@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModFrame, type ModTier } from "./ModFrame";
 import {
   FLOOD_BURST,
+  INTERNAL_MESSAGE,
   MAX_FRAME_HEIGHT,
   MAX_IN_FLIGHT,
   MIN_FRAME_HEIGHT,
@@ -50,6 +51,12 @@ const THEME = {
 vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => THEME,
+}));
+
+// The app's reader, which `ui.openDocument` opens: the real provider fetches through IPC.
+const openReaderById = vi.fn();
+vi.mock("../../lib/reader", () => ({
+  useReader: () => ({ openReaderById: (id: number) => openReaderById(id) }),
 }));
 
 const ENTRY = "pmmod://localhost/acme.tool/app/index.html?entry=" + "a".repeat(64);
@@ -287,8 +294,95 @@ describe("ModFrame", () => {
     root.removeAttribute("style");
   });
 
+  it("opens PM's own reader on the document the backend authorised, and answers null", async () => {
+    modCall.mockResolvedValue({ kind: "page", action: "ui.openDocument", args: { id: 12 } });
+    mount();
+    const { port } = connect(await theFrame());
+    expect(await ask(port, { id: 1, method: "ui.openDocument", args: { id: 12 } })).toEqual({
+      id: 1,
+      ok: true,
+      result: null,
+    });
+    expect(openReaderById).toHaveBeenCalledTimes(1);
+    expect(openReaderById).toHaveBeenCalledWith(12);
+  });
+
+  it("opens nothing for an id the frame sent that the backend didn't send back", async () => {
+    // The action's arguments are the backend's, never the frame's: the frame asks for 99, the
+    // backend authorised 12.
+    modCall.mockResolvedValue({ kind: "page", action: "ui.openDocument", args: { id: 12 } });
+    mount();
+    const { port } = connect(await theFrame());
+    await ask(port, { id: 1, method: "ui.openDocument", args: { id: 99 } });
+    expect(openReaderById).toHaveBeenCalledTimes(1);
+    expect(openReaderById).toHaveBeenCalledWith(12);
+  });
+
+  it.each([
+    null,
+    {},
+    { id: "12" },
+    { id: 0 },
+    { id: -3 },
+    { id: 1.5 },
+    { id: Number.MAX_SAFE_INTEGER + 2 },
+  ])("refuses to open the reader for the arguments %j, as PM's own failure", async (args) => {
+    modCall.mockResolvedValue({ kind: "page", action: "ui.openDocument", args });
+    mount();
+    const { port } = connect(await theFrame());
+    expect(await ask(port, { id: 1, method: "ui.openDocument" })).toEqual({
+      id: 1,
+      ok: false,
+      error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+    });
+    expect(openReaderById).not.toHaveBeenCalled();
+  });
+
+  it("transfers the vectors' buffer to the frame instead of copying it", async () => {
+    // Two documents of three floats each, in the layout embeddings.rs documents.
+    const buffer = new ArrayBuffer(16 + 2 * 8 + 2 * 3 * 4);
+    const view = new DataView(buffer);
+    view.setUint32(0, 1, true);
+    view.setUint32(4, 2, true);
+    view.setUint32(8, 3, true);
+    view.setFloat64(16, 7, true);
+    view.setFloat64(24, 5, true);
+    [0.5, -1, 2, 0.25, 0, 4].forEach((x, i) => view.setFloat32(32 + 4 * i, x, true));
+    modCall.mockResolvedValue(buffer);
+    mount();
+    const { port } = connect(await theFrame());
+    const answer = (await ask(port, { id: 4, method: "embeddings.documentVectors" })) as {
+      id: number;
+      ok: boolean;
+      result: { count: number; dimension: number; ids: Float64Array; vectors: Float32Array };
+    };
+    expect(answer.ok).toBe(true);
+    expect(answer.result.count).toBe(2);
+    expect(answer.result.dimension).toBe(3);
+    expect(Array.from(answer.result.ids)).toEqual([7, 5]);
+    expect(Array.from(answer.result.vectors)).toEqual([0.5, -1, 2, 0.25, 0, 4]);
+    // Moved, not copied: the page's buffer is detached, and the frame's views share one new one.
+    expect(buffer.byteLength).toBe(0);
+    expect(answer.result.ids.buffer).toBe(answer.result.vectors.buffer);
+    expect(answer.result.ids.buffer.byteLength).toBe(16 + 2 * 8 + 2 * 3 * 4);
+  });
+
+  it("answers a malformed binary reply as PM's own failure, never as vectors", async () => {
+    const truncated = new ArrayBuffer(20);
+    new DataView(truncated).setUint32(0, 1, true);
+    new DataView(truncated).setUint32(4, 9, true);
+    modCall.mockResolvedValue(truncated);
+    mount();
+    const { port } = connect(await theFrame());
+    expect(await ask(port, { id: 1, method: "embeddings.documentVectors" })).toEqual({
+      id: 1,
+      ok: false,
+      error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+    });
+  });
+
   it("never performs a page action it doesn't know, whatever the answer asks for", async () => {
-    modCall.mockResolvedValue({ kind: "page", action: "ui.openDocument", args: { id: 1 } });
+    modCall.mockResolvedValue({ kind: "page", action: "shell.openLink", args: { id: 1 } });
     mount();
     const { port } = connect(await theFrame());
     expect(await ask(port, { id: 1, method: "x.y" })).toEqual({

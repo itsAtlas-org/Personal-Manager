@@ -16,7 +16,8 @@
 //! - **The quota** (`limits::STORAGE_QUOTA_BYTES`, over `mod_kv` and `mod_doc_data` together) is
 //!   checked in the same transaction as the write, after the revision.
 //!
-//! [`kv_usage`] and [`doc_usage`] are what `storage.doc.*` (part 3) checks the same quota with.
+//! [`kv_usage`] and [`doc_usage`] are what `storage.doc.*` (`doc_storage.rs`) checks the same quota
+//! with.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
@@ -43,7 +44,8 @@ struct SetArgs {
     expected_revision: i64,
 }
 
-fn checked_key(key: &str) -> Result<(), ModError> {
+/// A key in the manifest's grammar; `storage.doc.*` takes its keys by the same rule.
+pub(super) fn checked_key(key: &str) -> Result<(), ModError> {
     if package::is_data_key(key) {
         Ok(())
     } else {

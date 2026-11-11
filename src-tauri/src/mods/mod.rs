@@ -603,18 +603,24 @@ pub fn mod_frame_close(
 /// the session's, never anything the frame said. `args` is the JSON text the page measured, so the
 /// cap is checked before it is parsed. Async, so no call runs on the main thread; every refusal
 /// comes back as an `api::Reply::Error` with its `MOD-####` code, the main-window check included.
+///
+/// The answer is a raw IPC body: JSON (the page reads it as an object) for every reply but the
+/// vectors, whose bytes go out as they are (the page reads an `ArrayBuffer`, `modBridge.ts`'s
+/// `readReply`).
 #[tauri::command]
 pub async fn mod_call(
     webview: Webview,
     session: String,
     method: String,
     args: String,
-) -> api::Reply {
+) -> tauri::ipc::InvokeResponseBody {
     let caller = api::Caller::Frame {
         window: webview.label().to_owned(),
         session,
     };
-    api::dispatch(webview.app_handle(), caller, &method, &args).await
+    api::dispatch(webview.app_handle(), caller, &method, &args)
+        .await
+        .into_body()
 }
 
 /// Apply the engine switches to a freshly built window and settle what took

@@ -35,6 +35,7 @@ mod connector_sync;
 mod context_budget;
 mod cost;
 mod db;
+mod doc_vectors;
 mod drive;
 mod duplicates;
 mod entities;

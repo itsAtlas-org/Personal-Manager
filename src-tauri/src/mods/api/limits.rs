@@ -16,7 +16,10 @@
 //! - **1 MiB of arguments** (the page's cap too, `modBridge.ts`'s `MAX_ARGS_BYTES`; a test holds
 //!   them equal). A storage value is the largest argument; anything bigger belongs in several keys.
 //! - **8 MiB of answer** (JSON). `documents.list` over a large library (thousands of documents of a
-//!   few hundred bytes each) is the largest JSON answer; vectors travel as binary (part 3), not here.
+//!   few hundred bytes each) is the largest JSON answer, paged under three quarters of it; vectors
+//!   travel as binary, up to **20 MiB**, not here.
+//! - **5,000 documents a call** (the Map's largest node cap): a page of the list, the ids a call
+//!   names, the entries of one batched write.
 //! - **50 MiB of private storage per mod** (`mod_kv` and `mod_doc_data` together), counted as each
 //!   row's value and key bytes plus a fixed per-row cost, so a million empty rows fill it too. The
 //!   Map's coordinates for 5,000 documents are well under 1 MiB.
@@ -38,6 +41,15 @@ pub const MAX_IN_FLIGHT: usize = 16;
 pub const MAX_ARGS_BYTES: usize = 1 << 20;
 /// A call's JSON answer, in bytes.
 pub const MAX_RESULT_BYTES: usize = 8 << 20;
+/// A binary answer (`embeddings.documentVectors`), in bytes: 20 MiB, which holds the largest the
+/// Host API sizes for (5,000 documents of 1,024 dimensions, 19.6 MiB with its header and ids).
+pub const MAX_BINARY_RESULT_BYTES: usize = 20 << 20;
+/// Documents one call may name or return: the Map's largest node cap. A page of `documents.list`, the
+/// ids a vector or storage call takes, and the entries of one `storage.doc.set` are held to it.
+pub const MAX_DOCS_PER_CALL: usize = 5000;
+/// What one page of `documents.list` aims to stay under, in bytes of JSON: three quarters of the
+/// answer cap, so a page ends early (with a cursor) rather than ever being refused as too large.
+pub const LIST_PAGE_BUDGET_BYTES: usize = MAX_RESULT_BYTES / 4 * 3;
 /// One mod's private storage, in bytes ([`row_cost`] per row).
 pub const STORAGE_QUOTA_BYTES: u64 = 50 << 20;
 /// What each stored row costs beyond its key and value: roughly SQLite's own overhead for a row and
@@ -323,6 +335,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{name} isn't a plain number: {line}"))
         };
         assert_eq!(number("MAX_ARGS_BYTES"), MAX_ARGS_BYTES as u64);
+        assert_eq!(number("MAX_BINARY_BYTES"), MAX_BINARY_RESULT_BYTES as u64);
         assert_eq!(number("FLOOD_CALLS_PER_SECOND"), CALLS_PER_SECOND);
         assert!(
             number("FLOOD_BURST") > CALL_BURST,

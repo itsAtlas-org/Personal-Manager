@@ -9,23 +9,53 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::{storage, Authorised, Host, ModError, PageAction, Reply};
+use super::{
+    doc_storage, documents, embeddings, storage, Authorised, Host, ModError, PageAction, Reply,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     ThemeGet,
     StorageGet,
     StorageSet,
+    StorageDocGet,
+    StorageDocSet,
+    StorageDocList,
+    StorageDocDelete,
+    DocumentsList,
+    EmbeddingsDocumentVectors,
+    EmbeddingsSignature,
+    UiOpenDocument,
 }
 
 impl Method {
-    pub const ALL: [Method; 3] = [Self::ThemeGet, Self::StorageGet, Self::StorageSet];
+    pub const ALL: [Method; 11] = [
+        Self::ThemeGet,
+        Self::StorageGet,
+        Self::StorageSet,
+        Self::StorageDocGet,
+        Self::StorageDocSet,
+        Self::StorageDocList,
+        Self::StorageDocDelete,
+        Self::DocumentsList,
+        Self::EmbeddingsDocumentVectors,
+        Self::EmbeddingsSignature,
+        Self::UiOpenDocument,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::ThemeGet => "theme.get",
             Self::StorageGet => "storage.get",
             Self::StorageSet => "storage.set",
+            Self::StorageDocGet => "storage.doc.get",
+            Self::StorageDocSet => "storage.doc.set",
+            Self::StorageDocList => "storage.doc.list",
+            Self::StorageDocDelete => "storage.doc.delete",
+            Self::DocumentsList => "documents.list",
+            Self::EmbeddingsDocumentVectors => "embeddings.documentVectors",
+            Self::EmbeddingsSignature => "embeddings.signature",
+            Self::UiOpenDocument => "ui.openDocument",
         }
     }
 
@@ -51,6 +81,14 @@ pub(super) async fn run<H: Host>(
         Method::ThemeGet => theme_get(args),
         Method::StorageGet => storage::get(host, auth, args).await,
         Method::StorageSet => storage::set(host, auth, args).await,
+        Method::StorageDocGet => doc_storage::get(host, auth, args).await,
+        Method::StorageDocSet => doc_storage::set(host, auth, args).await,
+        Method::StorageDocList => doc_storage::list(host, auth, args).await,
+        Method::StorageDocDelete => doc_storage::delete(host, auth, args).await,
+        Method::DocumentsList => documents::list(host, auth, args).await,
+        Method::EmbeddingsDocumentVectors => embeddings::document_vectors(host, auth, args).await,
+        Method::EmbeddingsSignature => embeddings::signature(host, auth, args).await,
+        Method::UiOpenDocument => documents::open_document(host, auth, args).await,
     }
 }
 
@@ -65,7 +103,7 @@ fn theme_get(args: &Value) -> Result<Reply, ModError> {
 }
 
 /// A call that takes nothing takes `null` (or nothing) or `{}`.
-fn no_args(args: &Value) -> Result<(), ModError> {
+pub(super) fn no_args(args: &Value) -> Result<(), ModError> {
     match args {
         Value::Null => Ok(()),
         Value::Object(map) if map.is_empty() => Ok(()),

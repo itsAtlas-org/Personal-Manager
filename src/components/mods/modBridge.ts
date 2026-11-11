@@ -15,7 +15,10 @@
 //   PM answers a call with `{ id, ok: true, result }` or `{ id, ok: false, error }`, where `error` is
 //   `{ code, message }` with a stable `MOD-####` code (ERROR_CODES.md), plus `permission` when a
 //   permission is the reason and `revision` when a stored value moved on. PM never answers a height
-//   request.
+//   request. A result is plain JSON, except `embeddings.documentVectors`'s: `{ count, dimension, ids,
+//   vectors }` with `ids` a Float64Array and `vectors` a Float32Array (count x dimension, document by
+//   document, in `ids`' order), views over one ArrayBuffer that PM transfers to the frame, so a
+//   5,000 x 1,024 answer (20 MB) isn't copied (`readVectors`).
 // - A frame that floods is stopped: its 33rd call in flight, or a burst well past the backend's rate
 //   bucket, closes its port and ends its session (spec §1.5 "Rate limits"). The backend holds its own
 //   limits behind this line (`src-tauri/src/mods/api/limits.rs`), and a test there pins the numbers
@@ -34,6 +37,10 @@ export const MAX_IN_FLIGHT = 32;
 /** A call's arguments, as UTF-8 bytes of JSON: the backend's cap too (`MAX_ARGS_BYTES` in
  *  limits.rs). Tauri reads the whole payload before Rust can refuse it, so the page holds the line. */
 export const MAX_ARGS_BYTES = 1_048_576;
+
+/** The most bytes of binary answer the backend sends (`MAX_BINARY_RESULT_BYTES` in limits.rs; a test
+ *  holds them equal): 20 MiB, the Host API's largest, 5,000 documents of 1,024 dimensions. */
+export const MAX_BINARY_BYTES = 20_971_520;
 
 /** The page's flood line, per frame: a token bucket refilled at the backend's rate (50 calls a second)
  *  and twice its burst. A mod that keeps calling after the backend refuses it with MOD-3001 crosses
@@ -56,7 +63,7 @@ export const MOD_ERRORS = {
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because
  *  only the page holds what they need. A test in handlers.rs pins this list to the backend's. */
-export const PAGE_ACTIONS = ["theme.get"] as const;
+export const PAGE_ACTIONS = ["theme.get", "ui.openDocument"] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 
@@ -90,11 +97,63 @@ export type PortMessage =
 
 const DROP: PortMessage = { kind: "drop" };
 
-/** What the backend answered a call with (`api::Reply`). */
+/** The document vectors as a frame receives them: views over one buffer (`readVectors`). */
+export interface DocumentVectors {
+  count: number;
+  dimension: number;
+  /** The document ids, in the order the vectors follow. */
+  ids: Float64Array;
+  /** `count` x `dimension` floats, document by document. */
+  vectors: Float32Array;
+}
+
+/** What the backend answered a call with (`api::Reply`). A `binary` answer is the vectors, already
+ *  checked, with the buffer both views lie over (the one to transfer). */
 export type BackendReply =
   | { kind: "value"; value: unknown }
   | { kind: "page"; action: PageAction; args: unknown }
+  | { kind: "binary"; vectors: DocumentVectors; buffer: ArrayBuffer }
   | { kind: "error"; error: ModError };
+
+/** The binary layout's version, and its fixed header (four little-endian u32s: version, count,
+ *  dimension, reserved); `src-tauri/src/mods/api/embeddings.rs` holds the layout. */
+const VECTORS_VERSION = 1;
+const VECTORS_HEADER_BYTES = 16;
+
+/** The layout is little-endian and the views read the machine's byte order, so a big-endian machine
+ *  (none PM runs on) would read garbage: it refuses instead. */
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/** Whether `data` is an ArrayBuffer, by its tag, so one from another realm (the webview's IPC layer, a
+ *  test's) counts. */
+export function isArrayBuffer(data: unknown): data is ArrayBuffer {
+  return Object.prototype.toString.call(data) === "[object ArrayBuffer]";
+}
+
+/** The vectors answer, checked against its own header: the right version, the length exactly the
+ *  header's arithmetic, inside the cap. `null` for anything else, which is PM's failure, never passed
+ *  on. */
+export function readVectors(buffer: ArrayBuffer): DocumentVectors | null {
+  if (!LITTLE_ENDIAN) return null;
+  const size = buffer.byteLength;
+  if (size < VECTORS_HEADER_BYTES || size > MAX_BINARY_BYTES) return null;
+  const header = new DataView(buffer);
+  const [version, count, dimension, reserved] = [0, 4, 8, 12].map((at) =>
+    header.getUint32(at, true),
+  );
+  if (version !== VECTORS_VERSION || reserved !== 0) return null;
+  // `count * dimension` is exact in a double: both are u32s and the buffer is under 20 MiB, so a
+  // product past the buffer is caught before it could lose precision.
+  const floats = count * dimension;
+  if (floats > size) return null;
+  if (size !== VECTORS_HEADER_BYTES + 8 * count + 4 * floats) return null;
+  return {
+    count,
+    dimension,
+    ids: new Float64Array(buffer, VECTORS_HEADER_BYTES, count),
+    vectors: new Float32Array(buffer, VECTORS_HEADER_BYTES + 8 * count, floats),
+  };
+}
 
 /** Messages arrive structured-cloned: plain data, with no getters or prototypes of the sender's. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,9 +226,14 @@ export function readPortMessage(data: unknown): PortMessage {
 
 const CODE = /^MOD-\d{4}$/;
 
-/** The backend's answer, checked: anything not in its shape is PM's own failure, never passed on. */
+/** The backend's answer, checked: anything not in its shape is PM's own failure, never passed on. Raw
+ *  bytes are the vectors; everything else is the JSON reply. */
 export function readReply(data: unknown): BackendReply {
   const broken: BackendReply = { kind: "error", error: refusal("internal", INTERNAL_MESSAGE) };
+  if (isArrayBuffer(data)) {
+    const vectors = readVectors(data);
+    return vectors ? { kind: "binary", vectors, buffer: data } : broken;
+  }
   if (!isRecord(data)) return broken;
   switch (data.kind) {
     case "value":

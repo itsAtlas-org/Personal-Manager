@@ -53,9 +53,8 @@ const fn call(name: &'static str, permission: &'static str, class: Class) -> Row
     }
 }
 
-/// Every row. PR A's other parts add `documents.list`, `embeddings.*`, `ui.openDocument` and
-/// `storage.doc.*` (part 3) and the events (part 4); PR B the experimental calls; PR C the
-/// Pinboard's calls and events.
+/// Every row. PR A's part 4 adds the events; PR B the experimental calls; PR C the Pinboard's calls
+/// and events.
 pub const ROWS: &[Row] = &[
     // The spec's table gives `theme.get` to `storage` and `ui.tab` alike, and its events table
     // gives `theme.changed` to `storage`; the call takes the event's permission, so a mod that may
@@ -63,6 +62,21 @@ pub const ROWS: &[Row] = &[
     call("theme.get", "storage", Class::Local),
     call("storage.get", "storage", Class::Local),
     call("storage.set", "storage", Class::Local),
+    // Per-document storage is `documents.meta`'s (spec §1.5's table), not `storage`'s: it is keyed to
+    // the user's documents, and a mod that may not know they exist has no use for rows on them.
+    call("storage.doc.get", "documents.meta", Class::Read),
+    call("storage.doc.set", "documents.meta", Class::Read),
+    call("storage.doc.list", "documents.meta", Class::Read),
+    call("storage.doc.delete", "documents.meta", Class::Read),
+    call("documents.list", "documents.meta", Class::Read),
+    call("ui.openDocument", "documents.meta", Class::Read),
+    // A vector can be inverted toward its text, so these have a permission of their own.
+    call(
+        "embeddings.documentVectors",
+        "documents.vectors",
+        Class::Read,
+    ),
+    call("embeddings.signature", "documents.vectors", Class::Read),
 ];
 
 /// What a name resolves to for a caller of this PM.

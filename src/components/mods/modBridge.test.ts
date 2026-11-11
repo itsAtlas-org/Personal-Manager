@@ -12,6 +12,7 @@ import {
   FloodGate,
   INTERNAL_MESSAGE,
   MAX_ARGS_BYTES,
+  MAX_BINARY_BYTES,
   MAX_FRAME_HEIGHT,
   MIN_FRAME_HEIGHT,
   MOD_ERRORS,
@@ -20,10 +21,31 @@ import {
   encodeArgs,
   errorText,
   fitsBytes,
+  isArrayBuffer,
   isConnectRequest,
   readPortMessage,
   readReply,
+  readVectors,
 } from "./modBridge";
+
+/** The vectors layout (embeddings.rs): a 16-byte header of little-endian u32s (version, count,
+ *  dimension, reserved), the ids as f64, then the floats as f32. Built by hand, byte by byte, so the
+ *  page is held to the layout and not to its own helper. */
+function pack(dimension: number, docs: { id: number; vec: number[] }[], header = [1, 0, 0]) {
+  const count = docs.length;
+  const buffer = new ArrayBuffer(16 + 8 * count + 4 * count * dimension);
+  const view = new DataView(buffer);
+  const [version, , reserved] = header;
+  view.setUint32(0, version, true);
+  view.setUint32(4, count, true);
+  view.setUint32(8, dimension, true);
+  view.setUint32(12, reserved, true);
+  docs.forEach((doc, i) => {
+    view.setFloat64(16 + 8 * i, doc.id, true);
+    doc.vec.forEach((x, j) => view.setFloat32(16 + 8 * count + 4 * (i * dimension + j), x, true));
+  });
+  return buffer;
+}
 
 describe("the connect request", () => {
   it("is exactly the versioned shape", () => {
@@ -211,6 +233,107 @@ describe("the backend's answer", () => {
     });
   });
 });
+
+describe("the vectors answer", () => {
+  const DOCS = [
+    { id: 3, vec: [0.5, -0.25, 1] },
+    { id: 1, vec: [0, 2, -3] },
+  ];
+
+  it("reads as views over the buffer, ids and floats in the order sent", () => {
+    const buffer = pack(3, DOCS);
+    const reply = readReply(buffer);
+    expect(reply.kind).toBe("binary");
+    if (reply.kind !== "binary") return;
+    expect(reply.buffer).toBe(buffer);
+    expect(reply.vectors.count).toBe(2);
+    expect(reply.vectors.dimension).toBe(3);
+    expect(Array.from(reply.vectors.ids)).toEqual([3, 1]);
+    expect(Array.from(reply.vectors.vectors)).toEqual([0.5, -0.25, 1, 0, 2, -3]);
+    // The views lie over the one buffer, which is what is transferred.
+    expect(reply.vectors.ids.buffer).toBe(buffer);
+    expect(reply.vectors.vectors.buffer).toBe(buffer);
+    // The ids sit on an 8-byte boundary and the floats on a 4-byte one.
+    expect(reply.vectors.ids.byteOffset % 8).toBe(0);
+    expect(reply.vectors.vectors.byteOffset % 4).toBe(0);
+  });
+
+  it("reads the Rust side's pinned bytes", () => {
+    // embeddings.rs's `the_layout_round_trips…`: version 1, 2 documents, 3 floats each.
+    const buffer = pack(3, DOCS);
+    expect(Array.from(new Uint8Array(buffer, 0, 16))).toEqual([
+      1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    expect(buffer.byteLength).toBe(16 + 2 * 8 + 2 * 3 * 4);
+  });
+
+  it("reads an empty answer, and a lone document", () => {
+    expect(readVectors(pack(384, []))).toMatchObject({ count: 0, dimension: 384 });
+    expect(readVectors(pack(1, [{ id: 9, vec: [1] }]))?.vectors.length).toBe(1);
+  });
+
+  it("is told apart from JSON by its tag, even from another realm", () => {
+    expect(isArrayBuffer(new ArrayBuffer(1))).toBe(true);
+    for (const other of [
+      new Uint8Array(4),
+      { byteLength: 4 },
+      "abc",
+      null,
+      new SharedArrayBuffer(4),
+    ])
+      expect(isArrayBuffer(other)).toBe(false);
+  });
+
+  it.each([
+    ["a version it doesn't know", pack(3, DOCS, [2, 0, 0])],
+    ["a reserved word that isn't 0", pack(3, DOCS, [1, 0, 7])],
+    ["no header", new ArrayBuffer(15)],
+    ["nothing", new ArrayBuffer(0)],
+    ["a body one float short", pack(3, DOCS).slice(0, -4)],
+    ["a body one float long", grow(pack(3, DOCS))],
+    ["a count past the bytes", withCount(pack(3, DOCS), 5)],
+    [
+      "a count and dimension whose product overflows",
+      withCountAndDimension(2 ** 32 - 1, 2 ** 32 - 1),
+    ],
+    ["more bytes than the cap", new ArrayBuffer(MAX_BINARY_BYTES + 1)],
+  ])("treats %s as PM's own failure", (_name, buffer) => {
+    expect(readVectors(buffer)).toBeNull();
+    expect(readReply(buffer)).toEqual({
+      kind: "error",
+      error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+    });
+  });
+
+  it("has the cap the backend has", () => {
+    expect(MAX_BINARY_BYTES).toBe(20 * 1024 * 1024);
+    // 5,000 documents of 1,024 dimensions, the largest the Host API sizes for, fits.
+    expect(16 + 5000 * (8 + 4 * 1024)).toBeLessThanOrEqual(MAX_BINARY_BYTES);
+  });
+});
+
+/** `buffer` with four more bytes on the end. */
+function grow(buffer: ArrayBuffer): ArrayBuffer {
+  const out = new Uint8Array(buffer.byteLength + 4);
+  out.set(new Uint8Array(buffer));
+  return out.buffer;
+}
+
+/** `buffer` with its count word changed. */
+function withCount(buffer: ArrayBuffer, count: number): ArrayBuffer {
+  new DataView(buffer).setUint32(4, count, true);
+  return buffer;
+}
+
+/** A bare header claiming `count` documents of `dimension` floats. */
+function withCountAndDimension(count: number, dimension: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(4, count, true);
+  view.setUint32(8, dimension, true);
+  return buffer;
+}
 
 describe("refusals sent back", () => {
   it("carry the code, the message clipped, and only what a mod can act on", () => {

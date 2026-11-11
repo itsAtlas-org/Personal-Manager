@@ -39,7 +39,6 @@ pub enum Code {
     /// A write based on a stale copy; the answer carries the current revision.
     StaleRevision,
     /// Nothing there, or nothing this mod may see (the two are never told apart).
-    #[cfg_attr(not(test), allow(dead_code))] // part 3's document calls
     NotFound,
     /// PM is locked or its data is closed.
     Locked,

@@ -831,3 +831,590 @@ async fn a_grant_withdrawn_in_flight_stops_the_write() {
     assert_eq!((e.code, e.permission), (Code::NotGranted, Some("storage")));
     assert!(kv_rows(&host, "atlas.map").is_empty());
 }
+
+// ---- the Map's calls (part 3): documents, vectors, the reader, per-document storage ----
+
+/// A first-party Map with both read permissions on record (as install consent writes them).
+fn mapper(host: &TestHost) -> String {
+    let s = installed(
+        host,
+        ModRow {
+            keys: vec![("layout", "cache"), ("settings", "content")],
+            ..ModRow::signed(
+                "atlas.map",
+                "first",
+                &["storage", "documents.meta", "documents.vectors"],
+            )
+        },
+    );
+    grant(host, "atlas.map", "documents.meta", "granted");
+    grant(host, "atlas.map", "documents.vectors", "granted");
+    s
+}
+
+/// A document whose leaf chunks are constant vectors of each value in `leaves`, carrying secrets in
+/// every column a mod must never see.
+fn document(host: &TestHost, id: i64, importance: Option<&str>, leaves: &[f64]) {
+    host.sql(|c| {
+        let dim = crate::db::vec0_dim(c).unwrap();
+        c.execute(
+            "INSERT INTO documents(id, vault_path, title, content_hash, project, importance, \
+                                   source_path, external_ref, source_id, source_parent_folder_name) \
+             VALUES (?1, ?2, ?3, ?2, 'Atlas', ?4, '/home/me/secret.md', 'https://drive.example/x', \
+                     'gdrive:me@example.com:f' || ?1, 'Private folder')",
+            params![id, format!("d{id}.md"), format!("Doc {id}"), importance],
+        )
+        .unwrap();
+        for (ordinal, v) in leaves.iter().enumerate() {
+            c.execute(
+                "INSERT INTO chunks(document_id, ordinal, content, char_count, kind) \
+                 VALUES (?1, ?2, 'c', 1, 'leaf')",
+                params![id, ordinal as i64],
+            )
+            .unwrap();
+            let chunk = c.last_insert_rowid();
+            let json = format!("[{}]", vec![v.to_string(); dim].join(","));
+            c.execute(
+                "INSERT INTO chunk_vec(rowid, embedding) VALUES (?1, ?2)",
+                params![chunk, json],
+            )
+            .unwrap();
+        }
+    });
+}
+
+fn doc_rows(host: &TestHost, m: &str) -> Vec<(i64, String, String)> {
+    host.sql(|c| {
+        let mut stmt = c
+            .prepare(
+                "SELECT document_id, key, value FROM mod_doc_data WHERE mod_id = ?1 \
+                 ORDER BY document_id, key",
+            )
+            .unwrap();
+        stmt.query_map([m], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    })
+}
+
+fn bytes(reply: Reply) -> Vec<u8> {
+    match reply {
+        Reply::Binary { bytes } => bytes,
+        other => panic!("not bytes: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_map_reads_documents_vectors_and_opens_the_reader() {
+    let host = TestHost::new();
+    let s = mapper(&host);
+    document(&host, 1, Some("high"), &[0.0, 0.2]);
+    document(&host, 2, None, &[0.3]);
+    document(&host, 3, Some("archive"), &[0.9]);
+    document(&host, 4, Some("low"), &[]);
+
+    let listed = value(
+        call(
+            &host,
+            &s,
+            "documents.list",
+            json!({"fields": ["id", "title", "importance", "chunkCount"]}),
+        )
+        .await,
+    );
+    assert_eq!(
+        listed,
+        json!({
+            "documents": [
+                {"id": 1, "title": "Doc 1", "importance": "high", "chunkCount": 2},
+                {"id": 2, "title": "Doc 2", "importance": null, "chunkCount": 1},
+                {"id": 4, "title": "Doc 4", "importance": "low", "chunkCount": 0},
+            ],
+            "next": null
+        }),
+        "the archived document is off the list, like the core Map's"
+    );
+
+    let signature = value(call(&host, &s, "embeddings.signature", Value::Null).await);
+    let dimension = host.sql(|c| crate::db::vec0_dim(c).unwrap());
+    assert_eq!(
+        signature["count"], 2,
+        "documents with vectors, not archived"
+    );
+    assert_eq!(signature["dimension"], dimension);
+    assert_eq!(signature["hash"].as_str().unwrap().len(), 64);
+    // A re-index to the same number of chunks changes it; the same state doesn't.
+    let again = value(call(&host, &s, "embeddings.signature", json!({})).await);
+    assert_eq!(again, signature);
+    host.sql(|c| {
+        c.execute(
+            "INSERT INTO chunks(document_id, ordinal, content, char_count, kind) \
+             VALUES (2, 1, 'c', 1, 'leaf')",
+            [],
+        )
+        .unwrap();
+        let chunk = c.last_insert_rowid();
+        c.execute(
+            "INSERT INTO chunk_vec(rowid, embedding) VALUES (?1, ?2)",
+            params![chunk, format!("[{}]", vec!["0.5"; dimension].join(","))],
+        )
+        .unwrap();
+    });
+    assert_ne!(
+        value(call(&host, &s, "embeddings.signature", Value::Null).await)["hash"],
+        signature["hash"]
+    );
+
+    let (count, dim, ids, floats) = embeddings::decode(&bytes(
+        call(&host, &s, "embeddings.documentVectors", json!({})).await,
+    ));
+    assert_eq!((count, dim as usize), (2, dimension));
+    assert_eq!(ids, vec![1.0, 2.0]);
+    assert_eq!(floats.len(), 2 * dimension);
+    let unit = 1.0 / (dimension as f32).sqrt();
+    assert!(floats.iter().all(|x| (x - unit).abs() < 1e-5));
+    // Named ids, and a cap: only what is asked and kept.
+    let named = embeddings::decode(&bytes(
+        call(
+            &host,
+            &s,
+            "embeddings.documentVectors",
+            json!({"ids": [2, 3, 4, 99]}),
+        )
+        .await,
+    ));
+    assert_eq!((named.0, named.2), (1, vec![2.0]));
+    let capped = embeddings::decode(&bytes(
+        call(&host, &s, "embeddings.documentVectors", json!({"cap": 1})).await,
+    ));
+    assert_eq!((capped.0, capped.2), (1, vec![1.0]), "the important one");
+
+    // The reader: Rust authorises, the page opens.
+    assert_eq!(
+        call(&host, &s, "ui.openDocument", json!({"id": 2})).await,
+        Reply::Page {
+            action: PageAction::UiOpenDocument,
+            args: json!({"id": 2})
+        }
+    );
+}
+
+/// Without `documents.vectors` a mod gets nothing of the vectors, and without `documents.meta`
+/// nothing of the documents, whether or not the document it names is there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_caller_without_the_permission_gets_nothing() {
+    let host = TestHost::new();
+    document(&host, 1, None, &[0.1]);
+    // Meta granted, vectors not even declared.
+    let meta = installed(
+        &host,
+        ModRow::signed("acme.meta", "second", &["storage", "documents.meta"]),
+    );
+    grant(&host, "acme.meta", "documents.meta", "granted");
+    for (method, args) in [
+        ("embeddings.documentVectors", json!({})),
+        ("embeddings.documentVectors", json!({"ids": [1]})),
+        ("embeddings.signature", json!({})),
+    ] {
+        let e = error(call(&host, &meta, method, args).await);
+        assert_eq!(
+            (e.code, e.permission),
+            (Code::NotGranted, Some("documents.vectors")),
+            "{method}"
+        );
+    }
+    // Vectors declared but never consented to (install policy, no row): refused, not prompted.
+    let unconsented = installed(
+        &host,
+        ModRow::signed("acme.vec", "second", &["documents.vectors"]),
+    );
+    assert_eq!(
+        code(call(&host, &unconsented, "embeddings.signature", json!({})).await),
+        Code::NotGranted
+    );
+    // Vectors granted and meta not: the vectors, not the documents.
+    grant(&host, "acme.vec", "documents.vectors", "granted");
+    assert!(matches!(
+        call(&host, &unconsented, "embeddings.signature", json!({})).await,
+        Reply::Value { .. }
+    ));
+    for (method, args) in [
+        ("documents.list", json!({"fields": ["id"]})),
+        ("ui.openDocument", json!({"id": 1})),
+        ("ui.openDocument", json!({"id": 999})),
+        ("storage.doc.get", json!({"documentId": 1, "key": "k"})),
+        (
+            "storage.doc.set",
+            json!({"key": "k", "entries": [{"documentId": 1, "value": 1}]}),
+        ),
+        ("storage.doc.list", json!({"key": "k"})),
+        ("storage.doc.delete", json!({"key": "k"})),
+    ] {
+        let e = error(call(&host, &unconsented, method, args).await);
+        assert_eq!(
+            (e.code, e.permission),
+            (Code::NotGranted, Some("documents.meta")),
+            "{method}"
+        );
+    }
+    assert!(doc_rows(&host, "acme.vec").is_empty());
+    // A denial on record wins over a policy that would allow it.
+    grant(&host, "acme.meta", "documents.meta", "denied");
+    assert_eq!(
+        code(call(&host, &meta, "documents.list", json!({"fields": ["id"]})).await),
+        Code::NotGranted
+    );
+}
+
+/// A document that isn't there and one the mod can't read (shelved) get the same error, byte for
+/// byte, from every call that takes one, and `ui.openDocument` opens neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_and_an_unreadable_document_are_the_same_error() {
+    let host = TestHost::new();
+    let s = mapper(&host);
+    document(&host, 1, None, &[0.1]);
+    document(&host, 2, Some("archive"), &[0.1]);
+    let calls = |id: i64| {
+        [
+            ("ui.openDocument", json!({"id": id})),
+            (
+                "storage.doc.get",
+                json!({"documentId": id, "key": "layout"}),
+            ),
+            (
+                "storage.doc.set",
+                json!({"key": "layout", "entries": [{"documentId": id, "value": [0, 0]}]}),
+            ),
+        ]
+    };
+    for ((method, missing), (_, shelved)) in calls(404).into_iter().zip(calls(2)) {
+        let a = error(call(&host, &s, method, missing).await);
+        let b = error(call(&host, &s, method, shelved).await);
+        assert_eq!(a, b, "{method}");
+        assert_eq!(a.code, Code::NotFound, "{method}");
+        // And in the shape the frame reads.
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::to_value(&b).unwrap()
+        );
+    }
+    assert!(doc_rows(&host, "atlas.map").is_empty(), "nothing written");
+    // The readable one answers.
+    assert!(matches!(
+        call(&host, &s, "ui.openDocument", json!({"id": 1})).await,
+        Reply::Page { .. }
+    ));
+    // Malformed ids are the shape's refusal, not a lookup.
+    for args in [
+        json!({"id": "1"}),
+        json!({"id": 1.5}),
+        json!({}),
+        json!({"id": 1, "x": 1}),
+    ] {
+        assert_eq!(
+            code(call(&host, &s, "ui.openDocument", args).await),
+            Code::BadArgs
+        );
+    }
+}
+
+/// The DTO through the dispatcher: a forbidden field named in the request is refused whole, and
+/// nothing of a document's secret columns is in any answer a mod can get.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_document_list_never_carries_a_forbidden_field() {
+    let host = TestHost::new();
+    let s = mapper(&host);
+    document(&host, 1, Some("high"), &[0.1]);
+    for field in [
+        "source_path",
+        "sourcePath",
+        "external_ref",
+        "sourceId",
+        "source_parent_folder_name",
+        "folderPath",
+        "vaultPath",
+    ] {
+        for fields in [json!([field]), json!(["id", "title", field])] {
+            let e = error(call(&host, &s, "documents.list", json!({"fields": fields})).await);
+            assert_eq!(e.code, Code::BadArgs, "{field}");
+            assert!(!e.message.contains("secret"), "{}", e.message);
+        }
+    }
+    let every = json!({"fields": [
+        "id", "title", "homeProject", "importance", "chunkCount", "reviewed", "sourceType", "tags",
+        "ingestedAt"
+    ]});
+    let all = value(call(&host, &s, "documents.list", every).await);
+    let text = all.to_string();
+    for leaked in [
+        "secret.md",
+        "drive.example",
+        "me@example.com",
+        "Private folder",
+        "gdrive:",
+        "d1.md",
+    ] {
+        assert!(!text.contains(leaked), "{leaked} reached a mod");
+    }
+    let keys: Vec<&String> = all["documents"][0].as_object().unwrap().keys().collect();
+    assert_eq!(keys.len(), 9);
+    // Every other answer the Map's calls give is as clean.
+    for (method, args) in [
+        ("storage.doc.list", json!({"key": "layout"})),
+        ("embeddings.signature", json!({})),
+    ] {
+        let text = value(call(&host, &s, method, args).await).to_string();
+        assert!(
+            !text.contains("secret") && !text.contains("example"),
+            "{method}"
+        );
+    }
+    // Paging is the caller's choice and bounded.
+    for limit in [0, 5001] {
+        assert_eq!(
+            code(
+                call(
+                    &host,
+                    &s,
+                    "documents.list",
+                    json!({"fields": ["id"], "limit": limit})
+                )
+                .await
+            ),
+            Code::BadArgs
+        );
+    }
+    assert_eq!(
+        value(
+            call(
+                &host,
+                &s,
+                "documents.list",
+                json!({"fields": ["id"], "after": 1})
+            )
+            .await
+        ),
+        json!({"documents": [], "next": null})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_document_storage_runs_end_to_end_and_goes_with_its_document() {
+    let host = TestHost::new();
+    let s = mapper(&host);
+    for n in 1..=3 {
+        document(&host, n, None, &[0.1]);
+    }
+    assert_eq!(
+        value(
+            call(
+                &host,
+                &s,
+                "storage.doc.set",
+                json!({"key": "layout", "entries": [
+                    {"documentId": 1, "value": [1, 2]}, {"documentId": 3, "value": {"x": 3}}]})
+            )
+            .await
+        ),
+        json!({"written": 2})
+    );
+    assert_eq!(
+        value(
+            call(
+                &host,
+                &s,
+                "storage.doc.get",
+                json!({"documentId": 1, "key": "layout"})
+            )
+            .await
+        ),
+        json!({"found": true, "value": [1, 2]})
+    );
+    assert_eq!(
+        value(
+            call(
+                &host,
+                &s,
+                "storage.doc.get",
+                json!({"documentId": 2, "key": "layout"})
+            )
+            .await
+        ),
+        json!({"found": false, "value": null})
+    );
+    assert_eq!(
+        value(call(&host, &s, "storage.doc.list", json!({"key": "layout"})).await),
+        json!({"entries": [
+            {"documentId": 1, "value": [1, 2]}, {"documentId": 3, "value": {"x": 3}}], "next": null})
+    );
+    // The mod's private `mod_kv` keys are another namespace.
+    assert_eq!(
+        value(call(&host, &s, "storage.get", json!({"key": "layout"})).await),
+        json!({"value": null, "revision": 0})
+    );
+    // A content-class key is refused (cache only), and nothing is written.
+    let e = error(
+        call(
+            &host,
+            &s,
+            "storage.doc.set",
+            json!({"key": "settings", "entries": [{"documentId": 1, "value": 1}]}),
+        )
+        .await,
+    );
+    assert_eq!(e.code, Code::BadArgs);
+    assert_eq!(doc_rows(&host, "atlas.map").len(), 2);
+    // Argument shapes.
+    for args in [
+        json!({"key": "layout", "entries": []}),
+        json!({"key": "layout", "entries": [{"documentId": 1, "value": 1}, {"documentId": 1, "value": 2}]}),
+        json!({"key": "Layout", "entries": [{"documentId": 1, "value": 1}]}),
+        json!({"key": "layout", "entries": [{"documentId": 1}]}),
+        json!({"key": "layout", "entries": [{"documentId": 1, "value": 1, "x": 2}]}),
+    ] {
+        assert_eq!(
+            code(call(&host, &s, "storage.doc.set", args.clone()).await),
+            Code::BadArgs,
+            "{args}"
+        );
+    }
+    // The document goes (a delete, or a Rebuild's re-creation, with no frame needing to be told):
+    // its rows go with it.
+    host.sql(|c| c.execute("DELETE FROM documents WHERE id = 1", []).unwrap());
+    assert_eq!(doc_rows(&host, "atlas.map").len(), 1);
+    assert_eq!(
+        code(
+            call(
+                &host,
+                &s,
+                "storage.doc.get",
+                json!({"documentId": 1, "key": "layout"})
+            )
+            .await
+        ),
+        Code::NotFound
+    );
+    assert_eq!(
+        value(call(&host, &s, "storage.doc.list", json!({"key": "layout"})).await),
+        json!({"entries": [{"documentId": 3, "value": {"x": 3}}], "next": null})
+    );
+    // Delete by id, then the whole key.
+    assert_eq!(
+        value(
+            call(
+                &host,
+                &s,
+                "storage.doc.delete",
+                json!({"key": "layout", "documentIds": [2, 3]})
+            )
+            .await
+        ),
+        json!({"deleted": 1})
+    );
+    assert!(doc_rows(&host, "atlas.map").is_empty());
+}
+
+/// The doc-storage write stops the way `storage.set` does: a pause, a lock or an uninstall in flight
+/// writes nothing, and the quota is the one shared with `mod_kv`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_doc_write_in_flight_across_a_pause_or_a_lock_commits_nothing() {
+    let write = json!({"key": "layout", "entries": [{"documentId": 1, "value": 1}]});
+    type Event = (&'static str, fn(&ModRuntime));
+    let events: [Event; 2] = [
+        ("lock", ModRuntime::bump_all),
+        ("pause", |rt| rt.pause(&id("atlas.map"))),
+    ];
+    for (what, event) in events {
+        let host = TestHost::new();
+        let s = mapper(&host);
+        document(&host, 1, None, &[0.1]);
+        host.hook(move |host, at| {
+            if at == Point::BeforeCommit {
+                event(host.runtime());
+            }
+        });
+        let e = error(call(&host, &s, "storage.doc.set", write.clone()).await);
+        assert_eq!(e.code, Code::SessionEnded, "{what}");
+        assert!(doc_rows(&host, "atlas.map").is_empty(), "{what}");
+    }
+    // A grant withdrawn between the checks and the write.
+    let host = TestHost::new();
+    let s = mapper(&host);
+    document(&host, 1, None, &[0.1]);
+    host.hook(|host, at| {
+        if at == Point::BeforeData {
+            grant(host, "atlas.map", "documents.meta", "denied");
+        }
+    });
+    for method in ["storage.doc.set", "storage.doc.delete", "documents.list"] {
+        let args = match method {
+            "storage.doc.set" => write.clone(),
+            "storage.doc.delete" => json!({"key": "layout"}),
+            _ => json!({"fields": ["id"]}),
+        };
+        assert_eq!(
+            code(call(&host, &s, method, args).await),
+            Code::NotGranted,
+            "{method}"
+        );
+    }
+    assert!(doc_rows(&host, "atlas.map").is_empty());
+    // The shared quota: full through mod_kv, a doc write is refused.
+    let host = TestHost::new();
+    let s = mapper(&host);
+    document(&host, 1, None, &[0.1]);
+    host.sql(|c| {
+        let filler = "x".repeat(limits::STORAGE_QUOTA_BYTES as usize - 1000);
+        c.execute(
+            "INSERT INTO mod_kv(mod_id, key, class, value) VALUES ('atlas.map', 'big', 'content', ?1)",
+            [filler],
+        )
+        .unwrap();
+    });
+    let e = error(
+        call(
+            &host,
+            &s,
+            "storage.doc.set",
+            json!({"key": "layout", "entries": [{"documentId": 1, "value": "y".repeat(2000)}]}),
+        )
+        .await,
+    );
+    assert_eq!(e.code, Code::QuotaExceeded);
+    assert!(doc_rows(&host, "atlas.map").is_empty());
+}
+
+/// A binary reply is held to its own cap, is never JSON, and every other reply still is.
+#[test]
+fn a_binary_reply_has_its_cap_and_goes_out_raw() {
+    let ok = Reply::Binary {
+        bytes: vec![1; 100],
+    };
+    assert_eq!(ok.clone().capped(), ok);
+    let big = Reply::Binary {
+        bytes: vec![0; limits::MAX_BINARY_RESULT_BYTES + 1],
+    };
+    assert_eq!(
+        big.capped(),
+        Reply::Error {
+            error: ModError::new(Code::TooLarge, "The answer is too large to send.")
+        }
+    );
+    // The JSON cap does not bind bytes, and the byte cap is the spec's 20 MiB.
+    const {
+        assert!(limits::MAX_BINARY_RESULT_BYTES > limits::MAX_RESULT_BYTES);
+        assert!(limits::MAX_BINARY_RESULT_BYTES == 20 << 20);
+    }
+    match (Reply::Binary { bytes: vec![7, 8] }).into_body() {
+        InvokeResponseBody::Raw(b) => assert_eq!(b, vec![7, 8]),
+        other => panic!("{other:?}"),
+    }
+    match Reply::value(json!({"a": 1})).into_body() {
+        InvokeResponseBody::Json(text) => assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"kind": "value", "value": {"a": 1}})
+        ),
+        other => panic!("{other:?}"),
+    }
+}

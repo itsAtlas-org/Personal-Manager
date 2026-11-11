@@ -26,9 +26,12 @@
 //!
 //! **What a handler answers** is a [`Reply`]: a value; a page action, when PM's page holds what
 //! the answer needs (the live theme, the document reader), which the dispatcher has already
-//! authorised; or an error. The page never performs anything Rust didn't authorise, and never one
+//! authorised; bytes, for the vectors; or an error. The page never performs anything Rust didn't authorise, and never one
 //! a frame names: the action comes from here.
 
+mod doc_storage;
+mod documents;
+mod embeddings;
 pub mod error;
 pub mod grants;
 mod handlers;
@@ -47,6 +50,7 @@ use std::time::Instant;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
+use tauri::ipc::InvokeResponseBody;
 use tauri::{AppHandle, Manager};
 
 pub use error::{Code, ModError};
@@ -130,16 +134,21 @@ pub enum PageAction {
     /// PM's live theme: its CSS custom properties and its axes (`modTheme.ts`).
     #[serde(rename = "theme.get")]
     ThemeGet,
+    /// PM's own document reader, opened on a document Rust found readable by the caller
+    /// (`ModFrame.tsx`, through the app's `ReaderProvider`).
+    #[serde(rename = "ui.openDocument")]
+    UiOpenDocument,
 }
 
 impl PageAction {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [PageAction; 1] = [Self::ThemeGet];
+    pub const ALL: [PageAction; 2] = [Self::ThemeGet, Self::UiOpenDocument];
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn name(self) -> &'static str {
         match self {
             Self::ThemeGet => "theme.get",
+            Self::UiOpenDocument => "ui.openDocument",
         }
     }
 }
@@ -154,6 +163,11 @@ pub enum Reply {
     Page { action: PageAction, args: Value },
     /// Refused, or failed: `{code, message}` for the frame.
     Error { error: ModError },
+    /// A binary answer (`embeddings.documentVectors`, layout in `embeddings.rs`). It never goes
+    /// through JSON: [`Reply::into_body`] hands it to the webview as a raw IPC body, which the page
+    /// receives as an `ArrayBuffer` and transfers to the frame.
+    #[serde(skip)]
+    Binary { bytes: Vec<u8> },
 }
 
 impl Reply {
@@ -161,12 +175,28 @@ impl Reply {
         Self::Value { value }
     }
 
-    /// The reply held to [`limits::MAX_RESULT_BYTES`].
+    /// The reply as the IPC body `mod_call` returns: JSON for everything but [`Reply::Binary`], whose
+    /// bytes go out raw.
+    pub fn into_body(self) -> InvokeResponseBody {
+        match self {
+            Self::Binary { bytes } => InvokeResponseBody::Raw(bytes),
+            other => InvokeResponseBody::Json(serde_json::to_string(&other).unwrap_or_else(|e| {
+                // Every other variant is plain data, so this can't fail; if it ever does the page
+                // is told PM failed, never handed nothing.
+                let error = ModError::internal(e);
+                serde_json::to_string(&Self::Error { error }).unwrap_or_default()
+            })),
+        }
+    }
+
+    /// The reply held to its cap: [`limits::MAX_RESULT_BYTES`] of JSON, or
+    /// [`limits::MAX_BINARY_RESULT_BYTES`] of bytes.
     fn capped(self) -> Self {
         let too_large = match &self {
             Self::Value { value } | Self::Page { args: value, .. } => {
                 !fits_json(value, limits::MAX_RESULT_BYTES)
             }
+            Self::Binary { bytes } => bytes.len() > limits::MAX_BINARY_RESULT_BYTES,
             Self::Error { .. } => false,
         };
         if too_large {

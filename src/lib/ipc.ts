@@ -2200,6 +2200,8 @@ export const modFrameClose = (session: string) => invoke<void>("mod_frame_close"
 /** Relay one bridge call: `args` is the JSON text the bridge measured, so the backend checks its size
  *  before parsing it. The backend resolves the session to its mod (the frame never names one) and
  *  always answers with a reply, `{kind: "value" | "page" | "error", …}`, which modBridge.ts reads;
- *  every refusal comes back that way, with its `MOD-####` code. */
+ *  every refusal comes back that way, with its `MOD-####` code. The one exception is the document
+ *  vectors, which come back as a raw `ArrayBuffer` (a raw IPC body, not JSON; modBridge.ts's
+ *  `readVectors` reads it). */
 export const modCall = (session: string, method: string, args: string) =>
   invoke<unknown>("mod_call", { session, method, args });

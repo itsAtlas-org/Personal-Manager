@@ -26,8 +26,10 @@
 // - A frame that floods (one call more than MAX_IN_FLIGHT waiting, or a burst past the flood gate)
 //   has its port closed and its session ended, and PM says so where the frame was.
 // - The backend answers each call with a value, a refusal (`MOD-####`), or a page action it has
-//   authorised, which PM performs here from what only the page holds (`theme.get`: PM's live theme).
-//   The action comes from the backend, never from the frame.
+//   authorised, which PM performs here from what only the page holds (`theme.get`: PM's live theme;
+//   `ui.openDocument`: PM's own document reader, on a document the backend found readable). The
+//   action and its arguments come from the backend, never from the frame. The vectors come back as
+//   bytes, which are transferred to the frame, not copied.
 // - A height request is a number PM clamps. Nothing a mod sends ever becomes an attribute, a class, a
 //   style string or markup.
 //
@@ -36,6 +38,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { modCall, modFrameClose, modFrameOpen } from "../../lib/ipc";
+import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
@@ -125,26 +128,43 @@ function endSession(live: Live) {
   closeQuietly(live.session);
 }
 
-function reply(live: Live, message: unknown) {
+/** Post `message` to the frame's port, moving each of `transfer` (the vectors' buffer) rather than
+ *  copying it. */
+function reply(live: Live, message: unknown, transfer: Transferable[] = []) {
   if (live.ended || !live.port) return;
   try {
-    live.port.postMessage(message);
+    live.port.postMessage(message, transfer);
   } catch {
-    // Every answer is plain JSON from the backend or the page, so this can't fail to clone; if it
-    // ever did, the frame's call simply goes unanswered.
+    // Every answer is plain JSON, or views over a buffer PM owns, from the backend or the page, so
+    // this can't fail to clone; if it ever did, the frame's call simply goes unanswered.
   }
 }
 
-/** What the page answers for an action the backend authorised. */
-function performPageAction(action: PageAction, theme: ModThemeAxes): unknown {
+/** What the page can do for a page action: PM's live theme, and its own reader. */
+interface PageContext {
+  theme: ModThemeAxes;
+  openDocument: (id: number) => void;
+}
+
+/** What the page answers for an action the backend authorised. The arguments are the backend's (it
+ *  checked them), but they cross IPC as JSON, so each action reads its own as untrusted. */
+function performPageAction(action: PageAction, args: unknown, ctx: PageContext): unknown {
   switch (action) {
     case "theme.get":
-      return themeSnapshot(document.documentElement, theme);
+      return themeSnapshot(document.documentElement, ctx.theme);
+    case "ui.openDocument": {
+      const id = (args as { id?: unknown } | null)?.id;
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error("ui.openDocument: not a document id");
+      }
+      ctx.openDocument(id);
+      return null;
+    }
   }
 }
 
 /** Send the frame the backend's answer to call `id`, performing it first when it is a page action. */
-function answerCall(live: Live, id: number, backend: BackendReply, theme: ModThemeAxes) {
+function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageContext) {
   switch (backend.kind) {
     case "value":
       reply(live, callResult(id, backend.value));
@@ -152,10 +172,14 @@ function answerCall(live: Live, id: number, backend: BackendReply, theme: ModThe
     case "error":
       reply(live, callError(id, backend.error));
       return;
+    case "binary":
+      // The views share one buffer, which moves to the frame: PM keeps no copy of the vectors.
+      reply(live, callResult(id, backend.vectors), [backend.buffer]);
+      return;
     case "page": {
       let result: unknown;
       try {
-        result = performPageAction(backend.action, theme);
+        result = performPageAction(backend.action, backend.args, ctx);
       } catch {
         reply(live, callError(id, refusal("internal", INTERNAL_MESSAGE)));
         return;
@@ -171,12 +195,15 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
   const [height, setHeight] = useState<number | null>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const liveRef = useRef<Live | null>(null);
-  // The theme a page action reads: the one on screen when the answer is made, not when the frame's
-  // listener was set up.
+  // What a page action reads: the theme on screen when the answer is made, not when the frame's
+  // listener was set up, and the app's own document reader.
   const theme = useTheme();
-  const themeRef = useRef<ModThemeAxes>(theme);
+  // The reader is the app's own (the Map opens it the same way), reached through the provider
+  // that wraps every view.
+  const { openReaderById } = useReader();
+  const pageRef = useRef<PageContext>({ theme, openDocument: openReaderById });
   useLayoutEffect(() => {
-    themeRef.current = theme;
+    pageRef.current = { theme, openDocument: openReaderById };
   });
 
   // One session per mount. Under StrictMode's mount-unmount-mount the first open may resolve after its
@@ -247,7 +274,7 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
           live.inFlight += 1;
           void modCall(live.session, message.method, message.args)
             .then(
-              (raw) => answerCall(live, message.id, readReply(raw), themeRef.current),
+              (raw) => answerCall(live, message.id, readReply(raw), pageRef.current),
               // The backend answers every refusal as a reply; a rejection is the IPC itself
               // failing, and its text is PM's, not the mod's to read.
               () => reply(live, callError(message.id, refusal("internal", INTERNAL_MESSAGE))),
