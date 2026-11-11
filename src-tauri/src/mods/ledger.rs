@@ -310,6 +310,13 @@ impl<F: Fn(&VerifiedPackage, &str, Source) -> Result<(), String>> CatalogueCheck
 /// re-applied to restored `mods` rows before any frame mounts"): `Some(reason)` keeps the row out
 /// of the registry this time. Writing the pause into the row is the blacklist's own (its owner,
 /// with its words); the ledger only declines to serve it.
+///
+/// **Slice 6 seam (a user or dev-mode pause under a standing blacklist entry).** The blacklist
+/// leaves such a row alone ([`super::safety::plan_row`]), and this check runs only at startup. So
+/// the resume path (the user lifting their own pause, mid-session) must itself ask a
+/// `SafetyCheck` built from `refresh::cached_index`, and refuse, or re-pause with
+/// `safety::blacklist_words`, when it holds the row. Otherwise the mod serves until the next pass
+/// (up to six hours) re-pauses it. No resume exists on this branch to carry that call yet.
 pub trait ServeCheck {
     fn hold(&self, id: &str, version: &str, package_sha256: Option<&str>) -> Option<String>;
 }

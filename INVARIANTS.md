@@ -594,8 +594,11 @@ with other bytes). What a machine has accepted lives in one per-machine file,
 index's sha256, the Atlas key ids seen revoked, the last good fetch and the cached index pair. Its
 seq never goes down and a revocation is never undone (`index_state::plan`), with one exception: an
 unexpired, rollover-signed index that revokes a key the machine still trusts sets its own seq,
-whatever was seen. A corrupt file reads as nothing seen, so the floor is `MIN_INDEX_SEQ`, never
-lower. Every signature PM checks for a mod, a package's or the index's, is checked against
+whatever was seen. Reading fails closed: no file is a first run, with the floor at `MIN_INDEX_SEQ`;
+a file that is there but unusable (unreadable, damaged, a format this PM doesn't read) is a fault,
+and its second copy, `mods-index.json.bak` (written after every save, part of the record), stands in
+when whole; with neither whole, no fetched index is taken at all, and nothing is downloaded, never
+"nothing seen", which would let a replayed authentic index roll the seq back. Every signature PM checks for a mod, a package's or the index's, is checked against
 `keys::KeyRing::trusted` with the recorded revocations, never against the embedded keys as they
 are. A blacklist entry only restricts: "paused" stops a mod and keeps its data; "removed" deletes
 its files and its cache-class rows, and its content-class storage and its gifts wait for the user's

@@ -296,6 +296,8 @@ pub fn plan_row(row: &RowView, index: &Index, now: DateTime<Utc>) -> Action {
             // when the entry lifted the row would resume to `active`, switching back on a mod the
             // user (or dev mode) had paused. It serves nothing meanwhile, and the startup
             // [`ServeCheck`] holds it should its owner lift the stop while the entry stands.
+            // (Slice 6 seam: that covers a restart, not a live resume. The resume path must ask
+            // the check itself; see the note on `ledger::ServeCheck`.)
             let other_owners_park = row.state == store::STATE_PARKED
                 && !row.reason.as_deref().is_some_and(store::is_ledger_reason);
             let other_owners_pause = row.state == store::STATE_PAUSED && !row.blacklist_paused();

@@ -14,8 +14,10 @@
 //!
 //! **One pass** ([`refresh_once`]), each step off the async runtime where it touches files or the
 //! DB, and none of it under the DB lock:
-//! 1. fetch `index.json` and its signature ([`fetch::fetch_index_pair`]: pinned URL, redirects to
-//!    GitHub's asset hosts only, size and time caps);
+//! 1. check the local record is usable (a damaged one with no backup means nothing can be taken, so
+//!    nothing is downloaded: [`RefreshError::RecordUnusable`]), then fetch `index.json` and its
+//!    signature ([`fetch::fetch_index_pair`]: pinned URL, redirects to GitHub's asset hosts only,
+//!    size and time caps);
 //! 2. accept it ([`index_state::accept`]: signature first, then the rules; a refused index changes
 //!    nothing, and the cached one stays in force);
 //! 3. apply the blacklist of the index in force to the installed rows
@@ -96,7 +98,7 @@ pub fn spawn_refresher(app: AppHandle) {
                     }
                 }
                 let jitter = Utc::now().timestamp_subsec_nanos();
-                schedule.record(now, result.is_ok(), jitter);
+                schedule.record(now, schedule_ok(&result), jitter);
             }
             tokio::time::sleep(TICK).await;
         }
@@ -118,12 +120,30 @@ pub enum RefreshError {
     /// the next try comes on the short back-off ([`fetch::delay_after`]) and a blacklist entry
     /// published in that same republish isn't six hours late.
     Refused(String),
+    /// This machine's record of the safety list is damaged and no backup copy stands in for it
+    /// ([`index_state::Loaded::fault`]), so no index could be taken. Found *before* any download:
+    /// fetching would only repeat the same refusal. The cause is local and mends only when the
+    /// record is deleted or PM is reinstalled at a version that reads it, so the retry is on the
+    /// full six hours ([`Self::counts_as_failure`]), not the short back-off, and the line
+    /// [`index_state::load`] logs is the only noise. Slice 6 reads [`record_fault`] to tell the user.
+    RecordUnusable(String),
 }
 
 impl RefreshError {
-    /// Offline, or not published yet: the ordinary weather, which PM doesn't log.
+    /// Offline, or not published yet: the ordinary weather, which PM doesn't log. A damaged
+    /// record is already logged by the read that found it.
     pub fn is_quiet(&self) -> bool {
-        matches!(self, Self::Fetch(e) if e.is_quiet())
+        match self {
+            Self::Fetch(e) => e.is_quiet(),
+            Self::RecordUnusable(_) => true,
+            Self::Local(_) | Self::Refused(_) => false,
+        }
+    }
+
+    /// Whether the schedule retries on the short back-off. A damaged record doesn't: retrying
+    /// sooner can't mend it.
+    pub fn counts_as_failure(&self) -> bool {
+        !matches!(self, Self::RecordUnusable(_))
     }
 }
 
@@ -131,7 +151,7 @@ impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fetch(e) => write!(f, "{e}"),
-            Self::Local(why) | Self::Refused(why) => f.write_str(why),
+            Self::Local(why) | Self::Refused(why) | Self::RecordUnusable(why) => f.write_str(why),
         }
     }
 }
@@ -174,7 +194,8 @@ pub async fn refresh_once(app: &AppHandle) -> Result<(), RefreshError> {
     let data_dir = crate::paths::data_dir(app).map_err(|e| RefreshError::Local(e.to_string()))?;
     let endpoints = Endpoints::machine();
     let transport = ReqwestTransport::new(&endpoints);
-    let (index_bytes, signature) = fetch::fetch_index_pair(&transport, &endpoints).await?;
+    let (index_bytes, signature) =
+        fetch_pair_if_record_usable(&transport, &endpoints, &data_dir, safety::ring()).await?;
     let now = Utc::now();
     let Some(outcome) = blocking(move || {
         index_state::accept(
@@ -195,6 +216,52 @@ pub async fn refresh_once(app: &AppHandle) -> Result<(), RefreshError> {
         work_on(app, &transport, &endpoints, &outcome.state, current, now).await;
     }
     refused.map_or(Ok(()), Err)
+}
+
+/// How a pass's result is told to the schedule: ok waits the full six hours, a failure backs off.
+fn schedule_ok(result: &Result<(), RefreshError>) -> bool {
+    result
+        .as_ref()
+        .map_or_else(|e| !e.counts_as_failure(), |_| true)
+}
+
+/// Step 1 of a pass, behind a check of the record: with it damaged and no backup, [`accept`] would
+/// refuse whatever came down, so nothing is downloaded (no traffic every few minutes to no effect).
+async fn fetch_pair_if_record_usable<T: Transport>(
+    transport: &T,
+    endpoints: &Endpoints,
+    data_dir: &Path,
+    ring: &KeyRing,
+) -> Result<(Vec<u8>, Vec<u8>), RefreshError> {
+    let (dir, ring) = (data_dir.to_path_buf(), ring.clone());
+    // A panicked read counts as usable: `accept` re-checks, so this gate only saves traffic.
+    if let Some(Some(why)) = blocking(move || record_fault_in(&dir, &ring)).await {
+        return Err(RefreshError::RecordUnusable(why));
+    }
+    Ok(fetch::fetch_index_pair(transport, endpoints).await?)
+}
+
+/// Why the record at `data_dir` is unusable, `None` when it is whole, backed up, or not there yet.
+fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<String> {
+    let loaded = index_state::load(data_dir, ring);
+    loaded.fault.then(|| {
+        format!(
+            "this machine's record of the safety list is damaged ({}); no index is taken until it is reset",
+            loaded.problem.as_deref().unwrap_or("unreadable")
+        )
+    })
+}
+
+/// The typed state for slice 6 to surface ("the safety list's record is damaged: reset it"): why
+/// the record is unusable, `None` when it is fine. Blocking: small file reads.
+///
+/// Slice 6 seam: the reset is deleting `mods-index.json` and `mods-index.json.bak` from the data
+/// folder. That forgets the seen seq and the revoked keys (the floor goes back to `MIN_INDEX_SEQ`),
+/// so it is the user's confirmed choice, never automatic.
+#[allow(dead_code)] // slice 6's strip reads it
+pub fn record_fault(app: &AppHandle) -> Option<String> {
+    let data_dir = crate::paths::data_dir(app).ok()?;
+    record_fault_in(&data_dir, safety::ring())
 }
 
 /// Steps 3 to 5 of a pass, for the index in force.
@@ -639,6 +706,53 @@ mod tests {
         let local = RefreshError::Local("no data folder".into());
         assert!(!local.is_quiet());
         assert!(!RefreshError::from(FetchError::TooLarge).is_quiet());
+    }
+
+    #[tokio::test]
+    async fn a_damaged_record_is_found_before_any_download_and_retried_on_the_long_wait() {
+        let keys = Keys::new();
+        let ring = keys.ring();
+        let eps = Endpoints::production();
+        let launch = t("2027-01-15T10:00:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(index_state::STATE_FILE), b"{").unwrap();
+        // The script has no answers: any request panics ("no more answers"), so this passing
+        // means nothing was fetched.
+        let silent = Script(Mutex::new(VecDeque::new()));
+        let err = fetch_pair_if_record_usable(&silent, &eps, dir.path(), &ring)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RefreshError::RecordUnusable(_)), "{err}");
+        assert!(err.is_quiet() && !err.counts_as_failure());
+        assert!(record_fault_in(dir.path(), &ring).is_some());
+        // Told to the schedule as a success: the next pass is six hours off, not five minutes.
+        let mut s = Schedule::default();
+        s.record(launch, schedule_ok(&Err(err)), 0);
+        assert!(!s.due(launch + chrono::Duration::minutes(6)));
+        assert!(!s.due(launch + chrono::Duration::hours(5)));
+        assert!(s.due(launch + chrono::Duration::hours(7)));
+        // Any other failure still backs off soon.
+        let mut s = Schedule::default();
+        s.record(
+            launch,
+            schedule_ok(&Err(RefreshError::Refused("torn".into()))),
+            0,
+        );
+        assert!(s.due(launch + chrono::Duration::minutes(6)));
+
+        // A record that is whole, or not there yet, fetches as before.
+        let (bytes, sig) = signed(&good_index(5), &keys.main);
+        for dir in [tempfile::tempdir().unwrap(), {
+            let d = tempfile::tempdir().unwrap();
+            state_at(d.path(), &ring, 5, &keys);
+            d
+        }] {
+            let (i, s) = fetch_pair_if_record_usable(&pair(&bytes, &sig), &eps, dir.path(), &ring)
+                .await
+                .unwrap();
+            assert_eq!((i, s), (bytes.clone(), sig.clone()));
+            assert!(record_fault_in(dir.path(), &ring).is_none());
+        }
     }
 
     // ---- Restore --------------------------------------------------------------------------------
