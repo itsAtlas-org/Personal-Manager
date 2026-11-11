@@ -8,7 +8,12 @@
 //! **The check order** ([`dispatch`]), each step refusing with a stable `MOD-####` code:
 //! 1. the main window only (a frame's call came from PM's page in `main`; an MCP call has no
 //!    window and skips this);
-//! 2. the store is open and PM isn't locked (`settings::app_lock_status_of`);
+//! 2. the store is open and PM isn't locked (`settings::app_locked_for_mods`), read AFTER step 3's
+//!    ticket is taken: enabling the lock writes its flag and then moves every session to a new
+//!    generation, so a lock enabled after the ticket is caught by the generation, and one enabled
+//!    before it by this read; read the other way round, one enabled between the two slips past
+//!    both. (A stale session is therefore told "session ended" before "locked": only the lock's own
+//!    sessions learn it is the lock.)
 //! 3. the session is live, at the generation the call began under, over the store it was opened in
 //!    (`runtime::CallTicket`);
 //! 4. the mod runs: its row is active and turned on (paused, parked, installing, blacklisted and an
@@ -111,6 +116,11 @@ pub enum Point {
     /// An event's recipients are chosen and its payload built; nothing is delivered yet. The DB guard
     /// is released.
     BeforeDelivery,
+    /// The app lock has just been read (its answer is on its way back to the caller).
+    LockRead,
+    /// An event is about to choose its recipients: the moment between a flush's own checks and the
+    /// emission.
+    BeforeEmit,
 }
 
 impl Host for AppHandle {
@@ -137,7 +147,7 @@ impl Host for AppHandle {
     }
 
     fn app_locked(&self) -> crate::error::Result<bool> {
-        crate::settings::app_lock_status_of(self.store()).map(|status| status.locked)
+        crate::settings::app_locked_for_mods(self.store())
     }
 }
 
@@ -319,15 +329,16 @@ fn authorise<H: Host>(
     session: &str,
     method: &str,
 ) -> Result<Authorised, ModError> {
-    // 2. The store is open and PM isn't locked (this takes and drops its own `conn()`).
-    if !matches!(host.app_locked(), Ok(false)) {
-        return Err(ModError::locked());
-    }
-    // 3. The session, at its generation, over its store.
+    // 3. The session, at its generation: first, so the lock check below can't be overtaken by a lock
+    // enabled between the two (the generation moves after the lock's flag is written).
     let ticket = host
         .runtime()
         .begin_call(session)
         .map_err(|_| ModError::session_ended())?;
+    // 2. The store is open and PM isn't locked (this takes and drops its own `conn()`).
+    if !matches!(host.app_locked(), Ok(false)) {
+        return Err(ModError::locked());
+    }
     let conn = host.store().conn().map_err(|_| ModError::locked())?;
     if host.store().store_epoch() != ticket.store_epoch {
         return Err(ModError::session_ended());

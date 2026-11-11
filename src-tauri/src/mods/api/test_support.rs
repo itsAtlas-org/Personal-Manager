@@ -144,7 +144,7 @@ pub struct Parts {
     pub calls: Calls,
     pub hub: Hub,
     pub sealed: AtomicBool,
-    /// PM locked, as `app_lock_status_of` would say on a platform with a lock.
+    /// PM locked, as `app_locked_for_mods` would say on a platform with a lock.
     pub locked: AtomicBool,
     hook: Mutex<Option<Hook>>,
 }
@@ -219,8 +219,11 @@ impl Host for TestHost {
 
     /// The real check (which errors on a closed store), then the test's lock on top.
     fn app_locked(&self) -> crate::error::Result<bool> {
-        let real = crate::settings::app_lock_status_of(&self.0.state)?.locked;
-        Ok(real || self.0.locked.load(Ordering::SeqCst))
+        let real = crate::settings::app_locked_for_mods(&self.0.state)?;
+        let answer = real || self.0.locked.load(Ordering::SeqCst);
+        // After the read, before the caller acts on it: where a lock enabled "just now" lands.
+        self.at(Point::LockRead);
+        Ok(answer)
     }
 
     fn at(&self, point: Point) {

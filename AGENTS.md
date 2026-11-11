@@ -154,7 +154,12 @@ release remain the open post-v1 work.
     decisions and `MOD_API_VERSION`) and `disk.rs` (the only code under `data_dir/mods`,
     INVARIANTS.md I-30); `runtime.rs` the `pmmod` scheme's
     registry, one-time entry URLs and frame sessions, with `headers.rs` (crate-free, like
-    `engine.rs`) building every response header (INVARIANTS.md I-27). In the page,
+    `engine.rs`) building every response header (INVARIANTS.md I-27). `api/` is the one Host
+    API dispatcher (check order, grant model, call limits, the handlers, the events); the frame
+    relay (`mod_call`) and the later MCP caller both go through it, so a grant is checked nowhere
+    else. `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements), and
+    `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
+    `embeddings.documentVectors` share. In the page,
     `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and `modBridge.ts`
     is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines

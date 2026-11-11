@@ -55,6 +55,14 @@ pub const STORAGE_QUOTA_BYTES: u64 = 50 << 20;
 /// What each stored row costs beyond its key and value: roughly SQLite's own overhead for a row and
 /// its index entry, so a flood of tiny rows meets the quota.
 pub const ROW_OVERHEAD_BYTES: u64 = 64;
+/// Storage writes per second, sustained, that GROW what a mod stores. Only a growing write must add
+/// up every row the mod has (a scan under the DB guard, 10 to 60 ms at the quota), so the call
+/// bucket, which counts calls and not what they cost, is not what bounds it: a full mod could
+/// otherwise ask for a scan fifty times a second. A write that doesn't grow never scans.
+pub const STORAGE_GROWTH_PER_SECOND: u64 = 4;
+/// Growing writes a mod may make at once after a quiet spell. The Map's first layout of a large
+/// library is a few dozen batches.
+pub const STORAGE_GROWTH_BURST: u64 = 40;
 
 // Events (spec §1.5 "Events"). A frame is told things as they happen, and a frame can be slow, so the
 // pipe from Rust to a frame holds a bounded number of events nobody has acknowledged, whatever the
@@ -149,6 +157,18 @@ impl TokenBucket {
 struct PerMod {
     bucket: TokenBucket,
     in_flight: usize,
+    /// Growing storage writes, which pay for a scan of everything the mod stores.
+    growth: TokenBucket,
+}
+
+impl PerMod {
+    fn new(now: Instant, rate: u64, burst: u64) -> Self {
+        Self {
+            bucket: TokenBucket::new(rate, burst, now),
+            in_flight: 0,
+            growth: TokenBucket::new(STORAGE_GROWTH_PER_SECOND, STORAGE_GROWTH_BURST, now),
+        }
+    }
 }
 
 /// Every mod's bucket and in-flight count, for the life of the process (managed by `setup()`). A
@@ -196,10 +216,9 @@ impl Calls {
         max_in_flight: usize,
     ) -> Result<Admission, ModError> {
         let mut all = lock(&self.per_mod);
-        let m = all.entry(id.clone()).or_insert_with(|| PerMod {
-            bucket: TokenBucket::new(rate, burst, now),
-            in_flight: 0,
-        });
+        let m = all
+            .entry(id.clone())
+            .or_insert_with(|| PerMod::new(now, rate, burst));
         if m.in_flight >= max_in_flight {
             return Err(ModError::new(
                 Code::RateLimited,
@@ -217,6 +236,24 @@ impl Calls {
             per_mod: Arc::clone(&self.per_mod),
             id: id.clone(),
         })
+    }
+
+    /// Whether `id` may make one more storage write that grows what it stores, which costs a scan of
+    /// everything it stores ([`STORAGE_GROWTH_PER_SECOND`]). Called under the DB guard, and takes
+    /// only this limiter's own short lock (nothing takes the guard while holding it).
+    pub fn allow_growth(&self, id: &ModId, now: Instant) -> Result<(), ModError> {
+        let mut all = lock(&self.per_mod);
+        let m = all
+            .entry(id.clone())
+            .or_insert_with(|| PerMod::new(now, CALLS_PER_SECOND, CALL_BURST));
+        if m.growth.take(now) {
+            Ok(())
+        } else {
+            Err(ModError::new(
+                Code::RateLimited,
+                "This mod is storing more data too fast.",
+            ))
+        }
     }
 
     #[cfg(test)]
@@ -339,6 +376,36 @@ mod tests {
             .admit_with(&a, t0 + Duration::from_millis(20), 50, 100, 3)
             .is_ok());
         assert!(calls.admit_with(&b, t0, 50, 100, 3).is_ok());
+    }
+
+    #[test]
+    fn growing_writes_have_their_own_small_bucket_per_mod() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let (a, b) = (id("acme.a"), id("acme.b"));
+        for i in 0..STORAGE_GROWTH_BURST {
+            calls
+                .allow_growth(&a, t0)
+                .unwrap_or_else(|e| panic!("{i}: {e}"));
+        }
+        assert_eq!(
+            calls.allow_growth(&a, t0).unwrap_err().code,
+            Code::RateLimited
+        );
+        // It refills at its own rate, one token per 250 ms.
+        assert!(calls
+            .allow_growth(&a, t0 + Duration::from_millis(249))
+            .is_err());
+        assert!(calls
+            .allow_growth(&a, t0 + Duration::from_millis(250))
+            .is_ok());
+        // Another mod is unaffected, and the call bucket is separate from this one.
+        assert!(calls.allow_growth(&b, t0).is_ok());
+        assert!(calls.admit(&a, t0).is_ok());
+        const {
+            assert!(STORAGE_GROWTH_PER_SECOND < CALLS_PER_SECOND);
+            assert!(STORAGE_GROWTH_BURST <= CALL_BURST);
+        }
     }
 
     #[test]

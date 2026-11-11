@@ -1174,7 +1174,6 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
-/// ASCII letters and digits plus `extra`, 1..=`max` bytes; lowercase letters only unless `upper`.
 /// A private-storage key: one grammar for the keys a manifest declares (`data.keys`) and the keys a
 /// mod's `storage.*` calls name (`mods::api`), so a declared key is always one a call can use. A
 /// lowercase letter, then up to 63 lowercase letters, digits, `_`, `.` or `-`.
@@ -1182,6 +1181,7 @@ pub fn is_data_key(key: &str) -> bool {
     is_word(key, 64, b"_.-", false) && key.as_bytes()[0].is_ascii_lowercase()
 }
 
+/// ASCII letters and digits plus `extra`, 1..=`max` bytes; lowercase letters only unless `upper`.
 fn is_word(s: &str, max: usize, extra: &[u8], upper: bool) -> bool {
     !s.is_empty()
         && s.len() <= max

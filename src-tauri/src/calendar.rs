@@ -777,9 +777,11 @@ pub fn build_feed(label: &str, url: &str, provider: &str) -> Result<IcsFeed> {
         Some(rest) => format!("https://{rest}"),
         None => raw.to_string(),
     };
-    // Enforce https + reject private/loopback hosts up front: an http link would
-    // leak the secret feed URL in cleartext, and an internal address would turn
-    // the sync fetch into an SSRF probe. Re-checked at sync time too.
+    // Enforce https and reject a literal private/loopback IP up front: an http link would leak the
+    // secret feed URL in cleartext, and an internal address would turn the sync fetch into an SSRF
+    // probe. A NAME is not resolved here: `sync_feed` resolves, screens and pins every hop it
+    // fetches, so a name that resolves privately is refused there. So every caller of this must
+    // sync the feed before it saves it (`add_ics_feed` does).
     let url = validate_feed_url(&normalized)?;
     let label = if label.trim().is_empty() {
         default_label(&url)

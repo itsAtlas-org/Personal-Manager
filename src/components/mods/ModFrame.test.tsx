@@ -314,6 +314,26 @@ describe("ModFrame", () => {
     expect(openReaderById).toHaveBeenCalledWith(12);
   });
 
+  it("performs no page action for a session that ended while the backend was answering", async () => {
+    // Authorised, and the answer in flight, when the session ends (here the frame is unmounted, as
+    // a pause, an uninstall, the lock or a vault switch unmounts it): the reader must not open.
+    let answer: (reply: unknown) => void = () => {};
+    modCall.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const view = mount();
+    const { port } = connect(await theFrame());
+    port.postMessage({ id: 1, method: "ui.openDocument", args: { id: 12 } });
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(1));
+    view.unmount();
+    answer({ kind: "page", action: "ui.openDocument", args: { id: 12 } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(openReaderById).not.toHaveBeenCalled();
+  });
+
   it("opens nothing for an id the frame sent that the backend didn't send back", async () => {
     // The action's arguments are the backend's, never the frame's: the frame asks for 99, the
     // backend authorised 12.

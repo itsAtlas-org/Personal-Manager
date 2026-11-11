@@ -290,6 +290,10 @@ pub fn check(
             format!("This needs your permission first ({permission})."),
         )
         .with_permission(policy.id)),
+        // D3's exclusion is told to the frame as a plain "off": its own words name the other side
+        // ("another unsigned mod already holds the opposite"), which would show a mod something about
+        // the mods beside it. The user gets the explanation on PM's own surface (`GrantError`).
+        Outcome::Refused(Refused::Exclusion) => Err(refusal(policy.id, Refused::Denied)),
         Outcome::Refused(why) => Err(refusal(policy.id, why)),
     }
 }
@@ -297,7 +301,7 @@ pub fn check(
 fn refusal(permission: &'static str, why: Refused) -> ModError {
     let message = match why {
         Refused::Undeclared => "This mod didn't ask for that permission.",
-        Refused::Denied => "You turned that permission off for this mod.",
+        Refused::Denied => "That permission is off for this mod.",
         Refused::NotConsented => "That permission wasn't granted when this mod was installed.",
         Refused::UnsealedEngine => {
             "Unsigned mods can't read your data until PM's web engine is sealed."

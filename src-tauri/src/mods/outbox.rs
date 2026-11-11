@@ -10,7 +10,11 @@
 //! event carries a `seq`; the frame acknowledges what it has taken (`{ ack: seq }` over its port, which
 //! PM's page relays as `mod_events_ack`), and the window slides. Past it an event is dropped and
 //! counted, never queued, so Rust holds nothing for a slow frame; the next event that does go out says
-//! how many were `missed`, and the frame asks again. The window covers every hop at once, the Tauri
+//! how many were `missed`, and the frame asks again. If nothing else may follow (the last event of a
+//! burst was the one dropped), the outbox owes the frame a **resync notice**: an empty
+//! `grants.changed`, which every running session may hear and which carries `missed`, sent the
+//! moment the window has room (when the drop wasn't for a full window, at once; otherwise when the
+//! frame's next acknowledgement makes room). The window covers every hop at once, the Tauri
 //! channel, PM's page, and the frame's port, because an event is outstanding until the frame says it
 //! has it. The goodbye notices ([`Ending`]) bypass the window, since they are the last things a
 //! session is ever sent and there are at most two.
@@ -34,6 +38,9 @@ use super::api::limits;
 /// The two lifecycle events a session gets without holding any permission.
 pub const MOD_PAUSED: &str = "mod.paused";
 pub const SESSION_CLOSED: &str = "session.closed";
+/// The resync notice's name: the one event with no permission and an empty payload, so it tells a
+/// session nothing but that it missed events.
+pub const RESYNC: &str = super::api::events::GRANTS_CHANGED;
 
 /// One event as the page receives it from the channel (`ipc.ts`'s `ModEventMessage`), and passes on
 /// to the frame (`modBridge.ts`'s `readEvent`).
@@ -157,8 +164,7 @@ impl Outbox {
             serde_json::to_vec(&payload).map_or(true, |bytes| bytes.len() > limits::MAX_EVENT_BYTES)
         };
         if state.sent - state.acked >= limits::EVENT_WINDOW || too_large() {
-            state.missed += 1;
-            state.dropped += 1;
+            state.miss(1);
             return Delivery::Dropped;
         }
         if state.send(name, payload) {
@@ -174,6 +180,16 @@ impl Outbox {
     pub fn ack(&self, seq: u64) {
         let mut state = self.lock();
         state.acked = state.acked.max(seq.min(state.sent));
+        // The window may have room for what is owed.
+        state.resync();
+    }
+
+    /// `n` events that were never handed to this outbox (the hub's cap, `api::events`) are lost to
+    /// the frame all the same: it is owed a resync notice like any dropped event.
+    pub fn note_missed(&self, n: u64) {
+        if n > 0 {
+            self.lock().miss(n);
+        }
     }
 
     /// Say goodbye (outside the window), then close. The notices stop at the first failure.
@@ -206,6 +222,26 @@ impl Outbox {
 }
 
 impl State {
+    /// `n` events the frame will not get: counted, and owed a resync notice.
+    fn miss(&mut self, n: u64) {
+        self.missed = self.missed.saturating_add(n);
+        self.dropped = self.dropped.saturating_add(n);
+        self.resync();
+    }
+
+    /// Send the resync notice if the frame is owed one and the window has room. Its `missed` is
+    /// the count of what went before; a notice that can't be sent now is still owed (`missed` stays)
+    /// and goes with the next acknowledgement, or rides on the next event.
+    fn resync(&mut self) {
+        if self.missed == 0 || self.sink.is_none() || self.sent - self.acked >= limits::EVENT_WINDOW
+        {
+            return;
+        }
+        if !self.send(RESYNC, json!({})) {
+            self.sink = None;
+        }
+    }
+
     /// Hand one event to the sink as the next in sequence. True when it went.
     fn send(&mut self, name: &'static str, payload: Value) -> bool {
         let Some(sink) = &self.sink else {
@@ -333,27 +369,74 @@ mod tests {
         let stats = outbox.stats();
         assert_eq!((stats.sent, stats.acked, stats.dropped), (256, 0, 1000));
 
-        // The frame catches up in part: the window slides by exactly that much, and the first event
-        // after the gap says how many it missed.
+        // The frame catches up in part: the window slides by exactly that much. What was dropped is
+        // owed a resync notice, which takes the first free place (carrying the count), so the frame
+        // learns it missed events even if nothing else follows.
         outbox.ack(10);
-        for _ in 0..10 {
+        let all = rec.all();
+        assert_eq!(all.len(), 257);
+        assert_eq!(
+            (all[256].seq, all[256].name, all[256].missed),
+            (257, RESYNC, Some(1000))
+        );
+        assert_eq!(all[256].payload, json!({}));
+        for _ in 0..9 {
             assert_eq!(outbox.deliver("documents.deleted", small()), Delivery::Sent);
         }
         assert_eq!(
             outbox.deliver("documents.deleted", small()),
             Delivery::Dropped
         );
-        let all = rec.all();
-        assert_eq!((all[256].seq, all[256].missed), (257, Some(1000)));
         assert_eq!(
-            all[257].missed, None,
-            "the count is cleared once it is told"
+            rec.all()[257].missed,
+            None,
+            "the count is cleared once told"
         );
-        // The one dropped since is reported by the next event that goes out.
+        // The one dropped since is owed too, and goes when the frame makes room.
         outbox.ack(300);
-        assert_eq!(outbox.deliver("documents.deleted", small()), Delivery::Sent);
         let last = rec.all().last().cloned().unwrap();
-        assert_eq!((last.seq, last.missed), (267, Some(1)));
+        assert_eq!((last.seq, last.name, last.missed), (267, RESYNC, Some(1)));
+        // With nothing owed, an acknowledgement sends nothing.
+        outbox.ack(u64::MAX);
+        assert_eq!(rec.all().len(), 267);
+        assert_eq!(outbox.deliver("documents.deleted", small()), Delivery::Sent);
+        assert_eq!(rec.all().last().unwrap().missed, None);
+    }
+
+    #[test]
+    fn events_lost_before_the_outbox_are_owed_a_notice_too() {
+        let rec = Recorder::default();
+        let outbox = rec.outbox();
+        // Nothing lost: nothing sent.
+        outbox.note_missed(0);
+        assert!(rec.all().is_empty());
+        // The window has room: the frame is told at once.
+        outbox.note_missed(7);
+        assert_eq!(rec.names(), [RESYNC]);
+        assert_eq!(rec.all()[0].missed, Some(7));
+        // A full window can't take it: it is owed until an acknowledgement, and rides on nothing
+        // else being sent.
+        for _ in 1..limits::EVENT_WINDOW {
+            outbox.deliver("documents.deleted", small());
+        }
+        outbox.note_missed(3);
+        assert_eq!(rec.all().len() as u64, limits::EVENT_WINDOW);
+        outbox.ack(1);
+        assert_eq!(rec.all().last().unwrap().missed, Some(3));
+        // A closed outbox is owed nothing and sends nothing.
+        outbox.close();
+        outbox.note_missed(5);
+        outbox.ack(u64::MAX);
+        assert_eq!(rec.all().len() as u64, limits::EVENT_WINDOW + 1);
+    }
+
+    #[test]
+    fn a_notice_to_a_channel_that_has_failed_closes_the_outbox() {
+        let rec = Recorder::default();
+        let outbox = rec.outbox();
+        rec.dead.store(true, Ordering::SeqCst);
+        outbox.note_missed(1);
+        assert!(outbox.stats().closed);
     }
 
     #[test]
@@ -381,10 +464,12 @@ mod tests {
         let outbox = rec.outbox();
         let huge = json!({ "title": "x".repeat(limits::MAX_EVENT_BYTES) });
         assert_eq!(outbox.deliver("documents.added", huge), Delivery::Dropped);
-        assert!(rec.all().is_empty());
+        // Nothing else may follow, so the frame is told at once that it missed one.
+        assert_eq!(rec.names(), [RESYNC]);
+        assert_eq!(rec.all()[0].missed, Some(1));
         let fits = json!({ "title": "x".repeat(limits::MAX_EVENT_BYTES - 64) });
         assert_eq!(outbox.deliver("documents.added", fits), Delivery::Sent);
-        assert_eq!(rec.all()[0].missed, Some(1));
+        assert_eq!(rec.all()[1].missed, None);
     }
 
     #[test]

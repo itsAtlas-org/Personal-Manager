@@ -416,6 +416,22 @@ pub fn app_lock_status_of(state: &AppState) -> Result<AppLockStatus> {
     })
 }
 
+/// Whether PM is locked now, for the mod dispatcher, which asks on every call and event: the same
+/// decision as [`app_lock_status_of`]'s `locked`, with the OS probe remembered once it has said yes
+/// (`applock::available_remembered`), so it isn't a thread and a WinRT round trip per call and a
+/// probe that later fails can't read as unlocked. Never asks the OS while the lock is off. Errors
+/// while the store is closed.
+pub fn app_locked_for_mods(state: &AppState) -> Result<bool> {
+    let enabled = {
+        let conn = state.conn()?;
+        db::get_bool(&conn, APP_LOCK_ENABLED_KEY, false)?
+    };
+    let verified = state
+        .app_unlocked
+        .load(std::sync::atomic::Ordering::Relaxed);
+    Ok(enabled && applock::should_lock(enabled, applock::available_remembered(), verified))
+}
+
 /// Turn the soft app-lock on or off. Enabling is refused when the OS can't verify, so a
 /// user can't strand themselves behind a gate that will never open (e.g. no Hello
 /// enrolled, or macOS where it isn't implemented yet).

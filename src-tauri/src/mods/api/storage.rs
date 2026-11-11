@@ -14,7 +14,10 @@
 //!   copy (two frames of one mod, say) is refused with [`Code::StaleRevision`] and the current
 //!   revision, so the mod re-reads instead of overwriting.
 //! - **The quota** (`limits::STORAGE_QUOTA_BYTES`, over `mod_kv` and `mod_doc_data` together) is
-//!   checked in the same transaction as the write, after the revision.
+//!   checked in the same transaction as the write, after the revision. Adding up what a mod stores
+//!   is a scan under the DB guard, so a write that doesn't grow it never scans (it always fits),
+//!   and one that does must first get a token from the mod's growth bucket
+//!   (`limits::STORAGE_GROWTH_PER_SECOND`): the call bucket counts calls, not what they cost.
 //!
 //! [`kv_usage`] and [`doc_usage`] are what `storage.doc.*` (`doc_storage.rs`) checks the same quota
 //! with.
@@ -123,6 +126,10 @@ pub(super) async fn set<H: Host>(
                 &text,
                 class,
                 expected_revision,
+                &|| {
+                    host.calls()
+                        .allow_growth(&auth.ticket.mod_id, std::time::Instant::now())
+                },
             )?;
             #[cfg(test)]
             host.at(super::Point::BeforeCommit);
@@ -158,7 +165,8 @@ fn read(conn: &Connection, id: &ModId, key: &str) -> Result<(Value, i64), ModErr
 }
 
 /// Write `text` under `key` if `expected` is its current revision and the quota allows it; the
-/// new revision. Inside the caller's transaction.
+/// new revision. Inside the caller's transaction. `growth` is asked for a token only by a write
+/// that grows the mod's storage, the only kind that adds up the rest of it.
 fn write(
     conn: &Connection,
     id: &ModId,
@@ -166,6 +174,7 @@ fn write(
     text: &str,
     class: DataClass,
     expected: i64,
+    growth: &dyn Fn() -> Result<(), ModError>,
 ) -> Result<i64, ModError> {
     let current: Option<(i64, i64)> = conn
         .query_row(
@@ -186,12 +195,16 @@ fn write(
     let key_bytes = key.len() as u64;
     let old = current.map_or(0, |(_, bytes)| row_cost(key_bytes, bytes.max(0) as u64));
     let new = row_cost(key_bytes, text.len() as u64);
-    let others = kv_usage(conn, id, Some(key))?.saturating_add(doc_usage(conn, id, None)?);
-    if !quota_allows(others, old, new, limits::STORAGE_QUOTA_BYTES) {
-        return Err(ModError::new(
-            Code::QuotaExceeded,
-            "This mod's storage is full.",
-        ));
+    // A write that doesn't grow always fits (`quota_allows`), so it adds nothing up.
+    if new > old {
+        growth()?;
+        let others = kv_usage(conn, id, Some(key))?.saturating_add(doc_usage(conn, id, None)?);
+        if !quota_allows(others, old, new, limits::STORAGE_QUOTA_BYTES) {
+            return Err(ModError::new(
+                Code::QuotaExceeded,
+                "This mod's storage is full.",
+            ));
+        }
     }
     let next = revision + 1;
     let now = chrono::Utc::now()
@@ -258,6 +271,55 @@ mod tests {
 
     fn id(s: &str) -> ModId {
         ModId::parse(s).unwrap()
+    }
+
+    /// [`super::write`] with a growth bucket that always has a token (the throttle has its own test).
+    fn write(
+        conn: &Connection,
+        id: &ModId,
+        key: &str,
+        text: &str,
+        class: DataClass,
+        expected: i64,
+    ) -> Result<i64, ModError> {
+        super::write(conn, id, key, text, class, expected, &|| Ok(()))
+    }
+
+    /// Only a write that grows what a mod stores asks for a growth token, and so adds up the rest of
+    /// its storage: a same-size or smaller write (even at a full quota) never does, and a refused
+    /// token writes nothing.
+    #[test]
+    fn only_a_growing_write_pays_for_the_scan_of_the_rest() {
+        use std::cell::Cell;
+        let (_dir, conn) = store();
+        insert_mod(&conn, &ModRow::signed("acme.tool", "second", &["storage"]));
+        let m = id("acme.tool");
+        let asked = Cell::new(0u32);
+        let counting = || {
+            asked.set(asked.get() + 1);
+            Ok(())
+        };
+        let put = |text: &str, expected: i64, growth: &dyn Fn() -> Result<(), ModError>| {
+            super::write(&conn, &m, "k", text, DataClass::Content, expected, growth)
+        };
+        assert_eq!(put("123", 0, &counting).unwrap(), 1);
+        assert_eq!(asked.get(), 1, "a new row grows");
+        assert_eq!(put("456", 1, &counting).unwrap(), 2);
+        assert_eq!(put("7", 2, &counting).unwrap(), 3);
+        assert_eq!(asked.get(), 1, "same size and smaller never ask");
+        assert_eq!(put("789", 3, &counting).unwrap(), 4);
+        assert_eq!(asked.get(), 2, "back to the larger size is growth");
+
+        // A refused token: nothing is written, whatever the quota.
+        let refused: &dyn Fn() -> Result<(), ModError> =
+            &|| Err(ModError::new(Code::RateLimited, "too fast"));
+        assert_eq!(
+            put("12345", 4, refused).unwrap_err().code,
+            Code::RateLimited
+        );
+        assert_eq!(read(&conn, &m, "k").unwrap(), (json!(789), 4));
+        // ...but a write that doesn't grow still goes, the bucket empty or not.
+        assert_eq!(put("0", 4, refused).unwrap(), 5);
     }
 
     #[test]

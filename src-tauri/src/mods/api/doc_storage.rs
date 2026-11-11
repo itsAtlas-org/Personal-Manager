@@ -169,7 +169,10 @@ pub(super) async fn set<H: Host>(
             // check still holds.
             let facts = recheck(&host, &tx, &auth)?;
             cache_key(&facts.data_classes, &key)?;
-            let written = write_entries(&tx, &auth.ticket.mod_id, &key, &texts)?;
+            let written = write_entries(&tx, &auth.ticket.mod_id, &key, &texts, &|| {
+                host.calls()
+                    .allow_growth(&auth.ticket.mod_id, std::time::Instant::now())
+            })?;
             #[cfg(test)]
             host.at(super::Point::BeforeCommit);
             // Immediately before the commit: a bump since the recheck rolls the write back.
@@ -298,11 +301,13 @@ fn read_one(
 
 /// Write `entries` (`(document, JSON text)`) under `key`, all or nothing, inside the caller's
 /// transaction: every document readable, the quota allowing the growth. How many were written.
+/// `growth` is asked for a token only by a write that grows the mod's storage (see `storage.rs`).
 fn write_entries(
     conn: &Connection,
     id: &ModId,
     key: &str,
     entries: &[(i64, String)],
+    growth: &dyn Fn() -> Result<(), ModError>,
 ) -> Result<usize, ModError> {
     let ids: Vec<i64> = entries.iter().map(|(d, _)| *d).collect();
     let ok = readable(conn, &ids)?;
@@ -333,17 +338,22 @@ fn write_entries(
     let new: u64 = entries.iter().fold(0u64, |total, (_, text)| {
         total.saturating_add(row_cost(key_bytes, text.len() as u64))
     });
-    let everything = kv_usage(conn, id, None)?.saturating_add(doc_usage(conn, id, None)?);
-    if !quota_allows(
-        everything.saturating_sub(old),
-        old,
-        new,
-        limits::STORAGE_QUOTA_BYTES,
-    ) {
-        return Err(ModError::new(
-            super::Code::QuotaExceeded,
-            "This mod's storage is full.",
-        ));
+    // A write that doesn't grow always fits (`quota_allows`), so it adds nothing up; one that does
+    // pays a growth token first (the sum is a scan under the DB guard).
+    if new > old {
+        growth()?;
+        let everything = kv_usage(conn, id, None)?.saturating_add(doc_usage(conn, id, None)?);
+        if !quota_allows(
+            everything.saturating_sub(old),
+            old,
+            new,
+            limits::STORAGE_QUOTA_BYTES,
+        ) {
+            return Err(ModError::new(
+                super::Code::QuotaExceeded,
+                "This mod's storage is full.",
+            ));
+        }
     }
     let stamp = now();
     let mut put = conn
@@ -464,6 +474,47 @@ mod tests {
 
     fn entries(pairs: &[(i64, &str)]) -> Vec<(i64, String)> {
         pairs.iter().map(|(d, t)| (*d, (*t).to_owned())).collect()
+    }
+
+    /// [`super::write_entries`] with a growth bucket that always has a token (the throttle has its
+    /// own test, `only_a_growing_batch_pays_for_the_scan_of_the_rest`).
+    fn write_entries(
+        conn: &Connection,
+        id: &ModId,
+        key: &str,
+        entries: &[(i64, String)],
+    ) -> Result<usize, ModError> {
+        super::write_entries(conn, id, key, entries, &|| Ok(()))
+    }
+
+    #[test]
+    fn only_a_growing_batch_pays_for_the_scan_of_the_rest() {
+        use std::cell::Cell;
+        let (_dir, conn, m) = world();
+        let asked = Cell::new(0u32);
+        let counting = || {
+            asked.set(asked.get() + 1);
+            Ok(())
+        };
+        let refused: &dyn Fn() -> Result<(), ModError> =
+            &|| Err(ModError::new(super::super::Code::RateLimited, "too fast"));
+        super::write_entries(
+            &conn,
+            &m,
+            "k",
+            &entries(&[(1, "123"), (3, "123")]),
+            &counting,
+        )
+        .unwrap();
+        assert_eq!(asked.get(), 1);
+        // Same size, then smaller: no token, even with none to give.
+        super::write_entries(&conn, &m, "k", &entries(&[(1, "456"), (3, "789")]), refused).unwrap();
+        super::write_entries(&conn, &m, "k", &entries(&[(1, "1")]), refused).unwrap();
+        // Growing is refused without a token, and nothing is written.
+        let e =
+            super::write_entries(&conn, &m, "k", &entries(&[(1, "12345")]), refused).unwrap_err();
+        assert_eq!(e.code, super::super::Code::RateLimited);
+        assert_eq!(read_one(&conn, &m, "k", 1).unwrap(), Some(json!(1)));
     }
 
     fn rows(conn: &Connection, m: &ModId) -> Vec<(i64, String, String)> {

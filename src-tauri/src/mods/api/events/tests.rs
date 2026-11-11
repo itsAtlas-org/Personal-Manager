@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::mods::api::test_support::{insert_mod, live_session, serve, ModRow, TestHost};
+use crate::mods::api::Point;
 use crate::mods::outbox::testing::Recorder;
 use crate::mods::outbox::{EventMessage, EventSink, Outbox, SESSION_CLOSED};
 
@@ -491,12 +492,98 @@ fn a_frame_that_never_reads_is_bounded_and_told_what_it_missed() {
     say(&host, DOCUMENTS_DELETED, json!({ "ids": [5000] }));
     assert_eq!(f.rec.all().len() as u64, limits::EVENT_WINDOW);
 
-    // The frame takes them all: events flow again, and the first says how many it missed.
+    // The frame takes them all, and no later event is coming: it is told it missed some anyway, at
+    // once, by the resync notice (the last event of a burst being the dropped one is the case this
+    // is for).
     host.runtime().ack(&f.session, limits::EVENT_WINDOW);
+    let notice = f.rec.all().last().cloned().unwrap();
+    assert_eq!(
+        (notice.name, notice.payload, notice.missed),
+        (
+            outbox::RESYNC,
+            json!({}),
+            Some(1000 - limits::EVENT_WINDOW + 1)
+        )
+    );
+    // Events flow again, and carry no count: it was told once.
     say(&host, DOCUMENTS_DELETED, json!({ "ids": [6000] }));
     let last = f.rec.all().last().cloned().unwrap();
     assert_eq!(last.payload, json!({ "ids": [6000] }));
-    assert_eq!(last.missed, Some(1000 - limits::EVENT_WINDOW + 1));
+    assert_eq!(last.missed, None);
+}
+
+/// Ids the hub's cap dropped are lost to every frame, and a frame that may hear the event is told it
+/// missed them; one that may not is told nothing, as for any event.
+#[test]
+fn ids_dropped_for_the_hubs_cap_are_reported_to_the_frames_that_may_hear_them() {
+    let host = TestHost::new();
+    let heard = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    let deaf = open(&host, second("acme.deaf", &["storage"]), &[]);
+    let epoch = host.store().store_epoch();
+    let over = limits::MAX_PENDING_IDS as i64 + 25;
+    Hub::note(&host.hub().landed, &(1..=over).collect::<Vec<_>>(), epoch);
+    Hub::note(&host.hub().deleted, &(1..=over).collect::<Vec<_>>(), epoch);
+    // No documents exist: nothing is added, and every noted id is gone. The 25 past the cap are not
+    // known to anyone, so each hearing frame is owed a notice for each set.
+    flush_landed(&host);
+    settle_deleted(&host);
+    let notices: Vec<_> = heard
+        .rec
+        .all()
+        .into_iter()
+        .filter(|m| m.name == outbox::RESYNC)
+        .collect();
+    assert_eq!(
+        notices.iter().map(|m| m.missed).collect::<Vec<_>>(),
+        [Some(25), Some(25)],
+        "{:?}",
+        heard.rec.names()
+    );
+    assert!(deaf.rec.all().is_empty());
+    // Taken: the count starts again.
+    assert_eq!(host.hub().counts(), ((0, 0), (0, 0)));
+    // A cap hit over a store that is gone isn't reported over the next one.
+    Hub::note(
+        &host.hub().deleted,
+        &(1..=over).collect::<Vec<_>>(),
+        epoch + 1,
+    );
+    let before = heard.rec.all().len();
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert_eq!(heard.rec.all().len(), before);
+}
+
+/// The store swapped after a flush has checked its epoch and let go of the DB guard, before the
+/// emission takes it again: sessions opened over the new store are told nothing of the old one's
+/// deleted ids.
+#[test]
+fn a_store_swap_between_the_settle_and_its_emission_announces_nothing() {
+    let host = TestHost::new();
+    let old = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    let new_rec = Recorder::default();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fresh = new_rec.clone();
+    host.hook(move |host, at| {
+        if at == Point::BeforeEmit && !fired.swap(true, Ordering::SeqCst) {
+            // The swap, as every swap moves the epoch, and a mod opened over the new store.
+            let conn = host.store().take_conn().unwrap().unwrap();
+            *host.store().db.lock().unwrap() = Some(conn);
+            live_session(host, "acme.tool", fresh.outbox());
+        }
+    });
+    Hub::note(&host.hub().deleted, &[5, 9], host.store().store_epoch());
+    let said = settle_deleted(&host);
+    assert_eq!(said.sent, 0);
+    assert!(new_rec.all().is_empty(), "{:?}", new_rec.names());
+    assert!(old.rec.all().is_empty());
 }
 
 // ---- documents.added -------------------------------------------------------------------------------
@@ -626,8 +713,8 @@ fn ids_noted_over_one_store_are_never_announced_over_another() {
     // The store changed: what was noted before is dropped, and a new timer isn't needed (one is
     // already waiting; it will take the new store's ids).
     assert!(!Hub::note(&hub.deleted, &[7], 6));
-    let (epoch, ids) = Hub::take(&hub.deleted);
-    assert_eq!((epoch, ids), (6, vec![7]));
+    let (epoch, ids, lost) = Hub::take(&hub.deleted);
+    assert_eq!((epoch, ids, lost), (6, vec![7], 0));
     // Taken: the next note starts a timer again.
     assert!(Hub::note(&hub.deleted, &[8], 6));
 

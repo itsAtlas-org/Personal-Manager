@@ -189,6 +189,11 @@ function performPageAction(action: PageAction, args: unknown, ctx: PageContext):
 
 /** Send the frame the backend's answer to call `id`, performing it first when it is a page action. */
 function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageContext) {
+  // The backend stops a call in flight when its session ends (a pause, an uninstall, the lock, a
+  // vault switch, the flood stop), but only up to its own answer: a page action authorised before
+  // the end would still open the reader here, for a frame PM has already stopped. Nothing is done
+  // for a session that is over.
+  if (live.ended) return;
   switch (backend.kind) {
     case "value":
       reply(live, callResult(id, backend.value));

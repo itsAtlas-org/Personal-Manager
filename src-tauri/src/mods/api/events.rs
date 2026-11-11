@@ -39,7 +39,10 @@
 //! **Coalesced.** A landing or a deletion waits [`limits::EVENT_COALESCE_MS`] for the next, so an
 //! import of a thousand documents is a few events, not a thousand. Each [`Hub`] set is bounded
 //! ([`limits::MAX_PENDING_IDS`]) and keyed to the store it was noted in: ids noted over one store are
-//! never announced over another.
+//! never announced over another, and each emission re-checks that under its own DB guard (the store
+//! can be swapped between a flush's checks and its emissions). Ids past the cap are lost to every
+//! frame; each session that may hear the event is told it `missed` that many
+//! ([`crate::mods::outbox`]'s resync notice), as it is for an event its window or the size cap dropped.
 //!
 //! **Not built here:** the Pinboard's events (`tasks.changed`, `projects.*`, `calendar.synced`,
 //! `lifecycle.suspend`, PR C). Adding one is a row in the table, a name in [`EVENTS`] and a call to
@@ -92,6 +95,14 @@ pub struct Emitted {
     pub refused: usize,
 }
 
+impl Emitted {
+    fn add(&mut self, other: Emitted) {
+        self.sent += other.sent;
+        self.dropped += other.dropped;
+        self.refused += other.refused;
+    }
+}
+
 /// Tell every session `audience` names that may hear `name`, the payloads `payloads` builds (once,
 /// from the DB under the guard, and only if some session may hear it; each payload is one event).
 ///
@@ -103,6 +114,21 @@ pub(super) fn emit_with<H: Host>(
     audience: &Audience,
     payloads: impl FnOnce(&Connection) -> Result<Vec<Value>, ModError>,
 ) -> Emitted {
+    emit_counting(host, name, audience, 0, payloads)
+}
+
+/// [`emit_with`], where `lost` events of this name were never built (the hub's cap): each session
+/// that may hear `name` is told it missed that many, with the events (if any) or on their own
+/// (`Outbox::note_missed`), so a flood the hub couldn't hold is never silent.
+fn emit_counting<H: Host>(
+    host: &H,
+    name: &'static str,
+    audience: &Audience,
+    lost: u64,
+    payloads: impl FnOnce(&Connection) -> Result<Vec<Value>, ModError>,
+) -> Emitted {
+    #[cfg(test)]
+    host.at(super::Point::BeforeEmit);
     let Some(row) = table::event_row(table::ROWS, name, MOD_API_VERSION) else {
         // A name with no row is never sent: the table test forbids a registered one.
         return Emitted::default();
@@ -144,7 +170,10 @@ pub(super) fn emit_with<H: Host>(
         match payloads(&conn) {
             Ok(events) => (permitted, events),
             Err(e) => {
-                eprintln!("mods: couldn't build the {name} event ({})", e.message);
+                // A store that moved on is expected, not a failure to report.
+                if e.code != super::Code::SessionEnded {
+                    eprintln!("mods: couldn't build the {name} event ({})", e.message);
+                }
                 out.refused += permitted.len();
                 return out;
             }
@@ -157,6 +186,7 @@ pub(super) fn emit_with<H: Host>(
             out.refused += 1;
             continue;
         }
+        recipient.outbox.note_missed(lost);
         for payload in &events {
             match recipient.outbox.deliver(name, payload.clone()) {
                 Delivery::Sent => out.sent += 1,
@@ -195,7 +225,8 @@ struct Pending {
     epoch: u64,
     /// A flush is waiting on its timer.
     scheduled: bool,
-    /// Ids dropped past [`limits::MAX_PENDING_IDS`], in all.
+    /// Ids dropped past [`limits::MAX_PENDING_IDS`] since the last take: frames are told they missed
+    /// that many ([`Hub::take`]).
     dropped: u64,
 }
 
@@ -233,6 +264,7 @@ impl Hub {
         let mut p = lock(pending);
         if p.epoch != epoch {
             p.ids.clear();
+            p.dropped = 0;
             p.epoch = epoch;
         }
         for id in ids {
@@ -247,14 +279,19 @@ impl Hub {
         start
     }
 
-    /// Take what is pending, with the store it was noted over.
-    fn take(pending: &Mutex<Pending>) -> (u64, Vec<i64>) {
+    /// Take what is pending: the store it was noted over, the ids, and how many more were dropped
+    /// for the cap (which the frames are told they missed).
+    fn take(pending: &Mutex<Pending>) -> (u64, Vec<i64>, u64) {
         let mut p = lock(pending);
         p.scheduled = false;
-        (p.epoch, std::mem::take(&mut p.ids).into_iter().collect())
+        (
+            p.epoch,
+            std::mem::take(&mut p.ids).into_iter().collect(),
+            std::mem::take(&mut p.dropped),
+        )
     }
 
-    /// Ids waiting, and ids dropped for the cap, in all: (landed, deleted).
+    /// Ids waiting, and ids dropped for the cap since the last take: (landed, deleted).
     #[cfg(test)]
     fn counts(&self) -> ((usize, u64), (usize, u64)) {
         let (l, d) = (lock(&self.landed), lock(&self.deleted));
@@ -302,7 +339,7 @@ pub fn document_landed<H: Host>(host: &H, id: i64) {
 
 /// The end of a landing interval: the documents that landed, in slices, as the list's DTO.
 pub(super) fn flush_landed<H: Host>(host: &H) -> Emitted {
-    let (epoch, ids) = Hub::take(&host.hub().landed);
+    let (epoch, ids, lost) = Hub::take(&host.hub().landed);
     let mut total = Emitted::default();
     for slice in ids.chunks(LANDED_SLICE) {
         if host.store().store_epoch() != epoch {
@@ -311,11 +348,33 @@ pub(super) fn flush_landed<H: Host>(host: &H) -> Emitted {
         let said = emit_with(host, DOCUMENTS_ADDED, &Audience::Everyone, |conn| {
             documents::added_payloads(conn, slice)
         });
-        total.sent += said.sent;
-        total.dropped += said.dropped;
-        total.refused += said.refused;
+        total.add(said);
     }
+    total.add(say_lost(host, DOCUMENTS_ADDED, epoch, lost));
     total
+}
+
+/// Tell the sessions that may hear `name` that they missed `lost` events the hub couldn't hold
+/// (nothing, when none, or when the store is no longer the one they were noted over).
+fn say_lost<H: Host>(host: &H, name: &'static str, epoch: u64, lost: u64) -> Emitted {
+    if lost == 0 {
+        return Emitted::default();
+    }
+    emit_counting(host, name, &Audience::Everyone, lost, |_| {
+        stays_over(host, epoch)?;
+        Ok(Vec::new())
+    })
+}
+
+/// Fails unless the store is still the one `epoch` names. Asked inside an emission's payload
+/// closure, which runs under the DB guard, so what was noted over one store is never announced
+/// over the next.
+fn stays_over<H: Host>(host: &H, epoch: u64) -> Result<(), ModError> {
+    if host.store().store_epoch() == epoch {
+        Ok(())
+    } else {
+        Err(ModError::session_ended())
+    }
 }
 
 // ---- documents.deleted --------------------------------------------------------------------------
@@ -337,9 +396,9 @@ pub fn documents_deleted<H: Host>(host: &H, ids: &[i64]) {
 /// slices of [`limits::MAX_IDS_PER_EVENT`]. Taking the DB guard waits for any writer still holding it
 /// (the one that noted them, mid-transaction), so what it finds is committed or rolled back.
 pub(super) fn settle_deleted<H: Host>(host: &H) -> Emitted {
-    let (epoch, ids) = Hub::take(&host.hub().deleted);
+    let (epoch, ids, lost) = Hub::take(&host.hub().deleted);
     let mut total = Emitted::default();
-    if ids.is_empty() {
+    if ids.is_empty() && lost == 0 {
         return total;
     }
     let gone = {
@@ -357,14 +416,17 @@ pub(super) fn settle_deleted<H: Host>(host: &H) -> Emitted {
             }
         }
     };
+    // The guard is gone: the store can still be swapped before an emission takes it again, which
+    // would announce this store's ids over the next. Each emission checks the epoch under its own
+    // guard, and sends nothing if it moved.
     for slice in gone.chunks(limits::MAX_IDS_PER_EVENT) {
         let said = emit_with(host, DOCUMENTS_DELETED, &Audience::Everyone, |_| {
+            stays_over(host, epoch)?;
             Ok(vec![json!({ "ids": slice })])
         });
-        total.sent += said.sent;
-        total.dropped += said.dropped;
-        total.refused += said.refused;
+        total.add(said);
     }
+    total.add(say_lost(host, DOCUMENTS_DELETED, epoch, lost));
     total
 }
 
@@ -516,9 +578,7 @@ pub fn grants_changed<H: Host>(host: &H, mods: &[ModId]) -> Emitted {
         let said = emit_with(host, GRANTS_CHANGED, &Audience::Mod(id.clone()), |_| {
             Ok(vec![json!({})])
         });
-        total.sent += said.sent;
-        total.dropped += said.dropped;
-        total.refused += said.refused;
+        total.add(said);
     }
     total
 }

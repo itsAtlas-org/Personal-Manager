@@ -208,10 +208,14 @@ async fn the_checks_refuse_in_order() {
         assert_eq!(e.code, Code::NotGranted, "{window:?}");
         assert_eq!(e.message, "Mods run only in PM's main window.");
     }
-    // 2. The lock.
+    // 2. The lock (read after the session is begun, so a stranger's session is "ended" first).
     let main = MAIN_LABEL;
     assert_eq!(
         code(call_from(&host, main, "nobody", "nope.never").await),
+        Code::SessionEnded
+    );
+    assert_eq!(
+        code(call_from(&host, main, &s, "nope.never").await),
         Code::Locked
     );
     host.0.locked.store(false, Ordering::SeqCst);
@@ -650,6 +654,30 @@ async fn a_pause_or_a_lock_in_flight_commits_nothing() {
     );
 }
 
+/// The lock enabled between the dispatcher's lock check and the rest of its checks: enabling writes
+/// its flag and then moves every session to a new generation, so the call (whose ticket was taken
+/// before the read) is stopped by the generation. With the lock read first, the call took its
+/// ticket AFTER the bump and nothing ever stopped it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lock_enabled_just_after_the_lock_check_stops_the_call() {
+    let host = TestHost::new();
+    let s = installed(&host, map_row());
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    host.hook(move |host, at| {
+        if at == Point::LockRead && !fired.swap(true, Ordering::SeqCst) {
+            // set_app_lock: the flag first, then every session to a new generation.
+            host.0.locked.store(true, Ordering::SeqCst);
+            host.runtime().bump_all();
+        }
+    });
+    let reply = call(&host, &s, "storage.set", set_args("settings", json!(1), 0)).await;
+    assert!(
+        matches!(error(reply).code, Code::SessionEnded | Code::Locked),
+        "the call must not run"
+    );
+    assert!(kv_rows(&host, "atlas.map").is_empty());
+}
+
 /// A store swapped under a call in flight (the epoch moves while the guard is free): the call
 /// reaches neither store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -775,10 +803,21 @@ async fn unsigned_mods_are_judged_together_on_every_call() {
     grant(&host, "acme.poster", "internet", "granted");
     let e = error(egress(&host, &poster).await);
     assert_eq!((e.code, e.permission), (Code::NotGranted, Some("internet")));
+    // The frame is told nothing about the other side: the exclusion's refusal is the very text of
+    // a permission the user turned off, so a mod can't tell the two apart (D3 exists so one unsigned
+    // mod's grants aren't another's business).
+    let exclusion = e.message.clone();
+    assert!(!exclusion.contains("another"), "{exclusion}");
     // ...and with both held, the reader's read is refused as well.
     assert_eq!(code(read(&host, &reader).await), Code::NotGranted);
     // Once the read is denied, internet works, and a fresh read is refused, not prompted.
     grant(&host, "acme.reader", "documents.meta", "denied");
+    let denied = error(read(&host, &reader).await);
+    assert_eq!(
+        (denied.code, denied.message),
+        (Code::NotGranted, exclusion),
+        "an exclusion reads exactly as a denial"
+    );
     assert!(matches!(egress(&host, &poster).await, Reply::Value { .. }));
     let e = error(read(&host, &poster).await);
     assert_eq!(
