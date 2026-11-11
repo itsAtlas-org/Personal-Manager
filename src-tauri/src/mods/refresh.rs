@@ -127,6 +127,11 @@ pub enum RefreshError {
     /// full six hours ([`Self::counts_as_failure`]), not the short back-off, and the line
     /// [`index_state::load`] logs is the only noise. Slice 6 reads [`record_fault`] to tell the user.
     RecordUnusable(String),
+    /// The same refusal, but the cause is that the record couldn't be *read* (a transient I/O
+    /// error, a data folder on a network or synced drive that is briefly away), not that it is
+    /// damaged: that can mend by itself, so the retry is on the short back-off and a blacklist
+    /// entry published meanwhile isn't six hours late. Nothing is downloaded either.
+    RecordUnreadable(String),
 }
 
 impl RefreshError {
@@ -135,13 +140,13 @@ impl RefreshError {
     pub fn is_quiet(&self) -> bool {
         match self {
             Self::Fetch(e) => e.is_quiet(),
-            Self::RecordUnusable(_) => true,
+            Self::RecordUnusable(_) | Self::RecordUnreadable(_) => true,
             Self::Local(_) | Self::Refused(_) => false,
         }
     }
 
     /// Whether the schedule retries on the short back-off. A damaged record doesn't: retrying
-    /// sooner can't mend it.
+    /// sooner can't mend it. An unreadable one does: the read may succeed next time.
     pub fn counts_as_failure(&self) -> bool {
         !matches!(self, Self::RecordUnusable(_))
     }
@@ -151,7 +156,10 @@ impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fetch(e) => write!(f, "{e}"),
-            Self::Local(why) | Self::Refused(why) | Self::RecordUnusable(why) => f.write_str(why),
+            Self::Local(why)
+            | Self::Refused(why)
+            | Self::RecordUnusable(why)
+            | Self::RecordUnreadable(why) => f.write_str(why),
         }
     }
 }
@@ -235,20 +243,28 @@ async fn fetch_pair_if_record_usable<T: Transport>(
 ) -> Result<(Vec<u8>, Vec<u8>), RefreshError> {
     let (dir, ring) = (data_dir.to_path_buf(), ring.clone());
     // A panicked read counts as usable: `accept` re-checks, so this gate only saves traffic.
-    if let Some(Some(why)) = blocking(move || record_fault_in(&dir, &ring)).await {
-        return Err(RefreshError::RecordUnusable(why));
+    if let Some(Some((why, unread))) = blocking(move || record_fault_in(&dir, &ring)).await {
+        return Err(if unread {
+            RefreshError::RecordUnreadable(why)
+        } else {
+            RefreshError::RecordUnusable(why)
+        });
     }
     Ok(fetch::fetch_index_pair(transport, endpoints).await?)
 }
 
-/// Why the record at `data_dir` is unusable, `None` when it is whole, backed up, or not there yet.
-fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<String> {
+/// Why the record at `data_dir` is unusable, `None` when it is whole, backed up, or not there yet;
+/// with whether it was an I/O failure reading it (`unread`: may mend by itself) rather than damage.
+fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<(String, bool)> {
     let loaded = index_state::load(data_dir, ring);
     loaded.fault.then(|| {
-        format!(
-            "this machine's record of the safety list is damaged ({}); no index is taken until it is reset",
-            loaded.problem.as_deref().unwrap_or("unreadable")
-        )
+        let problem = loaded.problem.as_deref().unwrap_or("unreadable");
+        let why = if loaded.unread {
+            format!("this machine's record of the safety list couldn't be read ({problem}); it is tried again soon")
+        } else {
+            format!("this machine's record of the safety list is damaged ({problem}); no index is taken until it is reset")
+        };
+        (why, loaded.unread)
     })
 }
 
@@ -261,7 +277,7 @@ fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<String> {
 #[allow(dead_code)] // slice 6's strip reads it
 pub fn record_fault(app: &AppHandle) -> Option<String> {
     let data_dir = crate::paths::data_dir(app).ok()?;
-    record_fault_in(&data_dir, safety::ring())
+    record_fault_in(&data_dir, safety::ring()).map(|(why, _)| why)
 }
 
 /// Steps 3 to 5 of a pass, for the index in force.
@@ -753,6 +769,42 @@ mod tests {
             assert_eq!((i, s), (bytes.clone(), sig.clone()));
             assert!(record_fault_in(dir.path(), &ring).is_none());
         }
+    }
+
+    /// An I/O failure reading the record (both files, so no backup stands in) is not damage: the
+    /// pass fetches nothing, but the retry is on the short back-off, not the six-hour wait.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_record_is_retried_on_the_short_backoff() {
+        use std::os::unix::fs::PermissionsExt;
+        let keys = Keys::new();
+        let ring = keys.ring();
+        let eps = Endpoints::production();
+        let launch = t("2027-01-15T10:00:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(index_state::STATE_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&path).is_ok() {
+            // Running as root: permissions can't make it unreadable here.
+            return;
+        }
+        let silent = Script(Mutex::new(VecDeque::new()));
+        let err = fetch_pair_if_record_usable(&silent, &eps, dir.path(), &ring)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RefreshError::RecordUnreadable(_)), "{err}");
+        assert!(err.is_quiet() && err.counts_as_failure());
+        let mut s = Schedule::default();
+        s.record(launch, schedule_ok(&Err(err)), 0);
+        assert!(s.due(launch + chrono::Duration::minutes(6)));
+        // The same file damaged rather than unreadable keeps the long wait.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        let err = fetch_pair_if_record_usable(&silent, &eps, dir.path(), &ring)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RefreshError::RecordUnusable(_)), "{err}");
     }
 
     // ---- Restore --------------------------------------------------------------------------------
