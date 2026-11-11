@@ -583,6 +583,42 @@ through `ledger::remove_deleted_vault` (the shared-vault delete and its acknowle
 that deletes one store and keeps the vault (the re-homed restore's pristine home) removes that store's
 folder through `ledger::remove_vacated_store`.
 
+### I-31 · The safety list's seen seq only rises and lives outside the DB, and a remote list never deletes user content — **Held**
+
+The signed mod index (Mods spec §1.10) is accepted only through `mods::index::verify_index` (both
+files capped, the signature checked before the JSON is parsed, the JSON parsed strictly, the trusted
+comment equal to the JSON's seq, expiry and revocations, and only the rollover key revoking a key)
+and `index::judge` (no seq below the release's `MIN_INDEX_SEQ`, below the seen one, or equal to it
+with other bytes). What a machine has accepted lives in one per-machine file,
+`data_dir/mods-index.json` (`mods/index_state.rs`), never in the vault DB: the seen seq and its
+index's sha256, the Atlas key ids seen revoked, the last good fetch and the cached index pair. Its
+seq never goes down and a revocation is never undone (`index_state::plan`), with one exception: an
+unexpired, rollover-signed index that revokes a key the machine still trusts sets its own seq,
+whatever was seen. A corrupt file reads as nothing seen, so the floor is `MIN_INDEX_SEQ`, never
+lower. Every signature PM checks for a mod, a package's or the index's, is checked against
+`keys::KeyRing::trusted` with the recorded revocations, never against the embedded keys as they
+are. A blacklist entry only restricts: "paused" stops a mod and keeps its data; "removed" deletes
+its files and its cache-class rows, and its content-class storage and its gifts wait for the user's
+confirmation (I-16). Tests pin every acceptance rule, the revocation gate, the file's atomic write
+and its corruption handling.
+
+**Why.** A `.pmbackup` restore copies the DB verbatim, so a seq kept there would roll back with it,
+and an old but authentic index would then lift a pause or un-revoke a removal. A seq that could go
+down for any other reason is the same replay. A leaked main key that signed a huge seq would lock
+every machine out of the real index for good without the rotation exception. And a "removed" entry
+that deleted user content, by mistake or from a leaked key, would wipe data on every machine at
+once, with no way back.
+
+**Co-signers.** The fetcher records an index through `index_state::accept` with `Origin::Fetched`,
+off the async runtime and never under the DB lock. A restore commit runs the backup's copy of the
+index pair through `accept` with `Origin::Restored`, never writing a seq from a backup on its own.
+Whatever applies a blacklist entry goes through the ledger, and leaves content-class `mod_kv` rows
+and `mod_ledger` gifts for the user's confirmation. A dev build's test key and index URL come only
+from `keys::dev_setting`, which needs `PM_DATA_DIR`, so a test index never reaches the real data
+folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index's seq, never above
+it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its
+blacklist.
+
 ---
 
 ## 6. Build tooling and dependencies

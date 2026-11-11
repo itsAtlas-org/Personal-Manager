@@ -181,7 +181,7 @@ fn refuse(refusal: Refusal, detail: impl Into<String>) -> PackageError {
 }
 
 /// A name from the file, quoted and escaped so it can't fake the message around it.
-fn quote(name: &str) -> String {
+pub(super) fn quote(name: &str) -> String {
     let mut out: String = name.chars().take(80).collect();
     if out.len() < name.len() {
         out.push('…');
@@ -419,8 +419,10 @@ struct RawEngines {
 }
 
 /// An optional field that, when present, must hold a value: `null` is refused rather than read as
-/// absent.
-fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+/// absent. The signed index (`index.rs`) reads its optional fields the same way.
+pub(super) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
 }
 
@@ -749,39 +751,68 @@ fn check_case_collisions(names: &[String]) -> Result<(), PackageError> {
     Ok(())
 }
 
-/// Verify `signature` (a minisign signature file) over `message` with any of `keys`. Returns which
-/// key and the trusted comment.
-fn verify_signature(
+/// Why a minisign signature was refused. The signed index (`index.rs`) goes through the same check,
+/// so PM has one way of reading a signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignatureFault {
+    /// Not UTF-8, not exactly minisign's four lines, or not decodable.
+    Malformed,
+    /// minisign's legacy (non-prehashed) mode, by a trusted key id.
+    Legacy,
+    /// No trusted key has its key id.
+    UntrustedKey,
+    /// A trusted key's id, but the signature or its trusted comment doesn't verify.
+    BadSignature,
+}
+
+/// Check `signature` (a minisign signature file) over `message` with any of `keys`: prehashed only.
+/// Returns which key and the trusted comment, which the global signature covers.
+pub(crate) fn check_minisign(
     message: &[u8],
     signature: &[u8],
     keys: &[PublicKey],
-) -> Result<(usize, String), PackageError> {
-    let malformed = || refuse(Refusal::Signature, "its signature is malformed");
-    let text = std::str::from_utf8(signature).map_err(|_| malformed())?;
+) -> Result<(usize, String), SignatureFault> {
+    let text = std::str::from_utf8(signature).map_err(|_| SignatureFault::Malformed)?;
     // minisign writes exactly four lines; anything after them would be ignored by the decoder, and
     // nothing in a signed file is ignored.
     if text.lines().count() != 4 {
-        return Err(malformed());
+        return Err(SignatureFault::Malformed);
     }
-    let sig = Signature::decode(text).map_err(|_| malformed())?;
+    let sig = Signature::decode(text).map_err(|_| SignatureFault::Malformed)?;
     let mut id_matched = false;
     for (index, key) in keys.iter().enumerate() {
         match key.verify(message, &sig, false) {
             Ok(()) => return Ok((index, sig.trusted_comment().to_owned())),
             Err(minisign_verify::Error::UnexpectedKeyId) => {}
-            Err(minisign_verify::Error::UnexpectedAlgorithm) => {
-                return Err(refuse(
-                    Refusal::Signature,
-                    "its signature uses minisign's legacy mode, which PM refuses",
-                ));
-            }
+            Err(minisign_verify::Error::UnexpectedAlgorithm) => return Err(SignatureFault::Legacy),
             Err(_) => id_matched = true,
         }
     }
     Err(if id_matched {
-        refuse(Refusal::BadSignature, "its signature doesn't verify")
+        SignatureFault::BadSignature
     } else {
-        refuse(Refusal::UntrustedKey, "it isn't signed by a key PM trusts")
+        SignatureFault::UntrustedKey
+    })
+}
+
+/// [`check_minisign`], refused in a package's words.
+fn verify_signature(
+    message: &[u8],
+    signature: &[u8],
+    keys: &[PublicKey],
+) -> Result<(usize, String), PackageError> {
+    check_minisign(message, signature, keys).map_err(|fault| match fault {
+        SignatureFault::Malformed => refuse(Refusal::Signature, "its signature is malformed"),
+        SignatureFault::Legacy => refuse(
+            Refusal::Signature,
+            "its signature uses minisign's legacy mode, which PM refuses",
+        ),
+        SignatureFault::UntrustedKey => {
+            refuse(Refusal::UntrustedKey, "it isn't signed by a key PM trusts")
+        }
+        SignatureFault::BadSignature => {
+            refuse(Refusal::BadSignature, "its signature doesn't verify")
+        }
     })
 }
 
@@ -920,7 +951,7 @@ fn parse_checksums(bytes: &[u8]) -> Result<BTreeMap<String, [u8; 32]>, PackageEr
 }
 
 /// 64 lowercase hex digits.
-fn parse_sha256(s: &str) -> Option<[u8; 32]> {
+pub(super) fn parse_sha256(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
@@ -1119,22 +1150,30 @@ fn plain_text(
     newlines: bool,
     may_be_empty: bool,
 ) -> Result<(), PackageError> {
+    plain_text_fault(s, max_chars, newlines, may_be_empty)
+        .map_err(|fault| manifest_error(format!("{what} {fault}")))
+}
+
+/// [`plain_text`]'s rule on its own: `Err` says what's wrong ("is empty", …). The signed index's
+/// names and reasons (`index.rs`) are held to it too, since PM draws them the same way.
+pub(super) fn plain_text_fault(
+    s: &str,
+    max_chars: usize,
+    newlines: bool,
+    may_be_empty: bool,
+) -> Result<(), String> {
     if s.is_empty() {
         return if may_be_empty {
             Ok(())
         } else {
-            Err(manifest_error(format!("{what} is empty")))
+            Err("is empty".into())
         };
     }
     if s.chars().count() > max_chars {
-        return Err(manifest_error(format!(
-            "{what} is longer than {max_chars} characters"
-        )));
+        return Err(format!("is longer than {max_chars} characters"));
     }
     if s.trim() != s {
-        return Err(manifest_error(format!(
-            "{what} starts or ends with a space"
-        )));
+        return Err("starts or ends with a space".into());
     }
     let bad = s.chars().any(|c| {
         let allowed_space = c == ' ' || (newlines && c == '\n');
@@ -1143,9 +1182,7 @@ fn plain_text(
             || is_invisible(c)
     });
     if bad {
-        return Err(manifest_error(format!(
-            "{what} has a hidden or control character"
-        )));
+        return Err("has a hidden or control character".into());
     }
     Ok(())
 }
@@ -1217,7 +1254,7 @@ fn parse_version(s: &str) -> Result<semver::Version, PackageError> {
 }
 
 /// `major.minor`, no leading zeros.
-fn parse_major_minor(s: &str) -> Option<(u16, u16)> {
+pub(super) fn parse_major_minor(s: &str) -> Option<(u16, u16)> {
     let (a, b) = s.split_once('.')?;
     let part = |p: &str| -> Option<u16> {
         let ok = !p.is_empty()
@@ -1260,12 +1297,12 @@ fn parse_publisher(raw: &RawPublisher) -> Result<Publisher, PackageError> {
 }
 
 /// A git commit as PM writes one: 40 lowercase hex digits (a SHA-1 object id).
-fn is_commit(s: &str) -> bool {
+pub(super) fn is_commit(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// GitHub's `owner/repo` shape.
-fn is_source_repo(s: &str) -> bool {
+pub(super) fn is_source_repo(s: &str) -> bool {
     let Some((owner, repo)) = s.split_once('/') else {
         return false;
     };
@@ -1372,13 +1409,14 @@ pub(crate) mod tests {
     // ---- Signing, in the test: minisign's format with a key made for this run only (no key is
     // ever committed) -------------------------------------------------------------------------
 
-    struct TestKey {
-        pair: Ed25519KeyPair,
-        id: [u8; 8],
+    /// Also signs the index tests' indexes (`index.rs`).
+    pub(crate) struct TestKey {
+        pub(crate) pair: Ed25519KeyPair,
+        pub(crate) id: [u8; 8],
     }
 
     impl TestKey {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let rng = SystemRandom::new();
             let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
             let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
@@ -1388,22 +1426,27 @@ pub(crate) mod tests {
         }
 
         /// The minisign public key ("Ed", key id, key).
-        fn public(&self) -> PublicKey {
+        pub(crate) fn public(&self) -> PublicKey {
+            PublicKey::from_base64(&self.public_base64()).unwrap()
+        }
+
+        /// The public key as the Tauri `.pub` file holds it, base64-decoded once.
+        pub(crate) fn public_base64(&self) -> String {
             let mut bin = vec![0x45, 0x64];
             bin.extend_from_slice(&self.id);
             bin.extend_from_slice(self.pair.public_key().as_ref());
-            PublicKey::from_base64(&B64.encode(bin)).unwrap()
+            B64.encode(bin)
         }
 
         /// A prehashed ("ED") minisign signature: Ed25519 over BLAKE2b-512 of the message, then a
         /// global signature over that signature and the trusted comment.
-        fn sign(&self, message: &[u8], comment: &str) -> String {
+        pub(crate) fn sign(&self, message: &[u8], comment: &str) -> String {
             let hash = Blake2b512::digest(message);
             self.sign_raw(&hash, [0x45, 0x44], comment)
         }
 
         /// minisign's legacy mode: Ed25519 over the message itself.
-        fn sign_legacy(&self, message: &[u8], comment: &str) -> String {
+        pub(crate) fn sign_legacy(&self, message: &[u8], comment: &str) -> String {
             self.sign_raw(message, [0x45, 0x64], comment)
         }
 

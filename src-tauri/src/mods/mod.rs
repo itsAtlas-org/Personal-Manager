@@ -8,6 +8,8 @@
 //!   response headers; both are free of PM's crate so the sealed-frame regression app can include
 //!   them.
 //! - [`ids`]: the mod id grammar and the trust tiers. [`package`]: the `.pmmod` verifier.
+//! - [`keys`]: the embedded Atlas keys and the key-id gate. [`index`]: the signed index's format,
+//!   verification and acceptance rules; [`index_state`] the per-machine record of it (§1.10, D15).
 //! - [`runtime`]: the installed-mod registry, the one-time entry URLs and the frame sessions, and
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
@@ -44,6 +46,9 @@ pub mod disk;
 pub mod engine;
 pub mod headers;
 pub mod ids;
+pub mod index;
+pub mod index_state;
+pub mod keys;
 pub mod ledger;
 pub mod package;
 pub mod policy;

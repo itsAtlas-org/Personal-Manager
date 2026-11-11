@@ -152,9 +152,12 @@ release remain the open post-v1 work.
     decisions and `MOD_API_VERSION`) and `disk.rs` (the only code under `data_dir/mods`,
     INVARIANTS.md I-30); `runtime.rs` the `pmmod` scheme's
     registry, one-time entry URLs and frame sessions, with `headers.rs` (crate-free, like
-    `engine.rs`) building every response header (INVARIANTS.md I-27). In the page,
-    `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and `modBridge.ts`
-    is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
+    `engine.rs`) building every response header (INVARIANTS.md I-27). `keys.rs` embeds the two
+    Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
+    against; `index.rs` is the signed index's format, verification and acceptance rules, and
+    `index_state.rs` its per-machine record, `data_dir/mods-index.json` (INVARIANTS.md I-31).
+    In the page, `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and
+    `modBridge.ts` is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
 - **Sidecar** — `sidecar/pm_sidecar.py` + `requirements.txt` (committed code). A managed venv

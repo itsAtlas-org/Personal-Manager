@@ -45,7 +45,6 @@ use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 
 use chrono::{DateTime, Utc};
-use minisign_verify::PublicKey;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,6 +54,7 @@ use tauri::{AppHandle, Manager};
 use super::disk::{self, Layout, PathRefusal, Step, SweepReport, VersionName};
 use super::headers::APP_DIR;
 use super::ids::{self, ModId};
+use super::keys::TrustedKeys;
 use super::package::{self, ApiRange, PackageError, VerifiedPackage};
 use super::policy::{
     self, ApiFit, InstallKind, Pinned, Refusal, MOD_API_OLDEST_MAJOR, MOD_API_VERSION,
@@ -411,16 +411,18 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         self.store.with_conn(self.layout, f)
     }
 
-    /// Install, update or repair from a signed `.pmmod`'s bytes, verified against `keys` (the
-    /// embedded Atlas keys, slice 5).
+    /// Install, update or repair from a signed `.pmmod`'s bytes, verified against `keys`: the
+    /// embedded Atlas keys less those this machine has seen revoked (`keys::KeyRing::trusted`, with
+    /// the revocations `index_state` records), so a revoked key is refused here as it is for the
+    /// index.
     pub fn install_package(
         &self,
         bytes: &[u8],
-        keys: &[PublicKey],
+        keys: &TrustedKeys,
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
-        let pkg = package::verify(bytes, keys).map_err(LedgerError::Package)?;
+        let pkg = package::verify(bytes, keys.public_keys()).map_err(LedgerError::Package)?;
         let sha = hex::encode(Sha256::digest(bytes));
         self.install_verified(&pkg, &sha, opts, now)
     }
@@ -1265,6 +1267,7 @@ mod tests {
     use crate::mods::engine::Platform;
     use crate::mods::package::tests::signed_package;
     use crate::mods::runtime::FrameError;
+    use minisign_verify::PublicKey;
     use std::fs;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1384,8 +1387,12 @@ mod tests {
             (bytes, key): &(Vec<u8>, PublicKey),
             approval: Approval,
         ) -> Result<Installed, LedgerError> {
-            self.ledger()
-                .install_package(bytes, std::slice::from_ref(key), &opts(approval), now())
+            self.ledger().install_package(
+                bytes,
+                &TrustedKeys::of_test_keys(std::slice::from_ref(key)),
+                &opts(approval),
+                now(),
+            )
         }
 
         fn sql<T: rusqlite::types::FromSql>(&self, q: &str) -> T {
@@ -1578,7 +1585,7 @@ mod tests {
         let package = pkg("1.0.0", |_| {});
         match w.ledger().install_package(
             &package.0,
-            std::slice::from_ref(&package.1),
+            &TrustedKeys::of_test_keys(std::slice::from_ref(&package.1)),
             &blacklisted,
             now(),
         ) {
@@ -1600,10 +1607,30 @@ mod tests {
         ));
         let unsigned = signed_package(|_, _| {});
         assert!(matches!(
-            w.ledger()
-                .install_package(&unsigned.0, &[], &opts(Approval::Approved), now()),
+            w.ledger().install_package(
+                &unsigned.0,
+                &TrustedKeys::of_test_keys(&[]),
+                &opts(Approval::Approved),
+                now()
+            ),
             Err(LedgerError::Package(_))
         ));
+        // A key this machine has seen revoked signs nothing it installs (the key-id gate).
+        let signer = crate::mods::keys::KeyId::parse("00000000000000AA").unwrap();
+        let ring = crate::mods::keys::KeyRing::of([crate::mods::keys::AtlasKey {
+            role: crate::mods::keys::KeyRole::Main,
+            id: signer,
+            key: package.1.clone(),
+        }]);
+        match w.ledger().install_package(
+            &package.0,
+            &ring.trusted(&BTreeSet::from([signer])),
+            &opts(Approval::Approved),
+            now(),
+        ) {
+            Err(LedgerError::Package(e)) => assert_eq!(e.refusal, package::Refusal::UntrustedKey),
+            other => panic!("{other:?}"),
+        }
         // The tier is checked again here, whatever the verifier said.
         let mut forged = package::verify(&package.0, std::slice::from_ref(&package.1)).unwrap();
         forged.manifest.publisher.tier = ids::Tier::Second;
@@ -1781,7 +1808,12 @@ mod tests {
         };
         let got = w
             .ledger()
-            .install_package(&bytes, &[key], &from_file, now())
+            .install_package(
+                &bytes,
+                &TrustedKeys::of_test_keys(&[key]),
+                &from_file,
+                now(),
+            )
             .unwrap();
         assert_eq!(
             (got.kind, got.pruned),
