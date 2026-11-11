@@ -14,8 +14,11 @@ import { TASK_CALENDAR_ID, weekdayShort } from "./calendar-layout";
 import { formatDateLocal } from "./format";
 import {
   buildColumns,
+  cardCount,
   columnForDay,
   dropPlan,
+  foldKey,
+  keepLiveWindowFolds,
   laneTaskIds,
   LATER_EVENTS,
   linkedEvent,
@@ -23,8 +26,10 @@ import {
   orderAfterStep,
   placeCards,
   placeEvents,
+  runwayProgressWords,
   samePlan,
   taskOverlayEvents,
+  setFoldKey,
   type RunwayColumn,
   type RunwayModel,
 } from "./runway";
@@ -266,6 +271,73 @@ describe("buildColumns", () => {
     for (const d of [WED, SAT, SUN]) {
       expect(buildColumns(d, []).filter((c) => c.today)).toHaveLength(1);
     }
+  });
+});
+
+describe("remembered folds", () => {
+  const col = (cols: RunwayColumn[], id: string) => cols.find((c) => c.id === id)!;
+
+  it("keys a column by its kind: past, a default by its id, a window by its whole id", () => {
+    // A window inside the week splits "Rest of this week" in two.
+    const cols = buildColumns(WED, [win("w1", "2026-11-07", "2026-11-07", "Trip")]);
+    expect(foldKey(col(cols, "past"))).toBe("past");
+    expect(foldKey(col(cols, "today"))).toBe("today");
+    expect(foldKey(col(cols, "later"))).toBe("later");
+    // Both pieces of the split default fold under one key.
+    expect(col(cols, "rest:2")).toBeDefined();
+    expect(foldKey(col(cols, "rest"))).toBe("rest");
+    expect(foldKey(col(cols, "rest:2"))).toBe("rest");
+    // A window id is never cut at its colon: that would make every window "window".
+    expect(foldKey(col(cols, "window:w1"))).toBe("window:w1");
+    expect(foldKey({ ...col(cols, "window:w1"), id: "window:w2", windowId: "w2" })).toBe(
+      "window:w2",
+    );
+  });
+
+  it("sets a key folded or open, as a new set, whatever it was", () => {
+    const empty = new Set<string>();
+    const one = setFoldKey(empty, "today", true);
+    expect([...one]).toEqual(["today"]);
+    expect(empty.size).toBe(0);
+    const two = setFoldKey(one, "later", true);
+    expect([...two]).toEqual(["today", "later"]);
+    expect([...setFoldKey(two, "today", false)]).toEqual(["later"]);
+    expect(two.has("today")).toBe(true);
+    // Idempotent: folding what is already folded, or opening what is open, changes nothing.
+    expect([...setFoldKey(two, "later", true)]).toEqual(["today", "later"]);
+    expect([...setFoldKey(two, "never", false)]).toEqual(["today", "later"]);
+  });
+
+  it("drops the folds of windows that are gone, and keeps every default column's", () => {
+    const folds = new Set(["today", "rest", "window:w1", "window:w2", "past"]);
+    expect([...keepLiveWindowFolds(folds, ["w2"])]).toEqual(["today", "rest", "window:w2", "past"]);
+    expect([...keepLiveWindowFolds(folds, [])]).toEqual(["today", "rest", "past"]);
+    expect([...folds]).toHaveLength(5);
+  });
+
+  it("counts a stack's tasks, not the stack as one card", () => {
+    const { model } = place(
+      [
+        task({ id: 1, do_start: "2026-11-04", stack_id: 7 }),
+        task({ id: 2, do_start: "2026-11-04", stack_id: 7 }),
+        task({ id: 3, do_start: "2026-11-04", lane: "background" }),
+      ],
+      { stacks: [stack(7)] },
+    );
+    expect(cardCount(model.lanes.today)).toBe(3);
+    expect(cardCount(model.lanes.tomorrow)).toBe(0);
+  });
+});
+
+describe("the Runway readout's words", () => {
+  it("counts done out of total, and adds what's in progress", () => {
+    expect(runwayProgressWords({ done: 3, total: 7, doing: 0 })).toBe("3/7 done");
+    expect(runwayProgressWords({ done: 3, total: 7, doing: 1 })).toBe("3/7 done · 1 in progress");
+    expect(runwayProgressWords({ done: 7, total: 7, doing: 0 })).toBe("7/7 done");
+  });
+
+  it("says nothing planned, not 0/0 done, when nothing is planned from today", () => {
+    expect(runwayProgressWords({ done: 0, total: 0, doing: 0 })).toBe("Nothing planned");
   });
 });
 

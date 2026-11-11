@@ -8,11 +8,11 @@
 // moves up or down its lane) from its Move… menu, a stack opens to its whole chain, and windows are
 // added and edited from the same dialog as the board's.
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import { formatClockIso } from "../../../lib/format";
-import type { CalendarEvent, Task, TaskStack } from "../../../lib/types";
+import type { CalendarEvent, Milestone, Task, TaskStack } from "../../../lib/types";
 
 vi.mock("../../../lib/ipc", () => ({
   planTask: vi.fn(async () => {}),
@@ -34,6 +34,7 @@ vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
 }));
 
 import * as ipc from "../../../lib/ipc";
+import { useRunwayModel, type RunwayProps } from "../views/runwayLogic";
 import { TerminalRunway } from "./TerminalRunway";
 
 // The strip prints the locale clock (12-hour on CI's en-US runners, 24-hour on an en-GB box), so the
@@ -54,11 +55,49 @@ beforeAll(() => {
   }
 });
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 afterEach(() => {
   cleanup();
+  for (const el of slots.splice(0)) el.remove();
   vi.clearAllMocks();
   localStorage.clear();
 });
+
+// The header's slot the Runway draws its readout and buttons into (CalendarView holds the model and
+// the header holds the slot): a div on the body, so `screen` finds what lands in it.
+const slots: HTMLElement[] = [];
+function makeSlot(): HTMLElement {
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  slots.push(el);
+  return el;
+}
+
+/** The Runway as CalendarView mounts it: its model built outside it, and a slot to draw into. */
+function Mounted({
+  milestones = [],
+  archived = new Set<string>(),
+  chrome,
+  ...props
+}: Omit<RunwayProps, "runway" | "chrome"> & {
+  milestones?: Milestone[];
+  archived?: ReadonlySet<string>;
+  chrome: HTMLElement | null;
+}) {
+  const runway = useRunwayModel({
+    tasks: props.tasks,
+    stacks: props.stacks,
+    milestones,
+    events: props.events,
+    archived,
+    windows: props.windows,
+    now: props.now,
+  });
+  return <TerminalRunway {...props} runway={runway} chrome={chrome} />;
+}
 
 const NOW = new Date(2026, 10, 4, 10, 0);
 
@@ -95,19 +134,19 @@ function task(over: Partial<Task> = {}): Task {
 
 function runway(over: { tasks?: Task[]; stacks?: TaskStack[]; windows?: RunwayWindow[] } = {}) {
   const spies = { onWindowsChange: vi.fn(), announce: vi.fn(), onOpenProject: vi.fn() };
+  const chrome = makeSlot();
   render(
-    <TerminalRunway
+    <Mounted
       tasks={over.tasks ?? [task()]}
       stacks={over.stacks ?? []}
-      milestones={[]}
       events={[]}
-      archived={new Set()}
       windows={over.windows ?? []}
       now={NOW}
+      chrome={chrome}
       {...spies}
     />,
   );
-  return spies;
+  return { ...spies, chrome };
 }
 
 describe("TerminalRunway", () => {
@@ -129,11 +168,37 @@ describe("TerminalRunway", () => {
   });
 
   it("hides and shows the events from the header, as the board does", () => {
-    localStorage.clear();
     runway({ tasks: [] });
     fireEvent.click(screen.getByRole("button", { name: /Hide events/ }));
     expect(screen.getByRole("button", { name: /Show events/ })).toBeTruthy();
-    localStorage.clear();
+  });
+
+  it("draws the readout in the header's slot in mono, with no bar and no + Task", () => {
+    const { chrome } = runway({
+      tasks: [
+        task({ id: 1, status: "done" }),
+        task({ id: 2, title: "Send the deck", effective_deadline: "2026-11-06" }),
+      ],
+    });
+    const words = within(chrome).getByText("1/2 done");
+    expect(words.parentElement!.className).toContain("font-mono");
+    expect(within(chrome).getByText("Send the deck")).toBeTruthy();
+    expect(within(chrome).queryByRole("progressbar")).toBeNull();
+    expect(within(chrome).getByRole("button", { name: /Hide events/ })).toBeTruthy();
+    expect(within(chrome).getByRole("button", { name: /\+ Window/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /\+ Task/ })).toBeNull();
+    // None of it is left in the Runway itself.
+    const root = screen
+      .getByRole("region", { name: "Today" })
+      .closest<HTMLElement>('[data-help="calendar-runway"]')!;
+    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByRole("button", { name: /Hide events/ })).toBeNull();
+  });
+
+  it("with nothing planned it says so, not 0/0 done", () => {
+    const { chrome } = runway({ tasks: [] });
+    expect(within(chrome).getByText("Nothing planned")).toBeTruthy();
+    expect(within(chrome).queryByText("0/0 done")).toBeNull();
   });
 
   it("has no pointer drag: nothing is marked to drag or drop on", () => {
@@ -200,6 +265,51 @@ describe("TerminalRunway", () => {
     expect(screen.getByText("Someday")).toBeTruthy();
   });
 
+  it("remembers a fold when the Runway comes back, and shares it with the board's key", () => {
+    const tasks = [task({ do_start: "2026-12-20", title: "Someday" })];
+    runway({ tasks });
+    fireEvent.click(screen.getByRole("button", { name: "── Later (1) ▾ ──" }));
+    cleanup();
+
+    runway({ tasks });
+    expect(screen.queryByText("Someday")).toBeNull();
+    expect(screen.getByRole("button", { name: "── Later (1) ▸ ──" })).toBeTruthy();
+    // The board reads the same key, so a System switch keeps it.
+    expect(JSON.parse(localStorage.getItem("pm.calendar.runwayFolded")!)).toEqual(["later"]);
+  });
+
+  it("a fold keeps the folds another window stored meanwhile", () => {
+    runway();
+    localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(["later"]));
+    fireEvent.click(screen.getByRole("button", { name: "── Tomorrow (0) ▾ ──" }));
+    expect(JSON.parse(localStorage.getItem("pm.calendar.runwayFolded")!)).toEqual([
+      "later",
+      "tomorrow",
+    ]);
+  });
+
+  it("follows a fold the other window made, when storage says so", () => {
+    runway();
+    act(() => {
+      localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(["tomorrow"]));
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.runwayFolded" }));
+    });
+    expect(screen.getByRole("button", { name: "── Tomorrow (0) ▸ ──" })).toBeTruthy();
+  });
+
+  it("counts a stack's tasks in its column's rule, as the board's rail does", () => {
+    runway({
+      tasks: [
+        task({ id: 1, title: "Book the slot", stack_id: 7 }),
+        task({ id: 2, title: "Fill the form", stack_id: 7 }),
+      ],
+      stacks: [
+        { id: 7, title: "Visa", kind: "sequential", note: null, created_at: "", updated_at: "" },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "── Today (2) ▾ ──" })).toBeTruthy();
+  });
+
   it("lists each column's events under its rule, and a click opens one", () => {
     const standup: CalendarEvent = {
       id: "e1",
@@ -215,9 +325,10 @@ describe("TerminalRunway", () => {
     };
     const onEventClick = vi.fn();
     render(
-      <TerminalRunway
+      <Mounted
         tasks={[]}
         stacks={[]}
+        chrome={makeSlot()}
         milestones={[
           {
             id: 1,
@@ -235,7 +346,6 @@ describe("TerminalRunway", () => {
           },
         ]}
         events={[standup]}
-        archived={new Set()}
         windows={[]}
         now={NOW}
         onWindowsChange={vi.fn()}
