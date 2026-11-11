@@ -16,13 +16,10 @@
 // event only opens its details.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import {
-  readRunwayPastOpen,
-  writeRunwayPastOpen,
-  type RunwayWindow,
-} from "../../../lib/calendarPrefs";
+import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import { deadlineInfo, STACK_KIND_LABEL, TONE_CLASS } from "../../../lib/tasks";
 import {
+  cardCount,
   dropPlan,
   isDropColumn,
   linkedEvent,
@@ -35,14 +32,7 @@ import {
   type RunwayTaskCard,
   type TaskPlan,
 } from "../../../lib/runway";
-import type {
-  CalendarEvent,
-  Milestone,
-  Task,
-  TaskInput,
-  TaskLane,
-  TaskStack,
-} from "../../../lib/types";
+import type { CalendarEvent, Milestone, Task, TaskLane, TaskStack } from "../../../lib/types";
 import { useDepth } from "../../../theme";
 import { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "../../tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
@@ -51,14 +41,13 @@ import {
   eventWhen,
   linkedDue,
   memberPlace,
-  newTaskDefaults,
   placeName,
   rolledWords,
   useRunwayActions,
-  useRunwayModel,
+  useRunwayFolds,
   type RunwayProps,
 } from "./runwayLogic";
-import { EventsStrip, MoveMenu, RunwayStrip, WindowDialog } from "./runwayParts";
+import { EventsStrip, MoveMenu, RunwayChrome, WindowDialog } from "./runwayParts";
 import {
   useRunwayDrag,
   type RunwayDrag,
@@ -74,7 +63,8 @@ const LANES: { lane: TaskLane; label: string }[] = [
   { lane: "background", label: "Background" },
 ];
 
-type Editing = { task: Task } | { defaults: Partial<TaskInput> } | null;
+/** The task open in the editor from a card's ✎. A new task is CalendarView's (+ Task, in the header). */
+type Editing = { task: Task } | null;
 
 /** What every card needs from the board. */
 interface CardCtx {
@@ -108,13 +98,13 @@ export function RunwayBoard(props: RunwayProps) {
     onEventClick,
     onShowList,
     announce,
+    chrome,
   } = props;
-  const { today, columns, model, strips, showEvents, toggleEvents } = useRunwayModel(props);
+  const { today, columns, model, strips, showEvents, toggleEvents } = props.runway;
   const { error, cycle, replan, reorder } = useRunwayActions(announce);
   const [editing, setEditing] = useState<Editing>(null);
   const [windowEdit, setWindowEdit] = useState<{ window: RunwayWindow | null } | null>(null);
-  const [pastOpen, setPastOpen] = useState(readRunwayPastOpen);
-  const [folded, setFolded] = useState<Set<string>>(() => new Set());
+  const { isFolded, toggle: toggleFold } = useRunwayFolds();
   const rootRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
@@ -195,35 +185,18 @@ export function RunwayBoard(props: RunwayProps) {
     onShowList,
   };
 
-  const isFolded = (c: RunwayColumn) => (c.kind === "past" ? !pastOpen : folded.has(c.id));
-  const toggleFold = (c: RunwayColumn) => {
-    if (c.kind === "past") {
-      setPastOpen((o) => {
-        writeRunwayPastOpen(!o);
-        return !o;
-      });
-      return;
-    }
-    setFolded((f) => {
-      const next = new Set(f);
-      if (next.has(c.id)) next.delete(c.id);
-      else next.add(c.id);
-      return next;
-    });
-  };
-
   return (
     <div
       ref={rootRef}
       data-help="calendar-runway"
       className={cn("flex min-h-0 flex-1 flex-col overflow-y-auto", drag.dragging && "select-none")}
     >
-      <RunwayStrip
+      <RunwayChrome
+        chrome={chrome}
         model={model}
-        onAddTask={() => setEditing({ defaults: newTaskDefaults(today) })}
-        onAddWindow={() => setWindowEdit({ window: null })}
         showEvents={showEvents}
         onToggleEvents={toggleEvents}
+        onAddWindow={() => setWindowEdit({ window: null })}
       />
       {error && (
         <div className="px-4 pt-2">
@@ -257,8 +230,7 @@ export function RunwayBoard(props: RunwayProps) {
       <ParkedShelf cards={model.parked} ctx={ctx} />
       <TaskEditor
         open={editing !== null}
-        task={editing && "task" in editing ? editing.task : null}
-        defaults={editing && "defaults" in editing ? editing.defaults : undefined}
+        task={editing ? editing.task : null}
         onClose={() => setEditing(null)}
       />
       <WindowDialog
@@ -271,14 +243,6 @@ export function RunwayBoard(props: RunwayProps) {
       />
     </div>
   );
-}
-
-/** How many cards a lane pair holds, counting a stack's tasks. */
-function cardCount(lanes: { foreground: RunwayCard[]; background: RunwayCard[] }): number {
-  let n = 0;
-  for (const c of [...lanes.foreground, ...lanes.background])
-    n += c.kind === "stack" ? c.tasks.length : 1;
-  return n;
 }
 
 function ColumnView({

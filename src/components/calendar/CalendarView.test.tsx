@@ -31,6 +31,7 @@ import type {
 import { addDays, dayKey, startOfDay, startOfWeek } from "../../lib/calendar-layout";
 import { A11_NOTE } from "../../lib/calendarEdit/editReasons";
 import { COPY_CALL_OFF_NOTE } from "../../lib/calendarEdit/eventDraft";
+import { isoToDisplay } from "../../lib/dateField";
 import { formatDateLocal, pad2 } from "../../lib/format";
 import { BOARD_VERSION, PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
 
@@ -83,6 +84,9 @@ const env = vi.hoisted(() => ({
   hidden: new Set<string>(),
   written: [] as string[][],
   yearEvents: null as CalendarEvent[] | null,
+  // The Runway's named windows, as the stored prefs cache holds them (read again on the app-wide
+  // settings signal, as the other window's change arrives).
+  windows: [] as { id: string; label: string; start: string; end: string }[],
 }));
 
 vi.mock("../../lib/ipc", () => ipc);
@@ -105,6 +109,7 @@ vi.mock("../../theme/timezones", async (importOriginal) => ({
 vi.mock("../../lib/calendarPrefs", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   readHidden: () => new Set(env.hidden),
+  readRunwayWindows: () => env.windows.map((w) => ({ ...w })),
   // What the pop-out's Calendars list writes: kept, and announced as the real one does, so the grid
   // re-reads it.
   writeHidden: (hidden: Set<string>) => {
@@ -243,6 +248,7 @@ beforeEach(() => {
   env.hidden = new Set();
   env.written = [];
   env.yearEvents = null;
+  env.windows = [];
   reads = [];
   held = false;
   rows = [standup];
@@ -1638,18 +1644,122 @@ describe("CalendarView: tasks", () => {
     render(<View />);
     const board = await screen.findByRole("region", { name: "Today" });
     expect(within(board).getByText("Draft the deck")).toBeTruthy();
-    expect(document.querySelector('[data-help="calendar-runway"]')).not.toBeNull();
+    // The board's own root: the header's buttons carry the Runway's help id too.
+    expect(board.closest('[data-help="calendar-runway"]')).not.toBeNull();
     // The Runway runs from today: no paging.
     expect(screen.queryByRole("button", { name: "Previous" })).toBeNull();
     expect(screen.getByText("From today")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     await screen.findByRole("button", { name: /Standup/ });
+    expect(screen.queryByRole("region", { name: "Today" })).toBeNull();
     expect(document.querySelector('[data-help="calendar-runway"]')).toBeNull();
     expect(localStorage.getItem("pm.calendar.agendaMode")).toBe("list");
     fireEvent.click(screen.getByRole("button", { name: "Runway" }));
     await screen.findByRole("region", { name: "Today" });
     expect(localStorage.getItem("pm.calendar.agendaMode")).toBe("runway");
+  });
+
+  it("the Runway's count, next up, Hide events, + Window and + Task are in the header, not the board, and gone in the List", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [
+      task({ id: 1, status: "done" }),
+      task({ id: 2, title: "Send the deck", effective_deadline: today }),
+    ];
+    // The suite's milestone counts as planned work from today.
+    ipc.listAllMilestones.mockResolvedValue([]);
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    const board = await screen.findByRole("region", { name: "Today" });
+    const header = document.querySelector<HTMLElement>('[data-help="calendar-header"]')!;
+    const inHeader = within(header);
+    expect(await inHeader.findByText("1/2 done")).toBeTruthy();
+    expect(inHeader.getByText(/Next up/)).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "Hide events" })).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "+ Window" })).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "+ Task" })).toBeTruthy();
+    // Each is in one place: none of them is left in the board.
+    const root = board.closest<HTMLElement>('[data-help="calendar-runway"]')!;
+    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByRole("button", { name: "Hide events" })).toBeNull();
+    expect(within(root).queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(within(root).queryByRole("button", { name: "+ Task" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    await screen.findByRole("button", { name: /Standup/ });
+    expect(screen.queryByText("1/2 done")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Hide events" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
+  });
+
+  it("says Nothing planned in the header when nothing is planned from today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [];
+    // The suite's milestone counts as planned work from today.
+    ipc.listAllMilestones.mockResolvedValue([]);
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    expect(screen.getByText("Nothing planned")).toBeTruthy();
+    expect(screen.queryByText("0/0 done")).toBeNull();
+  });
+
+  it("+ Task in the header opens New task starting today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    fireEvent.click(screen.getByRole("button", { name: "+ Task" }));
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Start doing it on").value).toBe(
+      isoToDisplay(today),
+    );
+    // One editor, not two: the board's own stays closed.
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("+ Task sits just before + New event in the header", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    const buttons = within(
+      document.querySelector<HTMLElement>('[data-help="calendar-header"]')!,
+    ).getAllByRole("button");
+    const at = buttons.indexOf(screen.getByRole("button", { name: "+ Task" }));
+    expect(buttons[at + 1]).toBe(screen.getByRole("button", { name: "+ New event" }));
+  });
+
+  it("a window the other window made shows on the Runway when the settings signal comes, not only on focus", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    expect(screen.queryByRole("region", { name: "Lisbon" })).toBeNull();
+    env.windows = [{ id: "w1", label: "Lisbon", start: today, end: today }];
+    act(() => {
+      window.dispatchEvent(new Event("pm:settings-changed"));
+    });
+    expect(await screen.findByRole("region", { name: "Lisbon" })).toBeTruthy();
+  });
+
+  it("a folded column stays folded across Runway to List to Runway", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    fireEvent.click(screen.getByRole("button", { name: "Fold Tomorrow" }));
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    await screen.findByRole("button", { name: /Standup/ });
+    fireEvent.click(screen.getByRole("button", { name: "Runway" }));
+    await screen.findByRole("region", { name: "Today" });
+    // The body remounted (its key changed), and the fold came back from storage.
+    expect(screen.getByRole("button", { name: "Show Tomorrow" })).toBeTruthy();
   });
 
   it("draws an open task in the list, and a click on it opens the task editor", async () => {

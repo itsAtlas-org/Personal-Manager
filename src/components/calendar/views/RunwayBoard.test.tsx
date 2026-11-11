@@ -39,6 +39,7 @@ vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
 
 import * as ipc from "../../../lib/ipc";
 import { RunwayBoard } from "./RunwayBoard";
+import { useRunwayModel, type RunwayProps } from "./runwayLogic";
 import { EDGE_SCROLL_MAX, edgeScrollStep } from "./useRunwayDrag";
 
 // The strip prints the locale clock (12-hour on CI's en-US runners, 24-hour on an en-GB box), so the
@@ -66,9 +67,44 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  for (const el of slots.splice(0)) el.remove();
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
+
+// The header's slot the board draws its readout and buttons into (CalendarView holds the model and
+// the header holds the slot): a div on the body, so `screen` finds what lands in it.
+const slots: HTMLElement[] = [];
+function makeSlot(): HTMLElement {
+  const el = document.createElement("div");
+  el.setAttribute("data-testid", "header-slot");
+  document.body.appendChild(el);
+  slots.push(el);
+  return el;
+}
+
+/** The board as CalendarView mounts it: its model built outside it, and a slot to draw into. */
+function Runway({
+  milestones = [],
+  archived = new Set<string>(),
+  chrome,
+  ...props
+}: Omit<RunwayProps, "runway" | "chrome"> & {
+  milestones?: Milestone[];
+  archived?: ReadonlySet<string>;
+  chrome: HTMLElement | null;
+}) {
+  const runway = useRunwayModel({
+    tasks: props.tasks,
+    stacks: props.stacks,
+    milestones,
+    events: props.events,
+    archived,
+    windows: props.windows,
+    now: props.now,
+  });
+  return <RunwayBoard {...props} runway={runway} chrome={chrome} />;
+}
 
 // Wednesday 04-11-2026: Today, Tomorrow (Thu 05), the rest of the week (06–08), next week (09–15).
 const NOW = new Date(2026, 10, 4, 10, 0);
@@ -144,8 +180,9 @@ function board(
     onEventClick: vi.fn(),
     announce: vi.fn(),
   };
+  const chrome = makeSlot();
   render(
-    <RunwayBoard
+    <Runway
       tasks={over.tasks ?? [task()]}
       stacks={over.stacks ?? []}
       milestones={over.milestones ?? []}
@@ -153,10 +190,11 @@ function board(
       archived={new Set(over.archived ?? [])}
       windows={over.windows ?? []}
       now={NOW}
+      chrome={chrome}
       {...spies}
     />,
   );
-  return spies;
+  return { ...spies, chrome };
 }
 
 const column = (name: string) => screen.getByRole("region", { name });
@@ -224,6 +262,114 @@ describe("RunwayBoard", () => {
     expect(strip()).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show events" }));
     expect(strip()).not.toBeNull();
+  });
+
+  it("draws its count, next up, Hide events and + Window in the given slot, none inside its own root", () => {
+    const { chrome } = board({
+      tasks: [
+        task({ id: 1, status: "done" }),
+        task({ id: 2, title: "Send the deck", effective_deadline: "2026-11-06" }),
+      ],
+    });
+    const inSlot = within(chrome);
+    expect(inSlot.getByText("1/2 done")).toBeTruthy();
+    expect(inSlot.getByText("Send the deck")).toBeTruthy();
+    expect(inSlot.getByText(`2d · ${formatDateLocal(new Date(2026, 10, 6))}`)).toBeTruthy();
+    expect(inSlot.getByRole("button", { name: "Hide events" })).toBeTruthy();
+    expect(inSlot.getByRole("button", { name: "+ Window" })).toBeTruthy();
+    // Standard depth draws the bar beside the count.
+    expect(inSlot.getByRole("progressbar")).toBeTruthy();
+    // Nothing of it is left in the board itself.
+    const root = column("Today").closest<HTMLElement>('[data-help="calendar-runway"]')!;
+    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByRole("button", { name: "Hide events" })).toBeNull();
+    expect(within(root).queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(within(root).queryByText(/Next up/)).toBeNull();
+  });
+
+  it("draws nothing until the header's slot is there", () => {
+    render(
+      <Runway
+        tasks={[task()]}
+        stacks={[]}
+        events={[]}
+        windows={[]}
+        now={NOW}
+        chrome={null}
+        onWindowsChange={vi.fn()}
+        announce={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("0/1 done")).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Today" })).toBeTruthy();
+  });
+
+  it("with nothing planned it says so, not 0/0 done", () => {
+    const { chrome } = board({ tasks: [] });
+    expect(within(chrome).getByText("Nothing planned")).toBeTruthy();
+    expect(within(chrome).queryByText("0/0 done")).toBeNull();
+    expect(within(chrome).queryByRole("progressbar")).toBeNull();
+  });
+
+  it("remembers a folded column when the board comes back", () => {
+    board();
+    fireEvent.click(screen.getByRole("button", { name: "Fold Tomorrow" }));
+    expect(screen.getByRole("button", { name: "Show Tomorrow" })).toBeTruthy();
+    cleanup();
+
+    board();
+    expect(screen.getByRole("button", { name: "Show Tomorrow" })).toBeTruthy();
+    // And opens again, for good.
+    fireEvent.click(screen.getByRole("button", { name: "Show Tomorrow" }));
+    cleanup();
+    board();
+    expect(screen.getByRole("button", { name: "Fold Tomorrow" })).toBeTruthy();
+  });
+
+  it("remembers a folded named window, and both pieces of a split column fold together", () => {
+    // A window inside the week splits "Rest of this week" into two pieces: rest and rest:2.
+    const windows: RunwayWindow[] = [
+      { id: "w1", label: "Lisbon", start: "2026-11-07", end: "2026-11-07" },
+    ];
+    board({ windows });
+    expect(screen.getAllByRole("region", { name: "Rest of this week" })).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Fold Rest of this week" })[0]);
+    // One fold, both pieces: neither has its ‹ any more.
+    expect(screen.queryAllByRole("button", { name: "Fold Rest of this week" })).toHaveLength(0);
+    expect(screen.getAllByRole("button", { name: "Show Rest of this week" })).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Fold Lisbon" }));
+    cleanup();
+
+    board({ windows });
+    expect(screen.getByRole("button", { name: "Show Lisbon" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Show Rest of this week" })).toHaveLength(2);
+  });
+
+  it("a fold keeps the folds another window stored meanwhile", () => {
+    board();
+    // The pop-out folded Later after this board mounted.
+    localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(["later"]));
+    fireEvent.click(screen.getByRole("button", { name: "Fold Tomorrow" }));
+    expect(JSON.parse(localStorage.getItem("pm.calendar.runwayFolded")!)).toEqual([
+      "later",
+      "tomorrow",
+    ]);
+  });
+
+  it("follows a fold the other window made, when storage says so", () => {
+    board();
+    expect(screen.getByRole("button", { name: "Fold Later" })).toBeTruthy();
+    act(() => {
+      localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(["later"]));
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.runwayFolded" }));
+    });
+    expect(screen.getByRole("button", { name: "Show Later" })).toBeTruthy();
+  });
+
+  it("writes nothing when it mounts", () => {
+    board();
+    expect(localStorage.getItem("pm.calendar.runwayFolded")).toBeNull();
   });
 
   it("ticks a task through the task IPC", async () => {
@@ -373,13 +519,12 @@ describe("RunwayBoard", () => {
     expect(screen.getByText(/^due .* · Review$/)).toBeTruthy();
   });
 
-  it("opens the shared task editor from ✎ and from + Task", async () => {
+  it("opens the shared task editor from ✎, and has no + Task of its own", async () => {
     board();
     fireEvent.click(screen.getByRole("button", { name: "Edit Draft the deck" }));
     expect(await screen.findByRole("dialog", { name: "Edit task" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    fireEvent.click(screen.getByRole("button", { name: "+ Task" }));
-    expect(await screen.findByRole("dialog", { name: "New task" })).toBeTruthy();
+    // + Task is the Calendar header's button (CalendarView owns the new-task editor).
+    expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
   });
 
   it("heads each column with its events and pinboard entries, read-only, opening their details", () => {
@@ -407,17 +552,16 @@ describe("RunwayBoard", () => {
       announce: vi.fn(),
     };
     render(
-      <RunwayBoard
+      <Runway
         tasks={[]}
         stacks={[]}
-        milestones={[]}
+        chrome={makeSlot()}
         events={[
           standup,
           ev("Bulbs", "2026-11-05", { calendar_id: "pm:pinboard", uid: null }),
           ev("Old", "2026-11-02T09:00:00"),
           ...later,
         ]}
-        archived={new Set()}
         windows={[]}
         now={NOW}
         colorOf={() => "var(--ink3)"}

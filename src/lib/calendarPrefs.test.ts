@@ -14,6 +14,7 @@ import {
   readAgendaMode,
   readHidden,
   readLastCreate,
+  readRunwayFolded,
   readRunwayPastOpen,
   readRunwayWindows,
   readSwipeDays,
@@ -23,6 +24,7 @@ import {
   writeAgendaMode,
   writeHidden,
   writeLastCreate,
+  writeRunwayFolded,
   writeRunwayPastOpen,
   writeRunwayWindows,
   writeSwipeDays,
@@ -127,6 +129,40 @@ describe("the Agenda's layout and the Runway (PA-2)", () => {
     expect(readRunwayPastOpen()).toBe(true);
     writeRunwayPastOpen(false);
     expect(readRunwayPastOpen()).toBe(false);
+  });
+
+  it("remembers the folded columns on this device, in the order they were folded", () => {
+    expect([...readRunwayFolded()]).toEqual([]);
+    writeRunwayFolded(["today", "window:w1"]);
+    expect(localStorage.getItem("pm.calendar.runwayFolded")).toBe('["today","window:w1"]');
+    expect([...readRunwayFolded()]).toEqual(["today", "window:w1"]);
+    // An empty set is a stored empty list, not a missing key's "nothing", and reads the same.
+    writeRunwayFolded([]);
+    expect([...readRunwayFolded()]).toEqual([]);
+  });
+
+  it("reads junk, non-strings and repeats in the folded key as what they are", () => {
+    for (const raw of ["not json", "{}", '"today"', "42", "null", ""]) {
+      localStorage.setItem("pm.calendar.runwayFolded", raw);
+      expect([...readRunwayFolded()]).toEqual([]);
+    }
+    localStorage.setItem(
+      "pm.calendar.runwayFolded",
+      JSON.stringify(["today", 7, null, "", "later", "today", { k: 1 }]),
+    );
+    // A repeat counts once, at the place it was last folded.
+    expect([...readRunwayFolded()]).toEqual(["later", "today"]);
+  });
+
+  it("keeps only the newest 64 folded columns, on write and on read", () => {
+    const keys = Array.from({ length: 70 }, (_, i) => `window:w${i}`);
+    writeRunwayFolded(keys);
+    const stored = JSON.parse(localStorage.getItem("pm.calendar.runwayFolded")!) as string[];
+    expect(stored).toHaveLength(64);
+    expect(stored[0]).toBe("window:w6");
+    expect(stored[63]).toBe("window:w69");
+    localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(keys));
+    expect([...readRunwayFolded()]).toEqual(keys.slice(-64));
   });
 
   it("windows round-trip in calendar_ui beside hidden and last create", async () => {

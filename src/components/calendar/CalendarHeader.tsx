@@ -7,7 +7,7 @@
 // Runway always runs from today, so with it on, the nav and the date label give way to "From today".
 //
 // THE ORDER AT THE RIGHT, set once for every control that joins it: view-specific controls, the view
-// switcher, + New event, then Pop out (main window) or Calendars n/m (the pop-out, which has no
+// switcher, + Task (the Runway only), + New event, then Pop out (main window) or Calendars n/m (the pop-out, which has no
 // sidebar to hold the list), then Refresh in the corner. Refresh always takes the last corner because
 // that is where a hand goes for it (Bobby: "i instinctively click top right for refresh").
 //
@@ -21,7 +21,13 @@
 // "+ New event" (#884, C10) is here only in the views without a grid corner to hold it (Month, Year,
 // Agenda, and Terminal's), at the right end beside Refresh; in Week and Day it sits in the grid's
 // top-left corner instead (see `NewEventButton`). It shows once a Google account is connected.
-// Everything else here only changes what you see.
+//
+// THE RUNWAY'S PIECES (Agenda, Runway layout) join the left group, where the nav sits in the other
+// views: the board draws its readout ("3/7 done", the bar, Next up), Hide events and + Window into
+// a slot beside "From today" (the board stays the owner of what they open), and + Task is this
+// header's own button, handed to CalendarView, which owns the editor. That group is wide, so the
+// Runway keeps it on the first row until the header is much wider than the other views need.
+// Besides the Runway's, the rest here only changes what you see.
 //
 // Refresh is an icon (circular arrows) at every Depth. When it last synced is the one fact that
 // tells you whether pressing it is worth it, so it is in the tooltip (hover and keyboard focus) and
@@ -47,6 +53,7 @@ import {
   Select,
   Tooltip,
   VisuallyHidden,
+  cn,
   type SegOption,
 } from "../ui";
 import { MiniCalendarPopover } from "./MiniCalendarPopover";
@@ -89,6 +96,11 @@ interface Props {
   /** The Agenda's layout: the Runway board or the dated list. Its switch shows in Agenda only. */
   agendaMode?: AgendaMode;
   onAgendaModeChange?: (mode: AgendaMode) => void;
+  /** The Runway's slot beside "From today", given to the board to draw its readout, Hide events
+   *  and + Window into. Called with the element when the Runway shows, and with null when it goes. */
+  runwaySlotRef?: (el: HTMLDivElement | null) => void;
+  /** Start a new task (the Runway's + Task, before + New event). Absent outside the Runway. */
+  onCreateTask?: () => void;
   /** Open the Calendar in a window of its own (#1039), or bring that window forward. Absent in the
    *  pop-out itself. */
   onPopOut?: () => void;
@@ -135,6 +147,8 @@ export function CalendarHeader({
   createRef,
   agendaMode = "list",
   onAgendaModeChange,
+  runwaySlotRef,
+  onCreateTask,
   onPopOut,
   roster,
 }: Props) {
@@ -160,10 +174,26 @@ export function CalendarHeader({
 
   return (
     <header className="@container border-b border-rule px-4 py-2" data-help="calendar-header">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 @4xl:grid-cols-[auto_minmax(0,1fr)_auto]">
-        <div className="col-start-1 row-start-1 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <div
+        className={cn(
+          "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2",
+          runway
+            ? "@7xl:grid-cols-[minmax(0,1fr)_auto_auto]"
+            : "@4xl:grid-cols-[auto_minmax(0,1fr)_auto]",
+        )}
+      >
+        <div className="col-start-1 row-start-1 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
           {runway ? (
-            <span className="px-1 font-head text-sm text-ink">From today</span>
+            <>
+              <span className="px-1 font-head text-sm text-ink">From today</span>
+              {/* The Runway draws its readout, Hide events and + Window here (portaled by the board,
+                which owns them). A real box, not display:contents, so help mode has a rect; hidden
+                while empty so it takes no gap before the board has drawn. */}
+              <div
+                ref={runwaySlotRef}
+                className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 empty:hidden"
+              />
+            </>
           ) : (
             <>
               <div className="flex items-center gap-1">
@@ -201,7 +231,16 @@ export function CalendarHeader({
           )}
         </div>
 
-        <div className="col-span-2 row-start-2 flex flex-wrap items-center justify-end gap-3 @4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1">
+        <div
+          className={cn(
+            "col-span-2 row-start-2 flex flex-wrap items-center justify-end gap-3",
+            // The Runway's left group is wide (the readout), so it keeps the first row to itself
+            // until the header is wider than the other views need.
+            runway
+              ? "@7xl:col-span-1 @7xl:col-start-2 @7xl:row-start-1"
+              : "@4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1",
+          )}
+        >
           {view === "agenda" && onAgendaModeChange && (
             // Agenda only, beside the view switcher: it changes how this one view lays out, so it
             // sits by what it changes and nowhere else (one control, one home).
@@ -259,6 +298,13 @@ export function CalendarHeader({
             lists every calendar inline — one control, one home per window. The main window keeps
             that and gets no button here. The pop-out has no sidebar, so its home is `roster` below:
             a stated deviation from Google's sidebar. */}
+          {onCreateTask && (
+            // The Runway's new task, beside + New event: both make something, and this one is the
+            // board's (it opens the editor CalendarView owns, starting today). In the Runway's help.
+            <Button variant="secondary" onClick={onCreateTask} data-help="calendar-runway">
+              + Task
+            </Button>
+          )}
           {onCreate && (
             <NewEventButton onCreate={onCreate} createReason={createReason} createRef={createRef} />
           )}
@@ -285,7 +331,12 @@ export function CalendarHeader({
           it last synced is a description, not part of the name. Syncing is aria-busy and
           aria-disabled with clicks ignored, NOT `disabled`: a focused button that turns disabled
           drops keyboard focus. */}
-        <div className="col-start-2 row-start-1 flex items-center @4xl:col-start-3">
+        <div
+          className={cn(
+            "col-start-2 row-start-1 flex items-center",
+            runway ? "@7xl:col-start-3" : "@4xl:col-start-3",
+          )}
+        >
           <Tooltip label={refreshTip(lastSync, syncing, now)} placement="below">
             <Button
               variant="tertiary"

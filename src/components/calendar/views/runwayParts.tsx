@@ -1,18 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The pieces both Runways draw alike (PA-2): the header strip, a column's read-only events strip,
-// the Move… menu (the keyboard's way to do what a drag does, and the Terminal's only way) and the
+// The pieces both Runways draw alike (PA-2): the readout and buttons the Calendar header shows, a
+// column's read-only events strip, the Move… menu (the keyboard's way to do what a drag does, and the Terminal's only way) and the
 // dialog that adds, edits or deletes a named window. The hooks and words they share are in
 // `runwayLogic.ts`.
 
 import { useId, useState } from "react";
+import { createPortal } from "react-dom";
 import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import { dayKey, isEventPast, PAST_EVENT_CLASS } from "../../../lib/calendar-layout";
 import {
   dropPlan,
   isDropColumn,
   orderAfterStep,
+  runwayProgressWords,
   type RunwayCard,
   type RunwayColumn,
   type RunwayEventStrip,
@@ -116,71 +118,108 @@ export function EventsStrip({
   );
 }
 
-/** The header strip: how far along, what's next, the events switch and the two add buttons. */
-export function RunwayStrip({
+/** How far along, and what's next: the Runway's readout, drawn in the Calendar header's left group
+ *  (see `RunwayChrome`). The words and "Next up" show at every Depth; the bar from Standard up, and
+ *  never in the Terminal, which says it in words alone. With nothing planned from today there is no
+ *  bar to draw and no next up, only "Nothing planned". */
+export function RunwayReadout({
   model,
-  onAddTask,
-  onAddWindow,
-  showEvents,
-  onToggleEvents,
   terminal = false,
 }: {
   model: RunwayModel;
-  onAddTask: () => void;
-  onAddWindow: () => void;
-  /** Whether the columns show their events strips, and the switch for it. */
-  showEvents: boolean;
-  onToggleEvents: () => void;
   terminal?: boolean;
 }) {
   const { showMeta } = useDepth();
-  const { done, total, doing } = model.progress;
-  const words = `${done}/${total} done${doing > 0 ? ` · ${doing} in progress` : ""}`;
+  const { done, total } = model.progress;
   return (
-    <div
-      className={cn(
-        "flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-rule px-4 py-2 text-xs",
-        terminal && "font-mono",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <span className="text-ink2">{words}</span>
+    <>
+      <span className={cn("flex items-center gap-2 text-xs", terminal && "font-mono")}>
+        <span className="text-ink2">{runwayProgressWords(model.progress)}</span>
         {showMeta && !terminal && total > 0 && (
           <Progress
             value={done / total}
             label="Done so far"
             valueText={`${done} of ${total} done`}
-            className="w-24"
+            className="w-24 shrink-0"
           />
         )}
-      </div>
+      </span>
       {model.nextUp && (
-        <span className="min-w-0 truncate text-ink3">
+        <span
+          className={cn("min-w-0 max-w-full truncate text-xs text-ink3", terminal && "font-mono")}
+        >
           Next up · <span className="text-ink">{model.nextUp.title}</span> ·{" "}
           <span className={TONE_CLASS[model.nextUp.tone]}>{model.nextUp.deadlineText}</span>
         </span>
       )}
-      <div className="ml-auto flex items-center gap-2">
-        <Button
-          variant="tertiary"
-          size="sm"
-          onClick={onToggleEvents}
-          title={
-            showEvents
-              ? "Hide the events and pinboard entries at the top of each column"
-              : "Show each day's events and pinboard entries at the top of its column"
-          }
-        >
-          {showEvents ? "Hide events" : "Show events"}
-        </Button>
-        <Button variant="secondary" size="sm" onClick={onAddTask}>
-          + Task
-        </Button>
-        <Button variant="tertiary" size="sm" onClick={onAddWindow} title="Name a stretch of days">
-          + Window
-        </Button>
-      </div>
+    </>
+  );
+}
+
+/** The Runway's own two buttons: the events switch and + Window. They change and extend the board,
+ *  so the board keeps them (and the window dialog they open), though they are drawn in the header.
+ *  Both are the header's own size, so the row reads as one. */
+export function RunwayTools({
+  showEvents,
+  onToggleEvents,
+  onAddWindow,
+}: {
+  /** Whether the columns show their events strips, and the switch for it. */
+  showEvents: boolean;
+  onToggleEvents: () => void;
+  onAddWindow: () => void;
+}) {
+  return (
+    <div data-help="calendar-runway" className="flex items-center gap-1">
+      <Button
+        variant="tertiary"
+        onClick={onToggleEvents}
+        title={
+          showEvents
+            ? "Hide the events and pinboard entries at the top of each column"
+            : "Show each day's events and pinboard entries at the top of its column"
+        }
+      >
+        {showEvents ? "Hide events" : "Show events"}
+      </Button>
+      <Button variant="tertiary" onClick={onAddWindow} title="Name a stretch of days">
+        + Window
+      </Button>
     </div>
+  );
+}
+
+/** The Runway's readout and buttons, drawn into the slot the Calendar header holds beside "From
+ *  today". Portaled, not lifted: the board stays the one owner of the dialogs the buttons open and
+ *  of the events switch's effect, and every control exists once, in the header. CalendarView is the
+ *  only mount of either board and sets the slot in the commit the header mounts, before paint, so
+ *  there is no inline fallback to keep. Nothing is drawn until the slot is there. */
+export function RunwayChrome({
+  chrome,
+  model,
+  showEvents,
+  onToggleEvents,
+  onAddWindow,
+  terminal = false,
+}: {
+  chrome: HTMLElement | null;
+  model: RunwayModel;
+  showEvents: boolean;
+  onToggleEvents: () => void;
+  onAddWindow: () => void;
+  terminal?: boolean;
+}) {
+  if (!chrome) return null;
+  return createPortal(
+    <>
+      <RunwayReadout model={model} terminal={terminal} />
+      <RunwayTools
+        showEvents={showEvents}
+        onToggleEvents={onToggleEvents}
+        onAddWindow={onAddWindow}
+      />
+    </>,
+    chrome,
   );
 }
 
