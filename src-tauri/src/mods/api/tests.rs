@@ -48,7 +48,11 @@ fn serve(host: &TestHost, m: &str) {
 fn session(host: &TestHost, m: &str) -> String {
     let opened = host
         .runtime()
-        .open_frame_in(&id(m), host.store().store_epoch())
+        .open_frame_in(
+            &id(m),
+            host.store().store_epoch(),
+            crate::mods::outbox::testing::discarding(),
+        )
         .unwrap();
     let req = Request::builder()
         .uri(opened.entry_url.as_str())
@@ -267,7 +271,11 @@ async fn every_other_refusal_has_its_code() {
     // A session that never loaded its page.
     let pending = host
         .runtime()
-        .open_frame_in(&id("atlas.map"), host.store().store_epoch())
+        .open_frame_in(
+            &id("atlas.map"),
+            host.store().store_epoch(),
+            crate::mods::outbox::testing::discarding(),
+        )
         .unwrap();
     assert_eq!(
         code(call(&host, &pending.session, "theme.get", Value::Null).await),
@@ -276,7 +284,11 @@ async fn every_other_refusal_has_its_code() {
     // A session from another store.
     let other_store = host
         .runtime()
-        .open_frame_in(&id("atlas.map"), host.store().store_epoch() + 1)
+        .open_frame_in(
+            &id("atlas.map"),
+            host.store().store_epoch() + 1,
+            crate::mods::outbox::testing::discarding(),
+        )
         .unwrap();
     let req = Request::builder()
         .uri(other_store.entry_url.as_str())

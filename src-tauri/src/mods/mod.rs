@@ -48,6 +48,7 @@ pub mod engine;
 pub mod headers;
 pub mod ids;
 pub mod ledger;
+pub mod outbox;
 pub mod package;
 pub mod policy;
 pub mod runtime;
@@ -572,19 +573,57 @@ fn main_only_label(label: &str) -> Result<()> {
 }
 
 /// Mint a one-time entry URL for a mod's frame and the session its bridge calls under, bound to the
-/// store open now: its calls reach that store or none (`runtime`, "A call is current").
+/// store open now: its calls reach that store or none (`runtime`, "A call is current"). `events` is
+/// the channel the frame's events come back on: Rust keeps it with the session (`outbox`), filters
+/// every event by the mod's grants before sending it (`api::events`), and drops it when the session
+/// ends.
 #[tauri::command]
 pub fn mod_frame_open(
     webview: Webview,
     runtime: State<'_, ModRuntime>,
     state: State<'_, crate::AppState>,
     mod_id: String,
+    events: tauri::ipc::Channel<outbox::EventMessage>,
 ) -> Result<FrameOpened> {
     main_only(&webview)?;
     let id = ModId::parse(&mod_id).map_err(|e| Error::Other(e.to_string()))?;
     runtime
-        .open_frame_in(&id, state.store_epoch())
+        .open_frame_in(&id, state.store_epoch(), outbox::Outbox::new(events))
         .map_err(|e| Error::Other(e.to_string()))
+}
+
+/// The frame of `session` has taken events up to `seq` (its port's `{ ack }`, relayed by PM's page):
+/// the window of events Rust may have outstanding for it slides (`outbox`). An unknown session or a
+/// number past what was sent counts for nothing.
+#[tauri::command]
+pub fn mod_events_ack(
+    webview: Webview,
+    runtime: State<'_, ModRuntime>,
+    session: String,
+    seq: u64,
+) -> Result<()> {
+    main_only(&webview)?;
+    runtime.ack(&session, seq);
+    Ok(())
+}
+
+/// PM's theme changed, as the page of `session`'s frame sees it: `theme` is the snapshot `theme.get`
+/// answers with. Rust tells that frame (`theme.changed`) if its mod holds `storage` and runs, and
+/// answers nothing either way, so the page learns nothing about the mod's grants. Async and off the
+/// runtime: the grant check reads the store.
+#[tauri::command]
+pub async fn mod_theme_changed(
+    webview: Webview,
+    session: String,
+    theme: serde_json::Value,
+) -> Result<()> {
+    main_only(&webview)?;
+    let app = webview.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        api::events::theme_changed(&app, &session, &theme);
+    })
+    .await
+    .map_err(|e| Error::Other(e.to_string()))
 }
 
 /// End a frame's session (its frame unmounted, or navigated). Ending an ended one is fine.

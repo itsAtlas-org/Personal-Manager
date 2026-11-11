@@ -9,10 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use tauri::http::Request;
 
+use super::events::Hub;
 use super::{Calls, Host, Point};
 use crate::mods::engine::Platform;
-use crate::mods::runtime::ModRuntime;
+use crate::mods::ids::ModId;
+use crate::mods::outbox::Outbox;
+use crate::mods::runtime::{InstalledMod, ModRuntime, ServedFile};
 use crate::sidecar::{SidecarManager, SidecarPaths};
 use crate::AppState;
 
@@ -89,6 +94,46 @@ pub fn insert_mod(conn: &Connection, row: &ModRow) {
     .unwrap();
 }
 
+/// Register `m`'s files with the runtime, as the ledger's startup load does for a row it serves.
+pub fn serve(host: &TestHost, m: &str) {
+    let id = ModId::parse(m).unwrap();
+    let root = host.dir().join("mods").join(m);
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    let page = b"<!doctype html><p>mod";
+    std::fs::write(root.join("app/index.html"), page).unwrap();
+    let file = ServedFile {
+        sha256: Sha256::digest(page).into(),
+        size: page.len() as u64,
+    };
+    let installed = InstalledMod::from_ledger(
+        id,
+        &root,
+        "app/index.html",
+        [("app/index.html".into(), file)],
+    )
+    .unwrap();
+    host.runtime().install(installed);
+}
+
+/// A live frame session for `m` (served already) over the open store, its events going to `outbox`:
+/// minted, and its entry page served.
+pub fn live_session(host: &TestHost, m: &str, outbox: Arc<Outbox>) -> String {
+    let opened = host
+        .runtime()
+        .open_frame_in(
+            &ModId::parse(m).unwrap(),
+            host.store().store_epoch(),
+            outbox,
+        )
+        .unwrap();
+    let req = Request::builder()
+        .uri(opened.entry_url.as_str())
+        .body(Vec::new())
+        .unwrap();
+    assert_eq!(host.runtime().serve("main", &req).status(), 200);
+    opened.session
+}
+
 /// What a test hooks into a call in flight.
 pub type Hook = Arc<dyn Fn(&TestHost, Point) + Send + Sync>;
 
@@ -97,6 +142,7 @@ pub struct Parts {
     pub state: AppState,
     pub runtime: ModRuntime,
     pub calls: Calls,
+    pub hub: Hub,
     pub sealed: AtomicBool,
     /// PM locked, as `app_lock_status_of` would say on a platform with a lock.
     pub locked: AtomicBool,
@@ -109,7 +155,14 @@ pub struct Parts {
 pub struct TestHost(pub Arc<Parts>);
 
 impl TestHost {
+    /// A host whose events wait an hour for their interval, so a test drives each flush itself and
+    /// no timer races it.
     pub fn new() -> Self {
+        Self::with_interval(std::time::Duration::from_secs(3600))
+    }
+
+    /// A host whose events wait `interval` before they are flushed, as the real timer does.
+    pub fn with_interval(interval: std::time::Duration) -> Self {
         let (dir, conn) = store();
         let sidecar = SidecarManager::new(SidecarPaths {
             source_dir: dir.path().join("sidecar"),
@@ -119,6 +172,7 @@ impl TestHost {
             state: AppState::new(Some(conn), None, sidecar, None, None),
             runtime: ModRuntime::new(Platform::Linux, vec!["tauri://localhost".into()]),
             calls: Calls::default(),
+            hub: Hub::with_delay(interval),
             sealed: AtomicBool::new(true),
             locked: AtomicBool::new(false),
             hook: Mutex::new(None),
@@ -153,6 +207,10 @@ impl Host for TestHost {
 
     fn calls(&self) -> &Calls {
         &self.0.calls
+    }
+
+    fn hub(&self) -> &Hub {
+        &self.0.hub
     }
 
     fn engine_sealed(&self) -> bool {

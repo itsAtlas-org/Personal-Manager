@@ -30,6 +30,12 @@
 //   `ui.openDocument`: PM's own document reader, on a document the backend found readable). The
 //   action and its arguments come from the backend, never from the frame. The vectors come back as
 //   bytes, which are transferred to the frame, not copied.
+// - Events (spec §1.5): `mod_frame_open` is given a channel, and Rust keeps it with the session and
+//   sends only what the mod's grants allow, so this page forwards every event it receives and
+//   decides nothing. They wait in an `EventPump` until the frame's port exists, then go over it in
+//   order; the frame's `{ ack }` is relayed to Rust, which is what bounds a slow frame. `theme.changed`
+//   starts here: PM's theme snapshot is the page's, so when it changes each frame's session is
+//   posted it (`modThemeChanged`) and Rust tells the frame, if its mod may hear it.
 // - A height request is a number PM clamps. Nothing a mod sends ever becomes an attribute, a class, a
 //   style string or markup.
 //
@@ -37,13 +43,14 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { modCall, modFrameClose, modFrameOpen } from "../../lib/ipc";
+import { modCall, modEventsAck, modFrameClose, modFrameOpen, modThemeChanged } from "../../lib/ipc";
 import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
 import { toneSurface } from "../ui/tone";
 import {
+  EventPump,
   FloodGate,
   INTERNAL_MESSAGE,
   MAX_IN_FLIGHT,
@@ -103,8 +110,25 @@ interface Live {
   port: MessagePort | null;
   inFlight: number;
   ended: boolean;
-  /** Every message with an id spends a token; a frame that runs it dry is flooding. */
+  /** Every message with an id (and every ack) spends a token; a frame that runs it dry is flooding. */
   flood: FloodGate;
+  /** The backend's events for this session, held until the port exists and sent over it after. */
+  events: EventPump;
+}
+
+/** A new session's live state. Its events post to its port through [`reply`], which does nothing
+ *  once the session has ended. */
+function newLive(session: string): Live {
+  const live: Live = {
+    session,
+    loads: 0,
+    port: null,
+    inFlight: 0,
+    ended: false,
+    flood: new FloodGate(performance.now()),
+    events: new EventPump((event) => reply(live, event)),
+  };
+  return live;
 }
 
 /** A rejection's text, for the "couldn't start" note (PM's own backend message). */
@@ -210,20 +234,17 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
   // cleanup ran; that session is closed the moment it arrives.
   useEffect(() => {
     let cancelled = false;
-    modFrameOpen(modId).then(
+    // This open's session, once it exists. Events can't arrive before it does (Rust sends none until
+    // the frame's page was served, which is after this resolves), and are dropped if they somehow do.
+    let mine: Live | null = null;
+    modFrameOpen(modId, (message) => mine?.events.push(message)).then(
       (opened) => {
         if (cancelled) {
           closeQuietly(opened.session);
           return;
         }
-        liveRef.current = {
-          session: opened.session,
-          loads: 0,
-          port: null,
-          inFlight: 0,
-          ended: false,
-          flood: new FloodGate(performance.now()),
-        };
+        mine = newLive(opened.session);
+        liveRef.current = mine;
         setPhase({ kind: "open", session: opened.session, entryUrl: opened.entryUrl });
       },
       (e: unknown) => {
@@ -258,6 +279,15 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
       switch (message.kind) {
         case "resize":
           setHeight(message.height);
+          return;
+        case "ack":
+          // Relayed as it is: Rust clamps it to what it sent. It costs a token like a call, so a
+          // frame can't make PM's IPC its own by acknowledging in a loop.
+          if (!live.flood.take(performance.now())) {
+            stopFlooding(live);
+            return;
+          }
+          modEventsAck(live.session, message.seq).catch(() => {});
           return;
         case "refuse":
           if (!live.flood.take(performance.now())) {
@@ -301,11 +331,49 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
       live.port = channel.port1;
       channel.port1.onmessage = (e: MessageEvent) => onPortMessage(live, e.data);
       frame.postMessage(PORT_MESSAGE, "*", [channel.port2]);
+      // The events that came before the port, in order, then everything after.
+      live.events.connect();
     };
 
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [open]);
+
+  // `theme.changed`: whenever PM's theme snapshot differs from the last one this frame was given, post
+  // it for this frame's session (Rust decides whether its mod may hear it). The theme provider applies
+  // its custom properties to the root in an effect of its own, which runs after this component's, so
+  // the snapshot is taken when the root actually changes (a mutation observer) or, for an axis that
+  // moved without the root's attributes doing so, a task after the render.
+  const session = phase.kind === "open" ? phase.session : null;
+  const themeCheck = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!session) return;
+    const root = document.documentElement;
+    // The baseline is what the frame can read for itself (`theme.get`) when the session starts.
+    let last = JSON.stringify(themeSnapshot(root, pageRef.current.theme));
+    const check = () => {
+      const live = liveRef.current;
+      if (!live || live.ended || live.session !== session) return;
+      const snapshot = themeSnapshot(root, pageRef.current.theme);
+      const text = JSON.stringify(snapshot);
+      if (text === last) return;
+      last = text;
+      modThemeChanged(session, snapshot).catch(() => {});
+    };
+    themeCheck.current = check;
+    const observer = new MutationObserver(check);
+    observer.observe(root, { attributes: true });
+    return () => {
+      themeCheck.current = () => {};
+      observer.disconnect();
+    };
+  }, [session]);
+  const { mode, system, accent, colorblind, depth } = theme;
+  useEffect(() => {
+    // A task after this render, so the provider's own effect has applied the root by then.
+    const timer = setTimeout(() => themeCheck.current(), 0);
+    return () => clearTimeout(timer);
+  }, [session, mode, system, accent, colorblind, depth]);
 
   const onLoad = () => {
     const live = liveRef.current;

@@ -1367,6 +1367,10 @@ pub fn run() {
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
             app.manage(mods::api::Calls::default());
+            // The events a frame is told (spec §1.5): what waits out its interval, and the one
+            // place document deletions are reported from (`ingest::delete_document`).
+            app.manage(mods::api::events::Hub::default());
+            mods::api::events::install_delete_notes(handle.clone());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;
@@ -2086,6 +2090,8 @@ pub fn run() {
             mods::mod_frame_open,
             mods::mod_frame_close,
             mods::mod_call,
+            mods::mod_events_ack,
+            mods::mod_theme_changed,
             // Developer mode (issue #78) — read-only inspection. Always registered (the
             // commands are harmless reads); only the UI is gated by the runtime `devMode`.
             commands_dev::dev_system_info,

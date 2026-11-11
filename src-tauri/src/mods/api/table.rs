@@ -19,8 +19,7 @@ use super::permissions::Class;
 pub enum Kind {
     /// A frame calls it and gets an answer.
     Call,
-    /// PM posts it to a frame that holds the permission.
-    #[cfg_attr(not(test), allow(dead_code))] // part 4's events
+    /// PM posts it to a frame that holds the permission (or to any session, without one).
     Event,
 }
 
@@ -53,8 +52,22 @@ const fn call(name: &'static str, permission: &'static str, class: Class) -> Row
     }
 }
 
-/// Every row. PR A's part 4 adds the events; PR B the experimental calls; PR C the Pinboard's calls
-/// and events.
+/// An event a frame needs `permission` to be told (or any session, with `None`: PM's word about the
+/// session itself, which carries no data).
+const fn event(name: &'static str, permission: Option<&'static str>, class: Class) -> Row {
+    Row {
+        name,
+        kind: Kind::Event,
+        permission,
+        class,
+        added: (1, 0),
+        deprecated: None,
+        removed: None,
+        experimental: false,
+    }
+}
+
+/// Every row. PR B adds the experimental calls; PR C the Pinboard's calls and events.
 pub const ROWS: &[Row] = &[
     // The spec's table gives `theme.get` to `storage` and `ui.tab` alike, and its events table
     // gives `theme.changed` to `storage`; the call takes the event's permission, so a mod that may
@@ -77,7 +90,29 @@ pub const ROWS: &[Row] = &[
         Class::Read,
     ),
     call("embeddings.signature", "documents.vectors", Class::Read),
+    // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
+    // A document that landed, as `documents.list`'s DTO with every field.
+    event("documents.added", Some("documents.meta"), Class::Read),
+    // Ids only, after the delete committed.
+    event("documents.deleted", Some("documents.meta"), Class::Read),
+    // The page's snapshot of PM's theme, the shape `theme.get` answers with.
+    event("theme.changed", Some("storage"), Class::Local),
+    // Lifecycle: no permission, no data. The mod's answers to "may I?" may now differ (re-ask)...
+    event("grants.changed", None, Class::Local),
+    // ...it was paused, and its session ended. These two are PM's goodbye (outbox.rs).
+    event("mod.paused", None, Class::Local),
+    event("session.closed", None, Class::Local),
 ];
+
+/// The live event row named `name` in `rows` at API `version`.
+pub fn event_row(rows: &'static [Row], name: &str, version: (u16, u16)) -> Option<&'static Row> {
+    rows.iter().find(|r| {
+        r.kind == Kind::Event
+            && r.name == name
+            && r.added <= version
+            && !r.removed.is_some_and(|v| v <= version)
+    })
+}
 
 /// What a name resolves to for a caller of this PM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

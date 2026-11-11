@@ -38,6 +38,12 @@
 //! them all. A session is also bound to the store that was open when it was minted (`AppState`'s
 //! store epoch), so a frame opened over one store never reads or writes another.
 //!
+//! **Events** (`outbox`, `api::events`). A session owns the outbox that carries its frame's events,
+//! the Tauri channel `mod_frame_open` was given. Whatever ends a session, its outbox is closed
+//! with it, after a goodbye when the frame is live and the session didn't end by the frame's own
+//! doing ([`Ending`]); the goodbyes are sent only once the registry's lock is released, so a send
+//! never runs under it. [`ModRuntime::live_recipients`] hands the emitter the live sessions to tell.
+//!
 //! **Serving is bounded.** Each request reads and hashes its whole file, so at most
 //! [`MAX_SERVING`] are read at once and [`MAX_WAITING`] more wait their turn ([`ServeGate`]); past
 //! that a request is refused with a 503.
@@ -48,6 +54,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -62,6 +69,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use super::engine::Platform;
 use super::headers;
 use super::ids::ModId;
+use super::outbox::{Ending, Outbox};
 use super::package::{self, VerifiedPackage};
 use super::MAIN_LABEL;
 use crate::pathguard;
@@ -244,6 +252,8 @@ struct Session {
     generation: u64,
     /// The store this session may reach (`AppState::store_epoch` when it was minted).
     store_epoch: u64,
+    /// Where this session's events go: the channel its frame's page opened it with.
+    outbox: Arc<Outbox>,
 }
 
 #[derive(Default)]
@@ -253,6 +263,10 @@ struct Inner {
     sessions: HashMap<String, Session>,
     /// The last generation handed out.
     last_generation: u64,
+    /// Outboxes of sessions this change ended, waiting to be told and closed once the lock is
+    /// released ([`Locked`]'s drop). Every way a session leaves `sessions` goes through
+    /// [`Inner::retire`], so none can leave its outbox open.
+    retired: Vec<(Arc<Outbox>, Ending)>,
 }
 
 impl Inner {
@@ -261,17 +275,40 @@ impl Inner {
         self.last_generation
     }
 
+    /// A session has left `sessions`: its outbox is closed, after a goodbye if its frame ever
+    /// loaded. A frame that never loaded has nobody to tell.
+    fn retire(&mut self, session: Session, ending: Ending) {
+        let live = matches!(session.state, SessionState::Live);
+        let ending = if live { ending } else { Ending::Silent };
+        self.retired.push((session.outbox, ending));
+    }
+
+    /// Remove every session `doomed` names, retiring each with `ending`.
+    fn remove_sessions_where(&mut self, ending: Ending, doomed: impl Fn(&Session) -> bool) {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| doomed(s))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(session) = self.sessions.remove(&id) {
+                self.retire(session, ending);
+            }
+        }
+    }
+
     fn sweep(&mut self, now: Instant) {
         self.tickets.retain(|_, t| t.expires > now);
-        self.sessions.retain(|_, s| match &s.state {
-            SessionState::Pending { expires, .. } => *expires > now,
-            SessionState::Live => true,
+        self.remove_sessions_where(Ending::Silent, |s| match &s.state {
+            SessionState::Pending { expires, .. } => *expires <= now,
+            SessionState::Live => false,
         });
     }
 
-    fn drop_mod(&mut self, id: &ModId) {
+    fn drop_mod(&mut self, id: &ModId, ending: Ending) {
         self.tickets.retain(|_, t| &t.mod_id != id);
-        self.sessions.retain(|_, s| &s.mod_id != id);
+        self.remove_sessions_where(ending, |s| &s.mod_id == id);
     }
 
     /// Whether `token` is a live ticket for exactly this mod and file. Never consumes.
@@ -299,10 +336,65 @@ impl Inner {
             }
             true
         } else {
-            self.sessions.remove(&ticket.session);
+            if let Some(session) = self.sessions.remove(&ticket.session) {
+                self.retire(session, Ending::Silent);
+            }
             false
         }
     }
+}
+
+/// The registry's lock. Dropping it releases the lock first, then tells and closes the outboxes of
+/// the sessions the change ended ([`Inner::retire`]): a goodbye is a send into a webview channel, and
+/// that never runs while the registry is held.
+struct Locked<'a> {
+    guard: Option<MutexGuard<'a, Inner>>,
+}
+
+impl Deref for Locked<'_> {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        self.guard.as_ref().expect("held until dropped")
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut Inner {
+        self.guard.as_mut().expect("held until dropped")
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
+        let retired = std::mem::take(&mut guard.retired);
+        drop(guard);
+        for (outbox, ending) in retired {
+            outbox.finish(ending.notices());
+        }
+    }
+}
+
+/// Who an event is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Audience {
+    /// Every live session of every mod.
+    Everyone,
+    /// Every live session of one mod (`grants.changed`, which slice 6's prompts send).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Mod(ModId),
+    /// One session.
+    Session(String),
+}
+
+/// A live session an event may go to: its ticket (for the generation and store it is current in)
+/// and its outbox.
+#[derive(Clone)]
+pub struct Recipient {
+    pub ticket: CallTicket,
+    pub outbox: Arc<Outbox>,
 }
 
 /// The scheme's state, managed by `setup()` for the life of the process.
@@ -350,7 +442,13 @@ impl ModRuntime {
             .collect();
         for id in &stale {
             inner.installed.remove(id);
-            inner.drop_mod(id);
+            // A mod that is still there, changed, was replaced; one that is gone was uninstalled.
+            let ending = if incoming.contains_key(id) {
+                Ending::Replaced
+            } else {
+                Ending::Uninstalled
+            };
+            inner.drop_mod(id, ending);
         }
         for (id, m) in incoming {
             inner.installed.entry(id).or_insert_with(|| Arc::new(m));
@@ -370,35 +468,93 @@ impl ModRuntime {
 
     /// Every change under this lock is a handful of map inserts and removals that can't panic part
     /// way, so a poisoned lock still holds consistent state and is read through.
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            guard: Some(self.inner.lock().unwrap_or_else(|e| e.into_inner())),
+        }
     }
 
     /// Install (or replace) a mod in the registry. A replacement ends every frame of the old one.
     #[cfg_attr(not(test), allow(dead_code))] // the ledger's install, which the Mods tab calls (slice 6)
     pub fn install(&self, installed: InstalledMod) {
         let mut inner = self.lock();
-        inner.drop_mod(&installed.id);
+        inner.drop_mod(&installed.id, Ending::Replaced);
         inner
             .installed
             .insert(installed.id.clone(), Arc::new(installed));
     }
 
-    /// Remove a mod, its unused entry URLs and its sessions.
+    /// Remove a mod, its unused entry URLs and its sessions. Each live frame is told its session
+    /// closed (`session.closed`, "uninstalled") on the way out.
     #[cfg_attr(not(test), allow(dead_code))] // the ledger's uninstall and install (slice 6 calls them), the blacklist (slice 5)
     pub fn uninstall(&self, id: &ModId) {
-        let mut inner = self.lock();
-        inner.installed.remove(id);
-        inner.drop_mod(id);
+        self.remove(id, Ending::Uninstalled);
     }
 
     /// A mod was paused or parked (its row is no longer active): stop serving it and end every
     /// session it has, so a call in flight commits nothing (spec §1.8). The writer of the pause
     /// calls this after its row commits; until it does, the dispatcher's own read of the row
-    /// already refuses new calls and every commit.
+    /// already refuses new calls and every commit. Each live frame is told `mod.paused`, then
+    /// `session.closed`, as its last two events.
     #[cfg_attr(not(test), allow(dead_code))] // the blacklist's pause (slice 5), the user's (slice 6)
     pub fn pause(&self, id: &ModId) {
-        self.uninstall(id);
+        self.remove(id, Ending::Paused);
+    }
+
+    fn remove(&self, id: &ModId, ending: Ending) {
+        let mut inner = self.lock();
+        inner.installed.remove(id);
+        inner.drop_mod(id, ending);
+    }
+
+    /// The live sessions `audience` names, each with the ticket it is current under and its outbox:
+    /// what an event is delivered to. Only a session whose frame has loaded (a pending one has
+    /// nobody to hear it). The emitter asks again whether each is [`Self::still_current`] just
+    /// before it delivers.
+    pub fn live_recipients(&self, audience: &Audience) -> Vec<Recipient> {
+        let inner = self.lock();
+        inner
+            .sessions
+            .iter()
+            .filter(|(session, s)| {
+                matches!(s.state, SessionState::Live)
+                    && match audience {
+                        Audience::Everyone => true,
+                        Audience::Mod(id) => &s.mod_id == id,
+                        Audience::Session(wanted) => *session == wanted,
+                    }
+            })
+            .map(|(session, s)| Recipient {
+                ticket: CallTicket {
+                    session: session.clone(),
+                    mod_id: s.mod_id.clone(),
+                    generation: s.generation,
+                    store_epoch: s.store_epoch,
+                },
+                outbox: Arc::clone(&s.outbox),
+            })
+            .collect()
+    }
+
+    /// Whether any frame is live: the cheap question an emitter asks before it holds anything for one.
+    pub fn any_live(&self) -> bool {
+        self.lock()
+            .sessions
+            .values()
+            .any(|s| matches!(s.state, SessionState::Live))
+    }
+
+    /// The frame has taken events up to `seq` (`mod_events_ack`). An unknown session is ignored: the
+    /// page may ack once more as its frame is torn down.
+    pub fn ack(&self, session: &str, seq: u64) {
+        let outbox = self
+            .lock()
+            .sessions
+            .get(session)
+            .map(|s| Arc::clone(&s.outbox));
+        if let Some(outbox) = outbox {
+            outbox.ack(seq);
+        }
     }
 
     /// Move every session to a new generation, so no call already in flight may go on: the app was
@@ -421,17 +577,35 @@ impl ModRuntime {
         self.open_frame_at(id, Instant::now(), 0)
     }
 
-    /// Mint an entry URL and a session for `id`, bound to the store open now (`store_epoch`, read
-    /// from `AppState::store_epoch` by `mod_frame_open`): its calls reach that store or none.
-    pub fn open_frame_in(&self, id: &ModId, store_epoch: u64) -> Result<FrameOpened, FrameError> {
-        self.open_frame_at(id, Instant::now(), store_epoch)
-    }
-
+    /// [`Self::open_frame_with`] at a time of the test's choosing, its events going nowhere.
+    #[cfg(test)]
     fn open_frame_at(
         &self,
         id: &ModId,
         now: Instant,
         store_epoch: u64,
+    ) -> Result<FrameOpened, FrameError> {
+        self.open_frame_with(id, now, store_epoch, super::outbox::testing::discarding())
+    }
+
+    /// Mint an entry URL and a session for `id`, bound to the store open now (`store_epoch`, read
+    /// from `AppState::store_epoch` by `mod_frame_open`): its calls reach that store or none. Its
+    /// events go to `outbox`, which the session owns from here: it is closed whenever the session ends.
+    pub fn open_frame_in(
+        &self,
+        id: &ModId,
+        store_epoch: u64,
+        outbox: Arc<Outbox>,
+    ) -> Result<FrameOpened, FrameError> {
+        self.open_frame_with(id, Instant::now(), store_epoch, outbox)
+    }
+
+    fn open_frame_with(
+        &self,
+        id: &ModId,
+        now: Instant,
+        store_epoch: u64,
+        outbox: Arc<Outbox>,
     ) -> Result<FrameOpened, FrameError> {
         let token = random_hex(TOKEN_BYTES)?;
         let session = random_hex(SESSION_BYTES)?;
@@ -467,6 +641,7 @@ impl ModRuntime {
                 },
                 generation,
                 store_epoch,
+                outbox,
             },
         );
         Ok(FrameOpened {
@@ -500,19 +675,20 @@ impl ModRuntime {
     pub fn close_all(&self) {
         let mut inner = self.lock();
         inner.tickets.clear();
-        inner.sessions.clear();
+        // Nobody to tell: the page that held the channels is gone.
+        inner.remove_sessions_where(Ending::Silent, |_| true);
     }
 
-    /// End a session. Its unused entry URL dies with it. Ending one that has already ended is
-    /// fine: a frame's unmount and its navigation-kill can both close it.
+    /// End a session. Its unused entry URL dies with it, and its outbox closes with nothing more
+    /// said (the frame asked, or is gone). Ending one that has already ended is fine: a frame's
+    /// unmount and its navigation-kill can both close it.
     pub fn close(&self, session: &str) {
         let mut inner = self.lock();
-        if let Some(Session {
-            state: SessionState::Pending { token, .. },
-            ..
-        }) = inner.sessions.remove(session)
-        {
-            inner.tickets.remove(&token);
+        if let Some(ended) = inner.sessions.remove(session) {
+            if let SessionState::Pending { token, .. } = &ended.state {
+                inner.tickets.remove(token);
+            }
+            inner.retire(ended, Ending::Silent);
         }
     }
 
@@ -543,6 +719,7 @@ impl ModRuntime {
                 state: SessionState::Live,
                 generation,
                 store_epoch,
+                ..
             }) => Ok(CallTicket {
                 session: session.to_owned(),
                 mod_id: mod_id.clone(),
@@ -565,6 +742,7 @@ impl ModRuntime {
                 state: SessionState::Live,
                 generation,
                 store_epoch,
+                ..
             }) if *mod_id == ticket.mod_id
                 && *generation == ticket.generation
                 && *store_epoch == ticket.store_epoch =>
@@ -1042,7 +1220,13 @@ mod tests {
     fn a_call_begins_only_under_a_live_session_and_carries_its_mod_and_store() {
         let s = setup(Platform::Linux);
         let rt = &s.runtime;
-        let opened = rt.open_frame_in(&id("atlas.map"), 7).unwrap();
+        let opened = rt
+            .open_frame_in(
+                &id("atlas.map"),
+                7,
+                super::super::outbox::testing::discarding(),
+            )
+            .unwrap();
         assert_eq!(rt.begin_call(&opened.session), Err(FrameError::NotReady));
         assert!(is_document(&get(rt, "main", &opened.entry_url)));
         let ticket = rt.begin_call(&opened.session).unwrap();

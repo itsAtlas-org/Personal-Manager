@@ -56,6 +56,36 @@ pub const STORAGE_QUOTA_BYTES: u64 = 50 << 20;
 /// its index entry, so a flood of tiny rows meets the quota.
 pub const ROW_OVERHEAD_BYTES: u64 = 64;
 
+// Events (spec §1.5 "Events"). A frame is told things as they happen, and a frame can be slow, so the
+// pipe from Rust to a frame holds a bounded number of events nobody has acknowledged, whatever the
+// frame does. The threat model is a mod that is slow or buggy, which these hold; a mod that lies in
+// its acknowledgements can only fill its own port, and a mod can already burn its own frame's memory
+// (spec §1.9, "Not enforceable").
+//
+// - **256 events outstanding per session** ([`EVENT_WINDOW`]). Past it an event is dropped and
+//   counted, and the next one delivered says how many were missed so the frame can ask again
+//   (`documents.list`). The Map's busiest burst is a big import: its documents arrive coalesced
+//   ([`EVENT_COALESCE_MS`]) a few dozen to a page, so one burst is a handful of events, and a
+//   frame that keeps up never meets the window.
+// - **64 KiB an event** ([`MAX_EVENT_BYTES`]), so the worst case in flight for one session is 16 MiB.
+//   A `documents.added` page ends under [`EVENT_DOCS_BUDGET_BYTES`], which leaves room for any one
+//   document; an event that is nonetheless too large is dropped and counted like any other.
+// - **Pending ids** ([`MAX_PENDING_IDS`]): the documents that landed or went within one coalescing
+//   interval, held until it ends. Past the cap the rest are dropped and counted, never queued.
+
+/// Events a session may have sent and not had acknowledged.
+pub const EVENT_WINDOW: u64 = 256;
+/// One event's payload, as JSON, in bytes.
+pub const MAX_EVENT_BYTES: usize = 64 << 10;
+/// What a `documents.added` event aims to stay under, in bytes of JSON: three quarters of the cap.
+pub const EVENT_DOCS_BUDGET_BYTES: usize = MAX_EVENT_BYTES / 4 * 3;
+/// Ids a `documents.deleted` event carries at most.
+pub const MAX_IDS_PER_EVENT: usize = 2000;
+/// How long a landing or a deletion waits for the next, so a burst is one event and not hundreds.
+pub const EVENT_COALESCE_MS: u64 = 250;
+/// Ids held at once between a landing or deletion and the end of its interval.
+pub const MAX_PENDING_IDS: usize = 100_000;
+
 /// What one stored row counts for against the quota.
 pub fn row_cost(key_bytes: u64, value_bytes: u64) -> u64 {
     key_bytes
@@ -342,5 +372,12 @@ mod tests {
             "the page must flood past the bucket"
         );
         assert!(number("MAX_IN_FLIGHT") > MAX_IN_FLIGHT as u64);
+        // The page buffers events a frame can't take yet, and never more than the backend lets it
+        // have outstanding.
+        assert_eq!(number("EVENT_BUFFER"), EVENT_WINDOW);
+        const {
+            assert!(EVENT_DOCS_BUDGET_BYTES < MAX_EVENT_BYTES);
+            assert!(MAX_IDS_PER_EVENT * 21 < MAX_EVENT_BYTES);
+        }
     }
 }

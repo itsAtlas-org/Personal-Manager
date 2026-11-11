@@ -56,7 +56,6 @@ enum Field {
 }
 
 impl Field {
-    #[cfg(test)]
     const ALL: [Field; 9] = [
         Self::Id,
         Self::Title,
@@ -142,6 +141,31 @@ fn dto(doc: &Doc, fields: &[Field]) -> Value {
     Value::Object(out)
 }
 
+/// The columns [`Doc`] reads, from `documents d`: the only columns of a document row this module
+/// ever selects.
+const DOC_COLUMNS: &str = "d.id, d.title, d.project, \
+        (SELECT t.id FROM tags t \
+          WHERE t.kind = 'project' AND t.norm = lower(trim(d.project))), \
+        d.importance, \
+        (SELECT count(*) FROM chunks c WHERE c.document_id = d.id), \
+        d.reviewed, d.source_type, d.tags, d.ingested_at";
+
+/// One row of [`DOC_COLUMNS`].
+fn read_doc(r: &rusqlite::Row<'_>) -> rusqlite::Result<Doc> {
+    Ok(Doc {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        project: r.get(2)?,
+        project_id: r.get(3)?,
+        importance: r.get(4)?,
+        chunk_count: r.get(5)?,
+        reviewed: r.get::<_, i64>(6)? != 0,
+        source_type: r.get(7)?,
+        tags_json: r.get(8)?,
+        ingested_at: r.get(9)?,
+    })
+}
+
 /// A page of listed documents after `after`, as DTOs of `fields`: at most `limit`, and ending early
 /// under the byte budget. The cursor is the last id returned, `None` when nothing follows.
 fn list_page(
@@ -153,31 +177,13 @@ fn list_page(
 ) -> Result<(Vec<Value>, Option<i64>), ModError> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT d.id, d.title, d.project, \
-                    (SELECT t.id FROM tags t \
-                      WHERE t.kind = 'project' AND t.norm = lower(trim(d.project))), \
-                    d.importance, \
-                    (SELECT count(*) FROM chunks c WHERE c.document_id = d.id), \
-                    d.reviewed, d.source_type, d.tags, d.ingested_at \
+            "SELECT {DOC_COLUMNS} \
              FROM documents d WHERE d.id > ?1 AND {LISTED} ORDER BY d.id LIMIT ?2"
         ))
         .map_err(ModError::internal)?;
     // One past the page, to know whether anything follows it.
     let rows = stmt
-        .query_map(params![after, limit as i64 + 1], |r| {
-            Ok(Doc {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                project: r.get(2)?,
-                project_id: r.get(3)?,
-                importance: r.get(4)?,
-                chunk_count: r.get(5)?,
-                reviewed: r.get::<_, i64>(6)? != 0,
-                source_type: r.get(7)?,
-                tags_json: r.get(8)?,
-                ingested_at: r.get(9)?,
-            })
-        })
+        .query_map(params![after, limit as i64 + 1], read_doc)
         .map_err(ModError::internal)?;
     let mut page: Vec<Value> = Vec::new();
     let mut used = 0usize;
@@ -202,6 +208,49 @@ fn list_page(
         page.push(value);
     }
     Ok((page, None))
+}
+
+/// The payloads of `documents.added` for `ids`: each document that is still listed (one deleted or
+/// shelved since it landed is simply absent, as it is from `documents.list`), as the list's own DTO
+/// with every field, grouped into events of at most [`limits::EVENT_DOCS_BUDGET_BYTES`] of JSON
+/// each, as `{ "documents": [...] }`, in id order. A mod that holds `documents.meta` may have all
+/// nine fields, and the events and the call share [`dto`], so they can't disagree.
+pub(super) fn added_payloads(conn: &Connection, ids: &[i64]) -> Result<Vec<Value>, ModError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted = serde_json::to_string(ids).map_err(ModError::internal)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {DOC_COLUMNS} FROM documents d \
+             WHERE {LISTED} AND d.id IN (SELECT value FROM json_each(?1)) ORDER BY d.id"
+        ))
+        .map_err(ModError::internal)?;
+    let rows = stmt
+        .query_map([wanted], read_doc)
+        .map_err(ModError::internal)?;
+    let mut events = Vec::new();
+    let mut page: Vec<Value> = Vec::new();
+    let mut used = 0usize;
+    for doc in rows {
+        let value = dto(&doc.map_err(ModError::internal)?, &Field::ALL);
+        let size = serde_json::to_string(&value)
+            .map_err(ModError::internal)?
+            .len()
+            + 1;
+        // An event ends before the document that would pass the budget; a first document always
+        // goes in (and is dropped by the outbox if it alone is over the event cap).
+        if !page.is_empty() && used + size > limits::EVENT_DOCS_BUDGET_BYTES {
+            events.push(json!({ "documents": std::mem::take(&mut page) }));
+            used = 0;
+        }
+        used += size;
+        page.push(value);
+    }
+    if !page.is_empty() {
+        events.push(json!({ "documents": page }));
+    }
+    Ok(events)
 }
 
 /// `documents.list(fields, after?, limit?)` → `{documents, next}`.
@@ -503,5 +552,46 @@ mod tests {
         let (page, _) = list_page(&conn, &fields(&["homeProject"]), 0, 10, usize::MAX).unwrap();
         assert_eq!(page[0]["homeProject"], Value::Null);
         assert_eq!(page[1]["homeProject"], json!({"id": null, "name": "Fresh"}));
+    }
+
+    #[test]
+    fn the_added_event_is_the_lists_dto_for_listed_documents_only_in_events_that_fit() {
+        let (_dir, conn) = store();
+        add(&conn, 1, Some("high"), "Atlas");
+        add(&conn, 2, Some("archive"), "Atlas");
+        add(&conn, 3, None, "Atlas");
+        let all: Vec<&str> = Field::ALL.iter().map(|f| f.name()).collect();
+        let (listed, _) = list_page(&conn, &fields(&all), 0, 10, usize::MAX).unwrap();
+
+        // An archived document, a missing one and a repeated id: the list's documents, each once.
+        let events = added_payloads(&conn, &[3, 1, 2, 99, 1]).unwrap();
+        assert_eq!(events, vec![json!({ "documents": listed })]);
+        assert_eq!(added_payloads(&conn, &[]).unwrap(), Vec::<Value>::new());
+        assert_eq!(
+            added_payloads(&conn, &[2, 99]).unwrap(),
+            Vec::<Value>::new()
+        );
+
+        // Past the budget the documents spread over several events, in id order, none lost.
+        for id in 10..400 {
+            add(&conn, id, None, "Atlas");
+        }
+        let ids: Vec<i64> = (10..400).collect();
+        let events = added_payloads(&conn, &ids).unwrap();
+        assert!(events.len() > 1);
+        let mut seen = Vec::new();
+        for event in &events {
+            assert!(
+                serde_json::to_vec(event).unwrap().len() <= limits::EVENT_DOCS_BUDGET_BYTES + 512
+            );
+            seen.extend(
+                event["documents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d["id"].as_i64().unwrap()),
+            );
+        }
+        assert_eq!(seen, ids);
     }
 }

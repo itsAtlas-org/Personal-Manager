@@ -28,11 +28,16 @@
 //! the answer needs (the live theme, the document reader), which the dispatcher has already
 //! authorised; bytes, for the vectors; or an error. The page never performs anything Rust didn't authorise, and never one
 //! a frame names: the action comes from here.
+//!
+//! **Events** go the other way ([`events`]): Rust asks the same grant questions per session, builds
+//! the payload from the store (never PM's own event), and sends only into the outbox of a session
+//! that may hear it (`mods::outbox`), bounded by the frame's acknowledgements.
 
 mod doc_storage;
 mod documents;
 mod embeddings;
 pub mod error;
+pub mod events;
 pub mod grants;
 mod handlers;
 pub mod limits;
@@ -71,16 +76,17 @@ pub enum Caller {
     Frame { window: String, session: String },
 }
 
-/// The events PM posts to frames (part 4 registers them, each with its row in the table).
-#[cfg_attr(not(test), allow(dead_code))]
-pub const EVENTS: &[&str] = &[];
+/// The events PM posts to frames, each with its row in the table (`events.rs`).
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use events::EVENTS;
 
-/// What the dispatcher reaches: the store, the frame sessions, the call limits, the engine's seal
-/// and the app lock. The app is the host; a test builds its own.
+/// What the dispatcher reaches: the store, the frame sessions, the call limits, the events waiting
+/// for their interval, the engine's seal and the app lock. The app is the host; a test builds its own.
 pub trait Host: Clone + Send + Sync + 'static {
     fn store(&self) -> &AppState;
     fn runtime(&self) -> &ModRuntime;
     fn calls(&self) -> &Calls;
+    fn hub(&self) -> &events::Hub;
     fn engine_sealed(&self) -> bool;
     /// Whether PM is locked now. An error means the store is closed, which refuses the same way.
     fn app_locked(&self) -> crate::error::Result<bool>;
@@ -102,6 +108,9 @@ pub enum Point {
     /// In a handler's transaction, its write made, just before the commit. The DB guard is held:
     /// a hook here must not take it.
     BeforeCommit,
+    /// An event's recipients are chosen and its payload built; nothing is delivered yet. The DB guard
+    /// is released.
+    BeforeDelivery,
 }
 
 impl Host for AppHandle {
@@ -115,6 +124,10 @@ impl Host for AppHandle {
 
     fn calls(&self) -> &Calls {
         self.state::<Calls>().inner()
+    }
+
+    fn hub(&self) -> &events::Hub {
+        self.state::<events::Hub>().inner()
     }
 
     /// Unsealed until the engine has said otherwise (`EngineState`), including before it is managed.

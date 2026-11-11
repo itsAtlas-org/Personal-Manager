@@ -2190,8 +2190,37 @@ export interface ModFrameOpened {
   session: string;
 }
 
-/** Mint a mod frame's entry URL and session. The URL is good for one load, within a minute. */
-export const modFrameOpen = (modId: string) => invoke<ModFrameOpened>("mod_frame_open", { modId });
+/** One event the backend sends a frame's session (spec §1.5 "Events"): already filtered by the mod's
+ *  grants in Rust, so every one that arrives here is one the mod may hear. `seq` counts from 1 per
+ *  session and is what the frame acknowledges; `missed` says how many were dropped just before this
+ *  one (the frame was too slow, or the event too large). modBridge.ts's `readEvent` reads it. */
+export interface ModEventMessage {
+  seq: number;
+  name: string;
+  payload: unknown;
+  missed?: number;
+}
+
+/** Mint a mod frame's entry URL and session. The URL is good for one load, within a minute. The
+ *  session's events come back on `onEvent` until the session ends; the backend keeps the channel with
+ *  the session and drops it with it. */
+export const modFrameOpen = (modId: string, onEvent: (message: ModEventMessage) => void) => {
+  const events = new Channel<ModEventMessage>();
+  events.onmessage = onEvent;
+  return invoke<ModFrameOpened>("mod_frame_open", { modId, events });
+};
+
+/** The frame of `session` has taken events up to `seq`: the window of events the backend may have
+ *  outstanding for it slides. The backend ignores a session it doesn't know and clamps a number past
+ *  what it sent. */
+export const modEventsAck = (session: string, seq: number) =>
+  invoke<void>("mod_events_ack", { session, seq });
+
+/** PM's theme changed as `session`'s frame sees it: `theme` is the snapshot `theme.get` answers with
+ *  (modTheme.ts). The backend tells that frame (`theme.changed`) if its mod may hear it, and answers
+ *  nothing either way. */
+export const modThemeChanged = (session: string, theme: unknown) =>
+  invoke<void>("mod_theme_changed", { session, theme });
 
 /** End a frame's session: on unmount, and when the frame navigates (its second `load`). Closing an
  *  ended session is fine. */

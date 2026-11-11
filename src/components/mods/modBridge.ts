@@ -19,6 +19,16 @@
 //   vectors }` with `ids` a Float64Array and `vectors` a Float32Array (count x dimension, document by
 //   document, in `ids`' order), views over one ArrayBuffer that PM transfers to the frame, so a
 //   5,000 x 1,024 answer (20 MB) isn't copied (`readVectors`).
+// - PM tells a frame things as they happen (spec §1.5 "Events"): over the port, `{ event, seq, payload,
+//   missed? }`, which no reply looks like (a reply has `id` and `ok`). The backend has already decided,
+//   per mod and per grant, whether the mod may hear the event, so the page forwards every one it is
+//   given and filters nothing itself; it only keeps names it knows (`MOD_EVENTS`). `seq` counts from 1
+//   per session. The frame acknowledges what it has taken with `{ ack: seq }` (cumulative; at most
+//   once per batch, since an ack costs a token like a call); the backend lets at most `EVENT_BUFFER`
+//   events be unacknowledged, and drops, counts and reports (`missed`) any past that, so a slow frame
+//   can't grow anyone's memory: not Rust's, the page's, or its own port's. Events that arrive before
+//   the port exists are held, never more than `EVENT_BUFFER` of them, and sent when it connects
+//   (`EventPump`).
 // - A frame that floods is stopped: its 33rd call in flight, or a burst well past the backend's rate
 //   bucket, closes its port and ends its session (spec §1.5 "Rate limits"). The backend holds its own
 //   limits behind this line (`src-tauri/src/mods/api/limits.rs`), and a test there pins the numbers
@@ -67,6 +77,23 @@ export const PAGE_ACTIONS = ["theme.get", "ui.openDocument"] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 
+/** The events PM tells a frame (`api::events::EVENTS`; a test in events.rs pins this list to the
+ *  backend's). The backend sends only these, and only to a mod that may hear them. */
+export const MOD_EVENTS = [
+  "documents.added",
+  "documents.deleted",
+  "theme.changed",
+  "grants.changed",
+  "mod.paused",
+  "session.closed",
+] as const;
+
+export type ModEventName = (typeof MOD_EVENTS)[number];
+
+/** Events the backend lets be unacknowledged at once (`EVENT_WINDOW` in limits.rs; a test holds them
+ *  equal), so the most the page can hold for a frame that has no port yet. */
+export const EVENT_BUFFER = 256;
+
 /** Method names: what the host API's dotted names look like, bounded. Rust checks each against its
  *  dispatch table; this only keeps junk off the IPC channel. */
 const METHOD = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
@@ -92,6 +119,7 @@ export interface ModError {
 export type PortMessage =
   | { kind: "call"; id: number; method: string; args: string }
   | { kind: "resize"; height: number }
+  | { kind: "ack"; seq: number }
   | { kind: "refuse"; id: number; error: ModError }
   | { kind: "drop" };
 
@@ -209,6 +237,12 @@ export function readPortMessage(data: unknown): PortMessage {
     const height = clampFrameHeight(data.resize);
     return height === null ? DROP : { kind: "resize", height };
   }
+  if ("ack" in data) {
+    const seq = data.ack;
+    return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0
+      ? { kind: "ack", seq }
+      : DROP;
+  }
   const id = data.id;
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return DROP;
   const method = data.method;
@@ -259,6 +293,69 @@ export function readReply(data: unknown): BackendReply {
     }
     default:
       return broken;
+  }
+}
+
+/** One event as a frame receives it. */
+export interface EventToFrame {
+  event: ModEventName;
+  seq: number;
+  payload: unknown;
+  /** How many events were dropped just before this one, when any were. */
+  missed?: number;
+}
+
+/** An event from the backend's channel, checked: a name PM knows and a sequence number. Anything
+ *  else is PM's own failure and is dropped (it can't be acknowledged, so it can't be told of). */
+export function readEvent(raw: unknown): EventToFrame | null {
+  if (!isRecord(raw)) return null;
+  const { name, seq, payload, missed } = raw;
+  if (typeof name !== "string" || !(MOD_EVENTS as readonly string[]).includes(name)) return null;
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1) return null;
+  const event: EventToFrame = { event: name as ModEventName, seq, payload: payload ?? null };
+  if (typeof missed === "number" && Number.isSafeInteger(missed) && missed > 0) {
+    event.missed = missed;
+  }
+  return event;
+}
+
+/** Where a frame's events wait until its port exists, and how they go to it after: in order, each
+ *  checked. The backend never has more than `EVENT_BUFFER` outstanding, so the hold can't pass that
+ *  unless the backend is wrong; if it does, the excess is dropped and the next event says so. */
+export class EventPump {
+  private held: EventToFrame[] = [];
+  private connected = false;
+  private lost = 0;
+  private readonly post: (event: EventToFrame) => void;
+
+  constructor(post: (event: EventToFrame) => void) {
+    this.post = post;
+  }
+
+  /** An event from the backend. */
+  push(raw: unknown): void {
+    const event = readEvent(raw);
+    if (!event) return;
+    if (this.lost > 0) {
+      event.missed = (event.missed ?? 0) + this.lost;
+      this.lost = 0;
+    }
+    if (this.connected) {
+      this.post(event);
+    } else if (this.held.length >= EVENT_BUFFER) {
+      this.lost += 1 + (event.missed ?? 0);
+    } else {
+      this.held.push(event);
+    }
+  }
+
+  /** The frame's port exists: send what was held, in order, then everything from here on. */
+  connect(): void {
+    if (this.connected) return;
+    this.connected = true;
+    const held = this.held;
+    this.held = [];
+    for (const event of held) this.post(event);
   }
 }
 

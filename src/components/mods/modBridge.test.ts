@@ -7,6 +7,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  EVENT_BUFFER,
+  EventPump,
   FLOOD_BURST,
   FLOOD_CALLS_PER_SECOND,
   FloodGate,
@@ -16,6 +18,7 @@ import {
   MAX_FRAME_HEIGHT,
   MIN_FRAME_HEIGHT,
   MOD_ERRORS,
+  MOD_EVENTS,
   callError,
   clampFrameHeight,
   encodeArgs,
@@ -23,6 +26,7 @@ import {
   fitsBytes,
   isArrayBuffer,
   isConnectRequest,
+  readEvent,
   readPortMessage,
   readReply,
   readVectors,
@@ -380,5 +384,93 @@ describe("the flood gate", () => {
     const gate = new FloodGate(0);
     const step = 1000 / FLOOD_CALLS_PER_SECOND;
     for (let i = 0; i < 10_000; i += 1) expect(gate.take(i * step)).toBe(true);
+  });
+});
+
+describe("events", () => {
+  it("reads an event from the backend: a name PM knows and a whole sequence number", () => {
+    expect(readEvent({ seq: 3, name: "documents.added", payload: { documents: [] } })).toEqual({
+      event: "documents.added",
+      seq: 3,
+      payload: { documents: [] },
+    });
+    // A missing payload is null; `missed` rides along only when it is a count.
+    expect(readEvent({ seq: 1, name: "session.closed" })).toEqual({
+      event: "session.closed",
+      seq: 1,
+      payload: null,
+    });
+    expect(readEvent({ seq: 2, name: "mod.paused", payload: {}, missed: 5 })?.missed).toBe(5);
+    for (const missed of [0, -1, 1.5, "5", null]) {
+      expect(readEvent({ seq: 2, name: "mod.paused", payload: {}, missed })).not.toHaveProperty(
+        "missed",
+      );
+    }
+    // Every event PM has is one the page lets through.
+    for (const name of MOD_EVENTS) expect(readEvent({ seq: 1, name, payload: {} })).not.toBeNull();
+  });
+
+  it("drops what isn't an event: an unknown name, no sequence, a bad one, not an object", () => {
+    for (const bad of [
+      null,
+      undefined,
+      "documents.added",
+      [],
+      { seq: 1, name: "tasks.changed", payload: {} },
+      { seq: 1, name: "constructor", payload: {} },
+      { seq: 1, payload: {} },
+      { name: "documents.added", payload: {} },
+      { seq: 0, name: "documents.added" },
+      { seq: -1, name: "documents.added" },
+      { seq: 1.5, name: "documents.added" },
+      { seq: "1", name: "documents.added" },
+      { seq: 2 ** 60, name: "documents.added" },
+    ]) {
+      expect(readEvent(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it("reads an acknowledgement, and drops one that isn't a whole number", () => {
+    expect(readPortMessage({ ack: 0 })).toEqual({ kind: "ack", seq: 0 });
+    expect(readPortMessage({ ack: 41 })).toEqual({ kind: "ack", seq: 41 });
+    // A call that also says `ack` is an acknowledgement and nothing else: it never reaches the backend.
+    expect(readPortMessage({ ack: 3, id: 1, method: "storage.get", args: {} })).toEqual({
+      kind: "ack",
+      seq: 3,
+    });
+    for (const ack of [-1, 1.5, "3", null, undefined, Number.NaN, Infinity, 2 ** 60, {}]) {
+      expect(readPortMessage({ ack }), String(ack)).toEqual({ kind: "drop" });
+    }
+  });
+
+  it("holds events until connected, then sends them in order, and sends the rest at once", () => {
+    const sent: number[] = [];
+    const pump = new EventPump((e) => sent.push(e.seq));
+    pump.push({ seq: 1, name: "documents.added", payload: {} });
+    pump.push({ seq: 2, name: "documents.added", payload: {} });
+    pump.push({ seq: 3, name: "tasks.changed", payload: {} });
+    expect(sent).toEqual([]);
+    pump.connect();
+    expect(sent).toEqual([1, 2]);
+    pump.push({ seq: 4, name: "documents.added", payload: {} });
+    expect(sent).toEqual([1, 2, 4]);
+    // Connecting twice sends nothing twice.
+    pump.connect();
+    expect(sent).toEqual([1, 2, 4]);
+  });
+
+  it("holds no more than the backend allows outstanding, and reports what it had to drop", () => {
+    const got: { seq: number; missed?: number }[] = [];
+    const pump = new EventPump((e) => got.push({ seq: e.seq, missed: e.missed }));
+    for (let seq = 1; seq <= EVENT_BUFFER + 3; seq += 1) {
+      pump.push({ seq, name: "documents.deleted", payload: {} });
+    }
+    pump.connect();
+    expect(got).toHaveLength(EVENT_BUFFER);
+    // The next event after the drop says how many were lost, added to what the backend said.
+    pump.push({ seq: EVENT_BUFFER + 4, name: "documents.deleted", payload: {}, missed: 2 });
+    expect(got[got.length - 1]).toEqual({ seq: EVENT_BUFFER + 4, missed: 5 });
+    pump.push({ seq: EVENT_BUFFER + 5, name: "documents.deleted", payload: {} });
+    expect(got[got.length - 1]).toEqual({ seq: EVENT_BUFFER + 5, missed: undefined });
   });
 });

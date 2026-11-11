@@ -435,6 +435,9 @@ pub fn run(
                 if !document.reviewed {
                     let _ = app.emit(DOCUMENT_LANDED, &document);
                 }
+                // The same arrival, told to the mods that may know of documents, as their own
+                // narrow shape and whether or not the document is in the review queue.
+                crate::mods::api::events::document_landed(app, document.id);
                 // The other door a new document comes through (#711). A file dragged in is exactly
                 // as likely to be a second copy of something as one a connector found — more so,
                 // since the user is often importing what they already have in a cloud account.
@@ -1905,9 +1908,13 @@ pub fn rebuild(
     {
         let conn = state.conn()?;
         if wipe {
+            // The ids a mod could see, read before they go (mods' `documents.deleted`); noted once
+            // the wipe has run, announced once the guard is released.
+            let visible_to_mods = crate::mods::api::events::listed_ids(&conn);
             conn.execute_batch(
                 "DELETE FROM chunks_fts; DELETE FROM chunk_vec; DELETE FROM chunks; DELETE FROM documents;",
             )?;
+            crate::mods::api::events::note_deleted(&visible_to_mods);
             // A wholesale delete orphans EVERY tag at once, by cascade, and the per-document prune in
             // `tags::set_document_projects` can never reach them: a tag whose documents are all gone is
             // in no surviving document's leaving-set. Re-filing heals the tags the vault still names —
@@ -2899,8 +2906,19 @@ pub(crate) fn delete_document(tx: &Connection, doc_id: i64) -> Result<()> {
     // established vocabulary and re-mints it onto new documents. Inside the caller's transaction, so
     // the orphaning and the prune commit or roll back together.
     let held = crate::tags::document_tag_ids(tx, doc_id)?;
+    // Whether a mod could see it, read before it goes: the mod events announce only those
+    // (`mods::api::events`).
+    let visible_to_mods = crate::mods::api::events::is_listed(tx, doc_id);
     tx.execute("DELETE FROM documents WHERE id = ?1", params![doc_id])?;
     crate::tags::prune_orphan_tags_by_id(tx, &held)?;
+    // This function is the one every document row's deletion goes through (a delete, a bulk delete,
+    // a connector reset, a duplicate fold, a chat's delete), so it is where the mods' `documents.deleted`
+    // is told. Only noted here, inside the caller's transaction: the announcement waits for the
+    // writer to let go of the store, and goes out only for ids that are gone then, so a rolled-back
+    // delete announces nothing.
+    if visible_to_mods {
+        crate::mods::api::events::note_deleted(&[doc_id]);
+    }
     Ok(())
 }
 

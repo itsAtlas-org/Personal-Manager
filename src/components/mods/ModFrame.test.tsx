@@ -29,11 +29,16 @@ import {
 const modFrameOpen = vi.fn();
 const modFrameClose = vi.fn();
 const modCall = vi.fn();
+const modEventsAck = vi.fn();
+const modThemeChanged = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
-  modFrameOpen: (modId: string) => modFrameOpen(modId),
+  modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
+    modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
   modCall: (session: string, method: string, args: unknown) => modCall(session, method, args),
+  modEventsAck: (session: string, seq: number) => modEventsAck(session, seq),
+  modThemeChanged: (session: string, theme: unknown) => modThemeChanged(session, theme),
 }));
 
 // The theme a `theme.get` is answered from: the same stub the other component tests use (the real
@@ -73,6 +78,8 @@ beforeEach(() => {
   });
   modFrameClose.mockResolvedValue(undefined);
   modCall.mockResolvedValue({ kind: "value", value: { answer: 42 } });
+  modEventsAck.mockResolvedValue(undefined);
+  modThemeChanged.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -132,7 +139,7 @@ describe("ModFrame", () => {
     mount();
     const frame = await theFrame();
     expect(modFrameOpen).toHaveBeenCalledTimes(1);
-    expect(modFrameOpen).toHaveBeenCalledWith("acme.tool");
+    expect(modFrameOpen).toHaveBeenCalledWith("acme.tool", expect.any(Function));
     expect(frame.getAttribute("src")).toBe(ENTRY);
     expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
     expect(frame.getAttribute("allow")).toBe("");
@@ -555,5 +562,153 @@ describe("ModFrame", () => {
       "PM couldn't start this mod: That mod isn't installed.",
     );
     expect(document.querySelector("iframe")).toBeNull();
+  });
+});
+
+describe("ModFrame events", () => {
+  /** What the backend's channel hands the page for the latest session opened. */
+  const channel = () =>
+    modFrameOpen.mock.calls[modFrameOpen.mock.calls.length - 1][1] as (message: unknown) => void;
+  const event = (seq: number, name = "documents.deleted", payload: unknown = { ids: [seq] }) => ({
+    seq,
+    name,
+    payload,
+  });
+
+  /** Everything the frame's port receives, from now on. */
+  function listen(port: MessagePort): unknown[] {
+    const got: unknown[] = [];
+    port.onmessage = (e: MessageEvent) => got.push(e.data);
+    return got;
+  }
+  const settle = () => act(() => new Promise((r) => setTimeout(r, 20)));
+
+  it("opens its session with a channel the backend's events come back on", async () => {
+    mount();
+    await theFrame();
+    expect(modFrameOpen).toHaveBeenCalledWith("acme.tool", expect.any(Function));
+  });
+
+  it("holds events until the frame has its port, then sends them in order, then the rest as they come", async () => {
+    mount();
+    const frame = await theFrame();
+    channel()(event(1));
+    channel()(event(2, "theme.changed", { vars: {} }));
+    const win = frame.contentWindow!;
+    const post = vi.spyOn(win, "postMessage").mockImplementation(() => {});
+    postFrom(win, CONNECT);
+    const port = (post.mock.calls[0] as unknown as [unknown, string, MessagePort[]])[2][0];
+    ports.push(port);
+    const got = listen(port);
+    await settle();
+    expect(got).toEqual([
+      { event: "documents.deleted", seq: 1, payload: { ids: [1] } },
+      { event: "theme.changed", seq: 2, payload: { vars: {} } },
+    ]);
+    channel()({ ...event(3), missed: 4 });
+    await settle();
+    expect(got[2]).toEqual({
+      event: "documents.deleted",
+      seq: 3,
+      payload: { ids: [3] },
+      missed: 4,
+    });
+  });
+
+  it("forwards nothing it can't read: an unknown name, no sequence, not an object", async () => {
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    for (const bad of [
+      null,
+      "documents.added",
+      { name: "tasks.changed", seq: 1, payload: {} },
+      { name: "documents.added", payload: {} },
+      { name: "documents.added", seq: 0, payload: {} },
+      { name: "documents.added", seq: 1.5, payload: {} },
+      { name: 7, seq: 1, payload: {} },
+    ]) {
+      channel()(bad);
+    }
+    await settle();
+    expect(got).toEqual([]);
+  });
+
+  it("relays the frame's acknowledgement to the backend under PM's own session", async () => {
+    mount();
+    const { port } = connect(await theFrame());
+    port.postMessage({ ack: 7, session: "someone-else" });
+    await settle();
+    expect(modEventsAck).toHaveBeenCalledTimes(1);
+    expect(modEventsAck).toHaveBeenCalledWith("session-1", 7);
+    // An acknowledgement that isn't a whole number is no acknowledgement.
+    for (const ack of [-1, 1.5, "7", null, Number.NaN, 2 ** 60]) port.postMessage({ ack });
+    await settle();
+    expect(modEventsAck).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes a frame that acknowledges in a loop pay for it: past the flood line it is stopped", async () => {
+    mount();
+    const { port } = connect(await theFrame());
+    for (let i = 0; i < FLOOD_BURST + 10; i += 1) port.postMessage({ ack: i + 1 });
+    await settle();
+    expect(modEventsAck.mock.calls.length).toBeLessThanOrEqual(FLOOD_BURST);
+    expect((await screen.findByRole("status")).textContent).toContain("too many requests");
+    expect(modFrameClose).toHaveBeenCalledWith("session-1");
+  });
+
+  it("forwards events no more once the session has ended", async () => {
+    const { unmount } = mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    const send = channel();
+    unmount();
+    send(event(1));
+    await settle();
+    expect(got).toEqual([]);
+  });
+
+  it("posts PM's theme for its own session when it changes, once per change", async () => {
+    const root = document.documentElement;
+    root.style.setProperty("--bg", "white");
+    mount();
+    await theFrame();
+    await settle();
+    // Mounting changes nothing: the frame reads the theme it starts with from `theme.get`.
+    expect(modThemeChanged).not.toHaveBeenCalled();
+
+    root.style.setProperty("--bg", "black");
+    await settle();
+    expect(modThemeChanged).toHaveBeenCalledTimes(1);
+    const [session, snapshot] = modThemeChanged.mock.calls[0] as [string, Record<string, unknown>];
+    expect(session).toBe("session-1");
+    expect((snapshot.vars as Record<string, string>)["--bg"]).toBe("black");
+    expect(snapshot).toMatchObject({
+      mode: "dark",
+      system: "slate",
+      accent: "mono",
+      depth: "standard",
+    });
+
+    // The same value again is no change; a different one is.
+    root.style.setProperty("--bg", "black");
+    await settle();
+    expect(modThemeChanged).toHaveBeenCalledTimes(1);
+    root.style.setProperty("--bg", "grey");
+    await settle();
+    expect(modThemeChanged).toHaveBeenCalledTimes(2);
+    root.style.removeProperty("--bg");
+  });
+
+  it("posts no theme once its frame is gone", async () => {
+    const root = document.documentElement;
+    const { unmount } = mount();
+    await theFrame();
+    await settle();
+    unmount();
+    root.style.setProperty("--fg", "red");
+    await settle();
+    expect(modThemeChanged).not.toHaveBeenCalled();
+    root.style.removeProperty("--fg");
   });
 });
