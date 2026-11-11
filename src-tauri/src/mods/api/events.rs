@@ -345,7 +345,10 @@ pub(super) fn flush_landed<H: Host>(host: &H) -> Emitted {
         if host.store().store_epoch() != epoch {
             break;
         }
+        // The check above is made with no guard held: the store can be swapped before the emission
+        // takes it, so the payload closure (under the guard) asks again, as `settle_deleted` does.
         let said = emit_with(host, DOCUMENTS_ADDED, &Audience::Everyone, |conn| {
+            stays_over(host, epoch)?;
             documents::added_payloads(conn, slice)
         });
         total.add(said);

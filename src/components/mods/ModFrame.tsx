@@ -59,6 +59,7 @@ import {
   callResult,
   errorText,
   isConnectRequest,
+  readEvent,
   readPortMessage,
   readReply,
   refusal,
@@ -110,6 +111,9 @@ interface Live {
   port: MessagePort | null;
   inFlight: number;
   ended: boolean;
+  /** The backend has said this session is over (`mod.paused` / `session.closed`). Unlike `ended` the
+   *  port stays open, so the goodbye itself still reaches the frame, but no answer is performed. */
+  over: boolean;
   /** Every message with an id (and every ack) spends a token; a frame that runs it dry is flooding. */
   flood: FloodGate;
   /** The backend's events for this session, held until the port exists and sent over it after. */
@@ -125,6 +129,7 @@ function newLive(session: string): Live {
     port: null,
     inFlight: 0,
     ended: false,
+    over: false,
     flood: new FloodGate(performance.now()),
     events: new EventPump((event) => reply(live, event)),
   };
@@ -193,7 +198,7 @@ function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageCont
   // vault switch, the flood stop), but only up to its own answer: a page action authorised before
   // the end would still open the reader here, for a frame PM has already stopped. Nothing is done
   // for a session that is over.
-  if (live.ended) return;
+  if (live.ended || live.over) return;
   switch (backend.kind) {
     case "value":
       reply(live, callResult(id, backend.value));
@@ -242,7 +247,13 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
     // This open's session, once it exists. Events can't arrive before it does (Rust sends none until
     // the frame's page was served, which is after this resolves), and are dropped if they somehow do.
     let mine: Live | null = null;
-    modFrameOpen(modId, (message) => mine?.events.push(message)).then(
+    modFrameOpen(modId, (message) => {
+      if (!mine) return;
+      // Forwarded first, so the frame hears its goodbye; then nothing more is performed for it.
+      mine.events.push(message);
+      const name = readEvent(message)?.event;
+      if (name === "mod.paused" || name === "session.closed") mine.over = true;
+    }).then(
       (opened) => {
         if (cancelled) {
           closeQuietly(opened.session);

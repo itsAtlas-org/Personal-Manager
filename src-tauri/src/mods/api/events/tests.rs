@@ -586,6 +586,36 @@ fn a_store_swap_between_the_settle_and_its_emission_announces_nothing() {
     assert!(old.rec.all().is_empty());
 }
 
+/// The same for a landing: ids noted over the old store are never read from the new one (its own
+/// rows with those ids are not documents that just landed there).
+#[test]
+fn a_store_swap_between_the_landing_flush_and_its_emission_announces_nothing() {
+    let host = TestHost::new();
+    let old = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    // Rows with the noted ids exist in the store the emission will read.
+    host.sql(|c| doc(c, 5, None));
+    host.sql(|c| doc(c, 9, None));
+    let new_rec = Recorder::default();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fresh = new_rec.clone();
+    host.hook(move |host, at| {
+        if at == Point::BeforeEmit && !fired.swap(true, Ordering::SeqCst) {
+            let conn = host.store().take_conn().unwrap().unwrap();
+            *host.store().db.lock().unwrap() = Some(conn);
+            live_session(host, "acme.tool", fresh.outbox());
+        }
+    });
+    Hub::note(&host.hub().landed, &[5, 9], host.store().store_epoch());
+    let said = flush_landed(&host);
+    assert_eq!(said.sent, 0);
+    assert!(new_rec.all().is_empty(), "{:?}", new_rec.names());
+    assert!(old.rec.all().is_empty());
+}
+
 // ---- documents.added -------------------------------------------------------------------------------
 
 #[test]

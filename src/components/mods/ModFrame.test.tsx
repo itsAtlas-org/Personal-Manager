@@ -334,6 +334,30 @@ describe("ModFrame", () => {
     expect(openReaderById).not.toHaveBeenCalled();
   });
 
+  it.each(["session.closed", "mod.paused"])(
+    "performs no page action once the backend has said %s, with the frame still mounted",
+    async (goodbye) => {
+      let answer: (reply: unknown) => void = () => {};
+      modCall.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            answer = resolve;
+          }),
+      );
+      mount();
+      const { port } = connect(await theFrame());
+      port.postMessage({ id: 1, method: "ui.openDocument", args: { id: 12 } });
+      await waitFor(() => expect(modCall).toHaveBeenCalledTimes(1));
+      const channel = modFrameOpen.mock.calls[modFrameOpen.mock.calls.length - 1][1] as (
+        message: unknown,
+      ) => void;
+      channel({ seq: 1, name: goodbye, payload: {} });
+      answer({ kind: "page", action: "ui.openDocument", args: { id: 12 } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(openReaderById).not.toHaveBeenCalled();
+    },
+  );
+
   it("opens nothing for an id the frame sent that the backend didn't send back", async () => {
     // The action's arguments are the backend's, never the frame's: the frame asks for 99, the
     // backend authorised 12.
@@ -633,6 +657,20 @@ describe("ModFrame events", () => {
       payload: { ids: [3] },
       missed: 4,
     });
+  });
+
+  it("still sends the frame its goodbye when the backend ends the session", async () => {
+    mount();
+    const frame = await theFrame();
+    const win = frame.contentWindow!;
+    const post = vi.spyOn(win, "postMessage").mockImplementation(() => {});
+    postFrom(win, CONNECT);
+    const port = (post.mock.calls[0] as unknown as [unknown, string, MessagePort[]])[2][0];
+    ports.push(port);
+    const got = listen(port);
+    channel()(event(1, "session.closed", { reason: "paused" }));
+    await settle();
+    expect(got).toEqual([{ event: "session.closed", seq: 1, payload: { reason: "paused" } }]);
   });
 
   it("forwards nothing it can't read: an unknown name, no sequence, not an object", async () => {
