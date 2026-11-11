@@ -50,6 +50,8 @@ export { Toggle, type ToggleProps } from "./Toggle";
 export { Tooltip, type TooltipProps } from "./Tooltip";
 // Formatting toolbars' pictograms: the Pinboard note's and the event description's.
 export { BulletIcon, ClearFormatIcon, LinkIcon, NumberIcon } from "./FormatIcons";
+// Icon-only action buttons' pictograms: the calendar header's Refresh and Pop out, the briefing's Refresh.
+export { PopOutIcon, RefreshIcon } from "./ActionIcons";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
 export { NavItem, type NavItemProps } from "./NavItem";
 export { Popover } from "./Popover";

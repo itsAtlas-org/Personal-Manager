@@ -19,6 +19,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useTheme } from "../../theme";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
 import { isKeyForADialog } from "../../lib/useDialogLayer";
+import { Button } from "./Button";
 import { cn } from "./cn";
 import { Tooltip } from "./Tooltip";
 import { useEdgeResizeCursor } from "./useEdgeResizeCursor";
@@ -173,7 +174,19 @@ function FullscreenIcon({ active }: { active: boolean }) {
   );
 }
 
-export function TitleBar({ subtitle }: { subtitle?: string } = {}) {
+/**
+ * @param subtitle   what this window shows when it isn't the main one ("Calendar").
+ * @param onOpenMain when given, an "Open PM" button after the label, for a window that can be the
+ *   only one on screen (the pop-out Calendar, with PM's main window hidden in the tray or minimised).
+ *   Here, not in that window's own header, because the bar sits outside the error boundary and above
+ *   every screen the window can show (the calendar, the checking blank, the locked and curtain
+ *   screens, a crash fallback), so one control is there on all of them; and at the left, away from the
+ *   caption buttons and the top-right corner, where a hand goes for Refresh.
+ */
+export function TitleBar({
+  subtitle,
+  onOpenMain,
+}: { subtitle?: string; onOpenMain?: () => void } = {}) {
   const { system } = useTheme();
   const [maximized, setMaximized] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -267,6 +280,15 @@ export function TitleBar({ subtitle }: { subtitle?: string } = {}) {
           </div>
         )}
         <SystemLabel subtitle={subtitle} />
+        {onOpenMain && (
+          // A real button inside the drag region gets its own clicks, as the Mac dots do; it must not
+          // carry `data-tauri-drag-region` itself. Its name is its visible text.
+          <Tooltip label="Bring PM's main window to the front" placement="below">
+            <Button variant="tertiary" size="xs" onClick={onOpenMain}>
+              Open PM
+            </Button>
+          </Tooltip>
+        )}
       </div>
 
       <div data-tauri-drag-region className="flex-1" />

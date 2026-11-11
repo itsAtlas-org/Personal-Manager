@@ -10,7 +10,7 @@
 // the text may take). The body, the empty/generating states and the Refresh control are shared —
 // which is the point: a change to how a briefing reads lands everywhere at once.
 
-import { Button, Card } from "./ui";
+import { Button, Card, RefreshIcon } from "./ui";
 import { Markdown } from "../lib/markdown";
 import { formatDate } from "../lib/format";
 import { useBriefing } from "../lib/briefing";
@@ -19,26 +19,6 @@ import { useBriefing } from "../lib/briefing";
  *  compact form used by the sidebar footer and the floating panel, where vertical room is scarce. */
 export type BriefingVariant = "card" | "panel";
 
-/** A circular-arrow refresh glyph. Hand-rolled in the house style (24x24, stroke=currentColor, round
- *  caps) because no icon library is a dependency — see settings/tabIcons.tsx. */
-function RefreshIcon({ spinning }: { spinning: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={`h-3.5 w-3.5 ${spinning ? "animate-spin motion-reduce:animate-none" : ""}`}
-    >
-      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-      <path d="M21 3v6h-6" />
-    </svg>
-  );
-}
-
 function RefreshButton({ busy, onRefresh }: { busy: boolean; onRefresh: () => void }) {
   return (
     <Button
@@ -46,8 +26,10 @@ function RefreshButton({ busy, onRefresh }: { busy: boolean; onRefresh: () => vo
       size="sm"
       onClick={onRefresh}
       disabled={busy}
+      // The name is the visible word (WCAG 2.5.3 Label in Name: a speech user says "click Refresh"),
+      // so there is no aria-label; what it does is the hover text, which a screen reader gets as the
+      // description.
       title="Regenerate today's briefing from your current projects and calendar"
-      aria-label={busy ? "Regenerating today's briefing" : "Regenerate today's briefing"}
     >
       <RefreshIcon spinning={busy} />
       <span>{busy ? "Refreshing…" : "Refresh"}</span>
