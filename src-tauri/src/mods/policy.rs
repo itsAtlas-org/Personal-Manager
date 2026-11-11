@@ -155,6 +155,12 @@ pub enum Refusal {
     NeedsApproval(Vec<Widening>),
     /// The row changed between the checks and the commit (another install, or a vault switch).
     Changed,
+    /// The signed index removed this mod and the row waits for the user's answer about what it
+    /// made and stored (I-16): nothing installs onto it until it is uninstalled.
+    RemovedPending,
+    /// A background install of a mod that isn't installed: unattended work only ever updates or
+    /// repairs, so a mod uninstalled while its update downloaded stays uninstalled.
+    NothingToUpdate,
 }
 
 impl fmt::Display for Refusal {
@@ -185,6 +191,10 @@ impl fmt::Display for Refusal {
             }
             Self::NeedsApproval(_) => f.write_str("this update asks for more and waits for you"),
             Self::Changed => f.write_str("the installed mods changed while it was installing"),
+            Self::RemovedPending => f.write_str(
+                "PM's safety list removed the installed mod with this id: uninstall it first",
+            ),
+            Self::NothingToUpdate => f.write_str("the mod it would update is no longer installed"),
         }
     }
 }

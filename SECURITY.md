@@ -12,7 +12,10 @@ enumerable — the model API calls that power chat, sent to your cloud AI provid
 if you configure one, to a local model endpoint (a loopback server on this machine sends nothing
 off-box; a remote or LAN endpoint receives the requests you route to it, and PM refuses to send a
 token and chats in the clear to a public address); a launch-time update check against the
-signed release feed (and the download if you accept an update); a one-time first-run download
+signed release feed (and the download if you accept an update); a fetch of PM's signed mod safety
+list (two small files from the project's public `PM-Mods` GitHub release, at launch and every six
+hours, sending nothing but a generic `PM-mods/1` user agent, accepted only with the project's
+signature; plus, for a mod you installed, its updates from the same place); a one-time first-run download
 of PM's on-device models and Python dependencies (your local model runner, if you use one, fetches
 model weights itself — PM does not); and, only if you configure them, a calendar fetch
 (read-only unless you turn on editing for a Google account, after which PM also sends the

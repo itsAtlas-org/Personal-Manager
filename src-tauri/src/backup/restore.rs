@@ -76,6 +76,10 @@ pub struct RestoreOutcome {
     pub created_at: String,
     pub target_dir: PathBuf,
     pub db_key_hex: Secret,
+    /// The mod safety list the backup carried, for [`crate::mods::refresh::take_restored`]: the
+    /// restore commands hand it to the acceptance rules, which keep the newer of it and the local
+    /// copy. Not trusted until they verify it.
+    pub mods_index: Option<manifest::ModsIndex>,
 }
 
 /// Restore `src` into a fresh `target_dir` using `passphrase`. `target_dir` must not
@@ -283,6 +287,7 @@ pub fn restore(
         created_at: man.created_at,
         target_dir: target_dir.to_path_buf(),
         db_key_hex: Secret::from(man.db_key_hex),
+        mods_index: man.mods_index,
     })
 }
 
@@ -392,6 +397,10 @@ mod tests {
             db_key_hex: Secret::from(key_hex.clone()),
             app_version: "test".into(),
             created_at: "2026-07-02T00:00:00Z".into(),
+            mods_index: Some(crate::backup::manifest::ModsIndex {
+                index_b64: "aW5kZXg=".into(),
+                signature_b64: "c2ln".into(),
+            }),
         };
         let cancel = AtomicBool::new(false);
         pack(inputs, &archive, "correct-horse", |_, _| {}, &cancel).unwrap();
@@ -401,6 +410,15 @@ mod tests {
         let outcome = restore(&archive, "correct-horse", &target, |_, _| {}, &cancel).unwrap();
         assert_eq!(outcome.vault_id, meta.vault_id);
         assert_eq!(outcome.db_key_hex.expose(), key_hex);
+        // The mod safety list the backup carried comes out as it went in (the commands run it
+        // through the acceptance rules; a backup made before the field has none).
+        assert_eq!(
+            outcome.mods_index,
+            Some(crate::backup::manifest::ModsIndex {
+                index_b64: "aW5kZXg=".into(),
+                signature_b64: "c2ln".into(),
+            })
+        );
 
         // The restored DB opens with the embedded key and holds our row.
         let conn = db::open(&target.join("pm.sqlite"), outcome.db_key_hex.expose()).unwrap();
@@ -451,6 +469,7 @@ mod tests {
             db_key_hex: Secret::from(key_hex),
             app_version: "test".into(),
             created_at: "2026-07-02T00:00:00Z".into(),
+            mods_index: None,
         };
         let cancel = AtomicBool::new(false);
         pack(inputs, &archive, "right", |_, _| {}, &cancel).unwrap();
@@ -482,6 +501,7 @@ mod tests {
             db_key_hex: Secret::from(key_hex),
             app_version: "test".into(),
             created_at: "2026-07-02T00:00:00Z".into(),
+            mods_index: None,
         };
         let cancel = AtomicBool::new(false);
         pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
@@ -518,6 +538,7 @@ mod tests {
             db_key_hex: Secret::from(key_hex.clone()),
             app_version: "test".into(),
             created_at: "2026-07-02T00:00:00Z".into(),
+            mods_index: None,
         };
         (inputs, key_hex)
     }
