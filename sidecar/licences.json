@@ -444,15 +444,15 @@
       }
     },
     "pandas": {
-      "versions": ["3.1.0"],
+      "versions": ["3.1.1"],
       "licence": "BSD-3-Clause AND BSD-2-Clause AND MIT AND TCL AND Apache-2.0 AND PSF-2.0 AND LicenseRef-Microsoft-VC-Redistributable",
-      "stamp": "74929ac5d36cd4b3aa55701ec6905a27",
+      "stamp": "9c0e587b1748c374b1a8793141d0e978",
       "evidence": {
         "expression": "BSD-3-Clause",
         "license": null,
         "classifiers": []
       },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). pandas is BSD-3-Clause; compiled in are ujson (BSD-3-Clause AND TCL), klib, musl-derived code, xsimd and fast_float 8.2.10 (Apache-2.0 OR BSL-1.0 OR MIT: MIT taken); its pure-Python borrowings add Apache-2.0, BSD-2-Clause and PSF-2.0. Windows adds msvcp140; Linux and macOS bundle no libraries."
+      "note": "Bundled natives read 2026-11-06 for 3.1.0 and again 2026-11-11 for 3.1.1 in the cp312 win_amd64, macOS arm64 and manylinux x86_64 wheels (hashes checked against the locks): 3.1.1 ships byte-identical licence files and the same native file set as 3.1.0. pandas is BSD-3-Clause; compiled in are ujson (BSD-3-Clause AND TCL), klib, musl-derived code, xsimd and fast_float 8.2.10 (Apache-2.0 OR BSL-1.0 OR MIT: MIT taken); its pure-Python borrowings add Apache-2.0, BSD-2-Clause and PSF-2.0. Windows adds msvcp140; Linux and macOS bundle no libraries."
     },
     "pdfminer-six": {
       "versions": ["20260107"],
@@ -552,18 +552,15 @@
       "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). The bindings are Apache-2.0 OR BSD-3-Clause (BSD-3-Clause taken) with CC-BY-4.0 documentation. The one bundled library, PDFium (BSD-3-Clause AND Apache-2.0), links statically FreeType (FTL), ICU (Unicode-3.0 AND ICU), libc++ (Apache-2.0 WITH LLVM-exception), Anti-Grain Geometry 2.3, libjpeg-turbo, libpng, OpenJPEG, abseil, lcms2, fast_float, simdutf and zlib, plus the Microsoft static C/C++ runtime on Windows. The same 15 licence files ship for every platform."
     },
     "python-dateutil": {
-      "versions": ["2.9.0.post0"],
+      "versions": ["4.0.0"],
       "licence": "Apache-2.0 AND BSD-3-Clause",
-      "stamp": "7b88e055c464a215b50ecbd0f91a3557",
+      "stamp": "05128aa929879d997c349d58cbfed014",
       "evidence": {
-        "expression": null,
-        "license": "Dual License",
-        "classifiers": [
-          "License :: OSI Approved :: Apache Software License",
-          "License :: OSI Approved :: BSD License"
-        ]
+        "expression": "BSD-3-Clause",
+        "license": null,
+        "classifiers": []
       },
-      "note": "`license: \"Dual License\"`, and the two classifiers name Apache and BSD without saying which applies. The LICENSE file (read in the py3 wheel) applies both rather than offering a choice: Apache-2.0 to every contribution after 2017-12-01 and to the code its authors re-licensed, and BSD-3-Clause to all the code, 'even that also covered by Apache 2.0'."
+      "note": "4.0.0 declares `license_expression: \"BSD-3-Clause\"`, which understates its own LICENSE file. That file (read in the py3 wheel, 2026-11-11) is unchanged from 2.9: Apache-2.0 applies to every contribution after 2017-12-01 and to the code its authors re-licensed, and BSD-3-Clause to all the code, 'even that also covered by Apache 2.0'. Both apply, so both are recorded. The wheel no longer bundles a time-zone database (tzdata supplies it)."
     },
     "python-pptx": {
       "versions": ["1.0.2"],

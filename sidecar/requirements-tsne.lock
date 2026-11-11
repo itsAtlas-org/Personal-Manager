@@ -22,7 +22,7 @@
 # pm-lock: 1
 # pm-python-floor: 3.11
 # pm-input: sidecar/requirements-optional.txt@sha256:9d643058aba9c41bc8bd37bff812d19cd611f05802a8ea3ff23c73d86fef65b1
-# pm-constraint: sidecar/requirements.lock@sha256:7f59fe8279102e80b3c49c008773ea2ada9376857595af86dbbbd1d1767de287
+# pm-constraint: sidecar/requirements.lock@sha256:48e11b91c42238758fd2a62e580b4539ee7d08626def96f7fe0e49b7049786a3
 # pm-pins: openTSNE==1.0.4
 cloudpickle==3.1.2 \
     --hash=sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414 \
