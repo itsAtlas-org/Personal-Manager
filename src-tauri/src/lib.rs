@@ -2047,6 +2047,8 @@ pub fn run() {
             commands::backup_to_proton,
             commands::restore_from_proton,
             commands::get_backup_schedule,
+            commands::get_backup_mod_data,
+            commands::save_backup_mod_data,
             commands::set_backup_schedule,
             commands::set_backup_passphrase,
             commands::forget_backup_passphrase,

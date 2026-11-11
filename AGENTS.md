@@ -134,7 +134,10 @@ release remain the open post-v1 work.
     model path: INVARIANTS.md I-22). Everything fetched is untrusted DATA (rule #6).
   - **Backup** — `backup/`: portable passphrase-encrypted zstd `.pmbackup`; a
     `destination.rs` enum fans out to the Proton Drive CLI (`proton.rs`) + Google Drive REST
-    (`gdrive.rs`); `schedule.rs`.
+    (`gdrive.rs`); `schedule.rs`. `strip.rs` is the one way a copy of the store leaves (every
+    backup and the export: a snapshot stripped of mod secrets, connected apps and rebuildable mod
+    data, then vacuumed; INVARIANTS.md I-32) and `adopt_mods.rs` what adopting a restored or
+    shared vault resets, plus the mod list a restore shows.
   - **Platform** — `secrets.rs` (OS keychain: API key + background key + DB key + OAuth
     tokens + feed URLs), `openrouter.rs` (streaming SSE + non-streaming `complete()`; the key
     stays in Rust), `cost.rs`, `applock.rs` / `lock_session.rs`, `components.rs` (the Storage

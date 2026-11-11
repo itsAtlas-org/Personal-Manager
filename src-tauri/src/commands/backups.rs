@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::backup::adopt_mods::{self, RestoredMod};
 use crate::backup::{
     self, destination::BackupDestination, BackupEvent, BackupKind, BackupPhase, BackupReport,
     RetentionOutcome,
@@ -78,11 +79,57 @@ pub struct RestoreSummary {
     pub created_at: String,
     /// Absolute path of the restored (not-yet-active) vault, for a follow-up "switch".
     pub target_dir: String,
+    /// The mods the backup held, all `pending`: the store isn't open yet, so whether a mod's files
+    /// are on this computer (a same-machine restore copies them back, after the open) isn't known.
+    /// [`SwitchOutcome::mods`] is the settled answer.
+    pub mods: Vec<RestoredMod>,
+}
+
+/// What [`switch_to_vault`] tells the page: what the reconcile couldn't do cleanly (the same kind of
+/// warnings the other vault commands return, which this one used to drop) and where each restored
+/// mod ended up, read after the open and the same-machine recovery have run.
+#[derive(Serialize)]
+pub struct SwitchOutcome {
+    pub warnings: Vec<String>,
+    pub mods: Vec<RestoredMod>,
+}
+
+/// Snapshot the live store into `snapshot` for a backup and strip it ([`backup::strip`], D4), on
+/// the blocking pool (F-42): the copy of a multi-GB store must not pin a tokio worker, and the DB
+/// lock is taken and dropped inside the closure (`DbGuard` is `!Send`) via a cloned handle. Both
+/// backup sites call this and nothing else, and it returns the mods the snapshot holds.
+async fn snapshot_stripped(
+    app: &AppHandle,
+    snapshot: &std::path::Path,
+    db_key: &crate::secret::Secret,
+) -> Result<Vec<backup::manifest::BackupMod>> {
+    let key = zeroize::Zeroizing::new(db_key.expose().to_string());
+    let app = app.clone();
+    let snapshot = snapshot.to_path_buf();
+    spawn_blocking_result("snapshot", move || {
+        let state = app.state::<AppState>();
+        let keep_content = backup::strip::keep_mod_data(&state)?;
+        backup::strip::snapshot_for_leaving(&state, &snapshot, &key, keep_content)
+    })
+    .await
+}
+
+/// Report a backup step's failure to the detached progress feed (clearing the "running" state the
+/// run's first `Phase` set) and hand the error back for the caller to return.
+fn backup_failed(app: &AppHandle, e: Error) -> Error {
+    emit_backup_progress(
+        app,
+        BackupEvent::Failed {
+            message: e.to_string(),
+        },
+    );
+    e
 }
 
 /// Create an encrypted, portable `.pmbackup` at `dest_path`, protected by `passphrase`.
-/// The live DB is snapshotted with `VACUUM INTO` under the lock (folding WAL, preserving
-/// SQLCipher), then — off the lock, in a blocking task — the snapshot + Markdown vault +
+/// The live DB is snapshotted (folding WAL, preserving SQLCipher) and the snapshot is stripped of
+/// what must not leave the computer (mod secrets, connected apps, rebuildable mod data), then — off
+/// the lock, in a blocking task — the snapshot + Markdown vault +
 /// metadata are streamed through zstd and a chunked XChaCha20-Poly1305 STREAM. The
 /// archive embeds the DB key inside its encrypted layer, so it restores on any machine
 /// that has the passphrase (unlike `export_all_data`, which is same-machine only).
@@ -107,25 +154,29 @@ pub async fn create_local_backup(
     vault::kdf::validate_passphrase_strength(&passphrase)?;
     let _busy = begin_backup_run(&app, &state, BackupPhase::Snapshot)?;
 
-    // Consistent, encrypted DB snapshot under the lock; drop the guard before the slow work.
+    // A step that fails after the run began has to say so (see `run_backup`).
+    let fail = |e: Error| backup_failed(&app, e);
+    // The vault's own metadata and key come BEFORE the snapshot: the snapshot is stripped through
+    // its key (D4), so a locked vault or a missing key stops here with nothing copied.
+    let resolved = vault::resolve(&app).map_err(fail)?;
+    let meta = vault::load_meta(&resolved.vault_root)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
+        .map_err(fail)?;
+    let db_key = vault::current_db_key(&meta)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))
+        .map_err(fail)?;
+
+    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4); the strip is the
+    // backup's gate: a snapshot that couldn't be stripped fails the whole backup.
     let tmp = tempfile::Builder::new()
         .prefix("pm-backup-snap-")
         .tempdir()?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
-    {
-        // Snapshot on the blocking pool (F-42): a `VACUUM INTO` of a multi-GB store must not pin a
-        // tokio worker or hold the DB mutex on the async runtime. The guard is acquired and dropped
-        // inside the closure (DbGuard is !Send) via a cloned handle; `snapshot` is cloned in and the
-        // original flows into the pack inputs below.
-        let app = app.clone();
-        let snapshot = snapshot.clone();
-        spawn_blocking_result("snapshot", move || -> Result<()> {
-            let state = app.state::<AppState>();
-            let conn = state.conn()?;
-            vault::migrate::vacuum_into(&conn, &snapshot)
-        })
-        .await?;
-    }
+    let mods = snapshot_stripped(&app, &snapshot, &db_key)
+        .await
+        .map_err(fail)?;
     emit_backup_progress(
         &app,
         BackupEvent::Phase {
@@ -134,11 +185,6 @@ pub async fn create_local_backup(
         },
     );
 
-    let resolved = vault::resolve(&app)?;
-    let meta = vault::load_meta(&resolved.vault_root)?
-        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))?;
-    let db_key = vault::current_db_key(&meta)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))?;
     // The mod safety list's cached copy rides in the manifest (a small file read, off the runtime).
     let mods_index = {
         let app = app.clone();
@@ -156,6 +202,7 @@ pub async fn create_local_backup(
         app_version: app.package_info().version.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         mods_index,
+        mods: Some(mods),
     };
     let vault_id = meta.vault_id.clone();
     let dest = std::path::PathBuf::from(dest_path);
@@ -454,7 +501,7 @@ pub async fn switch_to_vault(
     state: State<'_, AppState>,
     folder: String,
     make_private: bool,
-) -> Result<()> {
+) -> Result<SwitchOutcome> {
     // L-5: `folder` is a webview string pointing at an existing vault folder — require a real,
     // absolute, well-formed location before we open `folder/pm.sqlite` and promote its key.
     pathguard::sanitize_source(&folder)?;
@@ -480,6 +527,19 @@ pub async fn switch_to_vault(
                 .into(),
         )
     })?;
+    // The restore commit's resets (§1.11), on the store's own connection BEFORE it is attached: dev
+    // mode off and the connected apps cleared, so a restore never revives them or enables unsigned
+    // installs on a machine whose owner didn't. Before the attach is also before the first engage,
+    // which loads the mods, so nothing serves from a store these haven't reached. A reset that
+    // fails refuses the switch: nothing is attached yet, and the restored folder stays as it was.
+    // (The cached safety list is applied by that engage, before the load and so before any frame can
+    // mount: `ledger::after_writer_open`; the restore already took the backup's copy of it.)
+    adopt_mods::reset_for_adopt(&conn).map_err(|e| {
+        Error::Other(format!(
+            "the restored vault couldn't be made safe to open on this computer ({e}); it was not \
+             switched to"
+        ))
+    })?;
     // A different vault from here on, so the previous one's tamper notice no longer applies.
     state.clear_meta_warning();
     state.note_meta_report(&report);
@@ -495,8 +555,7 @@ pub async fn switch_to_vault(
     // off the async runtime thread; it reads `AppState` back through the `AppHandle`, like the other
     // migration commands.
     let app2 = app.clone();
-    // Unreported, as before: this command returns no warnings to the page.
-    let _warnings = spawn_blocking_result("adopt", move || {
+    let (warnings, mods) = spawn_blocking_result("adopt", move || {
         let mut warnings = adopt_restored_vault(&app2, &root, &meta, &data_dir, make_private)?;
         // Re-engage the writer lock for the final (possibly relocated) vault — best-effort,
         // mirroring the other mode-change commands (a device vault needs none; a passphrase vault
@@ -504,7 +563,23 @@ pub async fn switch_to_vault(
         // same-machine restore's mods from the store it was made from, and this one's mod reload
         // waits at the ledger lock until that copy is done.
         engage_or_warn(&app2, &mut warnings);
-        Ok(warnings)
+        // That copy is what decides which mods come back, and it lands in the background. Finish it
+        // here (a repeat of work already done costs a look at each row), so the list below is read
+        // after the recovery and not at the instant the open returned.
+        crate::mods::ledger::recover_now(&app2);
+        let st = app2.state::<AppState>();
+        let rows = st.conn().and_then(|c| adopt_mods::read_rows(&c));
+        let mods = match rows {
+            Ok(rows) => adopt_mods::describe_all(&rows, true),
+            Err(e) => {
+                warnings.push(format!(
+                    "PM couldn't read back which mods came with the restore ({e}); the Mods tab \
+                     lists them."
+                ));
+                Vec::new()
+            }
+        };
+        Ok((warnings, mods))
     })
     .await?;
 
@@ -513,7 +588,22 @@ pub async fn switch_to_vault(
     if let Ok(mut snap) = state.backup_state.lock() {
         snap.pending_restore = None;
     }
-    Ok(())
+    Ok(SwitchOutcome { warnings, mods })
+}
+
+/// Whether backups also carry the mods' own saved data ("Also save mod data in my backups",
+/// Backup settings). On unless the user turned it off. What it drops is in [`backup::strip`].
+#[tauri::command]
+pub fn get_backup_mod_data(state: State<'_, AppState>) -> Result<bool> {
+    backup::strip::keep_mod_data(&state)
+}
+
+/// Turn "Also save mod data in my backups" on or off. Takes effect on the next backup, for every
+/// destination (typed, scheduled, Proton, Google Drive), since they all take one stripped snapshot.
+#[tauri::command]
+pub fn save_backup_mod_data(state: State<'_, AppState>, enabled: bool) -> Result<()> {
+    let conn = state.conn()?;
+    crate::db::set_bool(&conn, backup::strip::BACKUP_MOD_DATA_KEY, enabled)
 }
 
 /// Acknowledge the last run's outcome, so its banner stops coming back.
@@ -823,20 +913,26 @@ pub(crate) async fn run_backup(
 
     let tmp = tempfile::Builder::new().prefix("pm-backup-").tempdir()?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
-    {
-        // Snapshot on the blocking pool (F-42): a `VACUUM INTO` of a multi-GB store must not pin a
-        // tokio worker or hold the DB mutex on the async runtime. The guard is acquired and dropped
-        // inside the closure (DbGuard is !Send) via a cloned handle; `snapshot` is cloned in and the
-        // original flows into the pack inputs below.
-        let app = app.clone();
-        let snapshot = snapshot.clone();
-        spawn_blocking_result("snapshot", move || -> Result<()> {
-            let state = app.state::<AppState>();
-            let conn = state.conn()?;
-            vault::migrate::vacuum_into(&conn, &snapshot)
-        })
-        .await?;
-    }
+    // A step that fails after the run began has to say so: the run's `Phase` events marked it
+    // running, and only `Finished` or `Failed` clears that (a bare `?` left the panel on a progress
+    // bar until PM restarted).
+    let fail = |e: Error| backup_failed(app, e);
+    // The vault's own metadata and key come BEFORE the snapshot: it is stripped through that key
+    // (D4), so a locked vault or a missing key stops here with nothing copied.
+    let resolved = vault::resolve(app).map_err(fail)?;
+    let meta = vault::load_meta(&resolved.vault_root)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
+        .map_err(fail)?;
+    let db_key = vault::current_db_key(&meta)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))
+        .map_err(fail)?;
+    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4), and the mods it
+    // holds. A snapshot that couldn't be stripped fails the backup.
+    let mods = snapshot_stripped(app, &snapshot, &db_key)
+        .await
+        .map_err(fail)?;
     emit_backup_progress(
         app,
         BackupEvent::Phase {
@@ -844,12 +940,6 @@ pub(crate) async fn run_backup(
             fraction: 1.0,
         },
     );
-
-    let resolved = vault::resolve(app)?;
-    let meta = vault::load_meta(&resolved.vault_root)?
-        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))?;
-    let db_key = vault::current_db_key(&meta)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))?;
     let now = chrono::Utc::now();
     let archive_name = crate::backup::naming::archive_name(
         &meta.vault_id,
@@ -873,6 +963,7 @@ pub(crate) async fn run_backup(
         app_version: app.package_info().version.to_string(),
         created_at: now.to_rfc3339(),
         mods_index,
+        mods: Some(mods),
     };
     let vault_id = meta.vault_id.clone();
 
@@ -1344,6 +1435,9 @@ fn finalize_restore(
         app_version: outcome.app_version,
         created_at: outcome.created_at.clone(),
         target_dir,
+        // Pending: the store opens at the switch, and a mod whose files sit in another store on this
+        // computer comes back then. The switch's answer is the settled one.
+        mods: adopt_mods::describe_all(&outcome.mods, false),
     };
     if let Ok(mut snap) = state.backup_state.lock() {
         snap.pending_restore = Some(summary.clone());

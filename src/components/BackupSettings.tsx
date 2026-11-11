@@ -51,6 +51,7 @@ import {
 import { readReconcileDismissed, writeReconcileDismissed } from "../lib/backupPrefs";
 import { Button, SectionInfo } from "./ui";
 import { AutomaticBackupsSection } from "./backup/AutomaticBackupsSection";
+import { BackupModDataSection } from "./backup/BackupModDataSection";
 import { BackupPassphraseSection } from "./backup/BackupPassphraseSection";
 import { BackupRunProgress } from "./backup/BackupRunProgress";
 import { BackupStatusSummary } from "./backup/BackupStatusSummary";
@@ -507,6 +508,9 @@ export function BackupSettings() {
         onRemember={() => void doRememberPass()}
         onForget={() => setConfirmForget(true)}
       />
+
+      {/* --- What goes in (the mods' saved data), then 2 · Save a backup now --- */}
+      <BackupModDataSection busy={busy} />
 
       {/* --- 2 · Save a backup now --- */}
       <SaveBackupNowSection

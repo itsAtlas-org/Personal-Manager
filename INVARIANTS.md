@@ -630,6 +630,38 @@ folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index
 it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its
 blacklist.
 
+### I-32 · A copy of the store leaves the computer only through the strip, and an adopted store is reset before it serves — **Held** (one gate: `backup::strip`'s site scan)
+
+Every file that carries the database off the live store (the typed `.pmbackup`, the scheduled and
+cloud backups that share `run_backup`, and the export zip) takes its snapshot through
+`backup::strip::snapshot_for_leaving`: a `VACUUM INTO` copy, then, on the COPY's own connection,
+`secure_delete` on, the deletes of D4 (`mod_secrets`, `mcp_clients`, `mod_doc_data`, cache-class
+`mod_kv`, every `installed_from = 'folder'` mod and the rows hanging off it, and content-class
+`mod_kv` when "Also save mod data in my backups" is off), a `VACUUM`, and a check of each step, so
+nothing is left in a page or a free page. A snapshot whose strip fails is deleted and the backup
+fails, with an error; no archive that might hold a secret is written. The store's key is resolved
+before the snapshot, because the strip opens the copy through it. A new place that copies the
+store out calls the same function; `every_site_that_copies_the_store_out_goes_through_the_strip`
+fails on any other `vacuum_into` in the app outside `vault/migrate.rs` (its rollback copy never
+leaves the vault folder) and the test fixtures. The test reads every page of the stripped file
+decrypted (free pages included), so a value left in the file is found where grepping the encrypted
+bytes could not. Adopting a store that came from elsewhere (`switch_to_vault` for a restore,
+`adopt_shared_vault` for the active writer) runs `backup::adopt_mods::reset_for_adopt`: developer
+mode off, `mcp_clients` cleared, MCP off (PR C's switch), all in one transaction, and on the
+restore path before the store is attached, so before the first load of its mods. A reset that
+fails refuses the restore's switch.
+
+**Why.** A backup is portable and carries the database key, so whatever is in `pm.sqlite` is as
+readable as the passphrase is guessable, and a plain `DELETE` leaves a row's bytes in the page.
+Mod secrets are the user's typed credentials and the connected apps' tokens belong to the device
+that issued them; neither may travel. A restored or joined store arrives with the other place's
+dev-mode switch, which would otherwise let unsigned installs run where nobody chose them.
+
+**Co-signers.** A change to the mod tables adds the new table to `strip` (the child-table guard
+test fails on a table that references `mods` and isn't listed) or says why it is safe. PR C adds
+the MCP switch's off value to `adopt_mods::switch_mcp_off`. The Mods tab's dev-mode part pauses the
+unsigned rows and makes the page's switch follow the row at the same two points.
+
 ---
 
 ## 6. Build tooling and dependencies

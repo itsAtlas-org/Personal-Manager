@@ -44,6 +44,10 @@ pub struct PackInputs {
     pub created_at: String,
     /// This machine's cached mod safety list, for the manifest (`manifest::BackupManifest`).
     pub mods_index: Option<manifest::ModsIndex>,
+    /// The mods the snapshot holds, read from the snapshot itself by [`super::strip`] so the list
+    /// and the rows can't disagree. `None` only for a pack that took no snapshot of a mods-aware
+    /// store (the tests that build a bare vault).
+    pub mods: Option<Vec<manifest::BackupMod>>,
 }
 
 /// One archive member: synthesized bytes (the manifest) or a file on disk.
@@ -203,6 +207,7 @@ fn enumerate_sources(inputs: &PackInputs) -> Result<Vec<Source>> {
         app_version: inputs.app_version.clone(),
         created_at: inputs.created_at.clone(),
         mods_index: inputs.mods_index.clone(),
+        mods: inputs.mods.clone(),
     };
     let mbytes = serde_json::to_vec(&m)
         .map_err(|e| Error::Other(format!("could not encode the backup manifest: {e}")))?;
@@ -334,5 +339,50 @@ fn key_mode_flag(mode: KeyMode) -> u16 {
     match mode {
         KeyMode::Device => 0,
         KeyMode::Passphrase => format::FLAG_SOURCE_KEY_MODE_PASSPHRASE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_manifest_carries_the_mod_list_the_snapshot_was_stripped_to() {
+        // `enumerate_sources` puts the manifest first; its `mods` is what the caller read out of the
+        // stripped snapshot (`strip::snapshot_for_leaving`), written for people and tools.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, b"db").unwrap();
+        let listed = vec![manifest::BackupMod {
+            id: "atlas.map".into(),
+            version: "1.0.0".into(),
+            tier: "first".into(),
+            source: "catalogue".into(),
+            signed: true,
+        }];
+        let manifest_of = |mods: Option<Vec<manifest::BackupMod>>| {
+            let inputs = PackInputs {
+                vault_root: dir.path().to_path_buf(),
+                db_snapshot: snap.clone(),
+                markdown_dir: dir.path().join("vault"),
+                meta: meta.clone(),
+                db_key_hex: Secret::from("00".repeat(32)),
+                app_version: "test".into(),
+                created_at: "2026-11-11T00:00:00Z".into(),
+                mods_index: None,
+                mods,
+            };
+            let sources = enumerate_sources(&inputs).unwrap();
+            let Source::Bytes { path, data } = &sources[0] else {
+                panic!("the manifest comes first");
+            };
+            assert_eq!(path, manifest::MANIFEST_ENTRY);
+            serde_json::from_slice::<manifest::BackupManifest>(data).unwrap()
+        };
+        assert_eq!(manifest_of(Some(listed.clone())).mods, Some(listed));
+        // "No mods installed" is written as an empty list, not left out.
+        assert_eq!(manifest_of(Some(Vec::new())).mods, Some(Vec::new()));
+        assert_eq!(manifest_of(None).mods, None);
     }
 }

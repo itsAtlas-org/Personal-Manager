@@ -11,7 +11,7 @@
 
 import { useState } from "react";
 
-import type { RestoreSummary } from "../../lib/types";
+import type { RestoredMod, RestoreSummary, SwitchOutcome } from "../../lib/types";
 import { formatDateTime } from "../../lib/format";
 import { switchToVault } from "../../lib/ipc";
 import { Button } from "../ui";
@@ -21,11 +21,41 @@ export interface RestoredVaultCardProps {
   setError: (m: string | null) => void;
 }
 
+/** Whether the switch has something the user should read before the page reloads: a warning the
+ *  reconcile raised (it used to be dropped), or a mod that isn't simply back on. */
+function needsReading(out: SwitchOutcome): boolean {
+  return out.warnings.length > 0 || out.mods.some((m) => m.standing !== "back");
+}
+
+/** The mods a restore lists, each with what to do about it. `pending` rows (before the switch) say
+ *  what applies if the mod's files aren't on this computer; settled rows say what happened. */
+function ModList({ mods }: { mods: RestoredMod[] }) {
+  return (
+    <ul className="mt-1 flex flex-col gap-0.5 text-xs text-ink3">
+      {mods.map((m) => (
+        <li key={m.id}>
+          <span className="text-ink2">{m.name}</span>
+          {m.standing === "back" ? (
+            <span className="text-ink4"> is back</span>
+          ) : m.note ? (
+            <span className="text-ink4"> — {m.note}</span>
+          ) : (
+            <span className="text-ink4"> is {m.standing}</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function RestoredVaultCard({ restored, setError }: RestoredVaultCardProps) {
   const [switching, setSwitching] = useState(false);
   // When a restored vault was passphrase-protected ("shareable"), the user chooses on this machine:
   // make it private (default — none of the sharing setup travels in a backup), or keep the passphrase.
   const [restoreAsPrivate, setRestoreAsPrivate] = useState(true);
+  // What the switch answered, held only when there is something to read; otherwise the page reloads
+  // at once, as it always did.
+  const [outcome, setOutcome] = useState<SwitchOutcome | null>(null);
 
   async function doSwitch() {
     if (!restored) return;
@@ -34,7 +64,12 @@ export function RestoredVaultCard({ restored, setError }: RestoredVaultCardProps
       setSwitching(true);
       // A device-mode restore is already private; only a passphrase restore honours the choice.
       const makePrivate = restored.key_mode === "passphrase" ? restoreAsPrivate : true;
-      await switchToVault(restored.target_dir, makePrivate);
+      const out = await switchToVault(restored.target_dir, makePrivate);
+      if (needsReading(out)) {
+        // The vault is already switched; the reload waits for the user to have read this.
+        setOutcome(out);
+        return;
+      }
       // The active vault changed underneath the whole app; reload so every view re-reads it.
       window.location.reload();
     } catch (e) {
@@ -44,6 +79,37 @@ export function RestoredVaultCard({ restored, setError }: RestoredVaultCardProps
   }
 
   if (!restored) return null;
+
+  if (outcome) {
+    const left = outcome.mods.filter((m) => m.standing !== "back");
+    return (
+      <div className="mt-3 max-w-sm rounded-[var(--radius-sm)] border border-border2 bg-surface p-3">
+        <p className="text-sm text-ink2">Switched to the restored vault.</p>
+        {outcome.warnings.length > 0 && (
+          <ul className="mt-1 flex flex-col gap-1 text-xs text-st-due">
+            {outcome.warnings.map((w) => (
+              <li key={w} className="break-words">
+                {w}
+              </li>
+            ))}
+          </ul>
+        )}
+        {left.length > 0 && (
+          <div className="mt-2">
+            <p className="text-xs text-ink4">
+              {left.length === 1 ? "One mod isn't" : `${left.length} mods aren't`} running yet:
+            </p>
+            <ModList mods={left} />
+          </div>
+        )}
+        <div className="mt-2">
+          <Button variant="primary" onClick={() => window.location.reload()}>
+            Continue
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mt-3 max-w-sm rounded-[var(--radius-sm)] border border-border2 bg-surface p-3">
@@ -85,6 +151,20 @@ export function RestoredVaultCard({ restored, setError }: RestoredVaultCardProps
           </label>
         </fieldset>
       )}
+      {restored.mods.length > 0 && (
+        <div className="mt-2">
+          <p className="text-xs text-ink4">
+            {restored.mods.length === 1
+              ? "This backup held one mod."
+              : `This backup held ${restored.mods.length} mods.`}{" "}
+            A mod whose files are on this computer comes back when you switch. Otherwise:
+          </p>
+          <ModList mods={restored.mods} />
+        </div>
+      )}
+      <p className="mt-2 text-xs text-ink4">
+        Developer mode comes back off, and apps you had connected need connecting again.
+      </p>
       <div className="mt-2">
         <Button variant="primary" onClick={doSwitch} disabled={switching}>
           {switching ? "Switching…" : "Switch to the restored vault"}

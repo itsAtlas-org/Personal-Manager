@@ -23,6 +23,7 @@ const backupStatus = vi.fn();
 const backupArchivePrefix = vi.fn();
 const forgetBackupPassphrase = vi.fn();
 const getBackupSchedule = vi.fn();
+const getBackupModData = vi.fn();
 const listGdriveBackups = vi.fn();
 const listProtonBackups = vi.fn();
 const onBackupProgress = vi.fn();
@@ -45,6 +46,8 @@ vi.mock("../lib/ipc", () => ({
   createLocalBackup: vi.fn(),
   forgetBackupPassphrase: () => forgetBackupPassphrase(),
   getBackupSchedule: () => getBackupSchedule(),
+  getBackupModData: () => getBackupModData(),
+  saveBackupModData: vi.fn(),
   listGdriveBackups: () => listGdriveBackups(),
   listProtonBackups: () => listProtonBackups(),
   onBackupProgress: (...a: unknown[]) => onBackupProgress(...a),
@@ -160,6 +163,7 @@ function clickDisconnect(heading: string) {
 
 beforeEach(() => {
   getBackupSchedule.mockResolvedValue(schedule());
+  getBackupModData.mockResolvedValue(true);
   backupGdriveStatus.mockResolvedValue(gdriveStatus());
   listGdriveBackups.mockResolvedValue([]);
   listProtonBackups.mockResolvedValue([]);

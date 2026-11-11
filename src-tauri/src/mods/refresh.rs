@@ -426,6 +426,29 @@ pub fn emit_notices(app: &AppHandle, notices: &[ModNotice]) {
     }
 }
 
+/// The event the page listens to (`mods://changed`) to re-read the installed mods when the registry
+/// changed under it without a command of its own: today a same-machine restore's mods coming back
+/// after the open that started the recovery returned (`ledger::after_writer_open`). The payload
+/// says why; the page's answer is always to read the rows again. Sent to the main window.
+pub const CHANGED_EVENT: &str = "mods://changed";
+/// [`ModsChanged::cause`] for mods whose files were copied back from another store of the vault.
+pub const CHANGED_RECOVERED: &str = "recovered";
+
+/// What `mods://changed` carries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModsChanged {
+    pub cause: &'static str,
+}
+
+/// Tell the main window the installed mods changed (see [`CHANGED_EVENT`]). Slice 6's Mods tab
+/// reuses it for its own refreshes (slice 6 part Mods tab: call this from install, uninstall and
+/// pause, so one listener serves every cause).
+pub fn emit_changed(app: &AppHandle, cause: &'static str) {
+    if let Err(e) = app.emit_to(super::MAIN_LABEL, CHANGED_EVENT, ModsChanged { cause }) {
+        eprintln!("mods: a change notice wasn't delivered ({e})");
+    }
+}
+
 // ---- Backup and restore -------------------------------------------------------------------------
 
 /// The backup manifest's copy of this machine's cached index, for a new backup. `None` when none

@@ -92,18 +92,26 @@ pub async fn export_all_data(
     // paired the right database with the wrong Markdown tree on every moved or shared vault — and
     // on a vault moved out of the profile, with no Markdown at all.
     let resolved = vault::resolve(&app)?;
+    // The store's key comes first: the snapshot is stripped through it (D4), exactly as a backup's
+    // is. An export is the other way the database leaves the computer, so the same promise holds:
+    // a mod's secrets and the connected apps are never in the zip.
+    let meta = vault::load_meta(&resolved.vault_root)?
+        .ok_or_else(|| Error::Other("this vault has no metadata to export".into()))?;
+    let db_key = vault::current_db_key(&meta)?
+        .ok_or_else(|| Error::Other("unlock the vault before exporting it".into()))?;
+    let key_hex = zeroize::Zeroizing::new(db_key.expose().to_string());
     let dest = dest_path;
-    // Snapshot + zip on the blocking pool (F-42): a `VACUUM INTO` can copy a multi-GB store, so on
-    // the async runtime it pinned a tokio worker *and* held the global DB mutex for the whole copy.
-    // The guard is scoped to the vacuum inside the closure, so it still releases before the slower
-    // zip walk — same lock lifetime as before, just off the runtime. The snapshot reaches the store
-    // via the cloned `app` handle (DbGuard is !Send, so acquire it inside the closure). `tmp` stays
-    // owned here and outlives the task.
+    // Snapshot + zip on the blocking pool (F-42): the copy of a multi-GB store would otherwise pin a
+    // tokio worker *and* hold the global DB mutex for the whole of it. The snapshot helper takes the
+    // lock for the copy only, so it still releases before the slower zip walk. The snapshot reaches
+    // the store via the cloned `app` handle (DbGuard is !Send). `tmp` stays owned here and outlives
+    // the task.
     spawn_blocking_result("export", move || -> Result<()> {
         {
             let state = app.state::<AppState>();
-            let conn = state.conn()?;
-            vault::migrate::vacuum_into(&conn, &snapshot)?;
+            // The export is the user's own copy of their data, so it keeps the mods' saved data
+            // whatever the backup toggle says: that toggle is about what a backup file carries.
+            crate::backup::strip::snapshot_for_leaving(&state, &snapshot, &key_hex, true)?;
         }
         write_export_zip(&resolved, &snapshot, std::path::Path::new(&dest))
     })
