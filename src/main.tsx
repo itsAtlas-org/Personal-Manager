@@ -7,6 +7,7 @@ import { ThemeProvider, UserTimeProvider } from "./theme";
 import { CapabilityProvider } from "./lib/capabilities";
 import { ContextMenuHost, ErrorBoundary, TitleBar } from "./components/ui";
 import { LinkNotice } from "./components/LinkNotice";
+import { showMainWindow } from "./lib/ipc";
 import { PopoverRoot } from "./PopoverRoot";
 import "./theme/fonts";
 import "./index.css";
@@ -40,7 +41,15 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
             {/* Custom window chrome sits above everything (incl. App's loading/onboarding screens)
                 so the frameless window can always be dragged/closed. */}
             <div className="flex h-full flex-col">
-              <TitleBar subtitle={isCalendarWindow ? "Calendar" : undefined} />
+              <TitleBar
+                subtitle={isCalendarWindow ? "Calendar" : undefined}
+                // The pop-out may be the only window on screen (main hidden in the tray, minimised,
+                // or covered): a way back, there on every screen of it. It only brings main
+                // forward: it doesn't switch main's tab, and the pop-out stays beside it.
+                onOpenMain={
+                  isCalendarWindow ? () => void showMainWindow().catch(() => {}) : undefined
+                }
+              />
               <div className="min-h-0 flex-1">
                 {/* INSIDE the providers (the fallback's Button reads useTheme, which throws without
                     one) and OUTSIDE Suspense, so a failed `./App` chunk load is caught too — today

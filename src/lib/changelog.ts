@@ -24,6 +24,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.177.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Refresh is now two circular arrows in the calendar's top-right corner, in the main window and the pop-out alike, where your hand goes for it. Hover over it, or Tab to it, to see when it last synced; the arrows turn while it works, and a screen reader says when it starts and when it's done. Pop out is now a small window icon just beside it.",
+      "The pop-out Calendar has an Open PM button in its top bar, so when it's the only window you can see you can bring PM's main window back in one click, even from the locked screen. It leaves the pop-out where it is.",
+      "The pop-out also has a Calendars button, with how many are showing (like 5/7), that opens the same list of calendars the sidebar has, so you can show or hide them without going back to the main window. A tick in one window shows in the other at once.",
+      "The pop-out now picks up changes made in Google within about half a minute by itself, even while the main window is hidden in the tray.",
+      "Hover hints now also show when you Tab to a button, go away when you press Esc, stay put while you move onto them, and keep inside the window. The briefing's Refresh and Open PM buttons are now named by the words they show, so voice control can click them.",
+    ],
+  },
+  {
     version: "3.176.0-alpha",
     date: "2026-11-11",
     highlights: [

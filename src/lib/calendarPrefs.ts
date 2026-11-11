@@ -9,6 +9,7 @@
 
 import { isValidTimeZone } from "../theme/timezones";
 import { readStored, writeStored } from "./storedPrefs";
+import type { Calendar } from "./types";
 
 /** The calendar's view modes. Day = the N-day time grid with N=1 (see PR2). */
 export type CalendarViewMode = "month" | "week" | "day" | "year" | "agenda";
@@ -81,6 +82,27 @@ export function writeHidden(hidden: Set<string>): void {
   } catch {
     /* non-browser context (tests) */
   }
+}
+
+/** `hidden` with `id` flipped: hidden becomes shown and the other way round. A new set, never the one
+ *  passed in, so a state setter sees a change. The sidebar's list and the pop-out's header popover
+ *  both toggle through this, so the two windows can't disagree about what a tick does. */
+export function toggleHiddenId(hidden: Set<string>, id: string): Set<string> {
+  const next = new Set(hidden);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
+/** The "5/7" beside "Calendars": how many of the calendars that sync (the selected ones: an
+ *  unselected one mirrors no events and is never listed) are showing, out of how many. The overlays
+ *  (Milestones, Tasks, Pinboard) are not counted. */
+export function rosterCount(
+  calendars: readonly Calendar[],
+  hidden: ReadonlySet<string>,
+): { shown: number; total: number } {
+  const synced = calendars.filter((c) => c.selected);
+  return { shown: synced.filter((c) => !hidden.has(c.id)).length, total: synced.length };
 }
 
 /** The calendar the user last created an event in (its PM id), or null: where the next new event

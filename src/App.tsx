@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { CONNECTOR_POLL_MS, shouldIncludeSharedWithMe } from "./lib/connectorPoll";
-import { nextCheckDelay, shouldCheck } from "./lib/calendarPoll";
+import { useCalendarChangeCheck } from "./lib/useCalendarChangeCheck";
 import { isTypingTarget } from "./lib/calendarNavKey";
 import { isAnyDialogOpen } from "./lib/useDialogLayer";
 import { CalendarView } from "./components/calendar/CalendarView";
@@ -100,7 +100,6 @@ import {
   setHelpMode,
   startSemanticLayout,
   syncCalendar,
-  checkGoogleCalendars,
   vaultLockStatus,
   vaultStatus,
 } from "./lib/ipc";
@@ -750,41 +749,8 @@ export default function App() {
   // window is on screen, a cheap check asks Google which calendars changed and fetches only those
   // (the backend spaces checks out and skips while a sync runs). Hidden or in the tray it pauses;
   // coming back into view or into focus checks at once. The views re-read on `calendar://synced`.
-  useEffect(() => {
-    if (!aiReady) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stopped = false;
-    const check = () => {
-      if (!stopped && shouldCheck(document.visibilityState)) {
-        void checkGoogleCalendars().catch(() => {
-          // A provider being unreachable is surfaced by the full sync, not here.
-        });
-      }
-    };
-    const schedule = () => {
-      timer = setTimeout(() => {
-        check();
-        if (!stopped) schedule();
-      }, nextCheckDelay());
-    };
-    schedule();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") check();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", check);
-    const stop = () => {
-      stopped = true;
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", check);
-    };
-    const off = onTeardown(stop);
-    return () => {
-      stop();
-      off();
-    };
-  }, [aiReady]);
+  // (A hook of its own now: the pop-out Calendar runs the same check.)
+  useCalendarChangeCheck(aiReady, onTeardown);
 
   // Load the boot-primed conversation's messages the first time the user opens chat (F-09): cold
   // start primes the selection but defers this fetch off the first-paint path. Fires at most once.

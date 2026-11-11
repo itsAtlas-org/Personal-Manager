@@ -16,6 +16,7 @@ const ipc = vi.hoisted(() => {
     vaultStatus: vi.fn(),
     vaultLockStatus: vi.fn(),
     showInMainWindow: vi.fn(() => Promise.resolve()),
+    checkGoogleCalendars: vi.fn(() => Promise.resolve({})),
     onVaultCurtain: vi.fn(async (h: () => void) => {
       handlers.curtain = h;
       return () => {};
@@ -38,9 +39,14 @@ vi.mock("./lib/scrollAxis", () => ({ installAxisScrollNormalizer: () => () => {}
 
 // The Calendar itself is tested on its own; here it only has to show, and to hand over its links.
 vi.mock("./components/calendar/CalendarView", () => ({
-  CalendarView: (p: { onOpenProject: (p: string) => void; onOpenPinboard: () => void }) => (
+  CalendarView: (p: {
+    onOpenProject: (p: string) => void;
+    onOpenPinboard: () => void;
+    rosterInHeader?: boolean;
+  }) => (
     <div>
       <p>the calendar</p>
+      <p>{p.rosterInHeader ? "list in the header" : "no list in the header"}</p>
       <button onClick={() => p.onOpenProject("Atlas")}>project</button>
       <button onClick={() => p.onOpenPinboard()}>pinboard</button>
     </div>
@@ -62,8 +68,12 @@ beforeEach(() => {
   ipc.vaultStatus.mockResolvedValue(VAULT);
   ipc.vaultLockStatus.mockResolvedValue({ active: true });
   stored.hydrateStoredPrefs.mockClear();
+  ipc.checkGoogleCalendars.mockClear();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 async function mount() {
   render(<CalendarWindow />);
@@ -102,6 +112,35 @@ describe("CalendarWindow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await act(async () => {});
     expect(screen.getByText("the calendar")).toBeTruthy();
+  });
+
+  it("holds the calendar list in the header, since it has no sidebar", async () => {
+    await mount();
+    expect(screen.getByText("list in the header")).toBeTruthy();
+  });
+
+  it("tells a locked PM's user where the way back is", async () => {
+    ipc.appLockStatus.mockResolvedValue({ ...OPEN, locked: true });
+    await mount();
+    // The Open PM button itself is in the title bar (TitleBar.test); the hint points at it.
+    expect(screen.getByText(/Unlock PM in its main window \(Open PM,/)).toBeTruthy();
+  });
+
+  it("checks Google for changes while the pop-out is open, and not behind the lock gate", async () => {
+    // Only the timers: the gate's own promises must still resolve.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    ipc.appLockStatus.mockResolvedValue({ ...OPEN, locked: true });
+    await mount();
+    await act(async () => void vi.advanceTimersByTime(120_000));
+    expect(ipc.checkGoogleCalendars).not.toHaveBeenCalled();
+    cleanup();
+
+    ipc.appLockStatus.mockResolvedValue(OPEN);
+    await mount();
+    expect(ipc.checkGoogleCalendars).not.toHaveBeenCalled();
+    // Within a quarter either way of 30 s (calendarPoll): by 40 s it has asked at least once.
+    await act(async () => void vi.advanceTimersByTime(40_000));
+    expect(ipc.checkGoogleCalendars.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it("treats a store it can't read as locked", async () => {

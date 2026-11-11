@@ -121,3 +121,33 @@ describe("TitleBar's Escape", () => {
     expect(setFullscreen).not.toHaveBeenCalled();
   });
 });
+
+// The pop-out Calendar's way back to PM's main window: a button in the bar, so it is there on every
+// screen of that window, locked and crashed ones included.
+describe("TitleBar's Open PM", () => {
+  it("offers Open PM only when given onOpenMain, and calls it", () => {
+    const onOpenMain = vi.fn();
+    render(<TitleBar subtitle="Calendar" onOpenMain={onOpenMain} />);
+    // Named by its visible words, with no aria-label of its own.
+    const button = screen.getByRole("button", { name: "Open PM" });
+    expect(button.getAttribute("aria-label")).toBeNull();
+    // A real button inside the drag region, never the drag region itself.
+    expect(button.hasAttribute("data-tauri-drag-region")).toBe(false);
+    fireEvent.click(button);
+    expect(onOpenMain).toHaveBeenCalledOnce();
+  });
+
+  it("has no Open PM in the main window (no prop)", () => {
+    render(<TitleBar />);
+    expect(screen.queryByRole("button", { name: "Open PM" })).toBeNull();
+  });
+
+  it("sits right after the label, before the window's own controls", () => {
+    render(<TitleBar subtitle="Calendar" onOpenMain={() => {}} />);
+    const open = screen.getByRole("button", { name: "Open PM" });
+    const fullScreen = screen.getByRole("button", { name: "Full screen" });
+    expect(
+      open.compareDocumentPosition(fullScreen) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});

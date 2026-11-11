@@ -98,9 +98,11 @@ import {
   readView,
   readZones,
   swipeDays,
+  toggleHiddenId,
   writeAgendaMode,
   writeCursorDay,
   writeDayCount,
+  writeHidden,
   writeRange,
   writeRangeBounds,
   writeRunwayWindows,
@@ -162,6 +164,7 @@ import {
 } from "./parts/CalendarEventPopover";
 import { whenText } from "./parts/whenText";
 import { CalendarHeader } from "./CalendarHeader";
+import { CalendarsPopover } from "./CalendarsPopover";
 import { NewEventButton } from "./NewEventButton";
 import { DeleteEventDialog } from "./edit/DeleteEventDialog";
 import { EventEditor } from "./edit/EventEditor";
@@ -301,6 +304,9 @@ interface CalendarViewProps {
   onOpenPinboard?: () => void;
   /** Open the Calendar in a window of its own (#1039). Absent in that window itself. */
   onPopOut?: () => void;
+  /** Hold the calendar list in the header, as a "Calendars n/m" popover. Set by the pop-out, which has
+   *  no sidebar; the main window keeps the list in its sidebar and gets no button. */
+  rosterInHeader?: boolean;
   /** An event to show, from the search palette (#1047): the view moves to its day and opens its
    *  details. A new `nonce` shows it again. */
   reveal?: { event: CalendarEvent; nonce: number } | null;
@@ -321,6 +327,7 @@ export function CalendarView({
   onOpenProject,
   onOpenPinboard,
   onPopOut,
+  rosterInHeader = false,
   reveal,
   onRevealTaken,
 }: CalendarViewProps) {
@@ -383,6 +390,11 @@ export function CalendarView({
   }, [cursor]);
   const [loading, setLoading] = useState(cachedOverview === null);
   const [syncing, setSyncing] = useState(false);
+  // The polite live region's words: "Moving …", "Put back.", why it can't move, and Refresh's start
+  // and finish. Declared up here, before `onRefresh`: a `useCallback` whose deps name `announce` would
+  // otherwise read it before its `const` runs and throw at render.
+  const [said, setSaid] = useState("");
+  const announce = useCallback((text: string) => setSaid((was) => sayAgain(was, text)), []);
   const [error, setError] = useState<string | null>(null);
   const [eventsFailed, setEventsFailed] = useState(false);
   const aliveRef = useRef(true);
@@ -637,6 +649,9 @@ export function CalendarView({
   const onRefresh = useCallback(async () => {
     setSyncing(true);
     setError(null);
+    // The button is an icon that only spins, so say it in the live region (WCAG 4.1.3): the start
+    // here, the finish below. A failure is said by the alert strip, which shows `error`.
+    announce("Refreshing your calendars…");
     // The months after the live band are read again too: a sync only fetches the live band.
     forgetLater();
     try {
@@ -648,21 +663,33 @@ export function CalendarView({
         loadPinboard(),
         loadTasks(),
       ]);
+      if (aliveRef.current) announce("Calendars refreshed");
     } catch (e) {
       if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (aliveRef.current) setSyncing(false);
     }
-  }, [loadEvents, loadOverview, loadMilestones, loadPinboard, loadTasks, forgetLater]);
+  }, [loadEvents, loadOverview, loadMilestones, loadPinboard, loadTasks, forgetLater, announce]);
 
-  // The visibility TOGGLES moved to the sidebar block (one control, one home), so this view only
+  // The visibility TOGGLES live in the sidebar block (one control, one home), so this view mostly
   // reads the set — but the sidebar is mounted right beside it, so a tick there has to land here
-  // without a remount. writeHidden announces on the app-wide signal; follow it.
+  // without a remount. writeHidden announces on the app-wide signal; follow it. A tick in the OTHER
+  // window arrives the same way: followStoredPrefs re-reads the shared store and fires it here.
   useEffect(() => {
     const sync = () => setHidden(readHidden());
     window.addEventListener("pm:settings-changed", sync);
     return () => window.removeEventListener("pm:settings-changed", sync);
   }, []);
+  // The one place this view writes the set: the pop-out's header popover (`rosterInHeader`), which
+  // has no sidebar. Same toggle as the sidebar's, through the shared helper.
+  const onToggleCalendar = useCallback(
+    (id: string) => {
+      const next = toggleHiddenId(hidden, id);
+      setHidden(next);
+      writeHidden(next); // announces, so the other window follows
+    },
+    [hidden],
+  );
 
   const onViewChange = useCallback((v: CalendarViewMode) => {
     setView(v);
@@ -1344,9 +1371,6 @@ export function CalendarView({
 
   // --- dragging an event to move it (#884, C16b) ---
 
-  // The polite live region's words: "Moving …", "Put back.", why it can't move.
-  const [said, setSaid] = useState("");
-  const announce = useCallback((text: string) => setSaid((was) => sayAgain(was, text)), []);
   // Day, Week and Month drag, on the pixel grid, once a Google account has editing on; Terminal
   // draws no grid, and Focus's read-only one has no gesture at all.
   const editingOn = overview ? Object.values(overview.editing).some((s) => s === "on") : false;
@@ -1736,6 +1760,18 @@ export function CalendarView({
         agendaMode={agendaMode}
         onAgendaModeChange={onAgendaModeChange}
         onPopOut={onPopOut}
+        roster={
+          rosterInHeader && overview ? (
+            <CalendarsPopover
+              accounts={overview.accounts}
+              calendars={overview.calendars}
+              hidden={hidden}
+              onToggle={onToggleCalendar}
+              colorOf={colorOf}
+              shapeOf={shapeOf}
+            />
+          ) : undefined
+        }
       />
 
       {isTerminal && (
