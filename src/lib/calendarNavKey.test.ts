@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   calendarNavKey,
   calendarUndoKey,
+  pageKeyHint,
   type NavKeyEvent,
   type UndoKeyEvent,
 } from "./calendarNavKey";
@@ -64,11 +65,105 @@ describe("calendarNavKey", () => {
     expect(calendarNavKey(key("C", { shiftKey: true }), true)).toBeNull();
   });
 
+  // Month and Year run their periods down the screen, so ↑ and ↓ page them as ← and → do; the day
+  // grids and the agenda scroll with ↑ and ↓, so they get nothing.
+  it("pages with ↑ and ↓ only where the view says its periods run vertically", () => {
+    expect(calendarNavKey(key("ArrowUp"), false, true)).toBe("prev");
+    expect(calendarNavKey(key("ArrowDown"), false, true)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false)).toBeNull();
+    expect(calendarNavKey(key("ArrowDown"), false)).toBeNull();
+    expect(calendarNavKey(key("ArrowUp"), false, false)).toBeNull();
+    // ← and → are the same either way.
+    expect(calendarNavKey(key("ArrowLeft"), false, true)).toBe("prev");
+    expect(calendarNavKey(key("ArrowRight"), false, true)).toBe("next");
+  });
+
+  it("gives ↑ and ↓ the same gates as ← and →", () => {
+    for (const k of ["ArrowUp", "ArrowDown"]) {
+      expect(calendarNavKey(key(k, { target: el("BUTTON") }), true, true)).toBeNull();
+      expect(calendarNavKey(key(k, { metaKey: true }), false, true)).toBeNull();
+      expect(calendarNavKey(key(k, { ctrlKey: true }), false, true)).toBeNull();
+      expect(calendarNavKey(key(k, { altKey: true }), false, true)).toBeNull();
+      for (const tag of ["INPUT", "TEXTAREA", "SELECT"]) {
+        expect(calendarNavKey(key(k, { target: el(tag) }), false, true)).toBeNull();
+      }
+      expect(calendarNavKey(key(k, { target: el("DIV", true) }), false, true)).toBeNull();
+    }
+  });
+
+  // Google's keys: j or n for the next period, k or p for the previous, in every view ← and → page.
+  it("pages with Google's j n k p in every view, ↑ and ↓ or not", () => {
+    for (const vertical of [false, true]) {
+      for (const k of ["j", "n"]) expect(calendarNavKey(key(k), false, vertical)).toBe("next");
+      for (const k of ["k", "p"]) expect(calendarNavKey(key(k), false, vertical)).toBe("prev");
+    }
+    // Caps Lock types the capital, as it does for `t`.
+    expect(calendarNavKey(key("J"), false)).toBe("next");
+    expect(calendarNavKey(key("P"), false)).toBe("prev");
+  });
+
+  it("gives j n k p the same gates as the arrows", () => {
+    for (const k of ["j", "n", "k", "p"]) {
+      expect(calendarNavKey(key(k, { target: el("BUTTON") }), true)).toBeNull();
+      // Ctrl+K is the command palette's, Ctrl+N and Ctrl+P the system's.
+      expect(calendarNavKey(key(k, { ctrlKey: true }), false)).toBeNull();
+      expect(calendarNavKey(key(k, { metaKey: true }), false)).toBeNull();
+      expect(calendarNavKey(key(k, { altKey: true }), false)).toBeNull();
+      for (const tag of ["INPUT", "TEXTAREA", "SELECT"]) {
+        expect(calendarNavKey(key(k, { target: el(tag) }), false)).toBeNull();
+      }
+      expect(calendarNavKey(key(k, { target: el("DIV", true) }), false)).toBeNull();
+    }
+  });
+
+  it("leaves the other letters alone", () => {
+    for (const k of ["a", "d", "m", "w", "y", "x", "Tab", "ArrowUpX"]) {
+      expect(calendarNavKey(key(k), false, true)).toBeNull();
+    }
+  });
+
   it("reads Shift, not the letter's case, so Caps Lock doesn't change the surface", () => {
     // Caps Lock on: the key reads "C" with no Shift held.
     expect(calendarNavKey(key("C"), false)).toBe("create");
     // Caps Lock on and Shift held: the key reads "c".
     expect(calendarNavKey(key("c", { shiftKey: true }), false)).toBe("quick-create");
+  });
+});
+
+// What the ‹ and › buttons say of their keys is built from the same table the decision reads, so a
+// key they name always pages.
+describe("pageKeyHint", () => {
+  it("names the keys for a tooltip and for aria-keyshortcuts", () => {
+    expect(pageKeyHint("prev", false)).toEqual({
+      glyphs: "←, k or p",
+      shortcuts: "ArrowLeft k p",
+    });
+    expect(pageKeyHint("next", false)).toEqual({
+      glyphs: "→, j or n",
+      shortcuts: "ArrowRight j n",
+    });
+  });
+
+  it("adds ↑ and ↓ where the periods run down the screen", () => {
+    expect(pageKeyHint("prev", true)).toEqual({
+      glyphs: "←, ↑, k or p",
+      shortcuts: "ArrowLeft ArrowUp k p",
+    });
+    expect(pageKeyHint("next", true)).toEqual({
+      glyphs: "→, ↓, j or n",
+      shortcuts: "ArrowRight ArrowDown j n",
+    });
+  });
+
+  it("only names keys that page, in the direction named", () => {
+    for (const vertical of [false, true]) {
+      for (const nav of ["prev", "next"] as const) {
+        const { shortcuts } = pageKeyHint(nav, vertical);
+        for (const k of shortcuts.split(" ")) {
+          expect(calendarNavKey(key(k), false, vertical)).toBe(nav);
+        }
+      }
+    }
   });
 });
 

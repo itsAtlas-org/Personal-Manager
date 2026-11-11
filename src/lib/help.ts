@@ -265,7 +265,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "calendar-header": {
     title: "Move around & choose a view",
-    body: "‹ Today › steps through time and jumps back to now; the buttons beside it switch between Day, Week, Month, Year and Agenda, and the label shows the range you're looking at. + New event (or c) creates an event in Google, on an account with editing turned on: in Day and Week it's in the grid's top-left corner with the time zones, and elsewhere beside Refresh, which reads your calendars again now. In Agenda, Runway | List switches between the Runway board of your tasks and milestones and a dated list of events; the Runway always starts from today, so the stepping buttons give way to \"From today\". Everything else here only changes what you see.",
+    body: "‹ Today › steps through time and jumps back to now. Keys: ← or k (or p) back, → or j (or n) forward, t for today, as in Google Calendar; ↑ and ↓ too in Month and Year. The buttons beside it switch between Day, Week, Month, Year and Agenda, and the label shows the range you're looking at. + New event (or c) creates an event in Google, on an account with editing turned on: in Day and Week it's in the grid's top-left corner with the time zones, and elsewhere beside Refresh, which reads your calendars again now. In Agenda, Runway | List switches between the Runway board of your tasks and milestones and a dated list of events; the Runway always starts from today, so the stepping buttons give way to \"From today\". Everything else here only changes what you see.",
   },
   "calendar-popout": {
     title: "Pop out the calendar",
