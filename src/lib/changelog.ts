@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.175.5-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Under-the-hood tidying: updates to two of the building blocks underneath PM's document engine. The first time PM starts after this update it sets up its document engine again by itself, along with photo text recognition and the map's extra layout if you've added them. Nothing changes in how you use PM.",
+    ],
+  },
+  {
     version: "3.175.4-alpha",
     date: "2026-11-06",
     highlights: [
