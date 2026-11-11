@@ -269,7 +269,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "calendar-popout": {
     title: "Pop out the calendar",
-    body: "Opens the whole Calendar in a window of its own, to keep beside PM or on another screen: every view, the Runway, your tasks, and editing your events. Press it again to bring that window forward. Both windows stay in step: a change in one, such as an event moved or a calendar hidden, shows in the other. A project or the pinboard opened from the pop-out opens in PM's main window. The pop-out shows nothing while PM is locked, and closes when PM quits.",
+    body: "Opens the whole Calendar in a window of its own, to keep beside PM or on another screen: every view, the Runway, your tasks, and editing your events (turning editing on or off is done in PM's main window, under Settings → Connectors). Press it again to bring that window forward. Both windows stay in step: a change in one, such as an event moved or a calendar hidden, shows in the other. A project or the pinboard opened from the pop-out opens in PM's main window. The pop-out shows nothing while PM is locked, and closes when PM quits.",
   },
   // In the calendar view only: Focus › Upcoming's details pop-up keeps `focus-agenda`'s help.
   "calendar-event": {

@@ -207,20 +207,24 @@ pub(super) fn release_plan(users: &BTreeSet<GoogleUse>, leaving: GoogleUse) -> G
 // --- changes outside PM ---
 
 /// Whether a command called from the window labelled `label` may change something outside PM (a
-/// Google calendar, from #884). Only the main window: PM's commands aren't ACL-gated per window, so
-/// the always-on-top briefing window can call any of them, and a write belongs where its Undo, its
-/// guest prompt and its errors are shown. Pure, so it's tested without a window.
+/// Google calendar, from #884). The main window and the pop-out Calendar (decided 2026-11-11):
+/// PM's commands aren't ACL-gated per window, so the always-on-top briefing window can call any of
+/// them, and a write belongs where its Undo, its guest prompt and its errors are shown. Both
+/// allowed windows mount the same `CalendarView`, which shows all three; the briefing window shows
+/// none of them, and a window added later is refused until it does. Pure, so it's tested without a
+/// window.
 pub(super) fn caller_may_write(label: &str) -> bool {
-    label == "main"
+    label == "main" || label == crate::popout::CALENDAR_LABEL
 }
 
 /// [`caller_may_write`] as a command guard.
-pub(super) fn require_main_window(window: &tauri::Window) -> Result<()> {
+pub(super) fn require_calendar_window(window: &tauri::Window) -> Result<()> {
     if caller_may_write(window.label()) {
         Ok(())
     } else {
         Err(Error::Other(
-            "Calendar changes can only be made from PM's main window.".into(),
+            "Calendar changes can only be made from PM's main window or the pop-out Calendar."
+                .into(),
         ))
     }
 }
@@ -265,12 +269,23 @@ mod tests {
         uses.iter().copied().collect()
     }
 
-    /// Writes outside PM come only from the main window; the briefing window (or any window added
-    /// later) is refused by default.
+    /// Writes outside PM come from the main window and the pop-out Calendar, which both show a
+    /// write's Undo, guest prompt and errors; the briefing window (or any window added later) is
+    /// refused by default, and a label has to match exactly.
     #[test]
-    fn only_the_main_window_may_write() {
+    fn only_the_main_and_popout_calendar_windows_may_write() {
         assert!(caller_may_write("main"));
-        for label in [crate::tray::BRIEFING_LABEL, "Main", "main ", ""] {
+        assert!(caller_may_write(crate::popout::CALENDAR_LABEL));
+        assert_eq!(crate::popout::CALENDAR_LABEL, "calendar");
+        for label in [
+            crate::tray::BRIEFING_LABEL,
+            "Main",
+            "main ",
+            "Calendar",
+            "calendar ",
+            "calendar-2",
+            "",
+        ] {
             assert!(!caller_may_write(label), "{label:?}");
         }
     }

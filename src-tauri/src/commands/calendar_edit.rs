@@ -5,9 +5,10 @@
 //! changed, delete it. The decisions are the pure core's (`crate::calendar_write`); this module does
 //! the I/O around them, in a fixed order every write follows:
 //!
-//! 1. the main window and the vault owner only (`require_main_window`, `require_owner`). The one
-//!    read that isn't for a write, how a repeating event repeats ([`series_summary`], for the event
-//!    popover), checks the window alone (C9 design scope-L3);
+//! 1. the main window or the pop-out Calendar, and the vault owner only (`require_calendar_window`,
+//!    `require_owner`; both windows show a write's Undo, guest prompt and errors, the briefing window
+//!    shows none). The one read that isn't for a write, how a repeating event repeats
+//!    ([`series_summary`], for the event popover), checks the window alone (C9 design scope-L3);
 //! 2. a short DB read: which Google calendar and event the mirror row stands for, and the calendar's
 //!    facts. The webview only ever names PM's own row ids and the session ids PM minted;
 //! 3. a fresh GET from Google, with no lock held, and the gate again on that copy (the mirror can be
@@ -24,7 +25,7 @@
 //!
 //! Every outcome comes back as data (`WriteOutcome`), so the editor keeps the draft and explains.
 //! Nothing here is reachable from a model: no model call has tools, the commands refuse any window
-//! but the main one, and `scripts/check-calendar-write-fence.mjs` keeps the command names and
+//! but the main one and the pop-out Calendar, and `scripts/check-calendar-write-fence.mjs` keeps the command names and
 //! [`google_io`] out of the chat and briefing paths.
 
 use std::collections::{HashMap, HashSet};
@@ -81,7 +82,7 @@ use crate::calendar_write::{plan, time};
 use crate::error::{Error, Result};
 use crate::{briefing, google, milestones, secrets, AppState};
 
-use super::shared::require_main_window;
+use super::shared::require_calendar_window;
 use super::vaults::require_vault_owner;
 
 /// What editing keeps in memory, in [`AppState`]. Lock order everywhere: the DB, then `recent`;
@@ -740,7 +741,7 @@ pub async fn get_calendar_event_for_edit(
     event_id: String,
     device_zone: Option<String>,
 ) -> Result<EditLoad> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     // Optional: an event's times carry their own zones, so the editor can open without knowing this
     // computer's (its time controls are then off). Given, it has to be a real zone.
@@ -945,7 +946,7 @@ pub async fn update_calendar_event(
     notify: Option<Notify>,
     asked: Option<GuestNotice>,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let Some(open) = open_session(&state.calendar_edit, &session)? else {
@@ -2495,7 +2496,7 @@ async fn looked_after_transfer<W: Wire>(
 /// `moved`, Google's copy on `dest`. The row on its own calendar goes, remembered as removed at the
 /// version it had (a list that lags can't bring it back); Google's copy lands on `dest` as a new
 /// row, remembered as created (a list that lags can't take it off). Two landings, one per calendar,
-/// each telling the main window; the first retires any Undo of the row. The call goes with the
+/// each telling every window; the first retires any Undo of the row. The call goes with the
 /// event. The editor's session (`session`) ends: its row is gone.
 fn land_transferred(
     host: &impl Host,
@@ -2941,7 +2942,7 @@ pub async fn create_calendar_event(
     notify: Option<Notify>,
     asked: Option<GuestNotice>,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let target = match resolve_calendar(
@@ -3662,7 +3663,7 @@ pub async fn delete_calendar_event(
     notify: Option<Notify>,
     asked: Option<GuestNotice>,
 ) -> Result<DeleteStart> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let refused = |result| Ok(DeleteStart::Refused { result });
     let state = app.state::<AppState>();
@@ -3706,6 +3707,7 @@ pub async fn delete_calendar_event(
     if let Some(scope) = scope {
         return start_series_delete(
             app.clone(),
+            window.label().to_string(),
             target,
             event_id,
             seen,
@@ -3728,6 +3730,7 @@ pub async fn delete_calendar_event(
     let claim = flight.hand_off(&app);
     let undo_token = new_session_id();
     let undone = state.calendar_edit.held_deletes.hold(
+        window.label(),
         &undo_token,
         &event_id,
         &seen.summary,
@@ -3757,8 +3760,9 @@ pub async fn delete_calendar_event(
             &answer,
         )
         .await;
-        let _ = task_app.emit_to(
-            "main",
+        // To every window; only the one holding the token shows a notice (`settle` in
+        // useEventWrites.ts drops a token it doesn't hold).
+        let _ = task_app.emit(
             "calendar://delete-settled",
             DeleteSettled {
                 undo_token: token,
@@ -3783,7 +3787,7 @@ pub fn cancel_calendar_delete(
     window: tauri::Window,
     undo_token: String,
 ) -> Result<bool> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     Ok(app
         .state::<AppState>()
         .calendar_edit
@@ -3802,6 +3806,10 @@ pub(crate) struct HeldDeletes(Mutex<HashMap<String, Held>>);
 
 /// One held delete: how to undo it, and what a reloaded webview needs to show it again.
 struct Held {
+    /// The label of the window that asked for it. A delete's "Deleting …" notice and Undo belong to
+    /// that window alone, so a window that mounts or reloads is only handed its own (the other
+    /// window shows the result by re-reading the mirror when the delete lands).
+    owner: String,
     undo: tokio::sync::oneshot::Sender<()>,
     event_id: String,
     summary: String,
@@ -3813,10 +3821,12 @@ struct Held {
 }
 
 impl HeldDeletes {
-    /// Hold the delete of `event_id` under `token` until `until`; the receiver resolves when it is
-    /// undone (or abandoned).
+    /// Hold the delete of `event_id`, asked for by the window labelled `owner`, under `token` until
+    /// `until`; the receiver resolves when it is undone (or abandoned).
+    #[allow(clippy::too_many_arguments)]
     fn hold(
         &self,
+        owner: &str,
         token: &str,
         event_id: &str,
         summary: &str,
@@ -3831,6 +3841,7 @@ impl HeldDeletes {
             .insert(
                 token.to_string(),
                 Held {
+                    owner: owner.to_string(),
                     undo,
                     event_id: event_id.to_string(),
                     summary: summary.to_string(),
@@ -3865,14 +3876,17 @@ impl HeldDeletes {
         }
     }
 
-    /// The deletes still waiting, for a webview that reloaded: the oldest first, as they were made,
-    /// so the notices come back in that order and Ctrl+Z still undoes the newest.
-    fn list(&self) -> Vec<HeldDeleteInfo> {
+    /// The deletes `owner` still has waiting, for its webview that reloaded (or opened): the oldest
+    /// first, as they were made, so the notices come back in that order and Ctrl+Z still undoes the
+    /// newest. Another window's deletes are not listed: showing them here would put a second "Deleting
+    /// …" notice and Undo for one delete on screen.
+    fn list(&self, owner: &str) -> Vec<HeldDeleteInfo> {
         let Ok(held) = self.0.lock() else {
             return Vec::new();
         };
         let now = Instant::now();
-        let mut waiting: Vec<(&String, &Held)> = held.iter().collect();
+        let mut waiting: Vec<(&String, &Held)> =
+            held.iter().filter(|(_, h)| h.owner == owner).collect();
         waiting.sort_by_key(|(_, h)| h.until);
         waiting
             .into_iter()
@@ -3895,12 +3909,17 @@ impl CalendarEditState {
     }
 }
 
-/// The deletes still waiting for their Undo window to end, so a webview that reloaded can show them
-/// again (plan A15).
+/// The calling window's deletes still waiting for their Undo window to end, so a webview that
+/// reloaded can show them again (plan A15). Only the caller's own: the pop-out Calendar can edit too
+/// (2026-11-11), and a delete's notice and Undo show in the window that asked for it.
 #[tauri::command]
 pub fn list_held_deletes(app: AppHandle, window: tauri::Window) -> Result<Vec<HeldDeleteInfo>> {
-    require_main_window(&window)?;
-    Ok(app.state::<AppState>().calendar_edit.held_deletes.list())
+    require_calendar_window(&window)?;
+    Ok(app
+        .state::<AppState>()
+        .calendar_edit
+        .held_deletes
+        .list(window.label()))
 }
 
 /// Send a held delete: a fresh copy, the gate, the "is it still what you saw" rule, the guests it
@@ -4037,7 +4056,7 @@ pub async fn reschedule_calendar_event(
     notify: Option<Notify>,
     asked: Option<GuestNotice>,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let (target, editing_choice) = {
@@ -4336,7 +4355,7 @@ pub async fn undo_calendar_change(
     window: tauri::Window,
     undo_token: String,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let Some(target) = state.calendar_edit.undo_target(&undo_token, Instant::now()) else {
@@ -4433,7 +4452,7 @@ pub async fn respond_to_calendar_event(
     comment: Option<String>,
     scope: Option<RsvpScope>,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     // One lock for the row's target, its account's choice and the repeating event it's an occurrence
@@ -4914,7 +4933,7 @@ pub async fn series_choices(
     window: tauri::Window,
     request: ChoiceRequest,
 ) -> Result<SeriesChoices> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let (target, open) = match &request {
@@ -4995,7 +5014,7 @@ pub async fn get_series_summary(
     window: tauri::Window,
     event_id: String,
 ) -> Result<Option<String>> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     let state = app.state::<AppState>();
     let ask = {
         let conn = state.conn()?;
@@ -7082,6 +7101,7 @@ async fn send_held_series_delete<W: Wire, H: Host>(
 #[allow(clippy::too_many_arguments)]
 async fn start_series_delete(
     app: AppHandle,
+    owner: String,
     target: Target,
     event_id: String,
     seen: SeenSummary,
@@ -7109,6 +7129,7 @@ async fn start_series_delete(
     let claim = flight.hand_off(&app);
     let undo_token = new_session_id();
     let undone = app.state::<AppState>().calendar_edit.held_deletes.hold(
+        &owner,
         &undo_token,
         &event_id,
         &seen.summary,
@@ -7135,8 +7156,7 @@ async fn start_series_delete(
         if let Some(result) =
             finish_held_series_delete(&wire, &task_app, &target, &held, undone).await
         {
-            let _ = task_app.emit_to(
-                "main",
+            let _ = task_app.emit(
                 "calendar://delete-settled",
                 DeleteSettled {
                     undo_token: held.token.clone(),
@@ -7222,7 +7242,7 @@ pub async fn settle_series_split(
     token: String,
     action: SplitAction,
 ) -> Result<WriteOutcome> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let Some((target, _)) = state.calendar_edit.partial_claim(&token) else {
@@ -9138,7 +9158,7 @@ pub async fn dev_series_report(
     window: tauri::Window,
     event_id: String,
 ) -> Result<SeriesReport> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_owner(&app)?;
     let state = app.state::<AppState>();
     let (target, mirror) = {
@@ -9587,7 +9607,8 @@ trait Host: Sync {
     /// `f` on the open store, holding the (non-reentrant) DB lock for `f` only (L11).
     fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R>;
     fn edit(&self) -> &CalendarEditState;
-    /// The mirror changed: nudge the briefing and tell the main window. Called with no lock held.
+    /// The mirror changed: nudge the briefing and tell every window, so each open Calendar re-reads
+    /// (the main window and the pop-out both show events). Called with no lock held.
     fn landed(&self, calendar_id: &str);
     /// The mirror's part in a series write. Its window follows the clock, so the tests fix it here.
     fn mirror(&self, calendar_id: &str) -> Result<MirrorFacts> {
@@ -9633,8 +9654,10 @@ impl Host for AppHandle {
 
     fn landed(&self, calendar_id: &str) {
         briefing::nudge(&self.state::<AppState>());
-        let _ = self.emit_to(
-            "main",
+        // A plain `emit`: this used to be `emit_to("main", …)`, which only reached the pop-out
+        // because its listeners take the default any-target. Say what's meant, so a targeted
+        // listener can't quietly leave the pop-out showing the old events.
+        let _ = self.emit(
             "calendar://write-outcome",
             WriteLanded {
                 calendar_id: calendar_id.to_string(),
@@ -9647,13 +9670,13 @@ impl Host for AppHandle {
 /// A task whose deadline follows an event reads that event's date (PA-1), so a write that moved or
 /// removed one in the mirror, or a delete that settled, has the task views re-read too. Every view
 /// listens app-wide (the pinboard and project page as well as the calendar), so this is a plain
-/// `emit`, not `emit_to("main")`. Called with no lock held.
+/// `emit`, like the calendar's own events. Called with no lock held.
 fn tasks_changed(app: &AppHandle) {
     let _ = app.emit(crate::tasks::TASKS_CHANGED, ());
 }
 
-/// Write Google's copy into the mirror, remember it for the next sync, and tell the briefing and the
-/// main window.
+/// Write Google's copy into the mirror, remember it for the next sync, and tell the briefing and
+/// every window.
 fn land(
     host: &impl Host,
     target: &Target,
@@ -10304,14 +10327,14 @@ mod tests {
         let held = HeldDeletes::default();
         let until = Instant::now() + UNDO;
         let mut undone = held
-            .hold("a", "cal:a", "Dentist", Vec::new(), false, until)
+            .hold("main", "a", "cal:a", "Dentist", Vec::new(), false, until)
             .unwrap();
         assert!(held.cancel("a"), "still waiting, so undone");
         assert!(undone.try_recv().is_ok(), "the waiting task hears it");
         assert!(!held.take("a"), "so the wait's end doesn't send it");
 
         let _rx = held
-            .hold("b", "cal:b", "Gym", Vec::new(), false, until)
+            .hold("main", "b", "cal:b", "Gym", Vec::new(), false, until)
             .unwrap();
         assert!(held.take("b"), "the wait ended first: it goes to Google");
         assert!(!held.cancel("b"), "too late to undo");
@@ -10333,6 +10356,7 @@ mod tests {
             .rev()
             .map(|(i, token)| {
                 held.hold(
+                    "main",
                     token,
                     "cal:e",
                     "Event",
@@ -10343,8 +10367,109 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let listed: Vec<String> = held.list().into_iter().map(|h| h.undo_token).collect();
+        let listed: Vec<String> = held
+            .list("main")
+            .into_iter()
+            .map(|h| h.undo_token)
+            .collect();
         assert_eq!(listed, tokens);
+    }
+
+    /// The main window and the pop-out Calendar both edit (2026-11-11), and a delete's "Deleting …"
+    /// notice and Undo belong to the window that asked: a window that mounts or reloads is listed
+    /// only its own waiting deletes, so a delete held by the other window isn't shown (or undone,
+    /// or settled) a second time. Undo still reaches any held delete by its token.
+    #[test]
+    fn a_window_is_listed_only_the_deletes_it_asked_for() {
+        let held = HeldDeletes::default();
+        let popout = crate::popout::CALENDAR_LABEL;
+        let until = Instant::now() + UNDO;
+        let _a = held
+            .hold("main", "a", "cal:a", "Dentist", Vec::new(), false, until)
+            .unwrap();
+        let _b = held
+            .hold(popout, "b", "cal:b", "Gym", Vec::new(), false, until)
+            .unwrap();
+        let tokens = |owner: &str| -> Vec<String> {
+            held.list(owner).into_iter().map(|h| h.undo_token).collect()
+        };
+        assert_eq!(tokens("main"), ["a"]);
+        assert_eq!(tokens(popout), ["b"]);
+        assert!(tokens(crate::tray::BRIEFING_LABEL).is_empty());
+        assert!(held.cancel("a"), "its token still undoes it");
+        assert!(tokens("main").is_empty());
+        assert_eq!(tokens(popout), ["b"], "the other window's is untouched");
+    }
+
+    /// The pop-out Calendar re-reads on the same three events as the main window, so none of them
+    /// may be aimed at one window: `emit_to("main", …)` reached the pop-out only by the accident of
+    /// its listeners' default any-target. Read from the two files' own text (the C9b-1 C1-M8
+    /// precedent).
+    #[test]
+    fn calendar_events_go_to_every_window() {
+        let mut seen = 0;
+        for source in [
+            include_str!("calendar_edit.rs"),
+            include_str!("calendars.rs"),
+        ] {
+            let shipped = source
+                .split("#[cfg(test)]\nmod tests {")
+                .next()
+                .unwrap_or_default();
+            for event in [
+                "\"calendar://write-outcome\"",
+                "\"calendar://delete-settled\"",
+                "\"calendar://synced\"",
+            ] {
+                for (at, _) in shipped.match_indices(event) {
+                    seen += 1;
+                    let before = &shipped[..at];
+                    let call = &before[before.rfind("emit").expect("an emit names it")..];
+                    assert!(
+                        !call.starts_with("emit_to"),
+                        "{event} is for every window, not one: {call:?}"
+                    );
+                }
+            }
+        }
+        // Write-outcome once, delete-settled twice, synced once: a const in place of a literal
+        // would leave the loop above with nothing to check.
+        assert!(seen >= 4, "the emit sites went unread: {seen} found");
+    }
+
+    /// A delete is held for the window that asked, so its notice and Undo show there and nowhere
+    /// else. `HeldDeletes` is tested with hand-typed labels above; this pins that the three call
+    /// sites pass the caller's own (a constant "main" would pass every one of those tests).
+    #[test]
+    fn held_deletes_are_owned_by_the_asking_window() {
+        let source = include_str!("calendar_edit.rs");
+        let shipped = source
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or_default();
+        let body_of = |head: &str| {
+            let start = shipped.find(head).expect("the function");
+            let rest = &shipped[start..];
+            rest[..rest.find("\n}\n").unwrap_or(rest.len())].to_string()
+        };
+        let one_off = body_of("pub async fn delete_calendar_event(");
+        assert!(
+            one_off.contains("held_deletes.hold(\n        window.label(),"),
+            "a one-off delete is held under the asking window"
+        );
+        assert!(
+            one_off.contains("start_series_delete(\n            app.clone(),\n            window.label().to_string(),"),
+            "a scoped delete is started for the asking window"
+        );
+        assert!(
+            body_of("async fn start_series_delete(")
+                .contains("held_deletes.hold(\n        &owner,"),
+            "and held under it"
+        );
+        assert!(
+            body_of("pub fn list_held_deletes(").contains(".list(window.label())"),
+            "a reload recovers the asking window's own deletes only"
+        );
     }
 
     /// Quitting drops every waiting delete: each task wakes as undone, and none can be taken.
@@ -10353,14 +10478,14 @@ mod tests {
         let held = HeldDeletes::default();
         let until = Instant::now() + UNDO;
         let mut a = held
-            .hold("a", "cal:a", "Dentist", Vec::new(), false, until)
+            .hold("main", "a", "cal:a", "Dentist", Vec::new(), false, until)
             .unwrap();
         let _b = held
-            .hold("b", "cal:b", "Gym", Vec::new(), false, until)
+            .hold("main", "b", "cal:b", "Gym", Vec::new(), false, until)
             .unwrap();
-        assert_eq!(held.list().len(), 2);
+        assert_eq!(held.list("main").len(), 2);
         let listed = held
-            .list()
+            .list("main")
             .into_iter()
             .find(|h| h.undo_token == "a")
             .unwrap();
@@ -10375,7 +10500,7 @@ mod tests {
             "the sender is gone: the task's wait ends as undone"
         );
         assert!(!held.take("a") && !held.take("b"));
-        assert!(held.list().is_empty());
+        assert!(held.list("main").is_empty());
     }
 
     #[test]
@@ -19375,6 +19500,7 @@ mod tests {
         let hidden = vec!["cal:a".to_string(), "cal:b".to_string()];
         let _rx = held
             .hold(
+                "main",
                 "t",
                 "cal:a",
                 "Standup",
@@ -19383,8 +19509,8 @@ mod tests {
                 Instant::now() + UNDO,
             )
             .unwrap();
-        assert_eq!(held.list()[0].hidden, hidden);
-        assert!(!held.list()[0].removal);
+        assert_eq!(held.list("main")[0].hidden, hidden);
+        assert!(!held.list("main")[0].removal);
         assert!(held.cancel("t"));
         assert!(!held.take("t"), "undone, so never sent");
     }
@@ -19628,6 +19754,7 @@ mod tests {
             host.edit
                 .held_deletes
                 .hold(
+                    "main",
                     "t",
                     &target.row_id,
                     "Standup",
@@ -19678,7 +19805,7 @@ mod tests {
             Some(saved())
         );
         script.asked_all();
-        assert!(host.edit.held_deletes.list().is_empty());
+        assert!(host.edit.held_deletes.list("main").is_empty());
         assert!(host.ids().is_empty());
 
         // Editing turned off during the wait: the entry is taken all the same (a reloaded webview
@@ -19696,7 +19823,7 @@ mod tests {
             })
         );
         silent.asked_all();
-        assert!(host.edit.held_deletes.list().is_empty());
+        assert!(host.edit.held_deletes.list("main").is_empty());
         assert_eq!(host.ids(), ids_of(rows_of(&october())));
 
         // The wait over but its entry gone first (an Undo that got there, or PM quitting): nothing
@@ -23891,7 +24018,7 @@ mod tests {
         let shell = &shell[..shell.find("\n}\n").unwrap_or(shell.len())];
         let at = |needle: &str| shell.find(needle).unwrap_or(usize::MAX);
         assert!(
-            at("require_main_window(&window)?;") < at("require_owner(&app)?;")
+            at("require_calendar_window(&window)?;") < at("require_owner(&app)?;")
                 && at("require_owner(&app)?;") < at("state.conn()")
                 && at("state.conn()") < at("create_event(&ctx"),
             "the window and owner checks come before reading anything or sending"
@@ -24506,8 +24633,8 @@ mod tests {
         assert!(kept(edit).is_none(), "nor while a write holds the series");
     }
 
-    /// C9 design scope-L3: the summary is a read, so the main window only, with no owner check and
-    /// none of editing's gates. Read from this file's own text (the C9b-1 C1-M8 precedent).
+    /// C9 design scope-L3: the summary is a read, so the editing windows only, with no owner check
+    /// and none of editing's gates. Read from this file's own text (the C9b-1 C1-M8 precedent).
     #[test]
     fn the_summary_checks_the_window_and_not_the_owner() {
         let source = include_str!("calendar_edit.rs");
@@ -24521,8 +24648,8 @@ mod tests {
         let body = &shipped[at..];
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
         assert!(
-            body.contains("require_main_window(&window)?;"),
-            "the main window only"
+            body.contains("require_calendar_window(&window)?;"),
+            "the editing windows only"
         );
         assert!(
             !body.contains("require_owner") && !body.contains("require_vault_owner"),
@@ -26758,7 +26885,7 @@ mod tests {
         let shell = &shell[..shell.find("\n}\n").unwrap_or(shell.len())];
         let at = |needle: &str| shell.find(needle).unwrap_or(usize::MAX);
         assert!(
-            at("require_main_window(&window)?;") < at("require_owner(&app)?;")
+            at("require_calendar_window(&window)?;") < at("require_owner(&app)?;")
                 && at("require_owner(&app)?;") < at("state.conn()")
                 && at("let series = row_series(&conn, &event_id)?;") < at("editing_status(")
                 && at("editing_status(") < at("reply(\n"),
@@ -27419,16 +27546,16 @@ mod tests {
         let held = HeldDeletes::default();
         let until = Instant::now() + UNDO;
         let _a = held
-            .hold("a", "cal:a", "Dentist", Vec::new(), true, until)
+            .hold("main", "a", "cal:a", "Dentist", Vec::new(), true, until)
             .unwrap();
-        let listed = held.list();
+        let listed = held.list("main");
         assert!(listed[0].removal);
         let json = serde_json::to_value(&listed[0]).unwrap();
         assert_eq!(json["removal"], json!(true));
         let _b = held
-            .hold("b", "cal:b", "Gym", Vec::new(), false, until + UNDO)
+            .hold("main", "b", "cal:b", "Gym", Vec::new(), false, until + UNDO)
             .unwrap();
-        let listed = held.list();
+        let listed = held.list("main");
         assert!(!listed[1].removal);
         let json = serde_json::to_value(&listed[1]).unwrap();
         assert!(json.get("removal").is_none(), "left out for a delete");
