@@ -23,13 +23,19 @@
 //! reused), written, fsynced, renamed over the old one, then the folder fsynced. A crash leaves the
 //! old file or the new one, and a temp file the next write removes.
 //!
-//! **Reading** is tolerant. No file is "nothing seen". A file that won't parse or breaks a rule is
-//! logged and read as "nothing seen" too, so the floor is [`MIN_INDEX_SEQ`], never lower, and the
-//! next accepted index replaces it (its revocations come back with the first index that carries
-//! them, and every index after a rotation does). A cached pair that no longer verifies is dropped
-//! alone, keeping the seq and revocations, which only restrict. A file that can't be *read* (an I/O
-//! error, not a parse error) is never overwritten: a passing lock (an antivirus scan) must not
-//! turn into "nothing seen" on disk.
+//! **A second copy** ([`BACKUP_FILE`], written after every save with the same bytes) is what a
+//! damaged or unreadable main file falls back on, so a truncated copy, a lock or a downgrade can't
+//! make the machine forget its seq or a revoked key. The main file wins whenever it is whole.
+//!
+//! **Reading fails closed.** No file at all is a first run: nothing seen, the floor is
+//! [`MIN_INDEX_SEQ`]. A file that is there but can't be read, won't parse or breaks a rule is a
+//! *fault*: the backup copy stands in if it is whole, and if it isn't ([`Loaded::fault`]) no
+//! fetched index is taken at all ([`accept`] refuses with [`Stale::RecordUnusable`]), because
+//! "nothing seen" would let a replayed authentic index roll the seq back, switch a blacklisted mod
+//! on and trust a revoked key. The fix is to delete the file (the log line says so). A cached pair
+//! that no longer verifies is dropped alone, keeping the seq and revocations, which only restrict.
+//! A file that can't be *read* (an I/O error, not a parse error) is never overwritten: a passing
+//! lock (an antivirus scan) must not turn into "nothing seen" on disk.
 
 // The fetcher (slice 5's second part) and the restore commit are the callers; until they land,
 // only the tests are.
@@ -47,13 +53,15 @@ use serde::{Deserialize, Serialize};
 
 use super::disk::{self, failpoint, Step};
 use super::index::{
-    judge, parse_time, time_text, verify_index, IndexError, Seen, Verdict, VerifiedIndex,
+    judge, parse_time, time_text, verify_index, IndexError, Seen, Stale, Verdict, VerifiedIndex,
     INDEX_CAP, MAX_SEQ, MIN_INDEX_SEQ, SIGNATURE_CAP,
 };
 use super::keys::{KeyId, KeyRing};
 
 /// The file's name in `data_dir`.
 pub const STATE_FILE: &str = "mods-index.json";
+/// The copy of it a damaged main file falls back on (module doc).
+pub const BACKUP_FILE: &str = "mods-index.json.bak";
 const STATE_FORMAT: u32 = 1;
 /// Both cached files in base64, plus room for the rest.
 const STATE_CAP: usize = (INDEX_CAP + SIGNATURE_CAP) / 3 * 4 + (64 << 10);
@@ -137,11 +145,16 @@ pub struct Loaded {
     pub problem: Option<String>,
     /// The file is there but couldn't be read, so it mustn't be written over.
     pub unread: bool,
+    /// The record exists but is unusable (unreadable, damaged, or a format this PM doesn't read)
+    /// and nothing stands in for it: the seq and revoked keys are unknown, so `state` is empty and
+    /// no index may be taken against it ([`accept`]). Never set for "no file".
+    pub fault: bool,
 }
 
 fn nothing_seen(problem: String) -> Loaded {
     Loaded {
         problem: Some(problem),
+        fault: true,
         ..Loaded::default()
     }
 }
@@ -240,24 +253,70 @@ pub fn state_path(data_dir: &Path) -> PathBuf {
     data_dir.join(STATE_FILE)
 }
 
-/// Read the file (see the module doc for what each failure reads as). Logs a problem.
-pub fn load(data_dir: &Path, ring: &KeyRing) -> Loaded {
-    let loaded = match read_capped(&state_path(data_dir)) {
-        Ok(None) => Loaded::default(),
-        Ok(Some(bytes)) => interpret(&bytes, ring),
+pub fn backup_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(BACKUP_FILE)
+}
+
+/// One of the two files: `None` when there is no such file, else what it says (a fault included).
+fn read_one(path: &Path, ring: &KeyRing) -> Option<Loaded> {
+    match read_capped(path) {
+        Ok(None) => None,
+        Ok(Some(bytes)) => Some(interpret(&bytes, ring)),
         Err(e) if e.kind() == io::ErrorKind::FileTooLarge => {
-            nothing_seen("is too large to be PM's".into())
+            Some(nothing_seen("is too large to be PM's".into()))
         }
-        Err(e) => Loaded {
+        Err(e) => Some(Loaded {
             unread: true,
             ..nothing_seen(format!("couldn't be read ({e})"))
-        },
+        }),
+    }
+}
+
+/// Which of the two files' readings is the record (pure; module doc, "Reading fails closed"): the
+/// main file when it is whole; else the backup when that is; else, if either file exists, a fault;
+/// else a first run. A main file that is missing while the backup is whole is recovered from the
+/// backup too. `unread` stays set when the main file couldn't be read, so it isn't written over.
+fn choose(main: Option<Loaded>, backup: Option<Loaded>) -> Loaded {
+    if main.as_ref().is_some_and(|m| !m.fault) {
+        return main.unwrap_or_default();
+    }
+    match (main, backup) {
+        (main, Some(b)) if !b.fault => {
+            let (why, unread) = match main {
+                Some(m) => (m.problem.unwrap_or_default(), m.unread),
+                None => ("is missing".to_owned(), false),
+            };
+            Loaded {
+                problem: Some(format!("{why}; its backup copy was used")),
+                unread,
+                ..b
+            }
+        }
+        (None, None) => Loaded::default(),
+        (Some(m), _) => m,
+        (None, Some(b)) => b,
+    }
+}
+
+/// Read the record (see the module doc for what each failure reads as). Logs a problem.
+pub fn load(data_dir: &Path, ring: &KeyRing) -> Loaded {
+    let main = read_one(&state_path(data_dir), ring);
+    // The backup is read only when the main file isn't whole.
+    let backup = if main.as_ref().is_some_and(|m| !m.fault) {
+        None
+    } else {
+        read_one(&backup_path(data_dir), ring)
     };
+    let loaded = choose(main, backup);
     if let Some(problem) = &loaded.problem {
-        eprintln!(
-            "mods: {STATE_FILE} {problem}; the safety list floor is seq {} until an index is accepted",
-            loaded.state.floor()
-        );
+        let then = if loaded.fault {
+            format!(
+                "no index is taken until it is readable again (delete {STATE_FILE} and {BACKUP_FILE} in the data folder to start over)"
+            )
+        } else {
+            format!("the safety list floor is seq {}", loaded.state.floor())
+        };
+        eprintln!("mods: {STATE_FILE} {problem}; {then}");
     }
     loaded
 }
@@ -277,9 +336,17 @@ fn read_capped(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Write `state` atomically (module doc).
+/// Write `state` atomically (module doc), then the same bytes as the backup copy. The backup comes
+/// second so that a crash between the two leaves a whole main file and a backup one save behind,
+/// never a backup ahead of the main file it would be preferred to. A backup that can't be written
+/// is logged, not an error: the record itself is in place.
 pub fn save(data_dir: &Path, state: &IndexState) -> io::Result<()> {
-    write_atomic(data_dir, STATE_FILE, &encode(state)?)
+    let bytes = encode(state)?;
+    write_atomic(data_dir, STATE_FILE, &bytes)?;
+    if let Err(e) = write_atomic(data_dir, BACKUP_FILE, &bytes) {
+        eprintln!("mods: the backup copy of {STATE_FILE} wasn't written ({e})");
+    }
+    Ok(())
 }
 
 /// `.<name>.<16 hex>.tmp`: dot-named, so nothing takes it for PM data.
@@ -401,8 +468,9 @@ pub fn plan(
 pub struct Outcome {
     /// Refused at verification, or the acceptance verdict.
     pub verdict: Result<Verdict, IndexError>,
-    /// The index in force now: the one just taken, else the cached one. Its blacklist always
-    /// applies; its catalogue only while [`super::index::Index::current_at`] holds.
+    /// The index in force now: the one just taken, else the cached one (none when the record is
+    /// unusable, [`Stale::RecordUnusable`]). Its blacklist always applies; its catalogue only while
+    /// [`super::index::Index::current_at`] holds.
     pub current: Option<VerifiedIndex>,
     /// The state as it now stands.
     pub state: IndexState,
@@ -435,6 +503,16 @@ fn accept_with_minimum(
 ) -> Outcome {
     let _guard = STATE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let loaded = load(data_dir, ring);
+    if loaded.fault {
+        // Fail closed: with the seq and the revoked keys unknown, any authentic index (a replay
+        // included) would look new, so none is taken, written, or used for this run.
+        return Outcome {
+            verdict: Ok(Verdict::Refused(Stale::RecordUnusable)),
+            current: None,
+            state: loaded.state,
+            unsaved: None,
+        };
+    }
     let fetched = match verify_index(index, signature, &ring.trusted(&loaded.state.revoked)) {
         Ok(v) => v,
         Err(e) => {
@@ -700,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_file_reads_as_nothing_seen_with_the_floor_at_the_minimum() {
+    fn a_corrupt_file_reads_as_a_fault_with_nothing_seen() {
         let keys = Keys::new();
         let good: Value = serde_json::from_slice(&encode(&held_state(&keys)).unwrap()).unwrap();
         let broken = |change: &dyn Fn(&mut Value)| {
@@ -729,6 +807,7 @@ mod tests {
             assert!(loaded.problem.is_some(), "{what}");
             assert_eq!(loaded.state, IndexState::default(), "{what}");
             assert!(loaded.index.is_none() && !loaded.unread, "{what}");
+            assert!(loaded.fault, "{what}: nothing may be taken against it");
             assert_eq!(loaded.state.floor(), MIN_INDEX_SEQ, "{what}");
         }
     }
@@ -795,11 +874,16 @@ mod tests {
         };
         save(dir.path(), &next).unwrap();
         assert_eq!(load(dir.path(), &keys.ring()).state, next);
-        let names: Vec<String> = fs::read_dir(dir.path())
+        let mut names: Vec<String> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(names, [STATE_FILE]);
+        names.sort();
+        assert_eq!(names, [STATE_FILE, BACKUP_FILE]);
+        assert_eq!(
+            fs::read(state_path(dir.path())).unwrap(),
+            fs::read(backup_path(dir.path())).unwrap()
+        );
     }
 
     #[test]
@@ -825,10 +909,18 @@ mod tests {
             );
             assert_eq!(
                 fs::read_dir(dir.path()).unwrap().count(),
-                1,
-                "{step:?}: no temp file left"
+                2,
+                "{step:?}: the record and its backup, no temp file left"
             );
         }
+        // The backup's own write failing leaves the new record in place, and says nothing is wrong
+        // with the save.
+        fail_at(Some((Step::Write, 1)));
+        assert!(save(dir.path(), &new).is_ok());
+        fail_at(None);
+        assert_eq!(load(dir.path(), &keys.ring()).state, new);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        save(dir.path(), &old).unwrap();
         // A failed folder flush comes after the rename: the new file is in place, and the error
         // still says the write isn't known to be durable.
         fail_at(Some((Step::SyncDir, 0)));
@@ -882,9 +974,10 @@ mod tests {
             // Running as root: permissions can't make it unreadable here.
             return;
         }
+        // The backup copy stands in: the seq and the revocation are not forgotten.
         let loaded = load(dir.path(), &keys.ring());
-        assert!(loaded.unread && loaded.problem.is_some());
-        assert_eq!(loaded.state.floor(), MIN_INDEX_SEQ);
+        assert!(loaded.unread && loaded.problem.is_some() && !loaded.fault);
+        assert_eq!(loaded.state, state);
         let (bytes, sig) = signed(&good_index(5), &keys.rollover);
         let out = accept(
             dir.path(),
@@ -894,7 +987,7 @@ mod tests {
             t(NOW),
             Origin::Fetched,
         );
-        // Taken for this run, but the unreadable file is left alone.
+        // Judged against the backup and taken for this run, but the unreadable file is left alone.
         assert_eq!(
             out.verdict,
             Ok(Verdict::Newer {
@@ -904,18 +997,46 @@ mod tests {
         );
         assert!(out.unsaved.is_some());
         assert_eq!(out.current.unwrap().index.seq, 5);
+        let (old, old_sig) = signed(&good_index(2), &keys.rollover);
+        let replay = accept(
+            dir.path(),
+            &keys.ring(),
+            &old,
+            &old_sig,
+            t(NOW),
+            Origin::Fetched,
+        );
+        assert_eq!(
+            replay.verdict,
+            Ok(Verdict::Refused(Stale::Older { seq: 2, seen: 4 }))
+        );
+
+        // With no backup either, nothing is known: no index is taken, and the file is left alone.
+        fs::remove_file(backup_path(dir.path())).unwrap();
+        let loaded = load(dir.path(), &keys.ring());
+        assert!(loaded.unread && loaded.fault);
+        let out = accept(
+            dir.path(),
+            &keys.ring(),
+            &bytes,
+            &sig,
+            t(NOW),
+            Origin::Fetched,
+        );
+        assert_eq!(out.verdict, Ok(Verdict::Refused(Stale::RecordUnusable)));
+        assert!(out.current.is_none());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(load(dir.path(), &keys.ring()).state, state);
     }
 
     #[test]
-    fn an_oversized_file_reads_as_nothing_seen() {
+    fn an_oversized_file_is_a_fault() {
         let dir = scratch();
         let keys = Keys::new();
         let file = fs::File::create(state_path(dir.path())).unwrap();
         file.set_len(STATE_CAP as u64 + 1).unwrap();
         let loaded = load(dir.path(), &keys.ring());
-        assert!(loaded.problem.is_some() && !loaded.unread);
+        assert!(loaded.problem.is_some() && !loaded.unread && loaded.fault);
         assert_eq!(loaded.state, IndexState::default());
     }
 
@@ -1006,18 +1127,135 @@ mod tests {
         let dir = scratch();
         let keys = Keys::new();
         let ring = keys.ring();
-        fs::write(state_path(dir.path()), b"garbage").unwrap();
+        // No file: a first run, held to the release's minimum.
         let (bytes, sig) = signed(&good_index(4), &keys.main);
         let out = accept_with_minimum(dir.path(), &ring, &bytes, &sig, t(NOW), Origin::Fetched, 5);
         assert_eq!(
             out.verdict,
             Ok(Verdict::Refused(Stale::BelowMinimum { seq: 4, minimum: 5 }))
         );
-        // Refused, so the corrupt file is left for the next accepted index to replace.
-        assert_eq!(fs::read(state_path(dir.path())).unwrap(), b"garbage");
+        assert!(!state_path(dir.path()).exists());
         let (bytes, sig) = signed(&good_index(5), &keys.main);
         let out = accept_with_minimum(dir.path(), &ring, &bytes, &sig, t(NOW), Origin::Fetched, 5);
         assert!(out.verdict.unwrap().is_good());
         assert_eq!(load(dir.path(), &ring).state.seq, 5);
+    }
+
+    /// The replay a damaged record must not allow: seq 40 with the main key revoked, the file
+    /// damaged or unreadable, then an old authentic index (and one signed by the revoked key).
+    fn seq_40_with_main_revoked(dir: &Path, keys: &Keys) -> IndexState {
+        let mut rotated = rotation(keys, 40);
+        rotated["mods"] = json!([]);
+        let (bytes, sig) = signed(&rotated, &keys.rollover);
+        let out = accept(dir, &keys.ring(), &bytes, &sig, t(NOW), Origin::Fetched);
+        assert_eq!(out.unsaved, None);
+        out.state
+    }
+
+    #[test]
+    fn a_damaged_record_with_no_backup_takes_no_index_and_is_not_written_over() {
+        let keys = Keys::new();
+        let ring = keys.ring();
+        for damage in ["truncate", "format-2", "empty"] {
+            let dir = scratch();
+            seq_40_with_main_revoked(dir.path(), &keys);
+            fs::remove_file(backup_path(dir.path())).unwrap();
+            let bytes = fs::read(state_path(dir.path())).unwrap();
+            let damaged = match damage {
+                "truncate" => bytes[..bytes.len() / 2].to_vec(),
+                "format-2" => {
+                    let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+                    v["format"] = json!(2);
+                    serde_json::to_vec(&v).unwrap()
+                }
+                _ => b"".to_vec(),
+            };
+            fs::write(state_path(dir.path()), &damaged).unwrap();
+            assert!(load(dir.path(), &ring).fault, "{damage}");
+            // The older authentic index (seq 12), a newer one, and the revoked key's own.
+            for (index, key) in [
+                (good_index(12), &keys.rollover),
+                (good_index(41), &keys.rollover),
+                (good_index(99), &keys.main),
+            ] {
+                let (b, s) = signed(&index, key);
+                let out = accept(dir.path(), &ring, &b, &s, t(NOW), Origin::Fetched);
+                assert_eq!(
+                    out.verdict,
+                    Ok(Verdict::Refused(Stale::RecordUnusable)),
+                    "{damage}"
+                );
+                assert!(out.current.is_none() && out.unsaved.is_none(), "{damage}");
+            }
+            // Nothing was written: the damaged file is as it was, and no backup appeared.
+            assert_eq!(
+                fs::read(state_path(dir.path())).unwrap(),
+                damaged,
+                "{damage}"
+            );
+            assert!(!backup_path(dir.path()).exists(), "{damage}");
+            // Deleting the damaged file starts over, as the log line says.
+            fs::remove_file(state_path(dir.path())).unwrap();
+            let (b, s) = signed(&good_index(MIN_INDEX_SEQ.max(1)), &keys.rollover);
+            let out = accept(dir.path(), &ring, &b, &s, t(NOW), Origin::Fetched);
+            assert!(out.verdict.unwrap().is_good(), "{damage}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_main_file_falls_back_on_the_backup_so_nothing_is_forgotten() {
+        let keys = Keys::new();
+        let ring = keys.ring();
+        let dir = scratch();
+        let before = seq_40_with_main_revoked(dir.path(), &keys);
+        // The main file is truncated; the backup stands in with the seq, the revocation and the
+        // cached index, so the replay is judged against them.
+        let bytes = fs::read(state_path(dir.path())).unwrap();
+        fs::write(state_path(dir.path()), &bytes[..bytes.len() / 2]).unwrap();
+        let loaded = load(dir.path(), &ring);
+        assert!(!loaded.fault && loaded.problem.is_some());
+        assert_eq!(loaded.state, before);
+        assert_eq!(loaded.index.unwrap().index.seq, 40);
+        replay_is_refused_against_backup(dir.path(), &keys);
+        // A newer index is taken, and the main file is whole again (the backup is not stale).
+        let (b, s) = signed(&good_index(41), &keys.rollover);
+        let out = accept(dir.path(), &ring, &b, &s, t(NOW), Origin::Fetched);
+        assert!(out.verdict.unwrap().is_good());
+        let loaded = load(dir.path(), &ring);
+        assert_eq!((loaded.problem, loaded.state.seq), (None, 41));
+        assert_eq!(loaded.state.revoked, before.revoked);
+
+        // A missing main file with a whole backup is recovered the same way.
+        fs::remove_file(state_path(dir.path())).unwrap();
+        let loaded = load(dir.path(), &ring);
+        assert!(!loaded.fault && loaded.state.seq == 41 && !loaded.unread);
+        // Both files damaged: a fault.
+        fs::write(state_path(dir.path()), b"{").unwrap();
+        fs::write(backup_path(dir.path()), b"{").unwrap();
+        assert!(load(dir.path(), &ring).fault);
+        // A main file missing with a damaged backup: a fault too, not a first run.
+        fs::remove_file(state_path(dir.path())).unwrap();
+        assert!(load(dir.path(), &ring).fault);
+        // No file of either kind is a first run.
+        fs::remove_file(backup_path(dir.path())).unwrap();
+        let first = load(dir.path(), &ring);
+        assert!(!first.fault && first.problem.is_none());
+    }
+
+    fn replay_is_refused_against_backup(dir: &Path, keys: &Keys) {
+        let ring = keys.ring();
+        let (older, sig) = signed(&good_index(12), &keys.rollover);
+        let out = accept(dir, &ring, &older, &sig, t(NOW), Origin::Fetched);
+        assert_eq!(
+            out.verdict,
+            Ok(Verdict::Refused(Stale::Older { seq: 12, seen: 40 }))
+        );
+        assert_eq!(out.current.unwrap().index.seq, 40);
+        let (by_main, sig) = signed(&good_index(99), &keys.main);
+        let out = accept(dir, &ring, &by_main, &sig, t(NOW), Origin::Fetched);
+        assert_eq!(
+            out.verdict.unwrap_err().refusal,
+            index::IndexRefusal::UntrustedKey
+        );
     }
 }

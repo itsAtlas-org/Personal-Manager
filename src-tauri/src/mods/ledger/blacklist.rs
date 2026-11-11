@@ -213,8 +213,9 @@ fn reason_of(index: &Index, view: &RowView) -> String {
         .unwrap_or_default()
 }
 
-/// Pause an active row (or take over another pause or park) for the blacklist. Compare-and-set on
-/// the state and reason the plan read; `false` when the row changed since.
+/// Pause an active row (or take over a ledger park; [`super::safety::plan_row`] leaves another
+/// owner's pause or park alone) for the blacklist. Compare-and-set on the state and reason the
+/// plan read; `false` when the row changed since.
 fn pause_row(conn: &mut Connection, view: &RowView, at: &str) -> rusqlite::Result<bool> {
     let n = conn.execute(
         "UPDATE mods SET state = ?2, state_reason = ?3, updated_at = ?4 \

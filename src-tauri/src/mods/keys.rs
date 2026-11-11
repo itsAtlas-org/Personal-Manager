@@ -11,8 +11,9 @@
 //! key for indexes and packages alike. Nothing can revoke the rollover key (a leaked main key
 //! must not be able to lock the rollover out), and nothing un-revokes a key.
 //!
-//! The trusted set is the embedded keys minus the ids this machine has seen revoked
-//! ([`KeyRing::trusted`]), so every signature PM checks, a package's ([`super::package::verify`]
+//! The trusted set is the embedded keys minus the ids this machine has seen revoked and minus the
+//! ids the build itself lists ([`BUILD_REVOKED_KEY_IDS`], so a machine that never saw the rotation
+//! still refuses the key once it runs a release made after it) ([`KeyRing::trusted`]), so every signature PM checks, a package's ([`super::package::verify`]
 //! through the ledger's `install_package`) or the index's ([`super::index::verify_index`]), sees
 //! the same set.
 //!
@@ -68,6 +69,23 @@ pub const ATLAS_MOD_KEYS: [EmbeddedKey; 2] = [
         public: "RWSMTj4qFeA8maIDkSNH7pMwICiuA2PEmjQOEyAwn8PDXHA5ztfNy8qW",
     },
 ];
+
+/// Key ids this build refuses whatever any machine's record says: empty today. The per-machine
+/// record ([`super::index_state`]) only learns a revocation from an index it has seen, so a fresh
+/// install, a machine whose record was lost, or one an attacker keeps from the real index would
+/// otherwise trust a key that leaked before it arrived. The first release made after a rotation
+/// adds the revoked id here, so no PM from then on is ever without it. Only the main key can ever
+/// be listed: nothing revokes the rollover key (a test pins that).
+pub const BUILD_REVOKED_KEY_IDS: [&str; 0] = [];
+
+/// The build's revoked ids, parsed. An entry that doesn't parse is skipped here and caught by a
+/// test, never silently let through at build time.
+fn build_revoked() -> BTreeSet<KeyId> {
+    BUILD_REVOKED_KEY_IDS
+        .iter()
+        .filter_map(|s| KeyId::parse(s))
+        .collect()
+}
 
 /// The dev-build-only variable naming a test key (decision 9 of the 2026-11-11 plan).
 pub const DEV_TEST_KEY_VAR: &str = "PM_MODS_TEST_KEY";
@@ -170,12 +188,17 @@ impl KeyRing {
         Self { keys: held }
     }
 
-    /// The key-id gate: every held key whose id isn't revoked.
+    /// The key-id gate: every held key whose id isn't revoked, by this machine's record (`revoked`)
+    /// or by the build ([`BUILD_REVOKED_KEY_IDS`]).
     pub fn trusted(&self, revoked: &BTreeSet<KeyId>) -> TrustedKeys {
+        self.trusted_with(revoked, &build_revoked())
+    }
+
+    fn trusted_with(&self, revoked: &BTreeSet<KeyId>, built_in: &BTreeSet<KeyId>) -> TrustedKeys {
         let trusted: Vec<AtlasKey> = self
             .keys
             .iter()
-            .filter(|k| !revoked.contains(&k.id))
+            .filter(|k| !revoked.contains(&k.id) && !built_in.contains(&k.id))
             .cloned()
             .collect();
         TrustedKeys {
@@ -385,6 +408,35 @@ mod tests {
         assert!(decode_public(&B64.encode(&bin)).is_none());
         assert!(decode_public("not base64!").is_none());
         assert!(decode_public("").is_none());
+    }
+
+    /// A revocation the build carries holds on a machine with an empty record, and the list itself
+    /// can't lock out the rollover key or hold a malformed id.
+    #[test]
+    fn a_build_revoked_key_is_never_trusted_even_with_no_record() {
+        let ring = KeyRing::atlas(None);
+        let main = id("95B83457064D517B");
+        let rollover = id("993CE0152A3E4E8C");
+        let none = BTreeSet::new();
+        let after = ring.trusted_with(&none, &BTreeSet::from([main]));
+        assert!(!after.trusts(main) && after.trusts(rollover));
+        assert_eq!(after.role_of(main), Some(KeyRole::Main), "still known");
+        // Unioned with the record, never replaced by it.
+        let both = ring.trusted_with(&BTreeSet::from([rollover]), &BTreeSet::from([main]));
+        assert!(both.public_keys().is_empty());
+
+        // The list the build ships: every id parses, and the rollover key is never in it. (Today
+        // it is empty; the release after a rotation lists the main key's id.)
+        for s in BUILD_REVOKED_KEY_IDS {
+            let listed = KeyId::parse(s).expect("a malformed id would be skipped");
+            assert_ne!(listed, rollover, "nothing revokes the rollover key");
+        }
+        assert_eq!(build_revoked().len(), BUILD_REVOKED_KEY_IDS.len());
+        // `trusted` is `trusted_with` the build's list.
+        assert_eq!(
+            ring.trusted(&none).trusts(main),
+            !BUILD_REVOKED_KEY_IDS.contains(&"95B83457064D517B")
+        );
     }
 
     /// The gate: a revoked id leaves the trusted set and stays known; the rest are untouched.

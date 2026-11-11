@@ -18,8 +18,10 @@
 //!   index that lifts the entry resumes it, and a pre-release of the fix (below `fixedIn`, outside
 //!   the range) stays paused. An expired index never resumes anything: it is only trusted for what
 //!   it restricts.
-//! - A row another owner parked (a closed room) is left alone: it serves nothing, and the startup
-//!   [`ServeCheck`] holds it should its owner lift the park while the entry stands.
+//! - A row another owner parked (a closed room) or paused (the user, dev mode) is left alone: it
+//!   serves nothing, the owner's reason stays so its stop outlives the entry, and the startup
+//!   [`ServeCheck`] holds it should its owner lift the stop while the entry stands. (A removal
+//!   still takes any row.)
 //!
 //! **What an install must agree with.** Catalogue installs (decision 10): the index must be current
 //! (an expired one restricts, it doesn't install), list the id at exactly the package's version,
@@ -290,9 +292,14 @@ pub fn plan_row(row: &RowView, index: &Index, now: DateTime<Utc>) -> Action {
             reason: e.reason.clone(),
         },
         Some(e) => {
+            // Another owner's stop is theirs to lift. Taking it over would overwrite its reason, and
+            // when the entry lifted the row would resume to `active`, switching back on a mod the
+            // user (or dev mode) had paused. It serves nothing meanwhile, and the startup
+            // [`ServeCheck`] holds it should its owner lift the stop while the entry stands.
             let other_owners_park = row.state == store::STATE_PARKED
                 && !row.reason.as_deref().is_some_and(store::is_ledger_reason);
-            if row.blacklist_paused() || other_owners_park {
+            let other_owners_pause = row.state == store::STATE_PAUSED && !row.blacklist_paused();
+            if row.blacklist_paused() || other_owners_park || other_owners_pause {
                 Action::Keep
             } else {
                 Action::Pause {
@@ -721,11 +728,15 @@ pub(crate) mod tests {
                 fixed_in: Some("1.2.0".into())
             }
         );
-        // A row the user paused is the blacklist's from now on (it can't be resumed past it).
-        assert!(matches!(
-            plan_row(&row("paused", Some("user"), "1.1.0"), &index, now()),
-            Action::Pause { .. }
-        ));
+        // A row the user (or dev mode) paused stays theirs: the blacklist must not overwrite the
+        // reason, or lifting the entry would resume a mod they switched off.
+        for reason in [Some("user"), Some("dev-mode"), None] {
+            assert_eq!(
+                plan_row(&row("paused", reason, "1.1.0"), &index, now()),
+                Action::Keep,
+                "{reason:?}"
+            );
+        }
         // A row the ledger parked for its files is paused too.
         assert!(matches!(
             plan_row(

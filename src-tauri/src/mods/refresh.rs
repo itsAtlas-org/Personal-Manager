@@ -111,6 +111,13 @@ pub enum RefreshError {
     Fetch(FetchError),
     /// Something on this machine (the data folder).
     Local(String),
+    /// Both files came down but the pair wasn't taken: a signature that doesn't match the index (a
+    /// torn pair, from a republish caught between its two uploads or a CDN edge holding one new
+    /// file), an untrusted key, or an index that is stale, replayed or too old for this PM. The
+    /// cached index stayed in force and its pass ran. It counts as a failure for the schedule, so
+    /// the next try comes on the short back-off ([`fetch::delay_after`]) and a blacklist entry
+    /// published in that same republish isn't six hours late.
+    Refused(String),
 }
 
 impl RefreshError {
@@ -124,8 +131,21 @@ impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Fetch(e) => write!(f, "{e}"),
-            Self::Local(why) => f.write_str(why),
+            Self::Local(why) | Self::Refused(why) => f.write_str(why),
         }
+    }
+}
+
+/// Why `outcome` wasn't taken, `None` when it was (a newer index, or the same one again; pure).
+fn refusal(outcome: &Outcome) -> Option<RefreshError> {
+    match &outcome.verdict {
+        Err(refused) => Some(RefreshError::Refused(format!(
+            "the fetched safety list was refused: {refused}"
+        ))),
+        Ok(Verdict::Refused(why)) => Some(RefreshError::Refused(format!(
+            "the fetched safety list wasn't taken: {why}"
+        ))),
+        Ok(Verdict::Same { .. } | Verdict::Newer { .. }) => None,
     }
 }
 
@@ -143,8 +163,9 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
         .ok()
 }
 
-/// Fetch, accept, apply and update (module doc). `Ok` when the index was fetched, whatever the
-/// acceptance rules made of it: a refused index is a fetch that worked.
+/// Fetch, accept, apply and update (module doc). `Ok` when an index was taken (or the one held was
+/// fetched again). A pair that downloaded but wasn't taken is [`RefreshError::Refused`], returned
+/// after the index in force has been worked on, so the pass isn't lost and the retry is soon.
 pub async fn refresh_once(app: &AppHandle) -> Result<(), RefreshError> {
     // After "Remove PM completely" nothing may bring the data folder back.
     if crate::paths::data_dir_is_purged() {
@@ -169,18 +190,11 @@ pub async fn refresh_once(app: &AppHandle) -> Result<(), RefreshError> {
     else {
         return Ok(());
     };
-    match &outcome.verdict {
-        Err(refused) => eprintln!("mods: the fetched safety list was refused: {refused}"),
-        Ok(Verdict::Refused(why)) => {
-            eprintln!("mods: the fetched safety list wasn't taken: {why}");
-        }
-        Ok(_) => {}
+    let refused = refusal(&outcome);
+    if let Some(current) = outcome.current.as_ref() {
+        work_on(app, &transport, &endpoints, &outcome.state, current, now).await;
     }
-    let Some(current) = outcome.current.as_ref() else {
-        return Ok(());
-    };
-    work_on(app, &transport, &endpoints, &outcome.state, current, now).await;
-    Ok(())
+    refused.map_or(Ok(()), Err)
 }
 
 /// Steps 3 to 5 of a pass, for the index in force.
@@ -539,6 +553,78 @@ mod tests {
             5,
             "the newer one still applies"
         );
+    }
+
+    /// A pair that downloaded but wasn't taken is a failed pass for the schedule: the next try is
+    /// on the short back-off, not six hours away.
+    #[tokio::test]
+    async fn a_pair_that_wasnt_taken_is_retried_soon_not_in_six_hours() {
+        let keys = Keys::new();
+        let ring = keys.ring();
+        let dir = tempfile::tempdir().unwrap();
+        let launch = t("2027-01-15T10:00:00Z");
+        let run = |out: &Outcome, schedule: &mut Schedule| {
+            let ok = refusal(out).is_none();
+            schedule.record(launch, ok, 0);
+            ok
+        };
+
+        // Taken: the full wait.
+        let (five, five_sig) = signed(&good_index(5), &keys.main);
+        let taken = fetch_and_accept(&pair(&five, &five_sig), dir.path(), &ring)
+            .await
+            .unwrap();
+        let mut s = Schedule::default();
+        assert!(run(&taken, &mut s));
+        assert!(!s.due(launch + chrono::Duration::hours(5)));
+        // The same index again is a pass that worked.
+        let again = fetch_and_accept(&pair(&five, &five_sig), dir.path(), &ring)
+            .await
+            .unwrap();
+        assert!(refusal(&again).is_none());
+
+        // A torn pair: the new index with the old signature. Refused at the signature, and retried
+        // within minutes.
+        let (six, _) = signed(&good_index(6), &keys.main);
+        let torn = fetch_and_accept(&pair(&six, &five_sig), dir.path(), &ring)
+            .await
+            .unwrap();
+        assert!(torn.verdict.is_err());
+        let mut s = Schedule::default();
+        assert!(!run(&torn, &mut s));
+        assert!(s.due(launch + chrono::Duration::minutes(6)));
+        assert!(matches!(refusal(&torn), Some(RefreshError::Refused(_))));
+        assert!(!refusal(&torn).unwrap().is_quiet());
+
+        // A replay (an older authentic index), a forgery and a record that can't be used are
+        // failures too; the ones further failing back off in steps.
+        let (old, old_sig) = signed(&good_index(4), &keys.main);
+        let replay = fetch_and_accept(&pair(&old, &old_sig), dir.path(), &ring)
+            .await
+            .unwrap();
+        assert!(matches!(
+            replay.verdict,
+            Ok(Verdict::Refused(Stale::Older { .. }))
+        ));
+        let mut s = Schedule::default();
+        assert!(!run(&replay, &mut s));
+        assert!(s.due(launch + chrono::Duration::minutes(6)));
+        let stranger = Keys::new();
+        let (forged, forged_sig) = signed(&good_index(9), &stranger.main);
+        let forgery = fetch_and_accept(&pair(&forged, &forged_sig), dir.path(), &ring)
+            .await
+            .unwrap();
+        assert!(refusal(&forgery).is_some());
+        let damaged = tempfile::tempdir().unwrap();
+        std::fs::write(damaged.path().join(index_state::STATE_FILE), b"{").unwrap();
+        let unusable = fetch_and_accept(&pair(&five, &five_sig), damaged.path(), &ring)
+            .await
+            .unwrap();
+        assert!(matches!(
+            unusable.verdict,
+            Ok(Verdict::Refused(Stale::RecordUnusable))
+        ));
+        assert!(refusal(&unusable).is_some());
     }
 
     #[tokio::test]

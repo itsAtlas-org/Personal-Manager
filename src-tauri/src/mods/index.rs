@@ -776,11 +776,19 @@ pub enum Stale {
     Older { seq: u64, seen: u64 },
     /// The seen seq with other bytes: two indexes signed with one seq.
     Equivocation { seq: u64 },
+    /// Not a fault of the index: this machine's record of what it has seen
+    /// ([`super::index_state`]) is there but can't be read or trusted, and no backup copy stands
+    /// in for it. Without it the seq and the revoked keys are unknown, so no index is taken until
+    /// the record is readable again; [`judge`] never returns this.
+    RecordUnusable,
 }
 
 impl fmt::Display for Stale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RecordUnusable => f.write_str(
+                "this machine's record of the safety list can't be read, so no index is taken until it can",
+            ),
             Self::BelowMinimum { seq, minimum } => {
                 write!(f, "seq {seq} is below this PM's minimum, {minimum}")
             }

@@ -58,8 +58,10 @@ pub const REASON_BLACKLIST_REMOVED: &str = "blacklist-removed";
 /// dismissal removes its entry.
 pub const SETTING_RESUMED: &str = "mods_resumed";
 /// `settings` key: background updates that wait for approval (they ask for more than was
-/// granted), a JSON object keyed by mod id: `{version, sha256, widenings}`. Slice 6's "update
-/// waiting" reads it; an approved install or a newer update clears it.
+/// granted, or need a newer PM), a JSON object keyed by mod id, each value a
+/// [`super::ledger::Waiting`]: `{version, sha256, kind, widenings, needsApi}` (camelCase; `kind` is
+/// `approval` or `newer-pm`, which decides whether the strip asks for approval or says to update
+/// PM). Slice 6's "update waiting" reads it; an approved install or a newer update clears it.
 pub const SETTING_UPDATES_WAITING: &str = "mods_updates_waiting";
 
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from

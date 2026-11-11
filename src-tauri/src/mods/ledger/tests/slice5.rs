@@ -196,6 +196,12 @@ fn a_pause_the_index_lifts_resumes_and_a_users_own_pause_is_not_resumed() {
     w.exec("UPDATE mods SET state = 'paused', state_reason = 'user'");
     assert!(w.apply(&blacklist(vec![])).is_empty());
     assert_eq!(w.state(), state("paused", Some("user")));
+    // An entry that matches a row the user paused doesn't take it over: lifting the entry later
+    // must not switch the mod back on.
+    assert!(w.apply(&blacklist(vec![pause_of("*", None)])).is_empty());
+    assert_eq!(w.state(), state("paused", Some("user")));
+    assert!(w.apply(&blacklist(vec![])).is_empty());
+    assert_eq!(w.state(), state("paused", Some("user")));
 }
 
 #[test]
@@ -348,13 +354,14 @@ fn a_row_that_changed_since_the_plan_is_left_to_whoever_changed_it() {
     assert!(report.notices.is_empty() && report.failed.is_empty());
     assert_eq!(w.state(), state("paused", Some("user")));
     assert_eq!(w.served_from(), None, "and the mod is off all the same");
-    // The next pass takes it over.
+    // The next pass leaves it theirs: a pause is its owner's to lift, and the entry doesn't take
+    // it over (lifting the entry would then resume a mod the user switched off).
     *w.store.before_step.lock().unwrap() = None;
-    assert_eq!(
-        w.apply(&blacklist(vec![pause_of("*", None)])).notices.len(),
-        1
-    );
-    assert_eq!(w.state(), state("paused", Some("blacklist")));
+    assert!(w
+        .apply(&blacklist(vec![pause_of("*", None)]))
+        .notices
+        .is_empty());
+    assert_eq!(w.state(), state("paused", Some("user")));
 }
 
 #[test]
