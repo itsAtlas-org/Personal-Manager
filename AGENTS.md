@@ -140,7 +140,9 @@ release remain the open post-v1 work.
     stays in Rust), `cost.rs`, `applock.rs` / `lock_session.rs`, `components.rs` (the Storage
     manager), `sidecar.rs` / `python_fetch.rs`, `wipe.rs` (Remove-PM-data), `local_ai_switch.rs`
     (the Local AI switch, enforced in Rust), `tray.rs` / `popout.rs` (the briefing panel and
-    the pop-out Calendar windows).
+    the pop-out Calendar windows), `net_screen.rs` (the public-internet screen: an untrusted
+    URL's host is resolved, every address screened, and the survivors pinned onto the client;
+    calendar feeds use it, and a mod's `net.fetch` will).
   - **Mods** — `mods/` (the Mods spec). `engine.rs` seals the webview engine: the sinkhole proxy,
     the navigation guard, the init scripts and the per-engine switches, with no `crate::` path so
     the sealed-frame regression app can include it. `mod.rs` builds every window through

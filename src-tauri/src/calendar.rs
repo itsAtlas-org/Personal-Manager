@@ -24,7 +24,6 @@
 //! with [`apply_write_effect`].
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -33,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::calendar_history::{Band, Changed};
 use crate::calendar_history::{Held, HistoryState};
 use crate::error::{Error, Result};
+use crate::net_screen::{self, Refusal};
 use crate::{calendar_history, clock, db, google, ics, secrets};
 
 const CALENDAR_API: &str = "https://www.googleapis.com/calendar/v3";
@@ -836,15 +836,15 @@ pub async fn sync_feed(
     band: &Band,
     tz: chrono_tz::Tz,
 ) -> Result<(Vec<CalendarEvent>, bool)> {
-    // Re-validate at fetch time: a feed stored before this guard existed — or one
-    // whose host now resolves to a private address — must not be fetched.
+    // Re-validate at fetch time: a feed stored before this guard existed must not be fetched. A host
+    // that now resolves to a private address is refused by the first hop's screen below.
     validate_feed_url(&feed.url)?;
 
     // M-6: fetch the feed following any redirects OURSELVES, so every hop — the first request and each
-    // redirect target — is resolved, screened against the private/loopback block-list, and PINNED onto
-    // a single-hop client before we dial it. That makes the address we vetted the exact one reqwest
-    // connects to, with no automatic (and unpinned) redirect resolution in between; reqwest's own
-    // redirect following is therefore disabled. The URL is left unchanged so Host and TLS SNI stay
+    // redirect target — is resolved, screened by the public-internet screen (`net_screen`), and PINNED
+    // onto a single-hop client before we dial it. That makes the address we vetted the exact one
+    // reqwest connects to, with no automatic (and unpinned) redirect resolution in between; reqwest's
+    // own redirect following is therefore disabled. The URL is left unchanged so Host and TLS SNI stay
     // correct. Fail closed: an unresolvable or non-public hop is an error, never a silent skip.
     const MAX_REDIRECTS: usize = 5;
     let mut next_url = feed.url.clone();
@@ -862,7 +862,9 @@ pub async fn sync_feed(
             .ok_or_else(|| Error::Other("That calendar URL has no host.".into()))?
             .to_string();
         let port = parsed.port_or_known_default().unwrap_or(443);
-        let pinned = resolve_and_screen(&host, port)?;
+        let pinned = net_screen::resolve_and_screen(&host, port)
+            .await
+            .map_err(feed_refusal)?;
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -943,8 +945,13 @@ fn parse_window(
     Ok((at(time_min)?, at(time_max)?))
 }
 
-/// Validate a feed URL: it must be `https` and must not point at a private,
-/// loopback, link-local, or otherwise non-public host. Returns the normalized URL.
+/// Validate a feed URL: it must be `https`, and a literal-IP host must be public. Returns the
+/// normalized URL.
+///
+/// A NAME is not looked up here. [`sync_feed`] resolves, screens and pins every hop it fetches, and
+/// adding a feed syncs it before anything is saved, so a name that resolves privately is refused
+/// either way. A lookup here would only repeat that one, and block an async worker on `getaddrinfo`
+/// while it did.
 fn validate_feed_url(raw: &str) -> Result<String> {
     let url = reqwest::Url::parse(raw)
         .map_err(|_| Error::Other("Enter a calendar URL starting with https://".into()))?;
@@ -956,93 +963,23 @@ fn validate_feed_url(raw: &str) -> Result<String> {
     let host = url
         .host_str()
         .ok_or_else(|| Error::Other("That calendar URL has no host.".into()))?;
-    if host_is_blocked(host) {
-        return Err(Error::Other(
-            "That calendar URL points at a private or local address, which isn't allowed.".into(),
-        ));
+    if net_screen::literal_ip(host).is_some_and(net_screen::ip_is_blocked) {
+        return Err(feed_refusal(Refusal::NotPublic));
     }
     Ok(url.to_string())
 }
 
-/// Resolve `host` to concrete socket addresses and screen every one against the private/loopback/
-/// link-local block-list, returning the survivors (M-6). The fetch path pins these onto the client so
-/// the address the guard screened is the exact one reqwest dials — closing the add-time → fetch-time
-/// DNS-rebinding TOCTOU. A literal-IP host is screened directly. Unlike [`host_is_blocked`] (the lenient
-/// add-time guard), this is the strict fetch-time gate: an unresolvable host, or one where any resolved
-/// address is blocked, is an error.
-fn resolve_and_screen(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
-    let blocked = || {
-        Error::Other(
-            "That calendar URL points at a private or local address, which isn't allowed.".into(),
-        )
-    };
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        if ip_is_blocked(ip) {
-            return Err(blocked());
-        }
-        return Ok(vec![SocketAddr::new(ip, port)]);
-    }
-    let addrs: Vec<SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|_| Error::Other("Couldn't resolve that calendar URL's host.".into()))?
-        .collect();
-    if addrs.is_empty() {
-        return Err(Error::Other(
-            "Couldn't resolve that calendar URL's host.".into(),
-        ));
-    }
-    // Fail closed: if ANY resolved address is non-public, refuse the whole host — a rebinding resolver
-    // that returns one public + one private answer must not slip through on the private one.
-    if addrs.iter().any(|a| ip_is_blocked(a.ip())) {
-        return Err(blocked());
-    }
-    Ok(addrs)
-}
-
-/// True if `host` is — or resolves to — a non-public address. An unresolvable
-/// hostname is allowed here (the fetch will simply fail later); we don't want to
-/// reject a legitimate feed added while briefly offline. This is the lenient add-time PRE-check
-/// only — it blocks the common literal-IP targets and internal names that resolve privately so the
-/// user gets a fast, friendly error. The authoritative gate is the fetch path, which screens AND pins
-/// every hop (the first request and each redirect) via [`resolve_and_screen`] and fails closed — so
-/// this pre-check being lenient about an unresolvable host is safe.
-fn host_is_blocked(host: &str) -> bool {
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        return ip_is_blocked(ip);
-    }
-    match (host, 443u16).to_socket_addrs() {
-        Ok(addrs) => addrs.into_iter().any(|a| ip_is_blocked(a.ip())),
-        Err(_) => false,
-    }
-}
-
-fn ip_is_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => ipv4_blocked(v4),
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return ipv4_blocked(mapped);
+/// A feed's words for the public-internet screen's refusals.
+fn feed_refusal(refusal: Refusal) -> Error {
+    Error::Other(
+        match refusal {
+            Refusal::NotPublic => {
+                "That calendar URL points at a private or local address, which isn't allowed."
             }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00 // fc00::/7  unique-local
-                || (first & 0xffc0) == 0xfe80 // fe80::/10 link-local
+            Refusal::Unresolved => "Couldn't resolve that calendar URL's host.",
         }
-    }
-}
-
-fn ipv4_blocked(v4: Ipv4Addr) -> bool {
-    v4.is_private()
-        || v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || v4.is_documentation()
-        // 100.64.0.0/10 — carrier-grade NAT / shared address space.
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        .into(),
+    )
 }
 
 /// Read a response body into a `String`, but never buffer more than `max` bytes —
@@ -4085,39 +4022,64 @@ mod tests {
         assert!(validate_feed_url("https://[::1]/feed.ics").is_err());
         // A public literal IP over https is allowed (and needs no DNS lookup).
         assert!(validate_feed_url("https://93.184.216.34/feed.ics").is_ok());
-    }
-
-    #[test]
-    fn resolve_and_screen_pins_public_literals_and_rejects_private_ones() {
-        // A public literal IP is pinned to exactly that address:port (no DNS, no rebinding surface).
-        assert_eq!(
-            resolve_and_screen("93.184.216.34", 443).unwrap(),
-            vec![SocketAddr::new("93.184.216.34".parse().unwrap(), 443)]
-        );
-        // Private / loopback / link-local (cloud metadata) literals are refused (M-6, SSRF).
-        assert!(resolve_and_screen("127.0.0.1", 443).is_err());
-        assert!(resolve_and_screen("10.0.0.5", 443).is_err());
-        assert!(resolve_and_screen("169.254.169.254", 443).is_err());
-        assert!(resolve_and_screen("[::1]", 443).is_err());
-    }
-
-    #[test]
-    fn ip_blocklist_covers_the_usual_ranges() {
-        use std::net::Ipv6Addr;
-        for ip in [
-            "127.0.0.1",
-            "10.1.2.3",
-            "192.168.1.1",
-            "172.16.0.1",
-            "169.254.169.254",
-            "100.64.0.1",
-            "0.0.0.0",
+        assert!(validate_feed_url("https://[2606:4700:4700::1111]/feed.ics").is_ok());
+        // The ranges the shared screen gained (Mods spec §10, defect 7) reach feeds as well.
+        for url in [
+            "https://0.1.2.3/feed.ics",
+            "https://198.18.0.1/feed.ics",
+            "https://240.0.0.1/feed.ics",
+            "https://224.0.0.251/feed.ics",
+            "https://[64:ff9b::7f00:1]/feed.ics",
+            "https://[64:ff9b:1::808:808]/feed.ics",
+            "https://[2002:c0a8:101::1]/feed.ics",
+            "https://[fec0::1]/feed.ics",
+            "https://[ff02::1]/feed.ics",
+            "https://[::ffff:127.0.0.1]/feed.ics",
+            "https://[::10.0.0.1]/feed.ics",
         ] {
-            assert!(ip_is_blocked(ip.parse().unwrap()), "{ip} should be blocked");
+            assert_eq!(
+                validate_feed_url(url).unwrap_err().to_string(),
+                "That calendar URL points at a private or local address, which isn't allowed.",
+                "{url}"
+            );
         }
-        assert!(ip_is_blocked(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(!ip_is_blocked("8.8.8.8".parse().unwrap()));
-        assert!(!ip_is_blocked("93.184.216.34".parse().unwrap()));
+        // A NAME isn't looked up here: the fetch's screen judges it (next test).
+        assert!(validate_feed_url("https://localhost/feed.ics").is_ok());
+    }
+
+    #[test]
+    fn sync_feed_refuses_a_name_that_resolves_off_the_internet_before_dialling() {
+        // `validate_feed_url` no longer looks names up, so this is the gate `localhost` (from the
+        // hosts file, no DNS query) meets, in the words the add dialog has always shown.
+        let feed = IcsFeed {
+            id: "ics:0000000000000000".into(),
+            label: "Test".into(),
+            url: "https://localhost/feed.ics".into(),
+            provider: "other".into(),
+        };
+        let band = Band::through_live(chrono::Utc::now());
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(sync_feed(&feed, &band, chrono_tz::UTC))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "That calendar URL points at a private or local address, which isn't allowed."
+        );
+    }
+
+    #[test]
+    fn a_feed_words_both_screen_refusals_as_it_always_has() {
+        assert_eq!(
+            feed_refusal(Refusal::NotPublic).to_string(),
+            "That calendar URL points at a private or local address, which isn't allowed."
+        );
+        assert_eq!(
+            feed_refusal(Refusal::Unresolved).to_string(),
+            "Couldn't resolve that calendar URL's host."
+        );
     }
 
     fn upcoming(summary: &str) -> UpcomingEvent {

@@ -82,6 +82,8 @@ mod milestones;
 mod model_gateway;
 // Mods (spec docs/mods-spec-2026-11-04.md): so far the sealed webview engine every window is built with.
 mod mods;
+// The public-internet screen: calendar feeds now, a mod's `net.fetch` later.
+mod net_screen;
 mod oauth_loopback;
 mod onedrive;
 mod openai_compat;
