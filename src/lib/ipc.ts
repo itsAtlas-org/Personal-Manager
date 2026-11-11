@@ -2197,6 +2197,9 @@ export const modFrameOpen = (modId: string) => invoke<ModFrameOpened>("mod_frame
  *  ended session is fine. */
 export const modFrameClose = (session: string) => invoke<void>("mod_frame_close", { session });
 
-/** Relay one bridge call. The backend resolves the session to its mod; the frame never names one. */
-export const modCall = (session: string, method: string, args: unknown) =>
-  invoke<unknown>("mod_call", { session, method, args: args ?? null });
+/** Relay one bridge call: `args` is the JSON text the bridge measured, so the backend checks its size
+ *  before parsing it. The backend resolves the session to its mod (the frame never names one) and
+ *  always answers with a reply, `{kind: "value" | "page" | "error", …}`, which modBridge.ts reads;
+ *  every refusal comes back that way, with its `MOD-####` code. */
+export const modCall = (session: string, method: string, args: string) =>
+  invoke<unknown>("mod_call", { session, method, args });

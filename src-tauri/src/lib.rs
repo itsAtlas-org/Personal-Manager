@@ -146,7 +146,7 @@ mod wipe;
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -498,6 +498,12 @@ pub struct AppState {
     /// vault on a profile that hasn't unlocked it yet. Reach it via [`AppState::conn`],
     /// never by locking the mutex directly, so the locked case is handled uniformly.
     pub db: Mutex<Option<Connection>>,
+    /// Which store `db` holds: bumped by every swap of the connection ([`AppState::open_session`],
+    /// [`AppState::take_conn`]), always while `db`'s mutex is held, so a reader holding
+    /// [`AppState::conn`]'s guard reads the epoch of exactly the store it is using. A mod's frame
+    /// session is bound to the epoch it was opened under (`mods::runtime`), so a frame opened over
+    /// one vault's store never reads or writes another's (Mods spec §1.8).
+    store_epoch: AtomicU64,
     /// The active vault's Markdown dir + cipher, kept in lockstep with `db`: set
     /// together when the store opens, both `None` while locked. Reach it via
     /// [`AppState::markdown_io`].
@@ -704,6 +710,7 @@ impl AppState {
     ) -> Self {
         AppState {
             db: Mutex::new(db),
+            store_epoch: AtomicU64::new(0),
             vault: Mutex::new(vault),
             sidecar,
             app_unlocked: AtomicBool::new(false),
@@ -877,6 +884,9 @@ impl AppState {
                 .map_err(|_| error::Error::Other("vault lock poisoned".into()))?;
             *db = Some(conn);
             *vault = Some(runtime);
+            // Under `db`'s guard, so whoever holds the guard next sees the new store's epoch.
+            self.store_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The one choke point that heals fault state: every successful open path (retry,
         // unlock, adopt, repair, curtain take-over) lands here, so none can leave a stale
@@ -959,7 +969,16 @@ impl AppState {
             .db
             .lock()
             .map_err(|_| error::Error::Other("database lock poisoned".into()))?;
+        self.store_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(guard.take())
+    }
+
+    /// Which store is open: changes with every [`AppState::open_session`] and
+    /// [`AppState::take_conn`]. Read it while holding [`AppState::conn`]'s guard to know it is the
+    /// epoch of the store that guard reaches; read without it, it can only be stale, never ahead.
+    pub fn store_epoch(&self) -> u64 {
+        self.store_epoch.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Replace the active vault's Markdown runtime in place (the connection stays open).
@@ -1343,8 +1362,10 @@ pub fn run() {
             // to build from tauri.conf.json just before calling this hook: it's built here now, from
             // that same entry, with the navigation guard, the init scripts and the download refusal.
             // The mod runtime goes in before the window too: its guard and the scheme handler ask it.
+            // So do the mod API's call limits, which every `mod_call` reaches.
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
+            app.manage(mods::api::Calls::default());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;

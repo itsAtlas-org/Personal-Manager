@@ -419,15 +419,32 @@ pub fn app_lock_status_of(state: &AppState) -> Result<AppLockStatus> {
 /// Turn the soft app-lock on or off. Enabling is refused when the OS can't verify, so a
 /// user can't strand themselves behind a gate that will never open (e.g. no Hello
 /// enrolled, or macOS where it isn't implemented yet).
+///
+/// Turning it on can lock PM at once (`applock::should_lock`: on, and not verified this session), so
+/// every mod call already in flight is stopped (Mods spec §1.8): the frame sessions move to a new
+/// generation, and the dispatcher refuses their next calls while the lock holds.
 #[tauri::command]
-pub fn set_app_lock(state: State<'_, AppState>, enabled: bool) -> Result<()> {
+pub fn set_app_lock(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<()> {
     if enabled && !applock::available() {
         return Err(Error::Other(
             "this device can't perform a biometric/Windows Hello check, so the app-lock can't be enabled".into(),
         ));
     }
-    let conn = state.conn()?;
-    db::set_bool(&conn, APP_LOCK_ENABLED_KEY, enabled)
+    {
+        let conn = state.conn()?;
+        db::set_bool(&conn, APP_LOCK_ENABLED_KEY, enabled)?;
+    }
+    if enabled {
+        use tauri::Manager;
+        if let Some(runtime) = app.try_state::<crate::mods::runtime::ModRuntime>() {
+            runtime.bump_all();
+        }
+    }
+    Ok(())
 }
 
 fn current_model(conn: &Connection) -> Result<String> {

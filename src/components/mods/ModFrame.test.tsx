@@ -5,16 +5,25 @@
 //
 // ModFrame's contract (Mods spec §1.4): the sealed iframe and PM's band, one session per mount, a port
 // only for the frame PM mounted, calls relayed under PM's own session, a navigation ends the session,
-// heights clamped, and the session closed on unmount. jsdom loads nothing into the frame, so the tests
-// play the frame: they fire its `load` events, post its messages with the frame as `source`, and talk
-// to PM over the port PM hands it.
+// heights clamped, and the session closed on unmount; the backend's answers read as a value, a refusal
+// or a page action PM performs from its live theme; and a frame that floods has its port closed and
+// its session ended. jsdom loads nothing into the frame, so the tests play the frame: they fire its
+// `load` events, post its messages with the frame as `source`, and talk to PM over the port PM hands
+// it.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ModFrame, type ModTier } from "./ModFrame";
-import { MAX_FRAME_HEIGHT, MAX_IN_FLIGHT, MIN_FRAME_HEIGHT, PORT_MESSAGE } from "./modBridge";
+import {
+  FLOOD_BURST,
+  MAX_FRAME_HEIGHT,
+  MAX_IN_FLIGHT,
+  MIN_FRAME_HEIGHT,
+  MOD_ERRORS,
+  PORT_MESSAGE,
+} from "./modBridge";
 
 const modFrameOpen = vi.fn();
 const modFrameClose = vi.fn();
@@ -24,6 +33,23 @@ vi.mock("../../lib/ipc", () => ({
   modFrameOpen: (modId: string) => modFrameOpen(modId),
   modFrameClose: (session: string) => modFrameClose(session),
   modCall: (session: string, method: string, args: unknown) => modCall(session, method, args),
+}));
+
+// The theme a `theme.get` is answered from: the same stub the other component tests use (the real
+// ThemeProvider pulls in IPC), with the axes a mod is told about.
+const THEME = {
+  system: "slate",
+  mode: "dark",
+  modePref: "system",
+  modeSource: "system",
+  accent: "mono",
+  colorblind: false,
+  depth: "standard",
+  autoLocation: "",
+};
+vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useTheme: () => THEME,
 }));
 
 const ENTRY = "pmmod://localhost/acme.tool/app/index.html?entry=" + "a".repeat(64);
@@ -39,11 +65,13 @@ beforeEach(() => {
     return Promise.resolve({ entryUrl: ENTRY, session: `session-${n}` });
   });
   modFrameClose.mockResolvedValue(undefined);
-  modCall.mockResolvedValue({ answer: 42 });
+  modCall.mockResolvedValue({ kind: "value", value: { answer: 42 } });
 });
 
 afterEach(() => {
   cleanup();
+  // The clock a flood test held still, and the frame windows' spies.
+  vi.restoreAllMocks();
   for (const port of ports) port.close();
   ports = [];
 });
@@ -167,40 +195,180 @@ describe("ModFrame", () => {
       session: "someone-elses",
       modId: "atlas.map",
     });
-    expect(modCall).toHaveBeenCalledWith("session-1", "storage.get", { key: "x" });
+    // The backend gets the arguments as the JSON text PM measured, so it can cap them before parsing.
+    expect(modCall).toHaveBeenCalledWith("session-1", "storage.get", '{"key":"x"}');
     expect(answer).toEqual({ id: 7, ok: true, result: { answer: 42 } });
   });
 
-  it("passes the backend's refusal back to the frame", async () => {
-    modCall.mockRejectedValue("unknown method");
+  it("passes the backend's refusal back to the frame as its code and message", async () => {
+    modCall.mockResolvedValue({
+      kind: "error",
+      error: {
+        code: "MOD-4001",
+        message: "That value changed since it was read: read it again.",
+        revision: 3,
+        extra: "never passed on",
+      },
+    });
     mount();
     const { port } = connect(await theFrame());
-    expect(await ask(port, { id: 1, method: "nope.never", args: null })).toEqual({
+    expect(await ask(port, { id: 1, method: "storage.set", args: null })).toEqual({
       id: 1,
       ok: false,
-      error: "unknown method",
+      error: {
+        code: "MOD-4001",
+        message: "That value changed since it was read: read it again.",
+        revision: 3,
+      },
     });
+  });
+
+  it("answers its own failure, never what went wrong, when the backend or its answer breaks", async () => {
+    const internal = {
+      id: 1,
+      ok: false,
+      error: { code: MOD_ERRORS.internal, message: "PM couldn't complete that call." },
+    };
+    mount();
+    const { port } = connect(await theFrame());
+    // The IPC rejecting (its text is PM's), and answers that aren't in the reply shape.
+    modCall.mockRejectedValueOnce("sqlite: no such table at /home/someone/pm.db");
+    expect(await ask(port, { id: 1, method: "a.b" })).toEqual(internal);
+    for (const broken of [
+      { answer: 42 },
+      "text",
+      null,
+      { kind: "error", error: { code: "nope", message: "x" } },
+      { kind: "value" },
+    ]) {
+      modCall.mockResolvedValueOnce(broken);
+      expect(await ask(port, { id: 1, method: "a.b" })).toEqual(internal);
+    }
   });
 
   it("refuses a call it can't read, without reaching the backend", async () => {
     mount();
     const { port } = connect(await theFrame());
-    expect(await ask(port, { id: 2, method: "bad method!" })).toMatchObject({ id: 2, ok: false });
+    expect(await ask(port, { id: 2, method: "bad method!" })).toMatchObject({
+      id: 2,
+      ok: false,
+      error: { code: MOD_ERRORS.badArgs },
+    });
     expect(await ask(port, { id: 3, method: "x.y", args: 10n })).toMatchObject({
       id: 3,
       ok: false,
+      error: { code: MOD_ERRORS.badArgs },
     });
     expect(modCall).not.toHaveBeenCalled();
   });
 
-  it("refuses calls past the in-flight cap until earlier ones finish", async () => {
+  it("performs theme.get from PM's live theme once the backend has authorised it", async () => {
+    const root = document.documentElement;
+    root.style.setProperty("--bg", "oklch(0.2 0 0)");
+    root.style.setProperty("--ink", "oklch(0.9 0 0)");
+    // Not a custom property: never part of the answer.
+    root.style.setProperty("color-scheme", "dark");
+    modCall.mockResolvedValue({ kind: "page", action: "theme.get", args: null });
+    mount();
+    const { port } = connect(await theFrame());
+    const answer = (await ask(port, { id: 1, method: "theme.get" })) as {
+      ok: boolean;
+      result: { vars: Record<string, string> };
+    };
+    expect(answer.ok).toBe(true);
+    expect(answer.result).toEqual({
+      vars: { "--bg": "oklch(0.2 0 0)", "--ink": "oklch(0.9 0 0)" },
+      mode: "dark",
+      system: "slate",
+      accent: "mono",
+      colorblind: false,
+      depth: "standard",
+    });
+    root.removeAttribute("style");
+  });
+
+  it("never performs a page action it doesn't know, whatever the answer asks for", async () => {
+    modCall.mockResolvedValue({ kind: "page", action: "ui.openDocument", args: { id: 1 } });
+    mount();
+    const { port } = connect(await theFrame());
+    expect(await ask(port, { id: 1, method: "x.y" })).toEqual({
+      id: 1,
+      ok: false,
+      error: { code: MOD_ERRORS.unknownMethod, message: "PM has no call by that name." },
+    });
+  });
+
+  /** A frame that outran PM's page: the port is closed, the session ended, and PM says so where the
+   *  frame was. Nothing it sends afterwards reaches the backend. */
+  async function expectStopped(port: MessagePort, callsBefore: number) {
+    await waitFor(() => expect(frameNow()).toBeNull());
+    expect(modFrameClose).toHaveBeenCalledTimes(1);
+    expect(modFrameClose).toHaveBeenCalledWith("session-1");
+    expect(screen.getByRole("status").textContent).toBe(
+      "This mod sent PM too many requests at once and was stopped.",
+    );
+    port.postMessage({ id: 5000, method: "a.b" });
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(modCall).toHaveBeenCalledTimes(callsBefore);
+    // Unmounting later doesn't end it twice.
+    cleanup();
+    expect(modFrameClose).toHaveBeenCalledTimes(1);
+  }
+
+  it("stops a frame at its 33rd call in flight: the port closes and the session ends", async () => {
     modCall.mockImplementation(() => new Promise(() => {}));
     mount();
     const { port } = connect(await theFrame());
     for (let id = 0; id < MAX_IN_FLIGHT; id += 1) port.postMessage({ id, method: "a.b" });
-    const answer = await ask(port, { id: 999, method: "a.b" });
-    expect(answer).toEqual({ id: 999, ok: false, error: "Too many calls at once." });
-    expect(modCall).toHaveBeenCalledTimes(MAX_IN_FLIGHT);
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(MAX_IN_FLIGHT));
+    // The 32nd was fine: the frame is still there.
+    expect(frameNow()).not.toBeNull();
+    expect(modFrameClose).not.toHaveBeenCalled();
+    port.postMessage({ id: 999, method: "a.b" });
+    await expectStopped(port, MAX_IN_FLIGHT);
+  });
+
+  it("lets calls through again as earlier ones finish", async () => {
+    const waiting: Array<() => void> = [];
+    modCall.mockImplementation(
+      () => new Promise((resolve) => waiting.push(() => resolve({ kind: "value", value: 1 }))),
+    );
+    mount();
+    const { port } = connect(await theFrame());
+    for (let id = 0; id < MAX_IN_FLIGHT; id += 1) port.postMessage({ id, method: "a.b" });
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(MAX_IN_FLIGHT));
+    await act(async () => {
+      waiting.shift()!();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    port.postMessage({ id: 100, method: "a.b" });
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(MAX_IN_FLIGHT + 1));
+    expect(frameNow()).not.toBeNull();
+    expect(modFrameClose).not.toHaveBeenCalled();
+  });
+
+  it("stops a frame that bursts well past the backend's rate, even when every call finishes", async () => {
+    // Time held still, so the burst is measured against the bucket alone.
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    mount();
+    const { port } = connect(await theFrame());
+    for (let id = 0; id < FLOOD_BURST; id += 1) {
+      // Answered at once: never more than a few in flight, so only the rate can stop it.
+      port.postMessage({ id, method: "a.b" });
+      if (id % 8 === 7) await act(() => new Promise((r) => setTimeout(r, 0)));
+    }
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(FLOOD_BURST));
+    expect(frameNow()).not.toBeNull();
+    port.postMessage({ id: 5001, method: "a.b" });
+    await expectStopped(port, FLOOD_BURST);
+  });
+
+  it("counts the calls PM refuses itself against the same flood line", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    mount();
+    const { port } = connect(await theFrame());
+    for (let id = 0; id < FLOOD_BURST + 1; id += 1) port.postMessage({ id, method: "bad method!" });
+    await expectStopped(port, 0);
   });
 
   it("clamps a height request, and ignores one that isn't a number", async () => {

@@ -10,6 +10,8 @@
 //! - [`ids`]: the mod id grammar and the trust tiers. [`package`]: the `.pmmod` verifier.
 //! - [`runtime`]: the installed-mod registry, the one-time entry URLs and the frame sessions, and
 //!   the serve decision. This file's three commands are its IPC surface.
+//! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
+//!   the handlers; `mod_call` hands it each call.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
@@ -40,6 +42,7 @@
 //! gives each the app's local data folder), so every window is built with PM's environment, or,
 //! when the main window couldn't be, every window without it.
 
+pub mod api;
 pub mod disk;
 pub mod engine;
 pub mod headers;
@@ -204,8 +207,8 @@ impl EngineState {
     }
 
     /// Whether every switch the engine depends on took. Until the main window has been built and
-    /// sealed, it hasn't: unsealed is the starting state.
-    #[allow(dead_code)] // read by the grant check (spec §1.4 item 3, a later slice); the tests read it today
+    /// sealed, it hasn't: unsealed is the starting state. The grant check reads it (spec §1.4 item
+    /// 3): no read-class grant for an unsigned mod while it is false (`api::permissions`).
     pub fn engine_sealed(&self) -> bool {
         self.verdict().sealed
     }
@@ -568,17 +571,19 @@ fn main_only_label(label: &str) -> Result<()> {
     }
 }
 
-/// Mint a one-time entry URL for a mod's frame and the session its bridge calls under.
+/// Mint a one-time entry URL for a mod's frame and the session its bridge calls under, bound to the
+/// store open now: its calls reach that store or none (`runtime`, "A call is current").
 #[tauri::command]
 pub fn mod_frame_open(
     webview: Webview,
     runtime: State<'_, ModRuntime>,
+    state: State<'_, crate::AppState>,
     mod_id: String,
 ) -> Result<FrameOpened> {
     main_only(&webview)?;
     let id = ModId::parse(&mod_id).map_err(|e| Error::Other(e.to_string()))?;
     runtime
-        .open_frame(&id)
+        .open_frame_in(&id, state.store_epoch())
         .map_err(|e| Error::Other(e.to_string()))
 }
 
@@ -594,20 +599,22 @@ pub fn mod_frame_close(
     Ok(())
 }
 
-/// One call from a mod's frame, relayed by PM's page. The mod is the session's, never anything the
-/// frame said.
+/// One call from a mod's frame, relayed by PM's page, answered by the dispatcher (`api`). The mod is
+/// the session's, never anything the frame said. `args` is the JSON text the page measured, so the
+/// cap is checked before it is parsed. Async, so no call runs on the main thread; every refusal
+/// comes back as an `api::Reply::Error` with its `MOD-####` code, the main-window check included.
 #[tauri::command]
-pub fn mod_call(
+pub async fn mod_call(
     webview: Webview,
-    runtime: State<'_, ModRuntime>,
     session: String,
     method: String,
-    args: serde_json::Value,
-) -> Result<serde_json::Value> {
-    main_only(&webview)?;
-    runtime
-        .call(&session, &method, &args)
-        .map_err(|e| Error::Other(e.to_string()))
+    args: String,
+) -> api::Reply {
+    let caller = api::Caller::Frame {
+        window: webview.label().to_owned(),
+        session,
+    };
+    api::dispatch(webview.app_handle(), caller, &method, &args).await
 }
 
 /// Apply the engine switches to a freshly built window and settle what took

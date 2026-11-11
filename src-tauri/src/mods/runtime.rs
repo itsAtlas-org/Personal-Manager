@@ -30,6 +30,14 @@
 //! - Main's page loading again (a reload): every ticket and session goes ([`ModRuntime::close_all`]),
 //!   since the page that held them is gone and its ModFrames never ran their cleanup.
 //!
+//! **A call is current** (the dispatcher's question, `mods::api`) while its session is still open,
+//! still live, and still at the generation the call began under ([`CallTicket`]). Every event that
+//! must stop a call already in flight ends or bumps it: the app lock bumps every session
+//! ([`ModRuntime::bump_all`]); a pause ([`ModRuntime::pause`]), an uninstall or a reinstall ends that
+//! mod's; a closed or curtained store ends them all (the ledger empties the registry); a reload ends
+//! them all. A session is also bound to the store that was open when it was minted (`AppState`'s
+//! store epoch), so a frame opened over one store never reads or writes another.
+//!
 //! **Serving is bounded.** Each request reads and hashes its whole file, so at most
 //! [`MAX_SERVING`] are read at once and [`MAX_WAITING`] more wait their turn ([`ServeGate`]); past
 //! that a request is refused with a 503.
@@ -115,11 +123,11 @@ impl ServeGate {
 pub enum FrameError {
     NotInstalled,
     TooManyFrames,
-    /// The session was closed, never existed, or expired before its frame loaded.
+    /// The session was closed, never existed, expired before its frame loaded, or (for a call in
+    /// flight) moved to a later generation.
     ClosedOrUnknown,
     /// The session's frame hasn't loaded its entry page yet.
     NotReady,
-    UnknownMethod,
     Random,
 }
 
@@ -130,10 +138,21 @@ impl std::fmt::Display for FrameError {
             Self::TooManyFrames => "Too many mod frames are opening at once.",
             Self::ClosedOrUnknown => "That mod session has ended.",
             Self::NotReady => "That mod hasn't finished loading.",
-            Self::UnknownMethod => "unknown method",
             Self::Random => "PM couldn't make a random token.",
         })
     }
+}
+
+/// What a call holds from the moment its session is resolved: which mod it is (PM's own record,
+/// never anything the frame said), the session's generation then, and the store the session was
+/// opened over. [`ModRuntime::still_current`] answers whether it may go on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTicket {
+    pub session: String,
+    pub mod_id: ModId,
+    generation: u64,
+    /// `AppState::store_epoch` when the session was minted.
+    pub store_epoch: u64,
 }
 
 /// What ModFrame gets: the URL its iframe loads once, and the session its bridge calls under.
@@ -219,6 +238,12 @@ enum SessionState {
 struct Session {
     mod_id: ModId,
     state: SessionState,
+    /// Changed by every bump ([`ModRuntime::bump_all`]); a call that began under another value is
+    /// no longer current. Drawn from [`Inner::last_generation`], so no two sessions, and no session
+    /// before and after a bump, ever share one.
+    generation: u64,
+    /// The store this session may reach (`AppState::store_epoch` when it was minted).
+    store_epoch: u64,
 }
 
 #[derive(Default)]
@@ -226,9 +251,16 @@ struct Inner {
     installed: HashMap<ModId, Arc<InstalledMod>>,
     tickets: HashMap<String, Ticket>,
     sessions: HashMap<String, Session>,
+    /// The last generation handed out.
+    last_generation: u64,
 }
 
 impl Inner {
+    fn next_generation(&mut self) -> u64 {
+        self.last_generation += 1;
+        self.last_generation
+    }
+
     fn sweep(&mut self, now: Instant) {
         self.tickets.retain(|_, t| t.expires > now);
         self.sessions.retain(|_, s| match &s.state {
@@ -360,11 +392,47 @@ impl ModRuntime {
         inner.drop_mod(id);
     }
 
-    pub fn open_frame(&self, id: &ModId) -> Result<FrameOpened, FrameError> {
-        self.open_frame_at(id, Instant::now())
+    /// A mod was paused or parked (its row is no longer active): stop serving it and end every
+    /// session it has, so a call in flight commits nothing (spec §1.8). The writer of the pause
+    /// calls this after its row commits; until it does, the dispatcher's own read of the row
+    /// already refuses new calls and every commit.
+    #[cfg_attr(not(test), allow(dead_code))] // the blacklist's pause (slice 5), the user's (slice 6)
+    pub fn pause(&self, id: &ModId) {
+        self.uninstall(id);
     }
 
-    fn open_frame_at(&self, id: &ModId, now: Instant) -> Result<FrameOpened, FrameError> {
+    /// Move every session to a new generation, so no call already in flight may go on: the app was
+    /// locked (`settings::set_app_lock`). The sessions themselves stay; their next calls meet the
+    /// lock check first.
+    pub fn bump_all(&self) {
+        let mut inner = self.lock();
+        let ids: Vec<String> = inner.sessions.keys().cloned().collect();
+        for id in ids {
+            let next = inner.next_generation();
+            if let Some(session) = inner.sessions.get_mut(&id) {
+                session.generation = next;
+            }
+        }
+    }
+
+    /// [`ModRuntime::open_frame_in`] over store epoch 0, for tests that never swap a store.
+    #[cfg(test)]
+    pub fn open_frame(&self, id: &ModId) -> Result<FrameOpened, FrameError> {
+        self.open_frame_at(id, Instant::now(), 0)
+    }
+
+    /// Mint an entry URL and a session for `id`, bound to the store open now (`store_epoch`, read
+    /// from `AppState::store_epoch` by `mod_frame_open`): its calls reach that store or none.
+    pub fn open_frame_in(&self, id: &ModId, store_epoch: u64) -> Result<FrameOpened, FrameError> {
+        self.open_frame_at(id, Instant::now(), store_epoch)
+    }
+
+    fn open_frame_at(
+        &self,
+        id: &ModId,
+        now: Instant,
+        store_epoch: u64,
+    ) -> Result<FrameOpened, FrameError> {
         let token = random_hex(TOKEN_BYTES)?;
         let session = random_hex(SESSION_BYTES)?;
         let mut inner = self.lock();
@@ -388,6 +456,7 @@ impl ModRuntime {
                 expires,
             },
         );
+        let generation = inner.next_generation();
         inner.sessions.insert(
             session.clone(),
             Session {
@@ -396,6 +465,8 @@ impl ModRuntime {
                     token: token.clone(),
                     expires,
                 },
+                generation,
+                store_epoch,
             },
         );
         Ok(FrameOpened {
@@ -445,35 +516,63 @@ impl ModRuntime {
         }
     }
 
-    /// The mod a live session belongs to: PM's own record, never anything the frame said.
+    /// The mod a live session belongs to: PM's own record, never anything the frame said. (The
+    /// dispatcher asks [`Self::begin_call`], which says the same and more.)
+    #[cfg(test)]
     pub fn session_mod(&self, session: &str) -> Result<ModId, FrameError> {
         self.session_mod_at(session, Instant::now())
     }
 
+    #[cfg(test)]
     fn session_mod_at(&self, session: &str, now: Instant) -> Result<ModId, FrameError> {
+        self.begin_call_at(session, now).map(|ticket| ticket.mod_id)
+    }
+
+    /// Begin a bridge call under `session`: only a live session, resolved to its mod by PM's own
+    /// record. The ticket carries the session's generation and store, for [`Self::still_current`].
+    pub fn begin_call(&self, session: &str) -> Result<CallTicket, FrameError> {
+        self.begin_call_at(session, Instant::now())
+    }
+
+    fn begin_call_at(&self, session: &str, now: Instant) -> Result<CallTicket, FrameError> {
         let mut inner = self.lock();
         inner.sweep(now);
         match inner.sessions.get(session) {
             Some(Session {
                 mod_id,
                 state: SessionState::Live,
-            }) => Ok(mod_id.clone()),
+                generation,
+                store_epoch,
+            }) => Ok(CallTicket {
+                session: session.to_owned(),
+                mod_id: mod_id.clone(),
+                generation: *generation,
+                store_epoch: *store_epoch,
+            }),
             Some(_) => Err(FrameError::NotReady),
             None => Err(FrameError::ClosedOrUnknown),
         }
     }
 
-    /// A bridge call. The session is resolved to its mod first; the dispatcher (slice 4) then
-    /// answers. Until it exists, every method is unknown.
-    pub fn call(
-        &self,
-        session: &str,
-        method: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value, FrameError> {
-        let _mod_id = self.session_mod(session)?;
-        let _ = (method, args);
-        Err(FrameError::UnknownMethod)
+    /// Whether a call begun with `ticket` may go on: its session is still open and live, for the
+    /// same mod, at the same generation. The dispatcher asks after every `.await` and immediately
+    /// before any commit.
+    pub fn still_current(&self, ticket: &CallTicket) -> Result<(), FrameError> {
+        let inner = self.lock();
+        match inner.sessions.get(&ticket.session) {
+            Some(Session {
+                mod_id,
+                state: SessionState::Live,
+                generation,
+                store_epoch,
+            }) if *mod_id == ticket.mod_id
+                && *generation == ticket.generation
+                && *store_epoch == ticket.store_epoch =>
+            {
+                Ok(())
+            }
+            _ => Err(FrameError::ClosedOrUnknown),
+        }
     }
 
     /// Answer one `pmmod` request from the webview labelled `label`.
@@ -922,7 +1021,7 @@ mod tests {
             Err(FrameError::ClosedOrUnknown)
         );
         assert_eq!(
-            rt.call(&opened.session, "projects.list", &serde_json::Value::Null),
+            rt.begin_call(&opened.session),
             Err(FrameError::ClosedOrUnknown)
         );
         // Closed after loading, too.
@@ -940,20 +1039,89 @@ mod tests {
     }
 
     #[test]
-    fn a_call_resolves_its_session_first_and_every_method_is_unknown_for_now() {
+    fn a_call_begins_only_under_a_live_session_and_carries_its_mod_and_store() {
         let s = setup(Platform::Linux);
         let rt = &s.runtime;
-        let opened = rt.open_frame(&id("atlas.map")).unwrap();
-        let args = serde_json::json!({});
-        assert_eq!(
-            rt.call(&opened.session, "projects.list", &args),
-            Err(FrameError::NotReady)
-        );
+        let opened = rt.open_frame_in(&id("atlas.map"), 7).unwrap();
+        assert_eq!(rt.begin_call(&opened.session), Err(FrameError::NotReady));
         assert!(is_document(&get(rt, "main", &opened.entry_url)));
+        let ticket = rt.begin_call(&opened.session).unwrap();
+        assert_eq!(ticket.mod_id, id("atlas.map"));
+        assert_eq!(ticket.session, opened.session);
+        assert_eq!(ticket.store_epoch, 7);
+        assert_eq!(rt.still_current(&ticket), Ok(()));
         assert_eq!(
-            rt.call(&opened.session, "projects.list", &args),
-            Err(FrameError::UnknownMethod)
+            rt.begin_call("not-a-session"),
+            Err(FrameError::ClosedOrUnknown)
         );
+    }
+
+    /// Every event that must stop a call in flight does: a bump (the app lock), a pause, an
+    /// uninstall, a reinstall, a closed store (the registry emptied), a reload and a close. A
+    /// ticket from one session never passes for another.
+    #[test]
+    fn a_call_in_flight_stops_being_current_on_every_bump_and_end() {
+        fn live(rt: &ModRuntime, m: &str) -> CallTicket {
+            let opened = rt.open_frame(&id(m)).unwrap();
+            assert!(is_document(&get(rt, "main", &opened.entry_url)));
+            rt.begin_call(&opened.session).unwrap()
+        }
+        fn reinstall(rt: &ModRuntime) {
+            let again = rt.lock().installed[&id("atlas.map")].as_ref().clone();
+            rt.install(again);
+        }
+        // (event, does it end only atlas.map's sessions)
+        type Event = (&'static str, fn(&ModRuntime), bool);
+        let events: [Event; 6] = [
+            ("bump", ModRuntime::bump_all, false),
+            ("pause", |rt| rt.pause(&id("atlas.map")), true),
+            ("uninstall", |rt| rt.uninstall(&id("atlas.map")), true),
+            ("reinstall", reinstall, true),
+            ("store closed", |rt| rt.replace_all(Vec::new()), false),
+            ("reload", ModRuntime::close_all, false),
+        ];
+        for (what, event, only_that_mod) in events {
+            // Each event against a fresh runtime, so one's effect can't stand in for another's.
+            let s = setup(Platform::Linux);
+            let rt = &s.runtime;
+            let ticket = live(rt, "atlas.map");
+            let other = live(rt, "acme.tool");
+            event(rt);
+            assert_eq!(
+                rt.still_current(&ticket),
+                Err(FrameError::ClosedOrUnknown),
+                "{what}"
+            );
+            let other_after = rt.still_current(&other);
+            assert_eq!(other_after.is_ok(), only_that_mod, "{what}: the other mod");
+        }
+        // A bump keeps the session: its next call begins under the new generation.
+        let s = setup(Platform::Linux);
+        let rt = &s.runtime;
+        let before = live(rt, "atlas.map");
+        rt.bump_all();
+        let after = rt.begin_call(&before.session).unwrap();
+        assert_eq!(rt.still_current(&after), Ok(()));
+        assert_eq!(rt.still_current(&before), Err(FrameError::ClosedOrUnknown));
+        // A closed session, and a ticket presented under another session's name or store.
+        let a = live(rt, "atlas.map");
+        let b = live(rt, "acme.tool");
+        let forged = CallTicket {
+            session: b.session.clone(),
+            ..a.clone()
+        };
+        assert_eq!(rt.still_current(&forged), Err(FrameError::ClosedOrUnknown));
+        let other_store = CallTicket {
+            store_epoch: a.store_epoch + 1,
+            ..a.clone()
+        };
+        assert_eq!(
+            rt.still_current(&other_store),
+            Err(FrameError::ClosedOrUnknown)
+        );
+        rt.close(&a.session);
+        assert_eq!(rt.still_current(&a), Err(FrameError::ClosedOrUnknown));
+        assert_eq!(rt.still_current(&b), Ok(()));
     }
 
     #[test]
@@ -961,7 +1129,7 @@ mod tests {
         let s = setup(Platform::Linux);
         let rt = &s.runtime;
         let t0 = Instant::now();
-        let opened = rt.open_frame_at(&id("atlas.map"), t0).unwrap();
+        let opened = rt.open_frame_at(&id("atlas.map"), t0, 0).unwrap();
         let url = Url::parse(&opened.entry_url).unwrap();
         let late = t0 + ENTRY_TTL;
         assert!(rt.is_pending_entry_at(&url, t0 + ENTRY_TTL - Duration::from_secs(1)));
@@ -976,7 +1144,7 @@ mod tests {
             Err(FrameError::ClosedOrUnknown)
         );
         // A live session doesn't expire.
-        let live = rt.open_frame_at(&id("atlas.map"), t0).unwrap();
+        let live = rt.open_frame_at(&id("atlas.map"), t0, 0).unwrap();
         let req = Request::builder()
             .uri(live.entry_url.as_str())
             .body(Vec::new())
@@ -998,14 +1166,16 @@ mod tests {
         );
         let t0 = Instant::now();
         for _ in 0..MAX_PENDING {
-            rt.open_frame_at(&id("atlas.map"), t0).unwrap();
+            rt.open_frame_at(&id("atlas.map"), t0, 0).unwrap();
         }
         assert_eq!(
-            rt.open_frame_at(&id("atlas.map"), t0),
+            rt.open_frame_at(&id("atlas.map"), t0, 0),
             Err(FrameError::TooManyFrames)
         );
         // Expired ones are swept, which makes room.
-        assert!(rt.open_frame_at(&id("atlas.map"), t0 + ENTRY_TTL).is_ok());
+        assert!(rt
+            .open_frame_at(&id("atlas.map"), t0 + ENTRY_TTL, 0)
+            .is_ok());
     }
 
     #[test]
@@ -1168,7 +1338,7 @@ mod tests {
         rt.close_all();
         for opened in &live {
             assert_eq!(
-                rt.call(&opened.session, "projects.list", &serde_json::Value::Null),
+                rt.begin_call(&opened.session),
                 Err(FrameError::ClosedOrUnknown)
             );
         }
