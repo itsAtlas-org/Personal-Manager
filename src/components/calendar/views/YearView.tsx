@@ -2,13 +2,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The Year view: a continuously vertically-scrolling stream of mini-months laid out in width-
-// responsive columns, with CSS scroll-snap to each MONTH row (never a whole year). Scrolling reports
-// the year filling the view up via onFocusDate so the header tracks it; the nav arrows, Today and the
-// mini-calendar scroll here. Event presence per day comes from the real mirror (soft disc / span pill),
-// today is the accent circle, and the current real month's title reads in accent-text. Clicking a day
-// drops the cursor there (the caller decides which view to open).
+// responsive columns, with CSS scroll-snap to each MONTH row (never a whole year). It spans 25 years
+// around an anchor month, and draws only the rows near the viewport (each absolutely placed in a
+// scroller of the full height, see `streamWindow`), so a fling never reaches its end. Scrolling
+// reports the year filling the view up via onFocusDate so the header tracks it; the nav arrows, Today
+// and the mini-calendar scroll here. Event presence per day comes from the real mirror (soft disc /
+// span pill), today is the accent circle, and the current real month's title reads in accent-text.
+// Clicking a day drops the cursor there (the caller decides which view to open).
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type UIEvent,
+} from "react";
 import type { CalendarEvent } from "../../../lib/types";
 import {
   dayKey,
@@ -17,9 +27,18 @@ import {
   parseLocal,
   startOfDay,
 } from "../../../lib/calendar-layout";
-import { scrollBehavior } from "../../../theme";
+import {
+  coverSlices,
+  focusRow,
+  glideOrJump,
+  nextSlice,
+  rowAtTop,
+  sliceRows,
+  type RowSlice,
+} from "../../../lib/streamWindow";
 import { cn } from "../../ui";
 import { MiniMonth, type MiniSpan } from "../parts/MiniMonth";
+import { useProgrammaticScroll } from "../parts/useProgrammaticScroll";
 import { COL_GAP_PX, ROW_GAP_PX } from "../parts/useYearGridLayout";
 
 interface Props {
@@ -35,8 +54,20 @@ const TITLE_PX = 26; // the month-name row above each mini-month
 const WEEKDAY_PX = 16;
 const MIN_CELL_PX = 18;
 const MAX_CELL_PX = 40;
-const PAST_MONTHS = 24; // window extent behind the anchor month…
-const FUTURE_MONTHS = 24; // …and ahead — ~4yr of scroll each side
+// The stream's extent each side of the anchor month: 25 years each way, 75 rows of mini-months at
+// four columns, 300 at one. It was ±24 months (two years) because the event mirror then ended there; PM
+// keeps every event now (#1047). A jump past it re-anchors.
+const PAST_MONTHS = 300;
+const FUTURE_MONTHS = 300;
+// A mini-month row is tall (a third of a pane at the narrowest), so the overscan is short: 6 rows
+// each side is up to 24 mini-months at four columns.
+const YEAR_OVERSCAN = 6;
+const SLICE_STEP_ROWS = 2;
+// A PM-driven scroll farther than this many MONTHS jumps rather than glides (a held ↓ outruns a glide):
+// two years, which a single year step (‹ › ↓) never exceeds. In rows it depends on the columns (a year
+// is 3 rows at four columns, 12 at one), so the limit is a month count turned into rows below.
+const MAX_GLIDE_MONTHS = 24;
+const maxGlideRows = (cols: number) => Math.ceil(MAX_GLIDE_MONTHS / cols) + 1; // +1: the half-scrolled top row
 
 const monthKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}`;
 const firstOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
@@ -98,11 +129,21 @@ export function YearView({ cursor, events, onSelectDay, onFocusDate }: Props) {
   const rowStride = monthH + ROW_GAP_PX;
   const ready = cellPx > 0 && size.h > 0;
 
+  const rows = Math.ceil(months.length / cols);
+  // The rows drawn, in rows of `cols` mini-months: set where PM scrolls to, and moved as the view
+  // scrolls. Nothing is drawn until the pane is measured.
+  const [slice, setSlice] = useState<RowSlice>({ first: 0, last: 0 });
+
   const focusKeyRef = useRef(monthKey(cursor));
-  const programmaticRef = useRef(false);
+  const { programmaticRef, scrollTo } = useProgrammaticScroll();
   const rafRef = useRef(0);
   const didInitRef = useRef(false);
   const prevAnchorRef = useRef(anchor);
+  // The month at the top-left (fractional while half-scrolled), kept when the rows change height or
+  // the columns change count, and the offset PM's own write landed on, so its scroll event isn't
+  // taken for the user moving it. As the day grids' `topHourRef`.
+  const topMonthRef = useRef(0);
+  const ownTopRef = useRef<number | null>(null);
 
   const monthOffset = useCallback(
     (d: Date) =>
@@ -125,20 +166,44 @@ export function YearView({ cursor, events, onSelectDay, onFocusDate }: Props) {
     (row: number, smooth: boolean) => {
       const el = scrollRef.current;
       if (!el) return;
-      programmaticRef.current = true;
-      el.scrollTo({ top: row * rowStride, behavior: scrollBehavior(smooth) });
-      const clear = () => {
-        programmaticRef.current = false;
-        el.removeEventListener("scrollend", clear);
-      };
-      el.addEventListener("scrollend", clear);
-      window.setTimeout(clear, 700);
+      // Draw the target's rows before scrolling to them, and keep a glide's starting rows until the
+      // scroll events trim them (a jump drops them at once).
+      const target = sliceRows(row * rowStride, el.clientHeight, rowStride, rows, YEAR_OVERSCAN);
+      setSlice((cur) => (smooth ? coverSlices(cur, target) : target));
+      topMonthRef.current = row * cols;
+      ownTopRef.current = null;
+      scrollTo(el, row * rowStride, smooth);
+      if (!smooth) ownTopRef.current = el.scrollTop;
     },
-    [rowStride],
+    [rowStride, rows, cols, scrollTo],
   );
 
-  // Position on first paint (instant), window rebuild (instant), and external cursor move (smooth).
-  // A scroll-driven cursor value has key === focusKeyRef and is skipped — no feedback loop.
+  // Keep the MONTH at the top-left, not the pixel, when the rows change height or the columns change
+  // count (a resize): the offset is rows × height, and at 25 years each way the same few pixels would
+  // slide the view by years. Before paint, from `topMonthRef`, not from `scrollTop`, which holds the old
+  // layout's offset by now.
+  const laidOutRef = useRef({ rowStride, cols });
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const was = laidOutRef.current;
+    laidOutRef.current = { rowStride, cols };
+    if (!el || !ready || !didInitRef.current) return;
+    if (was.rowStride === rowStride && was.cols === cols) return;
+    el.scrollTop = (topMonthRef.current / cols) * rowStride;
+    ownTopRef.current = el.scrollTop;
+    setSlice((cur) =>
+      nextSlice(
+        cur,
+        sliceRows(el.scrollTop, el.clientHeight, rowStride, rows, YEAR_OVERSCAN),
+        rows,
+        SLICE_STEP_ROWS,
+      ),
+    );
+  }, [rowStride, cols, rows, ready]);
+
+  // Position on first paint (instant), window rebuild (instant), and external cursor move (a glide
+  // when it's near, else a jump). A scroll-driven cursor value has key === focusKeyRef and is skipped
+  // — no feedback loop.
   useLayoutEffect(() => {
     if (!ready) return;
     const key = monthKey(cursor);
@@ -148,28 +213,56 @@ export function YearView({ cursor, events, onSelectDay, onFocusDate }: Props) {
       setAnchor(firstOfMonth(cursor));
       return;
     }
-    const smooth = didInitRef.current && !anchorChanged;
+    const target = rowOfMonth(cursor);
+    const from = rowAtTop(scrollRef.current?.scrollTop ?? 0, rowStride);
+    const smooth =
+      didInitRef.current &&
+      !anchorChanged &&
+      glideOrJump(from, target, maxGlideRows(cols)) === "smooth";
     didInitRef.current = true;
     prevAnchorRef.current = anchor;
     focusKeyRef.current = key;
-    scrollToRow(rowOfMonth(cursor), smooth);
-  }, [cursor, anchor, ready, inWindow, rowOfMonth, scrollToRow]);
+    scrollToRow(target, smooth);
+  }, [cursor, anchor, ready, cols, inWindow, rowOfMonth, rowStride, scrollToRow]);
 
-  const onScroll = useCallback(() => {
-    if (programmaticRef.current || !ready) return;
-    if (rafRef.current) return;
-    rafRef.current = window.requestAnimationFrame(() => {
-      rafRef.current = 0;
-      const el = scrollRef.current;
-      if (!el) return;
-      const row = Math.max(0, Math.round((el.scrollTop + el.clientHeight * 0.4) / rowStride));
-      const idx = Math.max(0, Math.min(months.length - 1, row * cols));
-      const key = monthKey(months[idx]);
-      if (key === focusKeyRef.current) return;
-      focusKeyRef.current = key;
-      onFocusDate(months[idx]);
-    });
-  }, [ready, rowStride, months, cols, onFocusDate]);
+  const onScroll = useCallback(
+    (e: UIEvent<HTMLDivElement>) => {
+      if (!ready) return;
+      // Where the user has put the top: not PM's own write (see `ownTopRef`), nor a glide's passing
+      // frames (the target is already `topMonthRef`; a resize mid-glide must land there, not between).
+      const top = e.currentTarget.scrollTop;
+      if (!programmaticRef.current && top !== ownTopRef.current) {
+        ownTopRef.current = null;
+        topMonthRef.current = rowAtTop(top, rowStride) * cols;
+      }
+      if (rafRef.current) return;
+      rafRef.current = window.requestAnimationFrame(() => {
+        rafRef.current = 0;
+        const el = scrollRef.current;
+        if (!el) return;
+        // The rows drawn follow every scroll, PM's own included.
+        setSlice((cur) =>
+          nextSlice(
+            cur,
+            sliceRows(el.scrollTop, el.clientHeight, rowStride, rows, YEAR_OVERSCAN),
+            rows,
+            SLICE_STEP_ROWS,
+          ),
+        );
+        // The focus isn't reported while PM scrolls: the cursor it was sent to is already right.
+        if (programmaticRef.current) return;
+        const idx = Math.min(
+          months.length - 1,
+          focusRow(el.scrollTop, el.clientHeight, rowStride, rows) * cols,
+        );
+        const key = monthKey(months[idx]);
+        if (key === focusKeyRef.current) return;
+        focusKeyRef.current = key;
+        onFocusDate(months[idx]);
+      });
+    },
+    [ready, rowStride, rows, months, cols, onFocusDate, programmaticRef],
+  );
 
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
@@ -178,24 +271,29 @@ export function YearView({ cursor, events, onSelectDay, onFocusDate }: Props) {
       ref={scrollRef}
       onScroll={onScroll}
       className="min-h-0 flex-1 snap-y snap-proximity overflow-y-auto p-4"
+      // Rows come and go around the viewport; the browser mustn't shift the scroll to follow them.
+      style={{ overflowAnchor: "none" }}
     >
       {ready && (
-        <div
-          className="grid"
-          style={{
-            gridTemplateColumns: `repeat(${cols}, 1fr)`,
-            columnGap: `${COL_GAP_PX}px`,
-            rowGap: `${ROW_GAP_PX}px`,
-          }}
-        >
-          {months.map((m) => {
+        // The whole stream's height, so the scrollbar and every offset are the stream's, with only
+        // the drawn rows in it, each month placed at its own row and column.
+        <div className="relative" style={{ height: `${rows * rowStride - ROW_GAP_PX}px` }}>
+          {months.slice(slice.first * cols, slice.last * cols).map((m, i) => {
+            const at = slice.first * cols + i;
+            const col = at % cols;
             const isCurrent =
               m.getFullYear() === today.getFullYear() && m.getMonth() === today.getMonth();
             return (
               <div
                 key={monthKey(m)}
-                className="snap-start overflow-hidden"
-                style={{ height: `${monthH}px` }}
+                className="absolute snap-start overflow-hidden"
+                style={{
+                  top: `${Math.floor(at / cols) * rowStride}px`,
+                  // The columns share the width less their gaps, as the grid's 1fr tracks did.
+                  left: `calc((100% - ${COL_GAP_PX * (cols - 1)}px) / ${cols} * ${col} + ${COL_GAP_PX * col}px)`,
+                  width: `calc((100% - ${COL_GAP_PX * (cols - 1)}px) / ${cols})`,
+                  height: `${monthH}px`,
+                }}
               >
                 <div
                   className={cn(

@@ -1743,3 +1743,240 @@ describe("CalendarView: tasks", () => {
     expect(screen.queryByText("Seed order")).toBeNull();
   });
 });
+
+// The keys that page the calendar: ← → and Google's j n k p everywhere, ↑ ↓ too where the periods
+// run down the screen (Month and Year). They stand down behind anything open over the grid.
+describe("CalendarView: the paging keys", () => {
+  async function mountIn(view: string) {
+    localStorage.setItem("pm.calendar.view", view);
+    const { CalendarView } = await import("./CalendarView");
+    const utils = render(<CalendarView />);
+    // The label is the header's, in every System (the Terminal's chrome has no "+ New event").
+    await screen.findByTitle("Pick a date");
+    await act(async () => {});
+    return utils;
+  }
+  const label = () => screen.getByTitle("Pick a date").textContent ?? "";
+  const monthName = (offset: number) => {
+    const n = new Date();
+    return new Date(n.getFullYear(), n.getMonth() + offset, 1).toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  it("pages a month with ↓ and ↑ in Month, as ← and → do", async () => {
+    await mountIn("month");
+    expect(label()).toContain(monthName(0));
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    press("ArrowUp");
+    expect(label()).toContain(monthName(0));
+    press("ArrowRight");
+    expect(label()).toContain(monthName(1));
+    press("ArrowLeft");
+    expect(label()).toContain(monthName(0));
+  });
+
+  // The paging keys take the press for themselves: left alone, ↑ ↓ would also nudge a focused Month or
+  // Year scroller natively, on top of the page. A press that stands down stays the page's to ignore.
+  it("takes the press it pages with, and leaves one it stands down for", async () => {
+    await mountIn("month");
+    // fireEvent returns false when the handler called preventDefault.
+    for (const key of ["ArrowDown", "ArrowUp", "j", "n", "k", "p", "ArrowRight", "ArrowLeft"]) {
+      expect(fireEvent.keyDown(document.body, { key }), key).toBe(false);
+    }
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    try {
+      expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(true);
+      expect(fireEvent.keyDown(field, { key: "j" })).toBe(true);
+    } finally {
+      field.remove();
+    }
+    const menu = document.createElement("div");
+    menu.setAttribute("data-popover-panel", "");
+    document.body.appendChild(menu);
+    try {
+      expect(fireEvent.keyDown(document.body, { key: "ArrowDown" })).toBe(true);
+    } finally {
+      menu.remove();
+    }
+  });
+
+  it("pages with Google's j n and k p in Month", async () => {
+    await mountIn("month");
+    press("j");
+    expect(label()).toContain(monthName(1));
+    press("n");
+    expect(label()).toContain(monthName(2));
+    press("k");
+    expect(label()).toContain(monthName(1));
+    press("p");
+    expect(label()).toContain(monthName(0));
+  });
+
+  it("pages a year with ↓ and ↑ in Year", async () => {
+    await mountIn("year");
+    const year = new Date().getFullYear();
+    expect(label()).toContain(String(year));
+    press("ArrowDown");
+    expect(label()).toContain(String(year + 1));
+    press("ArrowUp");
+    press("ArrowUp");
+    expect(label()).toContain(String(year - 1));
+    press("n");
+    expect(label()).toContain(String(year));
+  });
+
+  it("leaves ↑ and ↓ to the hours in Week, which j and → still page", async () => {
+    await mountIn("week");
+    const was = label();
+    press("ArrowDown");
+    press("ArrowUp");
+    expect(label()).toBe(was);
+    press("ArrowRight");
+    const next = label();
+    expect(next).not.toBe(was);
+    press("j");
+    expect(label()).not.toBe(next);
+    press("k");
+    expect(label()).toBe(next);
+  });
+
+  it("leaves ↑ and ↓ alone in the Agenda list, and in the Terminal's single-month table", async () => {
+    await mountIn("agenda");
+    const was = label();
+    press("ArrowDown");
+    expect(label()).toBe(was);
+    press("j");
+    expect(label()).toContain(monthName(1));
+    cleanup();
+    // Terminal's Month is one table driven by the same cursor, so ↑ ↓ page it too.
+    env.system = "terminal";
+    await mountIn("month");
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+  });
+
+  it("stands down behind a mini-calendar, a right-click menu or any popover, as clicks do", async () => {
+    await mountIn("month");
+    // The mini-calendar: a Popover, which is no dialog.
+    fireEvent.click(screen.getByTitle("Pick a date"));
+    expect(document.querySelector("[data-popover-panel]")).not.toBeNull();
+    for (const k of ["ArrowRight", "ArrowDown", "j", "n", "k", "p", "ArrowLeft", "ArrowUp"]) {
+      press(k);
+      expect(label()).toContain(monthName(0));
+    }
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.querySelector("[data-popover-panel]")).toBeNull();
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    // The right-click menu marks its panel the same way: it moves its own focus with the arrows.
+    const menu = document.createElement("div");
+    menu.setAttribute("data-popover-panel", "");
+    document.body.appendChild(menu);
+    try {
+      press("ArrowDown");
+      press("j");
+      press("t");
+      expect(label()).toContain(monthName(1));
+    } finally {
+      menu.remove();
+    }
+    press("ArrowDown");
+    expect(label()).toContain(monthName(2));
+  });
+
+  it("stands down in a field, with a modifier held, and behind a dialog", async () => {
+    await mountIn("month");
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    try {
+      act(() => void fireEvent.keyDown(field, { key: "ArrowDown" }));
+      act(() => void fireEvent.keyDown(field, { key: "j" }));
+      expect(label()).toContain(monthName(0));
+    } finally {
+      field.remove();
+    }
+    act(() => void fireEvent.keyDown(document.body, { key: "ArrowDown", ctrlKey: true }));
+    act(() => void fireEvent.keyDown(document.body, { key: "n", metaKey: true }));
+    expect(label()).toContain(monthName(0));
+    // Quick create is a dialog.
+    press("C", true);
+    await screen.findByRole("dialog", { name: "New event" });
+    act(() => void fireEvent.keyDown(document.body, { key: "ArrowDown" }));
+    expect(label()).toContain(monthName(0));
+  });
+
+  it("has no keys for the Runway, which runs from today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    localStorage.setItem("pm.calendar.view", "agenda");
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView />);
+    await screen.findByText("From today");
+    await act(async () => {});
+    press("j");
+    press("ArrowRight");
+    press("n");
+    // Switched to the list, the cursor is where it was: this month.
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(label()).toContain(monthName(0));
+  });
+});
+
+// A fling or a held key moves the cursor through many months: what loads, and what the strips say,
+// follows it only once it holds still (the first move of a burst at once).
+describe("CalendarView: loads follow the cursor once it settles", () => {
+  const monthStartUtc = (months: number) => {
+    const n = new Date();
+    return new Date(Date.UTC(n.getFullYear(), n.getMonth() + months, 1)).toISOString();
+  };
+  async function mountMonth() {
+    localStorage.setItem("pm.calendar.view", "month");
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView />);
+    await screen.findByRole("button", { name: "+ New event" });
+    await act(async () => {});
+  }
+
+  it("makes one load for a burst of months past the live band, not one per month", async () => {
+    // The live band ended at the start of this month.
+    ipc.calendarOverview.mockResolvedValue({ ...overview, mirror_end: monthStartUtc(0) });
+    await mountMonth();
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(1);
+    // Six months on, a keystroke each: the first passes at once and asks for what it needs.
+    for (let i = 0; i < 6; i++) press("ArrowDown");
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(2);
+    // The rest wait for the cursor to hold still, then make one call for where it ended.
+    await waitFor(() => expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(3), { timeout: 2000 });
+    const [, to] = ipc.loadCalendarMonths.mock.calls[2] as [string, string];
+    expect(new Date(to).getTime()).toBeGreaterThan(new Date(monthStartUtc(7)).getTime());
+    await new Promise((r) => setTimeout(r, 400));
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(3);
+  });
+
+  it("changes the range hint only after the cursor holds still, the label following at once", async () => {
+    // History starts two months back and is still downloading: the hint is for months before it.
+    ipc.calendarOverview.mockResolvedValue({
+      ...overview,
+      mirror_start: monthStartUtc(-2),
+      history_ready: false,
+    });
+    await mountMonth();
+    const hint = () => screen.queryByText(/older events are still downloading/);
+    expect(hint()).toBeNull();
+    // Three months back: the first (a month back) is inside the history and passes at once; the
+    // third is before it, and its hint waits.
+    for (let i = 0; i < 3; i++) press("ArrowUp");
+    const n = new Date();
+    expect(screen.getByTitle("Pick a date").textContent).toContain(
+      new Date(n.getFullYear(), n.getMonth() - 3, 1).toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      }),
+    );
+    expect(hint()).toBeNull();
+    expect(await screen.findByText(/older events are still downloading/)).toBeTruthy();
+  });
+});
