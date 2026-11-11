@@ -10,6 +10,11 @@
 //! - [`ids`]: the mod id grammar and the trust tiers. [`package`]: the `.pmmod` verifier.
 //! - [`keys`]: the embedded Atlas keys and the key-id gate. [`index`]: the signed index's format,
 //!   verification and acceptance rules; [`index_state`] the per-machine record of it (§1.10, D15).
+//! - [`fetch`]: the pinned, size- and time-capped download of the index and of packages, and the
+//!   6-hourly schedule. [`safety`]: what the accepted index decides (the install, serve and
+//!   unsigned checks, and the plan for applying the blacklist to an installed row). [`refresh`]:
+//!   the task that runs them, and what runs at launch and after a restore. [`updater`]: the
+//!   background update and the pinned-version repair download.
 //! - [`runtime`]: the installed-mod registry, the one-time entry URLs and the frame sessions, and
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
@@ -44,6 +49,7 @@
 
 pub mod disk;
 pub mod engine;
+pub mod fetch;
 pub mod headers;
 pub mod ids;
 pub mod index;
@@ -52,8 +58,11 @@ pub mod keys;
 pub mod ledger;
 pub mod package;
 pub mod policy;
+pub mod refresh;
 pub mod runtime;
+pub mod safety;
 pub mod store;
+pub mod updater;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

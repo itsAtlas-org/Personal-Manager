@@ -156,7 +156,13 @@ release remain the open post-v1 work.
     Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
     against; `index.rs` is the signed index's format, verification and acceptance rules, and
     `index_state.rs` its per-machine record, `data_dir/mods-index.json` (INVARIANTS.md I-31).
-    In the page, `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and
+    `fetch.rs` downloads the index and packages (pinned URL prefix, redirects to GitHub's asset
+    hosts only, size and time caps) and owns the 6-hourly schedule; `safety.rs` is what the
+    accepted index decides (catalogue, serve and unsigned checks, the plan for a blacklist);
+    `ledger/blacklist.rs` carries a plan out on the rows and `ledger/updates.rs` is the
+    background updater's ledger half, with `updater.rs` its decisions; `refresh.rs` is the task
+    that runs them, and what runs at launch and at a restore. A dev override of the index URL or
+    the test key lives only in `cfg(debug_assertions)` code behind `PM_DATA_DIR`. In the page, `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and
     `modBridge.ts` is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).

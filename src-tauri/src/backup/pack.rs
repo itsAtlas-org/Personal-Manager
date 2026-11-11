@@ -42,6 +42,8 @@ pub struct PackInputs {
     pub db_key_hex: Secret,
     pub app_version: String,
     pub created_at: String,
+    /// This machine's cached mod safety list, for the manifest (`manifest::BackupManifest`).
+    pub mods_index: Option<manifest::ModsIndex>,
 }
 
 /// One archive member: synthesized bytes (the manifest) or a file on disk.
@@ -200,6 +202,7 @@ fn enumerate_sources(inputs: &PackInputs) -> Result<Vec<Source>> {
         source_markdown_encryption: md_str(inputs.meta.markdown.encryption).to_string(),
         app_version: inputs.app_version.clone(),
         created_at: inputs.created_at.clone(),
+        mods_index: inputs.mods_index.clone(),
     };
     let mbytes = serde_json::to_vec(&m)
         .map_err(|e| Error::Other(format!("could not encode the backup manifest: {e}")))?;

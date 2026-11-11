@@ -1573,6 +1573,12 @@ pub fn run() {
             lock_session::engage(handle)?;
             lock_session::spawn_watcher(handle.clone());
 
+            // The mod safety list (Mods spec §1.10, D6): fetched shortly after launch and every six
+            // hours, on its own, whatever the updater's check did and with or without an open vault.
+            // Quiet when offline. Release builds fetch only the public index; a dev build pointed at
+            // another data folder may override the URL and the test key.
+            mods::refresh::spawn_refresher(handle.clone());
+
             // After the writer lock is settled (so a stepped-back profile doesn't write), settle the
             // store launch opened exactly as every later open is settled: the rules file and the
             // index-only manifest reconciled with their DB mirrors (the first run writes the rules

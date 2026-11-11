@@ -612,8 +612,16 @@ once, with no way back.
 **Co-signers.** The fetcher records an index through `index_state::accept` with `Origin::Fetched`,
 off the async runtime and never under the DB lock. A restore commit runs the backup's copy of the
 index pair through `accept` with `Origin::Restored`, never writing a seq from a backup on its own.
-Whatever applies a blacklist entry goes through the ledger, and leaves content-class `mod_kv` rows
-and `mod_ledger` gifts for the user's confirmation. A dev build's test key and index URL come only
+Whatever applies a blacklist entry goes through the ledger (`Ledger::apply_blacklist`, planned by
+the pure `safety::plan_row`): the registry is cut first, then the row is written, then the files go,
+so a failed write never leaves a restricted mod running, and a "removed" row stays `paused` with
+`state_reason = blacklist-removed` until the user answers the uninstall dialog. It deletes the
+mod's folder, its grants and its rebuildable rows (cache-class `mod_kv`, `mod_doc_data`,
+`mod_overlay`), and leaves content-class `mod_kv` rows, `mod_ledger` gifts and the secrets for the
+user's confirmation; nothing installs onto, loads or copies back a removed row. An expired index
+restricts but never resumes, installs or updates. The backup manifest carries the cached index
+*pair* (`mods_index`), never a bare seq, so what a restore feeds the acceptance rules is
+authenticated. A dev build's test key and index URL come only
 from `keys::dev_setting`, which needs `PM_DATA_DIR`, so a test index never reaches the real data
 folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index's seq, never above
 it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its

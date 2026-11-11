@@ -42,6 +42,26 @@ pub fn is_ledger_reason(reason: &str) -> bool {
     LEDGER_REASONS.contains(&reason)
 }
 
+/// `mods.state_reason` of a mod the signed index paused (Mods spec §1.10): stopped, its data kept.
+/// The index's own words are read from the cached index, not stored here, so a corrected reason
+/// reaches the strip.
+pub const REASON_BLACKLIST: &str = "blacklist";
+/// `mods.state_reason` of a mod the index removed: switched off, its grants revoked, its files and
+/// cache-class rows deleted. The row stays, in `paused`, until the user answers the uninstall
+/// dialog about what it made and the content it stored (I-16, I-31), so this is the typed
+/// "pending removal" state slice 6 reads. No install or update lands on it, and the startup load
+/// never looks for its files.
+pub const REASON_BLACKLIST_REMOVED: &str = "blacklist-removed";
+
+/// `settings` key: the mods the blacklist resumed, awaiting slice 6's "X is back on, fixed in
+/// version N" strip. A JSON array of `{id, version, at}`, one per mod, newest last; the strip's
+/// dismissal removes its entry.
+pub const SETTING_RESUMED: &str = "mods_resumed";
+/// `settings` key: background updates that wait for approval (they ask for more than was
+/// granted), a JSON object keyed by mod id: `{version, sha256, widenings}`. Slice 6's "update
+/// waiting" reads it; an approved install or a newer update clears it.
+pub const SETTING_UPDATES_WAITING: &str = "mods_updates_waiting";
+
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from
 /// file"), or a developer's unpacked test folder, which has no package sha256 and is left out of
 /// backups (§1.15).

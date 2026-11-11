@@ -139,6 +139,14 @@ pub async fn create_local_backup(
         .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))?;
     let db_key = vault::current_db_key(&meta)?
         .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))?;
+    // The mod safety list's cached copy rides in the manifest (a small file read, off the runtime).
+    let mods_index = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::mods::refresh::backup_copy(&app))
+            .await
+            .ok()
+            .flatten()
+    };
     let inputs = backup::pack::PackInputs {
         vault_root: resolved.vault_root.clone(),
         db_snapshot: snapshot,
@@ -147,6 +155,7 @@ pub async fn create_local_backup(
         db_key_hex: db_key,
         app_version: app.package_info().version.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
+        mods_index,
     };
     let vault_id = meta.vault_id.clone();
     let dest = std::path::PathBuf::from(dest_path);
@@ -230,6 +239,7 @@ pub async fn restore_local_backup(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&src, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
 
@@ -846,6 +856,14 @@ pub(crate) async fn run_backup(
         &now.format("%Y%m%dT%H%M%SZ").to_string(),
     );
     let archive_path = tmp.path().join(&archive_name);
+    // The mod safety list's cached copy rides in the manifest (a small file read, off the runtime).
+    let mods_index = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::mods::refresh::backup_copy(&app))
+            .await
+            .ok()
+            .flatten()
+    };
     let inputs = backup::pack::PackInputs {
         vault_root: resolved.vault_root.clone(),
         db_snapshot: snapshot,
@@ -854,6 +872,7 @@ pub(crate) async fn run_backup(
         db_key_hex: db_key,
         app_version: app.package_info().version.to_string(),
         created_at: now.to_rfc3339(),
+        mods_index,
     };
     let vault_id = meta.vault_id.clone();
 
@@ -1202,6 +1221,7 @@ pub async fn restore_from_proton(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&local, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
     // Only now: `dl` owns the downloaded archive the task above just read.
@@ -1563,6 +1583,7 @@ pub async fn restore_from_gdrive(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&local, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
     drop(dl);

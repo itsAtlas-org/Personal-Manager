@@ -60,8 +60,21 @@ use super::policy::{
     self, ApiFit, InstallKind, Pinned, Refusal, MOD_API_OLDEST_MAJOR, MOD_API_VERSION,
 };
 use super::runtime::{InstalledMod, ModRuntime, ServedFile};
+use super::safety::SafetyCheck;
 use super::store;
 use crate::AppState;
+
+// Applying the signed list's blacklist to the installed rows, and the background updater's half
+// (slice 5). What slice 6's strips read is re-exported for it.
+mod blacklist;
+mod updates;
+#[allow(unused_imports)]
+pub use blacklist::{
+    clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
+    Waiting, WaitingKind,
+};
+#[allow(unused_imports)]
+pub use updates::{Landed, Pass, RepairTarget};
 
 /// The `settings` key of the calendar's view prefs, whose `hidden` set names a mod's overlay by
 /// [`overlay_source`] (SYNC-SET.md). An uninstall takes the mod out of it.
@@ -384,6 +397,13 @@ struct Row {
     files: String,
 }
 
+impl Row {
+    /// Whether the signed list removed this mod (`store::REASON_BLACKLIST_REMOVED`).
+    fn removed(&self) -> bool {
+        self.reason.as_deref() == Some(store::REASON_BLACKLIST_REMOVED)
+    }
+}
+
 /// The ledger for one vault's folders, its store and the registry.
 pub struct Ledger<'a, S: LedgerStore> {
     layout: &'a Layout,
@@ -469,12 +489,25 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             })?;
         let (current, granted) =
             self.with_conn(|c| Ok((read_current(c, &m.id)?, read_granted(c, &m.id)?)))?;
+        // The signed list removed the installed mod: its row waits for the user's answer about
+        // what it made and stored (I-16), and nothing installs onto it until that uninstall.
+        if current
+            .as_ref()
+            .is_some_and(|c| c.reason.as_deref() == Some(store::REASON_BLACKLIST_REMOVED))
+        {
+            return Err(Refusal::RemovedPending.into());
+        }
         let kind = policy::decide(
             current.as_ref().map(|c| &c.pinned),
             &m.version,
             package_sha256,
             &m.publisher,
         )?;
+        // Unattended work only updates or repairs what is installed: a mod the user uninstalled
+        // while its update downloaded must not come back.
+        if kind == InstallKind::Fresh && opts.approval == Approval::Unattended {
+            return Err(Refusal::NothingToUpdate.into());
+        }
         if let (InstallKind::Update, Approval::Unattended, Some(c)) =
             (kind, opts.approval, &current)
         {
@@ -593,8 +626,11 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             }
         };
         let mut report = self.load(&rows, now, check);
+        // A row the safety list removed has no files to keep: a folder that reappears for it is
+        // quarantined like any other with no row.
         let known = rows
             .iter()
+            .filter(|row| !row.removed())
             .map(|row| (row.id.clone(), VersionName::parse(&row.version).ok()))
             .collect();
         report.sweep = disk::sweep(self.layout, &known, now);
@@ -630,6 +666,10 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         let mut recovered = Vec::new();
         let mut unrecovered = Vec::new();
         for row in &rows {
+            // Never copy a removed mod's files back from another store of the vault.
+            if row.removed() {
+                continue;
+            }
             let Ok(ok) = read_row(self.layout, row) else {
                 continue;
             };
@@ -700,6 +740,11 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         let mut changes = Vec::new();
         let mut serve = Vec::new();
         for row in rows {
+            // Removed by the safety list: no files to look for or put back, nothing to serve. The
+            // row waits, paused, for the uninstall dialog (I-16).
+            if row.removed() {
+                continue;
+            }
             let checked = read_row(self.layout, row).and_then(|ok| {
                 match check_files(&ok) {
                     Err(why) if why == store::REASON_FILES_MISSING => {
@@ -933,6 +978,8 @@ fn commit(
             values,
         )?,
     };
+    // A waiting update this install satisfies is no longer waiting.
+    blacklist::clear_waiting(&tx, w.id, Some(w.version))?;
     disk::failpoint(Step::Commit).map_err(LedgerError::Disk)?;
     tx.commit()?;
     Ok(Committed { state, consented })
@@ -1073,10 +1120,32 @@ fn active_layout(app: &AppHandle, state: &AppState, mint: Mint) -> Option<Layout
         .ok()
 }
 
+/// Run `f` on a ledger for the open store's mods folder: the safety list's refresh, the background
+/// updater and the Mods tab's commands (slice 6) go through this. `None` when no store is open (the
+/// vault is locked, or another profile is the writer), or it has no mods folder and `mint` didn't
+/// ask for one. `f` runs synchronously on the caller's thread: call this from `spawn_blocking`, never
+/// on the async runtime and never while holding the DB lock.
+pub fn with_active_ledger<T>(
+    app: &AppHandle,
+    mint: Mint,
+    f: impl FnOnce(&Ledger<'_, AppState>) -> T,
+) -> Option<T> {
+    let runtime = app.try_state::<ModRuntime>()?;
+    let state = app.state::<AppState>();
+    let layout = active_layout(app, state.inner(), mint)?;
+    Some(f(&Ledger::new(&layout, state.inner(), runtime.inner())))
+}
+
 /// Load the open store's mods and run the boot sweep. Called by the lock session once this
 /// instance holds the store as its writer (`lock_session::engage`, a take-over), never by a
 /// profile that stepped back, whose store is closed. A store that has no folder, or can't be named,
 /// loads nothing.
+///
+/// The cached safety list's blacklist is applied first ([`Ledger::apply_blacklist`]: a few row
+/// writes and, for a removed mod, its folder; the cached file is one small read), so a row it
+/// pauses or removes never reaches the registry, and no frame can mount before it. A restore's
+/// store comes through here too, and the startup load's [`SafetyCheck`] holds back anything the
+/// apply could not write.
 ///
 /// The load and the sweep's moves run inline, so two loads can't race across a vault switch: one
 /// query, a stat per file, a rename per stray folder, and the hashing of a quarantined copy only
@@ -1098,8 +1167,16 @@ pub fn after_writer_open(app: &AppHandle) {
         runtime.replace_all(Vec::new());
         return;
     };
-    let report =
-        Ledger::new(&layout, state.inner(), runtime.inner()).startup(Utc::now(), &no_blacklist_yet);
+    // The cached safety list is applied before the load, so a row it pauses or removes never
+    // reaches the registry, and so before any frame can mount (spec §1.10). A restored store's rows
+    // meet it here too: a restore commit opens its store through this same path.
+    let cached = super::refresh::cached_index(app);
+    let ledger = Ledger::new(&layout, state.inner(), runtime.inner());
+    if let Some(index) = &cached {
+        super::refresh::report_applied(app, &ledger.apply_blacklist(index, Utc::now()));
+    }
+    let check = SafetyCheck::serve(cached.as_ref());
+    let report = ledger.startup(Utc::now(), &check);
     if let Some(why) = &report.skipped {
         eprintln!("mods: nothing loaded or swept, the ledger couldn't be read ({why})");
     }
@@ -1123,7 +1200,8 @@ pub fn after_writer_open(app: &AppHandle) {
             return;
         };
         let ledger = Ledger::new(&layout, state.inner(), runtime.inner());
-        match ledger.recover_missing(Utc::now(), &no_blacklist_yet) {
+        let check = SafetyCheck::serve(cached.as_ref());
+        match ledger.recover_missing(Utc::now(), &check) {
             Ok(report) => log_recovery(&report),
             Err(e) => eprintln!("mods: other stores of this vault not looked in ({e})"),
         }
@@ -1168,7 +1246,9 @@ pub fn remove_vacated_store(app: &AppHandle, data_dir: &Path, vault_id: &str) {
     match open {
         Ok(Some(layout)) => {
             let ledger = Ledger::new(&layout, state.inner(), runtime.inner());
-            match ledger.remove_other_stores(data_dir, Utc::now(), &no_blacklist_yet) {
+            let cached = super::refresh::cached_index(app);
+            let check = SafetyCheck::serve(cached.as_ref());
+            match ledger.remove_other_stores(data_dir, Utc::now(), &check) {
                 Ok(report) => {
                     log_recovery(&report);
                     if !report.unrecovered.is_empty() {
@@ -1186,12 +1266,6 @@ pub fn remove_vacated_store(app: &AppHandle, data_dir: &Path, vault_id: &str) {
         }
         Err(e) => eprintln!("mods: a removed store's mods were left ({e})"),
     }
-}
-
-/// The [`ServeCheck`] of the startup load and of recovery: slice 5 passes the cached blacklist here
-/// (spec §1.10); until then nothing is held.
-fn no_blacklist_yet(_: &str, _: &str, _: Option<&str>) -> Option<String> {
-    None
 }
 
 /// Log what a recovery pass copied in, and what it couldn't.
@@ -1271,6 +1345,9 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    // The safety list against the ledger (slice 5).
+    mod slice5;
 
     const VAULT: &str = "11111111-2222-3333-4444-555555555555";
     const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
