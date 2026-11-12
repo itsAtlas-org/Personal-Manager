@@ -94,14 +94,16 @@ pub fn keep_mod_data(state: &AppState) -> Result<bool> {
     db::get_bool(&conn, BACKUP_MOD_DATA_KEY, true)
 }
 
-/// A fresh, empty folder for one backup's or export's copies, under [`WORK_DIR`] in `data_dir`.
-/// Removed with everything in it when the returned guard drops, on success and on failure alike.
+/// A fresh, empty folder for one backup's, export's or restore's copies, under [`WORK_DIR`] in
+/// `data_dir`. Removed with everything in it when the returned guard drops, on success and on
+/// failure alike. `job` words a full disk as what was being done (a restore's download folder says
+/// nothing was restored, not that a copy of the data wasn't saved).
 ///
 /// Only [`WORK_DIR`] is created, never `data_dir` itself (`create_dir`, not `create_dir_all`): after
 /// a full "remove PM completely" the data folder is gone on purpose and PM, still running on
 /// Linux and macOS, must create nothing (`paths::prepare_data_dir`), so a run then fails here
 /// instead of rebuilding the folder.
-pub fn work_dir(data_dir: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+pub(crate) fn work_dir(data_dir: &Path, prefix: &str, job: Job) -> Result<tempfile::TempDir> {
     let parent = data_dir.join(WORK_DIR);
     let made = match std::fs::create_dir(&parent) {
         Ok(()) => Ok(()),
@@ -109,14 +111,17 @@ pub fn work_dir(data_dir: &Path, prefix: &str) -> Result<tempfile::TempDir> {
         Err(e) => Err(e),
     }
     .and_then(|()| tempfile::Builder::new().prefix(prefix).tempdir_in(&parent));
-    made.map_err(|e| {
-        let e = Error::from(e);
-        if is_disk_full(&e) {
-            no_space(&parent)
-        } else {
-            e
-        }
-    })
+    made.map_err(|e| space_or(Error::from(e), &parent, job))
+}
+
+/// A failure of making or filling a folder, said as a full disk when it was one ([`no_space`], in
+/// `job`'s words) and returned as it came otherwise.
+fn space_or(e: Error, folder: &Path, job: Job) -> Error {
+    if is_disk_full(&e) {
+        no_space(folder, job)
+    } else {
+        e
+    }
 }
 
 /// Remove what a backup or export that never finished left in [`WORK_DIR`]: run at boot, when none
@@ -164,6 +169,7 @@ pub(crate) fn snapshot_for_leaving(
     dest: &Path,
     keep_content: bool,
     packed_beside: u64,
+    job: Job,
 ) -> Result<Stripped> {
     snapshot_checked(
         state,
@@ -171,6 +177,7 @@ pub(crate) fn snapshot_for_leaving(
         dest,
         keep_content,
         packed_beside,
+        job,
         crate::hardware::available_bytes,
     )
 }
@@ -201,6 +208,7 @@ fn snapshot_checked(
     dest: &Path,
     keep_content: bool,
     packed_beside: u64,
+    job: Job,
     free: impl Fn(&Path) -> Option<u64>,
 ) -> Result<Stripped> {
     // Before any byte is written, and not under the DB lock held for the copy (reading the volume
@@ -210,7 +218,7 @@ fn snapshot_checked(
         let conn = state.conn()?;
         store_bytes(&conn)?
     };
-    check_space(free(folder), size, packed_beside, folder)?;
+    check_space(free(folder), size, packed_beside, folder, job)?;
     snapshot_with(
         |work| {
             let conn = state.conn()?;
@@ -223,6 +231,7 @@ fn snapshot_checked(
         },
         dest,
         keep_content,
+        job,
     )
 }
 
@@ -254,6 +263,7 @@ fn snapshot_with(
     take: impl FnOnce(&Path) -> Result<Secret>,
     dest: &Path,
     keep_content: bool,
+    job: Job,
 ) -> Result<Stripped> {
     let work = work_path(dest);
     let folder = dest.parent().unwrap_or(dest).to_path_buf();
@@ -261,11 +271,7 @@ fn snapshot_with(
         Ok(key) => key,
         Err(e) => {
             discard(&work);
-            return Err(if is_disk_full(&e) {
-                no_space(&folder)
-            } else {
-                e
-            });
+            return Err(space_or(e, &folder, job));
         }
     };
     let stripped = strip_snapshot(&work, dest, key.expose(), keep_content);
@@ -277,7 +283,7 @@ fn snapshot_with(
             // Nothing half-stripped is left to be picked up by mistake.
             discard(dest);
             Err(if is_disk_full(&e) {
-                no_space(&folder)
+                no_space(&folder, job)
             } else {
                 Error::Other(format!(
                     "nothing was saved: PM couldn't take the mods' private data out of the copy \
@@ -317,11 +323,29 @@ fn is_disk_full(e: &Error) -> bool {
 }
 
 /// A full disk is said as one, not as a strip that failed: nothing about the user's data is wrong.
-fn no_space(folder: &Path) -> Error {
+fn no_space(folder: &Path, job: Job) -> Error {
+    // A copy of the store is made for a backup and an export; a restore's folder holds the archive
+    // downloaded from the cloud, whose size isn't known ahead.
+    let (lead, what, room) = match job {
+        Job::Backup => (
+            "nothing was saved",
+            "the copy of your data",
+            "about twice your database plus your notes",
+        ),
+        Job::Restore => (
+            "nothing was restored",
+            "downloading the backup",
+            "the whole backup file and what is unpacked from it",
+        ),
+        Job::Export => (
+            "the export wasn't finished",
+            "the copy of your data",
+            "about twice your database plus your notes",
+        ),
+    };
     Error::Other(format!(
-        "nothing was saved: there isn't enough free disk space for the copy of your data. PM makes \
-         it in its own folder ({}), and needs room there for about twice your database plus your \
-         notes while it works",
+        "{lead}: there isn't enough free disk space for {what}. PM works in its own folder ({}), \
+         and needs room there for {room} while it does",
         folder.display()
     ))
 }
@@ -391,10 +415,11 @@ fn check_space(
     store_bytes: u64,
     packed_beside: u64,
     folder: &Path,
+    job: Job,
 ) -> Result<()> {
     let needed = store_bytes.saturating_mul(2).saturating_add(packed_beside);
     match free {
-        Some(free) if free < needed => Err(no_space(folder)),
+        Some(free) if free < needed => Err(no_space(folder, job)),
         _ => Ok(()),
     }
 }
@@ -1049,7 +1074,7 @@ mod tests {
     /// [`snapshot_for_leaving`] for the vault `state` has open, as a caller that read its metadata
     /// from that vault passes it (none open: an id no vault has).
     fn leave(state: &AppState, dest: &Path, keep_content: bool) -> Result<Stripped> {
-        snapshot_for_leaving(state, &origin_of(state), dest, keep_content, 0)
+        snapshot_for_leaving(state, &origin_of(state), dest, keep_content, 0, Job::Backup)
     }
 
     /// The store `state` has open, as a caller that read its metadata from it names it (none open:
@@ -1282,6 +1307,62 @@ mod tests {
     }
 
     #[test]
+    fn a_full_disk_in_the_copies_folder_is_said_in_the_words_of_the_job_that_hit_it() {
+        // `work_dir` is shared: a restore's download folder is the same one a backup's copy is made
+        // in, and the wording was a backup's whichever job hit it ("nothing was saved ... the copy
+        // of your data" under a restore that had saved nothing and copied nothing).
+        let folder = Path::new("/somewhere/copies-in-progress");
+        let full = || Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let said = |job| space_or(full(), folder, job).to_string();
+        let backup = said(Job::Backup);
+        assert!(backup.starts_with("nothing was saved"), "{backup}");
+        let restore = said(Job::Restore);
+        assert!(restore.starts_with("nothing was restored"), "{restore}");
+        assert!(!restore.contains("nothing was saved"), "{restore}");
+        assert!(!restore.contains("copy of your data"), "{restore}");
+        let export = said(Job::Export);
+        assert!(export.starts_with("the export wasn't finished"), "{export}");
+        // Each still names the folder and says the disk is what is short.
+        for text in [&backup, &restore, &export] {
+            assert!(text.contains("isn't enough free disk space"), "{text}");
+            assert!(text.contains("/somewhere/copies-in-progress"), "{text}");
+        }
+        // The space check ahead of a copy speaks the same way; any other failure is not reworded.
+        let short = check_space(Some(1), 1_000, 0, folder, Job::Export).unwrap_err();
+        assert!(short.to_string().starts_with("the export wasn't finished"));
+        let other = space_or(
+            Error::Other("a vault file is unreadable".into()),
+            folder,
+            Job::Restore,
+        );
+        assert_eq!(other.to_string(), "a vault file is unreadable");
+    }
+
+    #[test]
+    fn a_restore_s_download_folder_is_made_as_a_restore() {
+        // The wording above only reaches a restore if the restore asks for its folder as one:
+        // `restore_scratch_in` is the one place that makes it, and the first two work_dir calls in
+        // the backups file are the two backup runs'.
+        let backups = production(include_str!("../commands/backups.rs"));
+        let scratch = backups
+            .split("fn restore_scratch_in(")
+            .nth(1)
+            .expect("restore_scratch_in exists")
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert!(scratch.contains("strip::work_dir("), "{scratch}");
+        assert!(scratch.contains("Job::Restore"), "{scratch}");
+        assert!(!scratch.contains("Job::Backup"), "{scratch}");
+        let export = production(include_str!("../commands/export.rs"));
+        assert_eq!(
+            export.matches("Job::Export").count(),
+            3,
+            "work_dir, the snapshot, the zip"
+        );
+    }
+
+    #[test]
     fn a_full_disk_is_said_as_one_and_leaves_nothing() {
         // SQLITE_FULL from the first copy (the live store's `VACUUM INTO`) or the strip's rewrite is
         // a full disk, not a secret that couldn't be taken out.
@@ -1299,6 +1380,7 @@ mod tests {
             },
             &dest,
             true,
+            Job::Backup,
         )
         .unwrap_err()
         .to_string();
@@ -1315,7 +1397,7 @@ mod tests {
     #[test]
     fn copies_are_made_in_pms_own_folder_and_a_crash_leaves_nothing_after_boot() {
         let data = tempfile::tempdir().unwrap();
-        let run = work_dir(data.path(), "pm-backup-").unwrap();
+        let run = work_dir(data.path(), "pm-backup-", Job::Backup).unwrap();
         // On the data dir's disk, under the one folder the boot sweep and the wipe clear.
         assert_eq!(run.path().parent().unwrap(), data.path().join(WORK_DIR));
         let snapshot = run.path().join("pm.sqlite");
@@ -1327,7 +1409,9 @@ mod tests {
         );
 
         // What a crash leaves (a run folder, kept past its guard, and a stray file) goes at boot.
-        let crashed = work_dir(data.path(), "pm-export-").unwrap().keep();
+        let crashed = work_dir(data.path(), "pm-export-", Job::Export)
+            .unwrap()
+            .keep();
         std::fs::write(crashed.join("pm.sqlite"), b"x").unwrap();
         std::fs::write(data.path().join(WORK_DIR).join("stray"), b"x").unwrap();
         assert_eq!(sweep_work_dir(data.path()), 2);
@@ -1350,13 +1434,13 @@ mod tests {
         // (paths::prepare_data_dir): a copy's folder must not bring it back.
         let outer = tempfile::tempdir().unwrap();
         let gone = outer.path().join("Personal Manager");
-        assert!(work_dir(&gone, "pm-export-").is_err());
+        assert!(work_dir(&gone, "pm-export-", Job::Export).is_err());
         assert!(!gone.exists(), "the data folder was rebuilt");
         // Whereas the data folder that is there gets its one subfolder, again and again.
         let here = outer.path().join("here");
         std::fs::create_dir(&here).unwrap();
-        drop(work_dir(&here, "pm-backup-").unwrap());
-        drop(work_dir(&here, "pm-backup-").unwrap());
+        drop(work_dir(&here, "pm-backup-", Job::Backup).unwrap());
+        drop(work_dir(&here, "pm-backup-", Job::Backup).unwrap());
     }
 
     #[test]
@@ -1364,17 +1448,17 @@ mod tests {
         let folder = Path::new("/somewhere/copies-in-progress");
         // Twice the store (the strip holds the first copy and the rewrite), exactly, is enough when
         // nothing else is packed beside it; a byte less is not; an unknown volume is not a no.
-        assert!(check_space(Some(2_000), 1_000, 0, folder).is_ok());
-        let err = check_space(Some(1_999), 1_000, 0, folder).unwrap_err();
+        assert!(check_space(Some(2_000), 1_000, 0, folder, Job::Backup).is_ok());
+        let err = check_space(Some(1_999), 1_000, 0, folder, Job::Backup).unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
-        assert!(check_space(None, 1_000, 0, folder).is_ok());
-        assert!(check_space(Some(0), 0, 0, folder).is_ok());
-        assert!(check_space(Some(u64::MAX - 1), u64::MAX, 0, folder).is_err());
+        assert!(check_space(None, 1_000, 0, folder, Job::Backup).is_ok());
+        assert!(check_space(Some(0), 0, 0, folder, Job::Backup).is_ok());
+        assert!(check_space(Some(u64::MAX - 1), u64::MAX, 0, folder, Job::Backup).is_err());
         // A pack into this folder also holds the Markdown and sidecars beside the store's pages:
         // twice the store plus those, exactly, is enough, a byte less is not.
-        assert!(check_space(Some(2_300), 1_000, 300, folder).is_ok());
-        assert!(check_space(Some(2_299), 1_000, 300, folder).is_err());
-        assert!(check_space(Some(u64::MAX - 1), 1, u64::MAX, folder).is_err());
+        assert!(check_space(Some(2_300), 1_000, 300, folder, Job::Backup).is_ok());
+        assert!(check_space(Some(2_299), 1_000, 300, folder, Job::Backup).is_err());
+        assert!(check_space(Some(u64::MAX - 1), 1, u64::MAX, folder, Job::Backup).is_err());
 
         // And it is wired in front of the first copy: nothing is made when the volume is too full.
         let dir = tempfile::tempdir().unwrap();
@@ -1382,23 +1466,36 @@ mod tests {
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
         let vault_id = origin_of(&state);
-        let err = snapshot_checked(&state, &vault_id, &dest, true, 0, |_| Some(1)).unwrap_err();
+        let err = snapshot_checked(&state, &vault_id, &dest, true, 0, Job::Backup, |_| Some(1))
+            .unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
         assert!(files_in(&dest).is_empty());
         assert!(!work_path(&dest).exists());
         // The Markdown beside the store is counted by the wired call, not only by the pure check:
         // exactly the store's twice is room for the copy alone, a byte short of it plus 500 is not.
         let store = store_bytes(&state.conn().unwrap()).unwrap();
-        let err = snapshot_checked(&state, &vault_id, &dest, true, 500, move |_| {
-            Some(store * 2 + 499)
-        })
+        let err = snapshot_checked(
+            &state,
+            &vault_id,
+            &dest,
+            true,
+            500,
+            Job::Backup,
+            move |_| Some(store * 2 + 499),
+        )
         .unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
         assert!(files_in(&dest).is_empty());
         // With room it copies.
-        snapshot_checked(&state, &vault_id, &dest, true, 500, move |_| {
-            Some(store * 2 + 500)
-        })
+        snapshot_checked(
+            &state,
+            &vault_id,
+            &dest,
+            true,
+            500,
+            Job::Backup,
+            move |_| Some(store * 2 + 500),
+        )
         .unwrap();
         assert!(dest.exists());
     }
@@ -1733,7 +1830,7 @@ mod tests {
             vault_id: "some-other-vault".into(),
             vault_root: open.vault_root.clone(),
         };
-        let err = snapshot_for_leaving(&state, &other, &dest, true, 0).unwrap_err();
+        let err = snapshot_for_leaving(&state, &other, &dest, true, 0, Job::Backup).unwrap_err();
         assert!(
             err.to_string()
                 .contains("the vault changed while the backup started"),
@@ -1746,7 +1843,7 @@ mod tests {
             vault_id: open.vault_id.clone(),
             vault_root: dir.path().join("restored-copy"),
         };
-        let err = snapshot_for_leaving(&state, &restored, &dest, true, 0).unwrap_err();
+        let err = snapshot_for_leaving(&state, &restored, &dest, true, 0, Job::Backup).unwrap_err();
         assert!(
             err.to_string()
                 .contains("the vault changed while the backup started"),
@@ -1754,7 +1851,7 @@ mod tests {
         );
         assert!(files_in(&dest).is_empty());
         // The same store, the open one by its own id and folder, is copied.
-        snapshot_for_leaving(&state, &open, &dest, true, 0).unwrap();
+        snapshot_for_leaving(&state, &open, &dest, true, 0, Job::Backup).unwrap();
         // No store open at all is another vault too.
         let live = Some((open.vault_id.clone(), open.vault_root.clone()));
         assert!(same_store(None, &open).is_err());

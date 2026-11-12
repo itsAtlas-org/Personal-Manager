@@ -505,4 +505,38 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn a_pack_that_fails_leaves_the_file_already_at_the_destination_and_no_temporary() {
+        // The destination is where the user chose, and may hold their last backup: it is replaced
+        // only by the rename of a finished archive. A cancelled pack fails mid-stream, after the
+        // temporary beside it was made and written to.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, vec![7u8; 50_000]).unwrap();
+        let inputs = PackInputs {
+            vault_root: dir.path().to_path_buf(),
+            db_snapshot: snap,
+            markdown_dir: dir.path().join("vault"),
+            meta,
+            db_key_hex: Secret::from("00".repeat(32)),
+            app_version: "test".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+            mods_index: None,
+            mods: None,
+        };
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let dest = out.join("mine.pmbackup");
+        std::fs::write(&dest, b"my last backup").unwrap();
+        let cancel = AtomicBool::new(true);
+        pack(inputs, &dest, "a passphrase", |_, _| {}, &cancel).unwrap_err();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"my last backup");
+        let left: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("mine.pmbackup")]);
+    }
 }

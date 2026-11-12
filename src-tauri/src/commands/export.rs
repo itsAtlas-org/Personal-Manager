@@ -86,7 +86,11 @@ pub async fn export_all_data(
     // A fresh *directory* (not file) so `VACUUM INTO` writes a fresh file into an empty dir — it
     // refuses a pre-existing target. On disk in PM's own folder, never the OS temp dir (tmpfs, RAM,
     // on many Linux desktops). The dir (and snapshot) is removed on drop.
-    let tmp = crate::backup::strip::work_dir(&paths::data_dir(&app)?, "pm-export-")?;
+    let tmp = crate::backup::strip::work_dir(
+        &paths::data_dir(&app)?,
+        "pm-export-",
+        crate::backup::strip::Job::Export,
+    )?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     // The RESOLVED vault root, not the profile data dir (#712). The snapshot below already comes
     // from the live (possibly pointed) store, so joining a hard-coded "vault" under the data dir
@@ -114,7 +118,14 @@ pub async fn export_all_data(
             // opened with the open store's own key, not the keychain's. The export is the user's own
             // copy of their data, so it keeps the mods' saved data whatever the backup toggle says:
             // that toggle is about what a backup file carries.
-            crate::backup::strip::snapshot_for_leaving(&state, &from, &snapshot, true, 0)?;
+            crate::backup::strip::snapshot_for_leaving(
+                &state,
+                &from,
+                &snapshot,
+                true,
+                0,
+                crate::backup::strip::Job::Export,
+            )?;
         }
         // The zip is written to the user's chosen place after the space check (which counts the
         // store only), so a full disk there is said as one.
@@ -187,12 +198,35 @@ pub async fn export_plaintext_markdown(
 /// PM could not open — `vault-meta.json` holds the KDF parameters and the verifier — and, if it did
 /// open, one that had silently lost its entity rules and every index-only pointer. An export missing
 /// what a backup includes is a promise of portability the archive cannot keep.
+///
+/// The zip is built in a temporary file beside `dest` and renamed over it only when it is whole
+/// (the pattern [`crate::backup::pack`] uses), so a failure part-way (a full disk, an unreadable
+/// note) leaves no partial archive at the place the user chose, and a file already there is
+/// replaced only by a finished export, never truncated by one that didn't finish. The temporary is
+/// beside `dest` so the rename is within one volume, and it is removed when this returns early.
 fn write_export_zip(
     resolved: &vault::ResolvedVault,
     db_snapshot: &std::path::Path,
     dest: &std::path::Path,
 ) -> Result<()> {
-    let file = std::fs::File::create(dest)?;
+    let dest_parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let dest_parent = dest_parent.unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = tempfile::Builder::new()
+        .prefix(".pmexport-")
+        .tempfile_in(dest_parent)?;
+    let file = tmp.as_file().try_clone()?;
+    let file = write_zip_into(file, resolved, db_snapshot)?;
+    file.sync_all()?;
+    tmp.persist(dest).map_err(|e| Error::from(e.error))?;
+    Ok(())
+}
+
+/// The archive's contents, written into `file`, which is handed back finished.
+fn write_zip_into(
+    file: std::fs::File,
+    resolved: &vault::ResolvedVault,
+    db_snapshot: &std::path::Path,
+) -> Result<std::fs::File> {
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -230,8 +264,7 @@ fn write_export_zip(
             opts,
         )?;
     }
-    zip.finish()?;
-    Ok(())
+    Ok(zip.finish()?)
 }
 
 /// Recursively add `dir` to the archive under `prefix`, preserving relative paths.
@@ -387,6 +420,123 @@ mod tests {
         let names = entries(&dest);
         assert!(names.contains(&"vault/real.md".to_string()));
         assert!(!names.contains(&"vault/stale.md".to_string()));
+    }
+
+    /// A vault whose Markdown tree has a note that can't be read (a link to nothing), so the zip
+    /// fails after it has already written the database and the notes before it.
+    #[cfg(unix)]
+    fn vault_that_fails_mid_zip(dir: &std::path::Path) -> (vault::ResolvedVault, PathBuf) {
+        let root = dir.join("Vault");
+        write(&root.join("vault").join("a.md"), &"a note\n".repeat(5000));
+        std::os::unix::fs::symlink(root.join("nowhere.md"), root.join("vault").join("z.md"))
+            .unwrap();
+        let snapshot = dir.join("snap.sqlite");
+        write(&snapshot, &"db page ".repeat(8192));
+        (
+            vault::ResolvedVault {
+                vault_root: root.clone(),
+                db_path: root.join(vault::DB_FILENAME),
+                markdown_dir: root.join("vault"),
+            },
+            snapshot,
+        )
+    }
+
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_that_fails_leaves_no_partial_file_where_the_user_chose() {
+        // The zip used to be created at the chosen path and written in place, so a failure part-way
+        // (a full disk, an unreadable note) left a truncated, unreadable "export" there.
+        let dir = tempfile::tempdir().unwrap();
+        let (resolved, snapshot) = vault_that_fails_mid_zip(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let dest = out.join("export.zip");
+        write_export_zip(&resolved, &snapshot, &dest).unwrap_err();
+        assert!(
+            !dest.exists(),
+            "a partial archive was left at the destination"
+        );
+        assert!(
+            names_in(&out).is_empty(),
+            "the temporary was left beside it: {:?}",
+            names_in(&out)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_export_leaves_a_file_the_user_already_had_there_untouched() {
+        // Replacing an earlier export is the point of choosing its name again, but only a finished
+        // one may replace it: a failed run used to truncate it first.
+        let dir = tempfile::tempdir().unwrap();
+        let (resolved, snapshot) = vault_that_fails_mid_zip(dir.path());
+        let out = dir.path().join("out");
+        let dest = out.join("export.zip");
+        write(&dest, "the export from last week");
+        write_export_zip(&resolved, &snapshot, &dest).unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "the export from last week"
+        );
+        assert_eq!(names_in(&out), vec!["export.zip".to_string()]);
+    }
+
+    #[test]
+    fn a_finished_export_replaces_the_file_there_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Vault");
+        write(&root.join("vault").join("a.md"), "# a");
+        let snapshot = dir.path().join("snap.sqlite");
+        write(&snapshot, "db");
+        let resolved = vault::ResolvedVault {
+            vault_root: root.clone(),
+            db_path: root.join(vault::DB_FILENAME),
+            markdown_dir: root.join("vault"),
+        };
+        let out = dir.path().join("out");
+        let dest = out.join("export.zip");
+        write(&dest, "the export from last week");
+        write_export_zip(&resolved, &snapshot, &dest).unwrap();
+        assert_eq!(
+            entries(&dest),
+            vec!["pm.sqlite".to_string(), "vault/a.md".to_string()]
+        );
+        assert_eq!(names_in(&out), vec!["export.zip".to_string()]);
+    }
+
+    #[test]
+    fn an_export_that_cannot_be_renamed_into_place_leaves_the_destination_and_no_temporary() {
+        // The last step is the rename: a destination that can't be replaced (here, a folder of that
+        // name) fails there, after the whole archive was written, and the temporary goes.
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("snap.sqlite");
+        write(&snapshot, "db");
+        let root = dir.path().join("Vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let resolved = vault::ResolvedVault {
+            vault_root: root.clone(),
+            db_path: root.join(vault::DB_FILENAME),
+            markdown_dir: root.join("vault"),
+        };
+        let out = dir.path().join("out");
+        let dest = out.join("export.zip");
+        write(&dest.join("keep.txt"), "mine");
+        write_export_zip(&resolved, &snapshot, &dest).unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("keep.txt")).unwrap(),
+            "mine"
+        );
+        assert_eq!(names_in(&out), vec!["export.zip".to_string()]);
     }
 
     #[test]

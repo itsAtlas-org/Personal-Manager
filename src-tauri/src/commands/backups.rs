@@ -127,7 +127,14 @@ async fn snapshot_stripped(
         } else {
             0
         };
-        backup::strip::snapshot_for_leaving(&state, &from, &snapshot, keep_content, beside)
+        backup::strip::snapshot_for_leaving(
+            &state,
+            &from,
+            &snapshot,
+            keep_content,
+            beside,
+            backup::strip::Job::Backup,
+        )
     })
     .await
 }
@@ -184,7 +191,9 @@ pub async fn create_local_backup(
     // backup's gate: a snapshot that couldn't be stripped fails the whole backup. Made on disk in
     // PM's own folder, never the OS temp dir (tmpfs, RAM, on many Linux desktops).
     let tmp = paths::data_dir(&app)
-        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-snap-"))
+        .and_then(|dir| {
+            backup::strip::work_dir(&dir, "pm-backup-snap-", backup::strip::Job::Backup)
+        })
         .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     let backup::strip::Stripped { mods, key: db_key } =
@@ -932,7 +941,7 @@ pub(crate) async fn run_backup(
     // The snapshot, and the archive packed from it, are made on disk in PM's own folder, never the
     // OS temp dir (tmpfs, RAM, on many Linux desktops); the folder goes when `tmp` drops.
     let tmp = paths::data_dir(app)
-        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-"))
+        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-", backup::strip::Job::Backup))
         .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     let resolved = vault::resolve(app).map_err(fail)?;
@@ -1411,7 +1420,11 @@ fn restore_scratch_in(
     data_dir: &std::path::Path,
     dest: &BackupDestination,
 ) -> Result<tempfile::TempDir> {
-    backup::strip::work_dir(data_dir, &format!("pm-restore-{}-", dest.kind()))
+    backup::strip::work_dir(
+        data_dir,
+        &format!("pm-restore-{}-", dest.kind()),
+        backup::strip::Job::Restore,
+    )
 }
 
 /// What a failed restore step tells the user: a cancel as a cancel, a full disk (the download into
