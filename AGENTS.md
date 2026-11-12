@@ -136,8 +136,9 @@ release remain the open post-v1 work.
     `destination.rs` enum fans out to the Proton Drive CLI (`proton.rs`) + Google Drive REST
     (`gdrive.rs`); `schedule.rs`. `strip.rs` is the one way a copy of the store leaves (every
     backup and the export: a snapshot stripped of mod secrets, connected apps and rebuildable mod
-    data, then vacuumed; INVARIANTS.md I-32) and `adopt_mods.rs` what adopting a restored or
-    shared vault resets, plus the mod list a restore shows.
+    data, then vacuumed, made in `data_dir/copies-in-progress/`; INVARIANTS.md I-32) and
+    `adopt_mods.rs` what a restore's commit resets (joining a shared vault resets nothing: dev
+    mode and connected apps are per device), plus the mod list a restore shows.
   - **Platform** — `secrets.rs` (OS keychain: API key + background key + DB key + OAuth
     tokens + feed URLs), `openrouter.rs` (streaming SSE + non-streaming `complete()`; the key
     stays in Rust), `cost.rs`, `applock.rs` / `lock_session.rs`, `components.rs` (the Storage

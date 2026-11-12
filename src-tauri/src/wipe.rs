@@ -401,8 +401,8 @@ fn remove_db_files_retrying(db_path: &Path) -> bool {
 /// Delete the non-DB vault artifacts: metadata, the encrypted entity-rules file, the index-only
 /// manifest, lock batons, the migration journal + its pre-migration backup (kept at the DATA DIR,
 /// which differs from the vault root for a relocated vault — clearing at the root stranded a full
-/// decryptable backup copy, B1-4), the Markdown tree, abandoned restore staging, and the relocation
-/// pointer. A relocated vault's user-chosen root is only removed if PM had it to itself (never
+/// decryptable backup copy, B1-4), the Markdown tree, abandoned restore staging, a backup's or
+/// export's unfinished copies, and the relocation pointer. A relocated vault's user-chosen root is only removed if PM had it to itself (never
 /// wholesale — that would take the user's unrelated files, F-03). Returns the approximate bytes
 /// freed by the tree removals it sizes. Kept separate from [`remove_db_files_retrying`] so the DB
 /// file is confirmed gone first; shared by the wipe and the boot-error "start fresh" recovery. The
@@ -443,6 +443,11 @@ fn remove_vault_artifacts(resolved: &vault::ResolvedVault, data_dir: &Path) -> u
     let restore_staging = data_dir.join(RESTORE_STAGING_DIR);
     freed += dir_size(&restore_staging);
     remove_dir_all_retrying(&restore_staging);
+    // The same for a backup's or export's copies in progress (`backup::strip::WORK_DIR`): the wipe
+    // holds the backup single-flight, so only a crashed run's leftovers can be there.
+    let copies = data_dir.join(crate::backup::strip::WORK_DIR);
+    freed += dir_size(&copies);
+    remove_dir_all_retrying(&copies);
     if let Some(vault_id) = vault_id {
         freed += remove_mod_files(data_dir, &vault_id);
     }
@@ -2168,6 +2173,10 @@ mod tests {
         std::fs::write(root.join("vault").join("note.md"), b"# note").unwrap();
         let unrelated = root.join("taxes-2025.xlsx");
         std::fs::write(&unrelated, b"not PM's to delete").unwrap();
+        // A crashed backup's copy of the store (`backup::strip::WORK_DIR`).
+        let copies = root.join(crate::backup::strip::WORK_DIR);
+        std::fs::create_dir_all(copies.join("pm-backup-x")).unwrap();
+        std::fs::write(copies.join("pm-backup-x").join("pm.sqlite"), b"x").unwrap();
 
         let resolved = vault::resolve_layout(&root, None);
         remove_vault_artifacts(&resolved, &root);
@@ -2176,6 +2185,7 @@ mod tests {
             assert!(!file.exists(), "{} survived the erase", file.display());
         }
         assert!(!root.join("vault").exists(), "the Markdown tree goes too");
+        assert!(!copies.exists(), "and an unfinished backup's copy");
         assert!(unrelated.exists(), "and nothing that isn't PM's is touched");
     }
 

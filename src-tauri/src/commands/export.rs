@@ -83,23 +83,16 @@ pub async fn export_all_data(
     // L-5: `dest_path` is a webview-supplied write destination — validate its shape and that its
     // containing folder exists before we write the export archive there.
     pathguard::sanitize_destination(&dest_path)?;
-    // A temp *directory* (not file) so `VACUUM INTO` writes a fresh file into an empty
-    // dir — it refuses a pre-existing target. The dir (and snapshot) is removed on drop.
-    let tmp = tempfile::Builder::new().prefix("pm-export-").tempdir()?;
+    // A fresh *directory* (not file) so `VACUUM INTO` writes a fresh file into an empty dir — it
+    // refuses a pre-existing target. On disk in PM's own folder, never the OS temp dir (tmpfs, RAM,
+    // on many Linux desktops). The dir (and snapshot) is removed on drop.
+    let tmp = crate::backup::strip::work_dir(&paths::data_dir(&app)?, "pm-export-")?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     // The RESOLVED vault root, not the profile data dir (#712). The snapshot below already comes
     // from the live (possibly pointed) store, so joining a hard-coded "vault" under the data dir
     // paired the right database with the wrong Markdown tree on every moved or shared vault — and
     // on a vault moved out of the profile, with no Markdown at all.
     let resolved = vault::resolve(&app)?;
-    // The store's key comes first: the snapshot is stripped through it (D4), exactly as a backup's
-    // is. An export is the other way the database leaves the computer, so the same promise holds:
-    // a mod's secrets and the connected apps are never in the zip.
-    let meta = vault::load_meta(&resolved.vault_root)?
-        .ok_or_else(|| Error::Other("this vault has no metadata to export".into()))?;
-    let db_key = vault::current_db_key(&meta)?
-        .ok_or_else(|| Error::Other("unlock the vault before exporting it".into()))?;
-    let key_hex = zeroize::Zeroizing::new(db_key.expose().to_string());
     let dest = dest_path;
     // Snapshot + zip on the blocking pool (F-42): the copy of a multi-GB store would otherwise pin a
     // tokio worker *and* hold the global DB mutex for the whole of it. The snapshot helper takes the
@@ -109,9 +102,12 @@ pub async fn export_all_data(
     spawn_blocking_result("export", move || -> Result<()> {
         {
             let state = app.state::<AppState>();
-            // The export is the user's own copy of their data, so it keeps the mods' saved data
-            // whatever the backup toggle says: that toggle is about what a backup file carries.
-            crate::backup::strip::snapshot_for_leaving(&state, &snapshot, &key_hex, true)?;
+            // Stripped as a backup's is (D4): an export is the other way the database leaves the
+            // computer, so a mod's secrets and the connected apps are never in the zip. The copy is
+            // opened with the open store's own key, not the keychain's. The export is the user's own
+            // copy of their data, so it keeps the mods' saved data whatever the backup toggle says:
+            // that toggle is about what a backup file carries.
+            crate::backup::strip::snapshot_for_leaving(&state, &snapshot, true)?;
         }
         write_export_zip(&resolved, &snapshot, std::path::Path::new(&dest))
     })

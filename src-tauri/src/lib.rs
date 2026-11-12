@@ -173,6 +173,12 @@ pub struct VaultRuntime {
     /// sources we index but don't fully import). Same primitive as `rules_cipher`, a distinct AAD
     /// stem apart; sits next to the rules file at the vault root.
     pub manifest_cipher: index_only::ManifestCipher,
+    /// The key the open store was opened with (`vault::db_key_hex` of the master every open path
+    /// builds this runtime from). Private, and read only by [`AppState::session_db_key`] for a copy
+    /// of the store that leaves (`backup::strip`), which must open the copy with the live store's
+    /// own key: the keychain's cached copy can be missing while the store is open (a cache write
+    /// that failed at unlock, "Forget passphrase", a locked keyring).
+    db_key: secret::Secret,
 }
 
 impl VaultRuntime {
@@ -190,6 +196,7 @@ impl VaultRuntime {
             cipher: vault::MarkdownCipher::from_meta(meta, master),
             rules_cipher: entities::RulesCipher::from_master(&meta.vault_id, master),
             manifest_cipher: index_only::ManifestCipher::from_master(&meta.vault_id, master),
+            db_key: vault::db_key_hex(master),
         }
     }
 }
@@ -998,6 +1005,24 @@ impl AppState {
         guard.as_ref().map(|rt| rt.cipher.vault_id().to_owned())
     }
 
+    /// The key the open store was opened with, for opening a copy of it (`backup::strip`: every
+    /// backup and the export). Taken from the session rather than the keychain, so a passphrase
+    /// vault whose key this account didn't cache (a failed cache write, "Forget passphrase", a
+    /// locked keyring) still backs up while it is open. Safe to call while holding
+    /// [`Self::conn`]'s guard (DB then vault, as [`Self::open_session`] takes them). The clone is a
+    /// zeroizing [`secret::Secret`]; callers keep it only for the copy.
+    pub(crate) fn session_db_key(&self) -> error::Result<secret::Secret> {
+        let guard = self
+            .vault
+            .lock()
+            .map_err(|_| error::Error::Other("vault lock poisoned".into()))?;
+        guard.as_ref().map(|rt| rt.db_key.clone()).ok_or_else(|| {
+            error::Error::Other(
+                "this vault's key isn't available on this device, so nothing was copied".into(),
+            )
+        })
+    }
+
     /// Snapshot the active vault's Markdown dir + cipher, or a friendly error if the
     /// vault is locked. Cloned so the caller can do file IO without holding the lock —
     /// the single way ingest reaches the Markdown layer.
@@ -1400,6 +1425,15 @@ pub fn run() {
             // a locked file just waits for the next boot. (F-25)
             if let Ok(data_dir) = paths::data_dir(handle) {
                 wipe::sweep_restore_staging(&data_dir, &resolved.vault_root);
+                // And the copies a backup or export makes before they leave
+                // (`backup::strip::WORK_DIR`): encrypted copies of a store whose run never finished.
+                // No backup or export can be in flight before the window exists.
+                let swept = backup::strip::sweep_work_dir(&data_dir);
+                if swept > 0 {
+                    eprintln!(
+                        "startup: cleared {swept} unfinished backup or export copy folder(s)"
+                    );
+                }
             }
 
             // Same idea, one directory over: PM's staging files in the OS temp dir. A connector

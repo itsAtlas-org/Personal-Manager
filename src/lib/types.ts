@@ -1351,9 +1351,12 @@ export interface RestoreSummary {
 }
 
 /** Where a restored mod stands (mirrors the Rust `adopt_mods::Standing`). `pending`: the store isn't
- *  open yet; `back`: its files are here and it is on; `paused`: here but switched off; `parked`: it
- *  can't run, and `note` says what gets it back; `installing`: an install that hadn't finished. */
-export type RestoredModStanding = "pending" | "back" | "paused" | "parked" | "installing";
+ *  open yet; `back`: it runs (the registry serves it, not merely an `active` row); `paused`: here but
+ *  switched off or held by the safety list; `parked`: it can't run, and `note` says what gets it
+ *  back; `installing`: an install that hadn't finished; `waiting`: on, but waiting for the user to
+ *  open it the first time. */
+export type RestoredModStanding =
+  "pending" | "back" | "paused" | "parked" | "installing" | "waiting";
 
 /** One mod a restore lists, with the words to show beside it. */
 export interface RestoredMod {
@@ -1366,7 +1369,7 @@ export interface RestoredMod {
   source: string;
   standing: RestoredModStanding;
   /** What to do or what happened (spec §1.11's "Install X to get this back"), or null when the mod
-   *  is simply back. For `pending` it is what applies if the files turn out not to be here. */
+   *  is simply back, or still `pending` (nothing is known before the switch). */
   note: string | null;
 }
 

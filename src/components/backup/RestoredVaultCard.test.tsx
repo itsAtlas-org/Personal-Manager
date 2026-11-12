@@ -53,7 +53,7 @@ function mod(over: Partial<RestoredMod>): RestoredMod {
     signed: true,
     source: "catalogue",
     standing: "pending",
-    note: "Install Board to get this back",
+    note: null,
     ...over,
   };
 }
@@ -89,7 +89,9 @@ const outcome = (over: Partial<SwitchOutcome>): SwitchOutcome => ({
 });
 
 describe("RestoredVaultCard", () => {
-  it("lists the mods a backup held, with the words for missing signed and unsigned ones", () => {
+  it("before the switch, lists the backup's mods without telling the user to install them", () => {
+    // A same-machine restore brings most mods back by itself, so before the switch nothing is
+    // known and each row says only that: never "Install X", even from a row that carries a note.
     render(
       <RestoredVaultCard
         restored={summary([
@@ -104,9 +106,9 @@ describe("RestoredVaultCard", () => {
         setError={() => {}}
       />,
     );
-    expect(screen.getByText("This backup held 2 mods.", { exact: false })).toBeTruthy();
-    expect(screen.getByText(/Install Board to get this back/)).toBeTruthy();
-    expect(screen.getByText(/Install the file again to get this back/)).toBeTruthy();
+    expect(screen.getByText("This backup held 2 mods:", { exact: false })).toBeTruthy();
+    expect(screen.getAllByText(/comes back if its files are on this computer/)).toHaveLength(2);
+    expect(screen.queryByText(/Install/)).toBeNull();
     // Said once for every restore: these reset on the way in.
     expect(screen.getByText(/Developer mode comes back off/)).toBeTruthy();
   });
@@ -131,6 +133,12 @@ describe("RestoredVaultCard", () => {
         mods: [
           mod({ standing: "back", note: null, id: "a.back", name: "Fine" }),
           mod({ standing: "parked", note: "Install Board to get this back" }),
+          mod({
+            standing: "waiting",
+            note: "Waiting for you to open it",
+            id: "atlas.pilot",
+            name: "Pilot",
+          }),
         ],
       }),
     );
@@ -139,8 +147,10 @@ describe("RestoredVaultCard", () => {
     expect(
       await screen.findByText(/couldn't re-engage its shared-vault coordination/),
     ).toBeTruthy();
-    expect(screen.getByText(/One mod isn't running yet/)).toBeTruthy();
+    expect(screen.getByText(/2 mods aren't running yet/)).toBeTruthy();
+    // After the switch the install note is the settled answer, and a pilot not yet opened says so.
     expect(screen.getByText(/Install Board to get this back/)).toBeTruthy();
+    expect(screen.getByText(/Waiting for you to open it/)).toBeTruthy();
     // The mod that is simply back is not listed among the ones to read about.
     expect(screen.queryByText("Fine")).toBeNull();
     expect(reload).not.toHaveBeenCalled();

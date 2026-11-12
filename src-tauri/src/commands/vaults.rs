@@ -940,25 +940,13 @@ pub fn adopt_shared_vault(
     }
     // M-3: if the meta was repaired on open, tell the user (non-blocking).
     emit_vault_meta_warning(&app, &state, &meta_report);
-    let active_writer = lock_session::status(&app).active;
-    // §1.11: a vault made elsewhere arrives with that place's dev-mode switch and connected apps, so
-    // joining one resets them as a restore does (`adopt_mods::reset_for_adopt`). Only the active
-    // writer writes to a shared store (the other account holds the baton and the curtain shows), so
-    // a joiner who isn't leaves it alone. The attach is done by now, so a failure here can't undo it: it is a warning, and the page's
-    // dev-mode switch stays the user's to check.
-    if active_writer {
-        if let Err(e) = state
-            .conn()
-            .and_then(|conn| crate::backup::adopt_mods::reset_for_adopt(&conn))
-        {
-            warnings.push(format!(
-                "PM couldn't switch developer mode off or clear connected apps in the shared \
-                 vault ({e}); check Settings → Developer."
-            ));
-        }
-    }
+    // Unlike a restore's commit, joining writes nothing about mods to the store: it is the vault's,
+    // in use by its other accounts and machines, and the two things a restore resets are per
+    // device. Neither seam takes the store, so neither can write it (`backup::adopt_mods`).
+    crate::backup::adopt_mods::joiner_dev_mode_is_per_device();
+    crate::backup::adopt_mods::joiner_accepts_only_its_own_clients();
     Ok(AdoptOutcome {
-        active_writer,
+        active_writer: lock_session::status(&app).active,
         warnings,
     })
 }

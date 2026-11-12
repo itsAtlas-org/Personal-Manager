@@ -12,31 +12,54 @@
 //!   restore, as they do their keychain ones), `mcp_clients` (connected apps' token hashes: a
 //!   device's, never a vault's), `mod_doc_data` and cache-class `mod_kv` (rebuildable), and every
 //!   mod installed from a developer's test folder (`installed_from = 'folder'`: nothing a restore
-//!   could install again, and unpublished work), with the rows that hang off it.
+//!   could install again, and unpublished work), with the rows that hang off it. Such a mod's
+//!   name also sits where its `mods` row can't take it along (no FK, by design): its gifts'
+//!   attribution (`mod_ledger`: id, name, author, source repo) is blanked to "a test mod", its
+//!   spend (`usage_log.mod_id`) loses the id, and its overlay leaves the calendar's hidden set.
 //! - **Out unless the user keeps it** (`BACKUP_MOD_DATA_KEY`, default on): content-class `mod_kv`,
 //!   the mods' own saved data. Off, a restore brings those mods back empty.
-//! - **Never touched:** `mod_overlay` and the gift rows (`mod_ledger` and the tasks and milestones
-//!   they name). The overlay is calendar entries a mod published into a core table; it is derived
-//!   and carries nothing private, so it stays. Gifts are core tasks and milestones that are the
-//!   user's own whatever made them (I-16, I-29). Neither is "a mod's data" in the sense the toggle
-//!   or D4 means.
+//! - **Never taken out:** `mod_overlay` and the gift rows (`mod_ledger` and the tasks and
+//!   milestones they name). The overlay is calendar entries a mod published into a core table; it
+//!   is derived and carries nothing private, so it stays. Gifts are core tasks and milestones that
+//!   are the user's own whatever made them (I-16, I-29). Neither is "a mod's data" in the sense the
+//!   toggle or D4 means.
 //!
-//! The strip runs on the SNAPSHOT's own connection, never on the live store. A plain `DELETE`
-//! leaves the row's bytes in the page (and a deleted overflow page on the free list), and nothing in
-//! PM sets `secure_delete`, so the strip sets it, deletes, and `VACUUM`s the copy before anything is
-//! packed; the test reads every decrypted page, free ones included, to prove the values are gone.
-//! If any step fails the snapshot is deleted and the caller gets an error: a backup that might hold
-//! a secret is never written.
+//! The strip runs on the COPY's own connection, never on the live store. A plain `DELETE` leaves
+//! the row's bytes in the page (and a deleted overflow page on the free list), and nothing in PM
+//! sets `secure_delete`, so the strip sets it, deletes, and then rewrites the copy with a `VACUUM`
+//! (`VACUUM INTO` the file that leaves, so the rewrite needs no temporary database: the bundled
+//! SQLCipher keeps those in memory, `SQLITE_TEMP_STORE=2`, and an in-place `VACUUM` of a multi-GB
+//! store would hold a whole copy in RAM). The test reads every decrypted page, free ones included,
+//! to prove the values are gone. If any step fails both files are deleted and the caller gets an
+//! error: a backup that might hold a secret is never written.
+//!
+//! **Where.** The copies are made in [`WORK_DIR`] under PM's data dir, on the same disk as the
+//! store, never the OS temp dir (tmpfs, which is RAM, on many Linux desktops). A run's folder goes
+//! when its guard drops, whether it worked or not, and [`sweep_work_dir`] removes at boot what a
+//! crash left (each is an encrypted copy of a store, nothing to keep).
+//!
+//! **Which key.** The copy is opened with the key the live store was opened with, read from the
+//! open session ([`AppState::session_db_key`]) under the same DB guard as the copy, never from the
+//! keychain: a passphrase vault whose key this account didn't cache is still open, and still backs
+//! up, and a copy can't be keyed differently from the store it was taken from.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::manifest::BackupMod;
 use crate::db;
 use crate::error::{Error, Result};
 use crate::mods::store;
+use crate::secret::Secret;
 use crate::AppState;
+
+/// The folder under PM's data dir where a copy of the store is made, stripped and (for a backup)
+/// packed before it leaves. One folder per run inside it ([`work_dir`]).
+pub const WORK_DIR: &str = "copies-in-progress";
+
+/// What a stripped attribution reads as: a folder mod's gifts keep a maker, just not which one.
+pub const STRIPPED_MOD_NAME: &str = "a test mod";
 
 /// `settings` key of "Also save mod data in my backups" (Backup settings): `"true"` or `"false"`,
 /// on when absent. Per vault (it travels in the store's own `settings`), like the schedule.
@@ -61,47 +84,142 @@ pub fn keep_mod_data(state: &AppState) -> Result<bool> {
     db::get_bool(&conn, BACKUP_MOD_DATA_KEY, true)
 }
 
-/// Snapshot the live store into `dest` (a file that doesn't exist yet) and strip the snapshot: the
-/// only way a copy of the store leaves (module doc). `key_hex` is the store's key, which the caller
-/// resolves FIRST so a missing key fails before any copy exists. The DB lock is held for the
-/// `VACUUM INTO` only; the strip is file work on the snapshot and runs after it is released. Returns
-/// the mods the snapshot holds, for the manifest. Blocking: call inside `spawn_blocking`.
+/// A fresh, empty folder for one backup's or export's copies, under [`WORK_DIR`] in `data_dir`.
+/// Removed with everything in it when the returned guard drops, on success and on failure alike.
+pub fn work_dir(data_dir: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+    let parent = data_dir.join(WORK_DIR);
+    let made = std::fs::create_dir_all(&parent)
+        .and_then(|()| tempfile::Builder::new().prefix(prefix).tempdir_in(&parent));
+    made.map_err(|e| {
+        let e = Error::from(e);
+        if is_disk_full(&e) {
+            no_space(&parent)
+        } else {
+            e
+        }
+    })
+}
+
+/// Remove what a backup or export that never finished left in [`WORK_DIR`]: run at boot, when none
+/// can be in flight. Each entry is an encrypted copy of a store (and, for a scheduled or cloud
+/// backup, its packed archive), so nothing is kept. Best-effort; returns how many entries went.
+pub fn sweep_work_dir(data_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(data_dir.join(WORK_DIR)) else {
+        return 0; // never made, or unreadable: nothing to do now
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // `file_type` doesn't follow a symlink, so a link is removed as itself, never its target.
+        let gone = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        if gone.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// A copy that is ready to leave: the mods it holds (for the manifest) and the key it is encrypted
+/// with, which is the live store's (a `.pmbackup` carries it inside its encrypted layer).
+#[derive(Debug)]
+pub(crate) struct Stripped {
+    pub mods: Vec<BackupMod>,
+    pub key: Secret,
+}
+
+/// Copy the live store into `dest` (a file that doesn't exist yet, in a [`work_dir`]) stripped: the
+/// only way a copy of the store leaves (module doc). The DB lock is held for the first copy (and the
+/// key read beside it) only; the strip is file work on that copy, after the lock is released.
+/// Blocking: call inside `spawn_blocking`.
 pub(crate) fn snapshot_for_leaving(
     state: &AppState,
     dest: &Path,
-    key_hex: &str,
     keep_content: bool,
-) -> Result<Vec<BackupMod>> {
+) -> Result<Stripped> {
     snapshot_with(
-        |dest| {
+        |work| {
             let conn = state.conn()?;
-            crate::vault::migrate::vacuum_into(&conn, dest)
+            // Under the same guard as the copy, so this is the key the copy is encrypted with,
+            // whatever opens or rekeys later.
+            let key = state.session_db_key()?;
+            crate::vault::migrate::vacuum_into(&conn, work)?;
+            Ok(key)
         },
         dest,
-        key_hex,
         keep_content,
     )
 }
 
-/// [`snapshot_for_leaving`] with the first step passed in, so a test can supply a bare connection.
+/// [`snapshot_for_leaving`] with the first copy passed in (it writes the copy at the path it is
+/// given and returns the key it is encrypted with), so a test can supply a bare connection.
 fn snapshot_with(
-    take: impl FnOnce(&Path) -> Result<()>,
+    take: impl FnOnce(&Path) -> Result<Secret>,
     dest: &Path,
-    key_hex: &str,
     keep_content: bool,
-) -> Result<Vec<BackupMod>> {
-    take(dest)?;
-    strip_snapshot(dest, key_hex, keep_content).map_err(|e| {
-        // Nothing half-stripped is left to be picked up by mistake.
-        discard(dest);
-        Error::Other(format!(
-            "nothing was saved: PM couldn't take the mods' private data out of the copy of your \
-             data ({e})"
-        ))
-    })
+) -> Result<Stripped> {
+    let work = work_path(dest);
+    let folder = dest.parent().unwrap_or(dest).to_path_buf();
+    let key = match take(&work) {
+        Ok(key) => key,
+        Err(e) => {
+            discard(&work);
+            return Err(if is_disk_full(&e) {
+                no_space(&folder)
+            } else {
+                e
+            });
+        }
+    };
+    let stripped = strip_snapshot(&work, dest, key.expose(), keep_content);
+    // The stripped working copy never leaves, whatever happened: only `dest` is packed.
+    discard(&work);
+    match stripped {
+        Ok(mods) => Ok(Stripped { mods, key }),
+        Err(e) => {
+            // Nothing half-stripped is left to be picked up by mistake.
+            discard(dest);
+            Err(if is_disk_full(&e) {
+                no_space(&folder)
+            } else {
+                Error::Other(format!(
+                    "nothing was saved: PM couldn't take the mods' private data out of the copy \
+                     of your data ({e})"
+                ))
+            })
+        }
+    }
 }
 
-/// Remove a snapshot and any sidecar SQLite may have made beside it.
+/// Where the first copy is made and stripped, beside `dest`, which only the rewrite writes.
+fn work_path(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".stripping");
+    dest.with_file_name(name)
+}
+
+/// Whether an error is the disk being full (`SQLITE_FULL` from a copy, or the OS's own).
+fn is_disk_full(e: &Error) -> bool {
+    match e {
+        Error::Sqlite(e) => e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull),
+        Error::Io(e) => e.kind() == std::io::ErrorKind::StorageFull,
+        _ => false,
+    }
+}
+
+/// A full disk is said as one, not as a strip that failed: nothing about the user's data is wrong.
+fn no_space(folder: &Path) -> Error {
+    Error::Other(format!(
+        "nothing was saved: there isn't enough free disk space for the copy of your data. PM makes \
+         it in its own folder ({}), and needs about twice your database's size free there while \
+         it works",
+        folder.display()
+    ))
+}
+
+/// Remove a copy and any sidecar SQLite may have made beside it.
 fn discard(dest: &Path) {
     let name = dest.to_string_lossy();
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -109,23 +227,111 @@ fn discard(dest: &Path) {
     }
 }
 
-/// Open the snapshot, strip it, `VACUUM` it, and read back its mod list.
-fn strip_snapshot(path: &Path, key_hex: &str, keep_content: bool) -> Result<Vec<BackupMod>> {
-    let conn = db::open_snapshot(path, key_hex)?;
-    let mods = strip(&conn, keep_content)?;
-    conn.close()
-        .map_err(|(_, e)| Error::Other(format!("the copy couldn't be closed cleanly: {e}")))?;
+/// Strip the copy at `work`, rewrite it into `dest` with a `VACUUM INTO`, and check `dest` itself:
+/// it opens with the key, holds nothing the strip took, has no free page and no WAL. Returns the
+/// mod list read from `dest`, the file that leaves.
+fn strip_snapshot(
+    work: &Path,
+    dest: &Path,
+    key_hex: &str,
+    keep_content: bool,
+) -> Result<Vec<BackupMod>> {
+    let conn = db::open_snapshot(work, key_hex)?;
+    let folder_ids = strip(&conn, keep_content)?;
+    // Rewrite the whole file from what is live, so no free page the deletes made goes along.
+    crate::vault::migrate::vacuum_into(&conn, dest)?;
+    close(conn)?;
+
+    let out = db::open_snapshot(dest, key_hex)?;
+    // The one file is the whole copy: a WAL beside it would never be packed.
+    let mode: String = out.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err(Error::Other(format!("journal mode stayed {mode}")));
+    }
+    let free = pragma_i64(&out, "freelist_count")?;
+    if free != 0 {
+        return Err(Error::Other(format!(
+            "{free} free pages survived the vacuum"
+        )));
+    }
+    let left = leftover(&out, keep_content, &folder_ids)?;
+    if left != 0 {
+        return Err(Error::Other(format!(
+            "{left} rows were back after the vacuum"
+        )));
+    }
+    let mods = read_mod_list(&out)?;
+    close(out)?;
     Ok(mods)
+}
+
+fn close(conn: Connection) -> Result<()> {
+    conn.close()
+        .map_err(|(_, e)| Error::Other(format!("the copy couldn't be closed cleanly: {e}")))
 }
 
 fn pragma_i64(conn: &Connection, name: &str) -> Result<i64> {
     Ok(conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))?)
 }
 
-/// The strip itself, on an open connection to a snapshot. Every step is checked, because a step
-/// that quietly did nothing (a pragma a build ignores, foreign keys off, a vacuum that didn't
-/// shrink) is exactly how a secret would stay in the file.
-fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<BackupMod>> {
+/// How many rows the strip takes are still in `conn`: D4's tables, folder mods, cache-class (and,
+/// when the content isn't kept, every) `mod_kv` row, and anything still naming one of `folder_ids`
+/// (the folder mods the strip found, whose attribution and spend it blanked).
+fn leftover(conn: &Connection, keep_content: bool, folder_ids: &[String]) -> Result<i64> {
+    let mut sql = format!(
+        "SELECT (SELECT count(*) FROM mod_secrets) + (SELECT count(*) FROM mcp_clients) \
+         + (SELECT count(*) FROM mod_doc_data) \
+         + (SELECT count(*) FROM mods WHERE installed_from = '{}') \
+         + (SELECT count(*) FROM mod_kv WHERE class = '{}')",
+        store::FROM_FOLDER,
+        store::KV_CACHE
+    );
+    if !keep_content {
+        sql.push_str(" + (SELECT count(*) FROM mod_kv)");
+    }
+    let mut left: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
+    for id in folder_ids {
+        left += conn.query_row(
+            "SELECT (SELECT count(*) FROM mod_ledger WHERE mod_id = ?1) \
+                  + (SELECT count(*) FROM usage_log WHERE mod_id = ?1)",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )?;
+        left += i64::from(calendar_names(conn, id)?);
+    }
+    Ok(left)
+}
+
+/// Whether the calendar's hidden set (`settings['calendar_ui']`) still names the overlay of mod
+/// `id` under its `mod:<id>` name. A blob that isn't the calendar's shape names nothing (the prune
+/// leaves it alone too), and a legacy name (`pm:pinboard`) is the core's, not the mod's.
+fn calendar_names(conn: &Connection, id: &str) -> Result<bool> {
+    let Ok(id) = crate::mods::ids::ModId::parse(id) else {
+        return Ok(false);
+    };
+    let name = crate::mods::ledger::overlay_source(&id);
+    if !name.starts_with(crate::mods::ledger::OVERLAY_SOURCE_PREFIX) {
+        return Ok(false);
+    }
+    let blob: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [crate::mods::ledger::CALENDAR_UI_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let hidden = blob
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("hidden").and_then(|h| h.as_array()).cloned())
+        .unwrap_or_default();
+    Ok(hidden.iter().any(|e| e.as_str() == Some(name.as_str())))
+}
+
+/// The strip itself, on an open connection to a copy (not yet rewritten). Every step is checked,
+/// because a step that quietly did nothing (a pragma a build ignores, foreign keys off, a delete
+/// that matched nothing it should have) is exactly how a secret would stay in the file. Returns the
+/// ids of the folder mods it took out, for the check of the rewritten file.
+fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<String>> {
     // Freed bytes are overwritten with zeros, not just unlinked.
     conn.execute_batch("PRAGMA secure_delete = ON")?;
     if pragma_i64(conn, "secure_delete")? != 1 {
@@ -136,7 +342,7 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<BackupMod>> {
     if pragma_i64(conn, "foreign_keys")? != 1 {
         return Err(Error::Other("foreign keys didn't turn on".into()));
     }
-    // The vacuum must land in the one file that is packed: no WAL beside it.
+    // The working copy stays one file, so nothing it held lingers in a WAL beside it.
     let mode: String = conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("delete") {
         return Err(Error::Other(format!("journal mode stayed {mode}")));
@@ -146,7 +352,32 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<BackupMod>> {
         "SELECT id FROM mods WHERE installed_from = '{}'",
         store::FROM_FOLDER
     );
+    // Found before their rows go: what names them outside the `mods` cascade is blanked by id.
+    let folder_ids: Vec<String> = conn
+        .prepare(&folder)?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let tx = conn.unchecked_transaction()?;
+    for id in &folder_ids {
+        // Its gifts stay the user's (I-16, I-29), made by "a test mod": no id a later install
+        // could match (a real id is at least three characters), no author, no repository.
+        tx.execute(
+            "UPDATE mod_ledger SET mod_id = '', mod_name = ?2, author = '', source_repo = '' \
+             WHERE mod_id = ?1",
+            rusqlite::params![id, STRIPPED_MOD_NAME],
+        )?;
+        // Its spend stays in the history, as PM's own.
+        tx.execute("UPDATE usage_log SET mod_id = NULL WHERE mod_id = ?1", [id])?;
+        // Its overlay out of the calendar's hidden set, as an uninstall does. A legacy overlay name
+        // (`pm:pinboard`) is the core's, names nothing, and stays.
+        if let Ok(mod_id) = crate::mods::ids::ModId::parse(id) {
+            if crate::mods::ledger::overlay_source(&mod_id)
+                .starts_with(crate::mods::ledger::OVERLAY_SOURCE_PREFIX)
+            {
+                crate::mods::ledger::prune_calendar_hidden(&tx, &mod_id)?;
+            }
+        }
+    }
     for table in MOD_CHILD_TABLES {
         tx.execute(
             &format!("DELETE FROM {table} WHERE mod_id IN ({folder})"),
@@ -174,35 +405,11 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<BackupMod>> {
 
     // Prove the rows are gone before the file is rewritten, so a delete that matched nothing it
     // should have is an error and not a hope.
-    let left: i64 = {
-        let mut sql = format!(
-            "SELECT (SELECT count(*) FROM mod_secrets) + (SELECT count(*) FROM mcp_clients) \
-             + (SELECT count(*) FROM mod_doc_data) \
-             + (SELECT count(*) FROM mods WHERE installed_from = '{}') \
-             + (SELECT count(*) FROM mod_kv WHERE class = '{}')",
-            store::FROM_FOLDER,
-            store::KV_CACHE
-        );
-        if !keep_content {
-            sql.push_str(" + (SELECT count(*) FROM mod_kv)");
-        }
-        conn.query_row(&sql, [], |r| r.get(0))?
-    };
+    let left = leftover(conn, keep_content, &folder_ids)?;
     if left != 0 {
         return Err(Error::Other(format!("{left} rows were still there")));
     }
-
-    let mods = read_mod_list(conn)?;
-
-    // Rewrite the whole file from what is live, dropping every free page the deletes made.
-    conn.execute_batch("VACUUM")?;
-    let free = pragma_i64(conn, "freelist_count")?;
-    if free != 0 {
-        return Err(Error::Other(format!(
-            "{free} free pages survived the vacuum"
-        )));
-    }
-    Ok(mods)
+    Ok(folder_ids)
 }
 
 /// The mods the (already stripped) snapshot holds, for the manifest.
@@ -585,18 +792,29 @@ mod tests {
         p
     }
 
-    /// A live store with the planted rows, as an `AppState` the way a backup reaches it.
+    /// A live store with the planted rows, as an `AppState` the way a backup reaches it: open, with
+    /// the session built from the key it was opened with, as every open path builds it.
     fn live_state(dir: &Path, key_hex: &str) -> (AppState, Planted) {
         let conn = db::open(&dir.join("live.sqlite"), key_hex).unwrap();
         let planted = plant(&conn);
+        (state_with(dir, conn, Some(key_hex)), planted)
+    }
+
+    /// An `AppState` over `conn` whose session holds `session_key` (none: no session runtime).
+    fn state_with(dir: &Path, conn: Connection, session_key: Option<&str>) -> AppState {
         let sidecar = crate::sidecar::SidecarManager::new(crate::sidecar::SidecarPaths {
             source_dir: dir.join("sidecar"),
             venv_dir: dir.join("venv"),
         });
-        (
-            AppState::new(Some(conn), None, sidecar, None, None),
-            planted,
-        )
+        let runtime = session_key.map(|key| {
+            let root = dir.join("vault-root");
+            std::fs::create_dir_all(&root).unwrap();
+            let meta = crate::vault::ensure_device_meta(&root).unwrap();
+            let resolved = crate::vault::resolve_layout(&root, None);
+            let master = crate::vault::master_from_db_key_hex(key).unwrap();
+            crate::VaultRuntime::build(&resolved, &meta, &master)
+        });
+        AppState::new(Some(conn), runtime, sidecar, None, None)
     }
 
     fn snapshot_dir() -> (tempfile::TempDir, PathBuf) {
@@ -655,7 +873,12 @@ mod tests {
         let (state, p) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
 
-        let mods = snapshot_for_leaving(&state, &dest, &key, true).unwrap();
+        let Stripped { mods, key: used } = snapshot_for_leaving(&state, &dest, true).unwrap();
+        assert_eq!(
+            used.expose(),
+            key,
+            "the copy is the open store's, under its key"
+        );
 
         let bytes = decrypted_file(&dest, &key);
         for (what, v) in [
@@ -677,11 +900,13 @@ mod tests {
             contains(&bytes, &p.overlay),
             "the calendar overlay is not mod-private data"
         );
-        assert!(
-            !dest.with_file_name("pm.sqlite-wal").exists()
-                && !dest.with_file_name("pm.sqlite-journal").exists(),
-            "the one file is the whole snapshot"
-        );
+        // The one file is the whole snapshot: no WAL or journal beside it, and the working copy
+        // the strip ran on is gone.
+        let left: Vec<String> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["pm.sqlite"]);
         // The list is the stripped snapshot's: no folder mod, the others as installed.
         assert_eq!(
             mods,
@@ -717,7 +942,7 @@ mod tests {
         let (state, p) = live_state(dir.path(), &key);
         for keep in [true, false] {
             let (_d, dest) = snapshot_dir();
-            snapshot_for_leaving(&state, &dest, &key, keep).unwrap();
+            snapshot_for_leaving(&state, &dest, keep).unwrap();
             let bytes = decrypted_file(&dest, &key);
             assert_eq!(contains(&bytes, &p.content), keep, "keep_content = {keep}");
             // The mods themselves come back either way, so a restore finds them (empty).
@@ -747,18 +972,28 @@ mod tests {
         assert!(keep_mod_data(&state).unwrap());
     }
 
+    /// Every file in a snapshot's folder: after a failure, none (no copy that might hold a secret).
+    fn files_in(dest: &Path) -> Vec<String> {
+        std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn a_strip_that_fails_fails_the_snapshot_and_leaves_no_file() {
         let key = fresh_key();
-        // A wrong key can't open the snapshot.
+        // A session whose key isn't the store's can't open the copy.
         let dir = tempfile::tempdir().unwrap();
-        let (state, _) = live_state(dir.path(), &key);
+        let conn = db::open(&dir.path().join("live.sqlite"), &key).unwrap();
+        plant(&conn);
+        let state = state_with(dir.path(), conn, Some(&fresh_key()));
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, &dest, &fresh_key(), true).unwrap_err();
+        let err = snapshot_for_leaving(&state, &dest, true).unwrap_err();
         assert!(err.to_string().contains("nothing was saved"), "{err}");
         assert!(
-            !dest.exists(),
-            "no snapshot that might hold a secret is left"
+            files_in(&dest).is_empty(),
+            "no snapshot that might hold a secret is left, nor the working copy"
         );
 
         // A store missing one of the tables can't be proved clean either.
@@ -769,9 +1004,210 @@ mod tests {
             conn.execute_batch("DROP TABLE mcp_clients").unwrap();
         }
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, &dest, &key, true).unwrap_err();
+        let err = snapshot_for_leaving(&state, &dest, true).unwrap_err();
         assert!(err.to_string().contains("nothing was saved"), "{err}");
-        assert!(!dest.exists());
+        assert!(files_in(&dest).is_empty());
+    }
+
+    #[test]
+    fn the_copy_is_keyed_from_the_open_session_and_says_so_when_there_is_none() {
+        // The copy is opened with the key the live store was opened with, from the session: nothing
+        // here has a keychain entry, which is a passphrase vault whose key this account didn't
+        // cache (a cache write that failed at unlock, "Forget passphrase", a locked keyring).
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let (_d, dest) = snapshot_dir();
+        let stripped = snapshot_for_leaving(&state, &dest, true).unwrap();
+        assert_eq!(stripped.key.expose(), key);
+        db::open_snapshot(&dest, stripped.key.expose()).expect("the copy opens with that key");
+
+        // With no session key the store can't be copied, and the words say why: not "locked".
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("live.sqlite"), &key).unwrap();
+        let state = state_with(dir.path(), conn, None);
+        let (_d, dest) = snapshot_dir();
+        let err = snapshot_for_leaving(&state, &dest, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("this vault's key isn't available on this device"),
+            "{err}"
+        );
+        assert!(!err.contains("locked"), "{err}");
+        assert!(files_in(&dest).is_empty());
+    }
+
+    #[test]
+    fn a_full_disk_is_said_as_one_and_leaves_nothing() {
+        // SQLITE_FULL from the first copy (the live store's `VACUUM INTO`) or the strip's rewrite is
+        // a full disk, not a secret that couldn't be taken out.
+        let (_d, dest) = snapshot_dir();
+        let full = || {
+            Error::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                None,
+            ))
+        };
+        let err = snapshot_with(
+            |work| {
+                std::fs::write(work, b"a partial copy").unwrap();
+                Err(full())
+            },
+            &dest,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("isn't enough free disk space"), "{err}");
+        assert!(!err.contains("private data"), "{err}");
+        assert!(files_in(&dest).is_empty(), "the partial copy is gone");
+        // The OS's own word for it is the same.
+        assert!(is_disk_full(&Error::Io(std::io::Error::from(
+            std::io::ErrorKind::StorageFull
+        ))));
+        assert!(!is_disk_full(&Error::Other("x".into())));
+    }
+
+    #[test]
+    fn copies_are_made_in_pms_own_folder_and_a_crash_leaves_nothing_after_boot() {
+        let data = tempfile::tempdir().unwrap();
+        let run = work_dir(data.path(), "pm-backup-").unwrap();
+        // On the data dir's disk, under the one folder the boot sweep and the wipe clear.
+        assert_eq!(run.path().parent().unwrap(), data.path().join(WORK_DIR));
+        let snapshot = run.path().join("pm.sqlite");
+        std::fs::write(&snapshot, b"x").unwrap();
+        drop(run);
+        assert!(
+            !snapshot.exists(),
+            "a finished run's folder goes with its guard"
+        );
+
+        // What a crash leaves (a run folder, kept past its guard, and a stray file) goes at boot.
+        let crashed = work_dir(data.path(), "pm-export-").unwrap().keep();
+        std::fs::write(crashed.join("pm.sqlite"), b"x").unwrap();
+        std::fs::write(data.path().join(WORK_DIR).join("stray"), b"x").unwrap();
+        assert_eq!(sweep_work_dir(data.path()), 2);
+        assert!(!crashed.exists());
+        assert_eq!(
+            std::fs::read_dir(data.path().join(WORK_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+        // Nothing to sweep, or no folder at all, is not an error.
+        assert_eq!(sweep_work_dir(data.path()), 0);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(sweep_work_dir(empty.path()), 0);
+    }
+
+    #[test]
+    fn a_folder_mods_name_author_and_repo_leave_its_gifts_and_spend() {
+        // A test mod has no FK from its gifts' attribution or its spend, by design (they outlive an
+        // uninstall), so deleting its `mods` row leaves its name, author and repository there. The
+        // copy keeps the gift and the spend, made by "a test mod".
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let id = format!("dev.{}", fresh_marker("secret"));
+        let name = fresh_marker("Unreleased");
+        let author = fresh_marker("someone-private");
+        let repo = fresh_marker("private-org/unreleased");
+        {
+            let conn = state.conn().unwrap();
+            conn.execute(
+                "INSERT INTO mods(id, name, version, tier, author, source_repo, source_commit, \
+                                  signed, install_id, installed_from, manifest, files, state) \
+                 VALUES (?1, ?2, '0.1.0', 'third', ?3, ?4, \
+                         '0123456789abcdef0123456789abcdef01234567', 0, 'fedcba9876543210', \
+                         'folder', '{}', '[]', 'active')",
+                params![id, name, author, repo],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO tasks(title) VALUES ('a gift')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, \
+                                        install_id, task_id) \
+                 VALUES (?1, ?2, 'third', ?3, ?4, 0, 'fedcba9876543210', ?5)",
+                params![id, name, author, repo, conn.last_insert_rowid()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, mod_id) VALUES ('m', 'background', ?1)",
+                [&id],
+            )
+            .unwrap();
+            // The user hid its calendar overlay, beside a calendar of their own.
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES ('calendar_ui', ?1)",
+                [
+                    serde_json::json!({"hidden": [format!("mod:{id}"), "work@example.com"]})
+                        .to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        // The control: an unstripped copy holds every one of them.
+        let (_c, plain) = snapshot_dir();
+        crate::vault::migrate::vacuum_into(&state.conn().unwrap(), &plain).unwrap();
+        let bytes = decrypted_file(&plain, &key);
+        for v in [&id, &name, &author, &repo] {
+            assert!(contains(&bytes, v), "{v} is in an unstripped copy");
+        }
+
+        let (_d, dest) = snapshot_dir();
+        snapshot_for_leaving(&state, &dest, true).unwrap();
+        let bytes = decrypted_file(&dest, &key);
+        for (what, v) in [
+            ("its id", &id),
+            ("its name", &name),
+            ("its author", &author),
+            ("its repository", &repo),
+        ] {
+            assert!(!contains(&bytes, v), "{what} reached the file");
+        }
+        // The gift and the spend are still there, attributed to nobody in particular.
+        let copy = db::open_snapshot(&dest, &key).unwrap();
+        let (maker, by, from): (String, String, String) = copy
+            .query_row(
+                "SELECT mod_id, mod_name, author || source_repo FROM mod_ledger \
+                 WHERE task_id = (SELECT id FROM tasks WHERE title = 'a gift')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (maker.as_str(), by.as_str(), from.as_str()),
+            ("", STRIPPED_MOD_NAME, "")
+        );
+        let spend: i64 = copy
+            .query_row(
+                "SELECT count(*) FROM usage_log WHERE kind = 'background' AND mod_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spend, 1);
+        // The user's own calendar stays hidden.
+        let ui: String = copy
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'calendar_ui'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ui.contains("work@example.com"));
+        // And the live store still names its maker: only the copy is changed.
+        let live = state.conn().unwrap();
+        let named: i64 = live
+            .query_row(
+                "SELECT count(*) FROM mod_ledger WHERE mod_id = ?1 AND mod_name = ?2",
+                params![id, name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(named, 1);
     }
 
     #[test]
@@ -780,7 +1216,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
-        snapshot_for_leaving(&state, &dest, &key, true).unwrap();
+        snapshot_for_leaving(&state, &dest, true).unwrap();
         let conn = db::open_snapshot(&dest, &key).unwrap();
         for table in MOD_CHILD_TABLES {
             let orphans: i64 = conn
@@ -837,7 +1273,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let meta = crate::vault::ensure_device_meta(&root).unwrap();
         let (_snap_dir, snap) = snapshot_dir();
-        let mods = snapshot_for_leaving(&state, &snap, &key, true).unwrap();
+        // The key the archive carries is the one the strip hands back, as the backup sites use it.
+        let Stripped { mods, key: used } = snapshot_for_leaving(&state, &snap, true).unwrap();
         let archive = dir.path().join("b.pmbackup");
         let cancel = std::sync::atomic::AtomicBool::new(false);
         pack(
@@ -846,7 +1283,7 @@ mod tests {
                 db_snapshot: snap,
                 markdown_dir: root.join("vault"),
                 meta,
-                db_key_hex: crate::secret::Secret::from(key.clone()),
+                db_key_hex: used,
                 app_version: "test".into(),
                 created_at: "2026-11-11T00:00:00Z".into(),
                 mods_index: None,
@@ -921,6 +1358,14 @@ mod tests {
             1,
             "export_all_data"
         );
+        // Each makes its copy in PM's own folder, not the OS temp dir (tmpfs on many desktops).
+        assert_eq!(
+            backups.matches("strip::work_dir(").count(),
+            2,
+            "create_local_backup and run_backup"
+        );
+        assert_eq!(export.matches("strip::work_dir(").count(), 1);
+        assert!(!export.contains(".tempdir()"));
         for (name, src) in [("backups.rs", &backups), ("export.rs", &export)] {
             assert!(
                 !src.contains("vacuum_into("),

@@ -331,6 +331,13 @@ impl ModRuntime {
         self.lock().installed.get(id).map(|m| m.root.clone())
     }
 
+    /// Whether the registry holds `id`, so its frame is served when it opens: the truth a restore's
+    /// "is back" reads (`backup::adopt_mods::settled`), since an `active` row can still be held
+    /// back (an unaccepted pilot, the safety list, files that didn't check out).
+    pub fn is_installed(&self, id: &ModId) -> bool {
+        self.lock().installed.contains_key(id)
+    }
+
     /// The scheme handler's turnstile.
     pub fn gate(&self) -> &ServeGate {
         &self.gate

@@ -97,19 +97,19 @@ pub struct SwitchOutcome {
 /// Snapshot the live store into `snapshot` for a backup and strip it ([`backup::strip`], D4), on
 /// the blocking pool (F-42): the copy of a multi-GB store must not pin a tokio worker, and the DB
 /// lock is taken and dropped inside the closure (`DbGuard` is `!Send`) via a cloned handle. Both
-/// backup sites call this and nothing else, and it returns the mods the snapshot holds.
+/// backup sites call this and nothing else. It returns the mods the snapshot holds and the key it
+/// is encrypted with, the open store's own (the archive carries it), so a passphrase vault whose
+/// key this account didn't cache in the keychain still backs up while it is open.
 async fn snapshot_stripped(
     app: &AppHandle,
     snapshot: &std::path::Path,
-    db_key: &crate::secret::Secret,
-) -> Result<Vec<backup::manifest::BackupMod>> {
-    let key = zeroize::Zeroizing::new(db_key.expose().to_string());
+) -> Result<backup::strip::Stripped> {
     let app = app.clone();
     let snapshot = snapshot.to_path_buf();
     spawn_blocking_result("snapshot", move || {
         let state = app.state::<AppState>();
         let keep_content = backup::strip::keep_mod_data(&state)?;
-        backup::strip::snapshot_for_leaving(&state, &snapshot, &key, keep_content)
+        backup::strip::snapshot_for_leaving(&state, &snapshot, keep_content)
     })
     .await
 }
@@ -156,27 +156,21 @@ pub async fn create_local_backup(
 
     // A step that fails after the run began has to say so (see `run_backup`).
     let fail = |e: Error| backup_failed(&app, e);
-    // The vault's own metadata and key come BEFORE the snapshot: the snapshot is stripped through
-    // its key (D4), so a locked vault or a missing key stops here with nothing copied.
     let resolved = vault::resolve(&app).map_err(fail)?;
     let meta = vault::load_meta(&resolved.vault_root)
         .map_err(fail)?
         .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
         .map_err(fail)?;
-    let db_key = vault::current_db_key(&meta)
-        .map_err(fail)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))
-        .map_err(fail)?;
 
     // Consistent, encrypted DB snapshot, stripped of what must not leave (D4); the strip is the
-    // backup's gate: a snapshot that couldn't be stripped fails the whole backup.
-    let tmp = tempfile::Builder::new()
-        .prefix("pm-backup-snap-")
-        .tempdir()?;
-    let snapshot = tmp.path().join(vault::DB_FILENAME);
-    let mods = snapshot_stripped(&app, &snapshot, &db_key)
-        .await
+    // backup's gate: a snapshot that couldn't be stripped fails the whole backup. Made on disk in
+    // PM's own folder, never the OS temp dir (tmpfs, RAM, on many Linux desktops).
+    let tmp = paths::data_dir(&app)
+        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-snap-"))
         .map_err(fail)?;
+    let snapshot = tmp.path().join(vault::DB_FILENAME);
+    let backup::strip::Stripped { mods, key: db_key } =
+        snapshot_stripped(&app, &snapshot).await.map_err(fail)?;
     emit_backup_progress(
         &app,
         BackupEvent::Phase {
@@ -567,10 +561,10 @@ pub async fn switch_to_vault(
         // here (a repeat of work already done costs a look at each row), so the list below is read
         // after the recovery and not at the instant the open returned.
         crate::mods::ledger::recover_now(&app2);
-        let st = app2.state::<AppState>();
-        let rows = st.conn().and_then(|c| adopt_mods::read_rows(&c));
-        let mods = match rows {
-            Ok(rows) => adopt_mods::describe_all(&rows, true),
+        // Each row against what the load made of it: "back" is a mod the registry serves, not an
+        // `active` row that waits for its first open or is held by the safety list.
+        let mods = match adopt_mods::settled(&app2) {
+            Ok(mods) => mods,
             Err(e) => {
                 warnings.push(format!(
                     "PM couldn't read back which mods came with the restore ({e}); the Mods tab \
@@ -911,28 +905,26 @@ pub(crate) async fn run_backup(
     let state = app.state::<AppState>();
     let _busy = begin_backup_run(app, &state, BackupPhase::Snapshot)?;
 
-    let tmp = tempfile::Builder::new().prefix("pm-backup-").tempdir()?;
-    let snapshot = tmp.path().join(vault::DB_FILENAME);
     // A step that fails after the run began has to say so: the run's `Phase` events marked it
     // running, and only `Finished` or `Failed` clears that (a bare `?` left the panel on a progress
     // bar until PM restarted).
     let fail = |e: Error| backup_failed(app, e);
-    // The vault's own metadata and key come BEFORE the snapshot: it is stripped through that key
-    // (D4), so a locked vault or a missing key stops here with nothing copied.
+    // The snapshot, and the archive packed from it, are made on disk in PM's own folder, never the
+    // OS temp dir (tmpfs, RAM, on many Linux desktops); the folder goes when `tmp` drops.
+    let tmp = paths::data_dir(app)
+        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-"))
+        .map_err(fail)?;
+    let snapshot = tmp.path().join(vault::DB_FILENAME);
     let resolved = vault::resolve(app).map_err(fail)?;
     let meta = vault::load_meta(&resolved.vault_root)
         .map_err(fail)?
         .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
         .map_err(fail)?;
-    let db_key = vault::current_db_key(&meta)
-        .map_err(fail)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))
-        .map_err(fail)?;
-    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4), and the mods it
-    // holds. A snapshot that couldn't be stripped fails the backup.
-    let mods = snapshot_stripped(app, &snapshot, &db_key)
-        .await
-        .map_err(fail)?;
+    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4), the mods it holds
+    // and the open store's key it is encrypted with. A snapshot that couldn't be stripped fails
+    // the backup.
+    let backup::strip::Stripped { mods, key: db_key } =
+        snapshot_stripped(app, &snapshot).await.map_err(fail)?;
     emit_backup_progress(
         app,
         BackupEvent::Phase {
@@ -1437,7 +1429,7 @@ fn finalize_restore(
         target_dir,
         // Pending: the store opens at the switch, and a mod whose files sit in another store on this
         // computer comes back then. The switch's answer is the settled one.
-        mods: adopt_mods::describe_all(&outcome.mods, false),
+        mods: adopt_mods::pending(&outcome.mods),
     };
     if let Ok(mut snap) = state.backup_state.lock() {
         snap.pending_restore = Some(summary.clone());

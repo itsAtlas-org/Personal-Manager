@@ -27,8 +27,9 @@ function needsReading(out: SwitchOutcome): boolean {
   return out.warnings.length > 0 || out.mods.some((m) => m.standing !== "back");
 }
 
-/** The mods a restore lists, each with what to do about it. `pending` rows (before the switch) say
- *  what applies if the mod's files aren't on this computer; settled rows say what happened. */
+/** The mods a restore lists. `pending` rows (before the switch) say only that the mod comes back if
+ *  its files are here: a same-machine restore brings most back, so telling the user to install each
+ *  one would be wrong for most of them. Settled rows (after it) say what happened, and what to do. */
 function ModList({ mods }: { mods: RestoredMod[] }) {
   return (
     <ul className="mt-1 flex flex-col gap-0.5 text-xs text-ink3">
@@ -37,6 +38,8 @@ function ModList({ mods }: { mods: RestoredMod[] }) {
           <span className="text-ink2">{m.name}</span>
           {m.standing === "back" ? (
             <span className="text-ink4"> is back</span>
+          ) : m.standing === "pending" ? (
+            <span className="text-ink4"> — comes back if its files are on this computer</span>
           ) : m.note ? (
             <span className="text-ink4"> — {m.note}</span>
           ) : (
@@ -155,11 +158,13 @@ export function RestoredVaultCard({ restored, setError }: RestoredVaultCardProps
         <div className="mt-2">
           <p className="text-xs text-ink4">
             {restored.mods.length === 1
-              ? "This backup held one mod."
-              : `This backup held ${restored.mods.length} mods.`}{" "}
-            A mod whose files are on this computer comes back when you switch. Otherwise:
+              ? "This backup held one mod:"
+              : `This backup held ${restored.mods.length} mods:`}
           </p>
           <ModList mods={restored.mods} />
+          <p className="mt-1 text-xs text-ink4">
+            After you switch, PM says how to get back any that don&rsquo;t come back.
+          </p>
         </div>
       )}
       <p className="mt-2 text-xs text-ink4">
