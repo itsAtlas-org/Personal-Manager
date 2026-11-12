@@ -37,7 +37,11 @@ use super::{
     blocking, recheck, still_current, Authorised, Code, Host, ModError, PageAction, Reply,
 };
 
-/// The SQL test (on a `documents d` row) for the documents a mod may list and read.
+/// The importance level that shelves a document (`documents.importance`, v17).
+pub(super) const ARCHIVE: &str = "archive";
+
+/// The SQL test (on a `documents d` row) for the documents a mod may list and read: everything but
+/// the [`ARCHIVE`]d. A test pins the two together.
 pub(super) const LISTED: &str = "d.importance IS NOT 'archive'";
 
 /// A field of the list DTO: all of it. Adding one is a decision about what mods may know.

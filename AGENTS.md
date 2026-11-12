@@ -157,7 +157,12 @@ release remain the open post-v1 work.
     `engine.rs`) building every response header (INVARIANTS.md I-27). `api/` is the one Host
     API dispatcher (check order, grant model, call limits, the handlers, the events); the frame
     relay (`mod_call`) and the later MCP caller both go through it, so a grant is checked nowhere
-    else. `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements), and
+    else. `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements); a
+    mod's readable set is the documents that aren't archived, so a writer of
+    `documents.importance` calls `events::note_listing_change` around its UPDATE and a writer of a
+    new document calls `events::note_landed` after its commit (a test pins the list of writers);
+    a frame is told what happened to it (`paused`, `uninstalled`, `replaced`) by which
+    `ModRuntime` call ends its session; and
     `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
     `embeddings.documentVectors` share. `keys.rs` embeds the two
     Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked

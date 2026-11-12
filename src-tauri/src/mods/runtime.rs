@@ -34,7 +34,7 @@
 //! still live, and still at the generation the call began under ([`CallTicket`]). Every event that
 //! must stop a call already in flight ends or bumps it: the app lock bumps every session
 //! ([`ModRuntime::bump_all`]); a pause ([`ModRuntime::pause`]), an uninstall or a reinstall ends that
-//! mod's; a closed or curtained store ends them all (the ledger empties the registry); a reload ends
+//! mod's; a closed or curtained store ends them all ([`ModRuntime::clear`]); a reload ends
 //! them all. A session is also bound to the store that was open when it was minted (`AppState`'s
 //! store epoch), so a frame opened over one store never reads or writes another.
 //!
@@ -43,6 +43,11 @@
 //! with it, after a goodbye when the frame is live and the session didn't end by the frame's own
 //! doing ([`Ending`]); the goodbyes are sent only once the registry's lock is released, so a send
 //! never runs under it. [`ModRuntime::live_recipients`] hands the emitter the live sessions to tell.
+//! What each writer says: a row that stays but stops serving (the blacklist's or a user's pause, a
+//! park, a safety-list hold, an install over a paused row) is `paused`
+//! ([`ModRuntime::pause`], or [`ModRuntime::replace_all`] for a mod whose row is still there); a row
+//! that is gone or removed is `uninstalled`; an install over an installed mod is `replaced`; a
+//! closed or curtained store says nothing ([`ModRuntime::clear`]), since no mod was changed.
 //!
 //! **Serving is bounded.** Each request reads and hashes its whole file, so at most
 //! [`MAX_SERVING`] are read at once and [`MAX_WAITING`] more wait their turn ([`ServeGate`]); past
@@ -51,7 +56,7 @@
 //! The registry is in memory. The ledger (`ledger.rs`) persists installs in the `mods` table and
 //! fills the registry from it whenever this instance opens a store as its writer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
@@ -428,9 +433,13 @@ impl ModRuntime {
         self.ledger.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Make the registry exactly `mods` (the startup load, a vault switch, a closed store). A mod
-    /// that stays exactly as it was keeps its frames; one that changed or left loses them.
-    pub fn replace_all(&self, mods: Vec<InstalledMod>) {
+    /// Make the registry exactly `mods` (a ledger load). A mod that stays exactly as it was keeps its
+    /// frames; one that changed loses them (told `replaced`); one that left loses them too, told
+    /// `paused` when `parked` names it (its row is still there but isn't served: parked for its
+    /// files, held by the safety list, paused, waiting for consent) and `uninstalled` when it
+    /// doesn't (no row). Without the distinction a mod parked at a reload would hear "uninstalled",
+    /// and a Mods tab built on the goodbye would show it gone.
+    pub fn replace_all(&self, mods: Vec<InstalledMod>, parked: &HashSet<ModId>) {
         let mut inner = self.lock();
         let incoming: HashMap<ModId, InstalledMod> =
             mods.into_iter().map(|m| (m.id.clone(), m)).collect();
@@ -442,9 +451,12 @@ impl ModRuntime {
             .collect();
         for id in &stale {
             inner.installed.remove(id);
-            // A mod that is still there, changed, was replaced; one that is gone was uninstalled.
+            // A mod that is still there, changed, was replaced; one whose row no longer serves was
+            // paused; one that is gone was uninstalled.
             let ending = if incoming.contains_key(id) {
                 Ending::Replaced
+            } else if parked.contains(id) {
+                Ending::Paused
             } else {
                 Ending::Uninstalled
             };
@@ -453,6 +465,17 @@ impl ModRuntime {
         for (id, m) in incoming {
             inner.installed.entry(id).or_insert_with(|| Arc::new(m));
         }
+    }
+
+    /// The store the registry was loaded from is closed or curtained (another profile took the
+    /// writer role, a lock hand-off, "Remove PM data"): serve nothing and end every session. No mod
+    /// was uninstalled or paused, so no frame is told it was: the sessions' store is gone and the
+    /// page that held them goes with it; their next call finds the session ended.
+    pub fn clear(&self) {
+        let mut inner = self.lock();
+        inner.installed.clear();
+        inner.tickets.clear();
+        inner.remove_sessions_where(Ending::Silent, |_| true);
     }
 
     /// Where an installed mod is served from, for the ledger's tests.
@@ -486,7 +509,6 @@ impl ModRuntime {
 
     /// Remove a mod, its unused entry URLs and its sessions. Each live frame is told its session
     /// closed (`session.closed`, "uninstalled") on the way out.
-    #[cfg_attr(not(test), allow(dead_code))] // the ledger's uninstall and install (slice 6 calls them), the blacklist (slice 5)
     pub fn uninstall(&self, id: &ModId) {
         self.remove(id, Ending::Uninstalled);
     }
@@ -496,7 +518,6 @@ impl ModRuntime {
     /// calls this after its row commits; until it does, the dispatcher's own read of the row
     /// already refuses new calls and every commit. Each live frame is told `mod.paused`, then
     /// `session.closed`, as its last two events.
-    #[cfg_attr(not(test), allow(dead_code))] // the blacklist's pause (slice 5), the user's (slice 6)
     pub fn pause(&self, id: &ModId) {
         self.remove(id, Ending::Paused);
     }
@@ -1256,12 +1277,17 @@ mod tests {
         }
         // (event, does it end only atlas.map's sessions)
         type Event = (&'static str, fn(&ModRuntime), bool);
-        let events: [Event; 6] = [
+        let events: [Event; 7] = [
             ("bump", ModRuntime::bump_all, false),
             ("pause", |rt| rt.pause(&id("atlas.map")), true),
             ("uninstall", |rt| rt.uninstall(&id("atlas.map")), true),
             ("reinstall", reinstall, true),
-            ("store closed", |rt| rt.replace_all(Vec::new()), false),
+            ("store closed", ModRuntime::clear, false),
+            (
+                "registry reloaded without it",
+                |rt| rt.replace_all(Vec::new(), &HashSet::new()),
+                false,
+            ),
             ("reload", ModRuntime::close_all, false),
         ];
         for (what, event, only_that_mod) in events {

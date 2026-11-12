@@ -486,6 +486,8 @@ async fn rebuild_core(app: AppHandle, sink: ingest::ProgressSink, pass: String) 
                 .into(),
         ));
     };
+    // The store this rebuild works on, for the mods' resync notice when it settles.
+    let store_epoch = state.store_epoch();
 
     // PRECONDITION, not housekeeping: repair any chat vault file the pre-3.81.2 organisation-write
     // bug stripped of its identity, BEFORE this pass reads a single file.
@@ -550,6 +552,17 @@ async fn rebuild_core(app: AppHandle, sink: ingest::ProgressSink, pass: String) 
     };
 
     let result = rebuild_passes(&app, &sink, extra_total, &pass, on_pass_start).await;
+
+    // A rebuild re-creates documents (new ids after a wipe, in-place rewrites otherwise): every live
+    // mod frame is told once, whether it succeeded or stopped part way (the wipe has run either
+    // way), that it missed events and should list again.
+    {
+        let app = app.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            crate::mods::api::events::documents_resync(&app, store_epoch)
+        })
+        .await;
+    }
 
     // Clear `running` on every path, success or failure, so a failed rebuild can't wedge the UI
     // showing a phantom in-flight job for the rest of the session. The marker only clears on
@@ -864,7 +877,13 @@ pub async fn dev_apply_change_event(
         });
         let actions = index_only::react(event, item_state.as_ref());
         // A single dev event: apply, then flush its manifest change immediately (no batch loop here).
-        if index_only::apply_actions(&state, &gateway, &actions, fetched.as_ref())?.dirtied {
+        let applied = index_only::apply_actions(&state, &gateway, &actions, fetched.as_ref())?;
+        // This harness doesn't go through `apply_connector_actions`, which announces arrivals; a
+        // document it creates is no less a new document to the mods that may read documents.
+        for document in &applied.landed {
+            crate::mods::api::events::note_landed(&[document.id]);
+        }
+        if applied.dirtied {
             let conn = state.conn()?;
             index_only::write_synced(&conn, &vault_root, &manifest_cipher)?;
         }

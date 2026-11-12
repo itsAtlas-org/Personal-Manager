@@ -1368,9 +1368,10 @@ pub fn run() {
             app.manage(mods::start_runtime(handle));
             app.manage(mods::api::Calls::default());
             // The events a frame is told (spec §1.5): what waits out its interval, and the one
-            // place document deletions are reported from (`ingest::delete_document`).
+            // place document writes are reported from (`ingest::delete_document`, the archive and
+            // landing notes: `mods::api::events::Note`).
             app.manage(mods::api::events::Hub::default());
-            mods::api::events::install_delete_notes(handle.clone());
+            mods::api::events::install_notes(handle.clone());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;

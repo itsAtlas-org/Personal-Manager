@@ -5,8 +5,8 @@
 //!
 //! | Event | Permission | Payload | Source |
 //! |---|---|---|---|
-//! | `documents.added` | `documents.meta` | `{documents: [...]}`, `documents.list`'s DTO, every field | a document landing (`ingest.rs`, `connector_sync.rs`), coalesced |
-//! | `documents.deleted` | `documents.meta` | `{ids: [...]}` | every document delete, after its commit |
+//! | `documents.added` | `documents.meta` | `{documents: [...]}`, `documents.list`'s DTO, every field | a document landing (the two `DOCUMENT_LANDED` points, notes, chats: [`note_landed`]) and an un-archive, coalesced |
+//! | `documents.deleted` | `documents.meta` | `{ids: [...]}` | every document delete, and an archive, after its commit |
 //! | `theme.changed` | `storage` | the snapshot `theme.get` answers with | PM's page, per frame |
 //! | `grants.changed` | none | `{}` | the writers of a grant, after their commit |
 //! | `mod.paused`, `session.closed` | none | `{}`, `{reason}` | the session's end (`runtime`, `outbox`) |
@@ -35,6 +35,15 @@
 //! for "gone and back". An archived document wasn't visible to a mod (`documents::LISTED`), so its
 //! deletion isn't announced to one either: an id a mod couldn't read must not be learnable from an
 //! event, as it isn't from a call.
+//!
+//! **A mod's readable set is the documents that aren't archived**, so shelving a document is, to a
+//! mod, a deletion and taking it off the shelf is a landing (no event of their own): the writers of
+//! `documents.importance` call [`note_listing_change`] around their UPDATE. What is announced is
+//! decided at the flush from the committed rows ([`settle_deleted`] announces the ids that are no
+//! longer readable, [`flush_landed`] the ones that are), so a rolled-back archive, or one undone
+//! within the interval, says nothing, and an id a mod never could read is never announced. A Rebuild
+//! re-creates documents (new ids after a wipe, in-place rewrites otherwise) and says so with one
+//! resync notice when it settles ([`documents_resync`]).
 //!
 //! **Coalesced.** A landing or a deletion waits [`limits::EVENT_COALESCE_MS`] for the next, so an
 //! import of a thousand documents is a few events, not a thousand. Each [`Hub`] set is bounded
@@ -322,11 +331,14 @@ fn schedule<H: Host>(host: &H, which: Which) {
 
 // ---- documents.added ----------------------------------------------------------------------------
 
-/// A document landed (a connector brought it, or an import indexed it) and its row has committed:
-/// tell the frames that may know, after the interval. Cheap when no frame is live. Called from the
-/// existing `DOCUMENT_LANDED` emit points (`ingest.rs`, `connector_sync.rs`), whether or not the
-/// document is in the review queue: a mod mirrors the list, not the queue. A document announced
-/// twice (a re-sync) is announced twice; the payload is the document as it is, so a mod keys by id.
+/// A document joined what a mod may read (a connector brought it, an import or a note or a chat
+/// indexed it, or it was taken off the shelf) and its row has committed: tell the frames that may
+/// know, after the interval. Cheap when no frame is live. Called from the `DOCUMENT_LANDED` emit
+/// points (`ingest.rs`, `connector_sync.rs`) and, through [`note_landed`], from every other writer of
+/// a new document and from the un-archive, whether or not the document is in the review queue: a
+/// mod mirrors the list, not the queue. A document announced twice (a re-sync) is announced twice;
+/// the payload is the document as it is *at the flush* (an archived one is left out,
+/// [`documents::added_payloads`]), so a mod keys by id.
 pub fn document_landed<H: Host>(host: &H, id: i64) {
     if !host.runtime().any_live() {
         return;
@@ -382,9 +394,10 @@ fn stays_over<H: Host>(host: &H, epoch: u64) -> Result<(), ModError> {
 
 // ---- documents.deleted --------------------------------------------------------------------------
 
-/// Ids that may have just been deleted, noted inside the deleter's transaction (so before its
-/// commit); announced after the interval if they are gone then ([`settle_deleted`]). The deleter
-/// reports only documents a mod could see ([`is_listed`]).
+/// Ids that may have just left what a mod may read (deleted, or archived: a mod's readable set is
+/// the documents that aren't archived, [`documents::LISTED`]), noted inside the writer's transaction
+/// (so before its commit); announced after the interval if they are out of that set then
+/// ([`settle_deleted`]). The writer reports only documents a mod could see ([`is_listed`]).
 pub fn documents_deleted<H: Host>(host: &H, ids: &[i64]) {
     if ids.is_empty() || !host.runtime().any_live() {
         return;
@@ -395,9 +408,11 @@ pub fn documents_deleted<H: Host>(host: &H, ids: &[i64]) {
     }
 }
 
-/// The end of a deletion interval: of the ids noted, the ones no longer in `documents`, as ids in
-/// slices of [`limits::MAX_IDS_PER_EVENT`]. Taking the DB guard waits for any writer still holding it
-/// (the one that noted them, mid-transaction), so what it finds is committed or rolled back.
+/// The end of a deletion interval: of the ids noted, the ones a mod can no longer read (no row, or
+/// archived), as ids in slices of [`limits::MAX_IDS_PER_EVENT`]. Taking the DB guard waits for any
+/// writer still holding it (the one that noted them, mid-transaction), so what it finds is committed
+/// or rolled back: a rolled-back delete or archive leaves the document listed and says nothing, and
+/// so does an archive that was undone within the interval.
 pub(super) fn settle_deleted<H: Host>(host: &H) -> Emitted {
     let (epoch, ids, lost) = Hub::take(&host.hub().deleted);
     let mut total = Emitted::default();
@@ -411,7 +426,7 @@ pub(super) fn settle_deleted<H: Host>(host: &H) -> Emitted {
         if host.store().store_epoch() != epoch {
             return total;
         }
-        match absent(&conn, &ids) {
+        match unlisted(&conn, &ids) {
             Ok(gone) => gone,
             Err(e) => {
                 eprintln!("mods: couldn't settle deleted documents ({})", e.message);
@@ -433,14 +448,15 @@ pub(super) fn settle_deleted<H: Host>(host: &H) -> Emitted {
     total
 }
 
-/// Of `ids`, the ones with no row in `documents`, in id order.
-fn absent(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>, ModError> {
+/// Of `ids`, the ones a mod can't read now (no row in `documents`, or an archived one), in id order.
+fn unlisted(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>, ModError> {
     let wanted = serde_json::to_string(ids).map_err(ModError::internal)?;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT value FROM json_each(?1) \
-             WHERE value NOT IN (SELECT id FROM documents) ORDER BY value",
-        )
+             WHERE value NOT IN (SELECT d.id FROM documents d WHERE {}) ORDER BY value",
+            documents::LISTED
+        ))
         .map_err(ModError::internal)?;
     let rows = stmt
         .query_map([wanted], |r| r.get::<_, i64>(0))
@@ -478,15 +494,40 @@ pub fn listed_ids(conn: &Connection) -> Vec<i64> {
         .unwrap_or_default()
 }
 
-type Notify = Arc<dyn Fn(&[i64]) + Send + Sync>;
+/// What a writer of documents reports, in terms of the set a mod may read (the documents that aren't
+/// archived): ids that may have left it, or may have joined it. Both are only *noted* where they
+/// happen, possibly inside a transaction that hasn't committed; what is announced is decided at the
+/// end of the interval from the committed rows ([`settle_deleted`], [`flush_landed`]), so a
+/// rollback announces nothing.
+#[derive(Clone, Copy)]
+pub enum Note<'a> {
+    /// Deleted, or put on the shelf.
+    Left(&'a [i64]),
+    /// Created, or taken off the shelf.
+    Joined(&'a [i64]),
+}
 
-/// Where [`note_deleted`] reports. Set once by `setup()` with the app; empty in a unit test of the
-/// code that deletes.
-static DELETE_NOTES: Mutex<Option<Notify>> = Mutex::new(None);
+type Notify = Arc<dyn for<'a> Fn(Note<'a>) + Send + Sync>;
 
-/// Report document deletions to the app's mod events (`lib.rs` setup).
-pub fn install_delete_notes(app: AppHandle) {
-    set_delete_notes(Some(Arc::new(move |ids| documents_deleted(&app, ids))));
+/// Where [`note_deleted`] and [`note_landed`] report. Set once by `setup()` with the app; empty in a
+/// unit test of the code that writes.
+static NOTES: Mutex<Option<Notify>> = Mutex::new(None);
+
+/// Report document writes to the app's mod events (`lib.rs` setup).
+pub fn install_notes(app: AppHandle) {
+    set_notes(Some(Arc::new(move |note| report(&app, note))));
+}
+
+/// Hand a note to the hub of `host`.
+fn report<H: Host>(host: &H, note: Note<'_>) {
+    match note {
+        Note::Left(ids) => documents_deleted(host, ids),
+        Note::Joined(ids) => {
+            for id in ids {
+                document_landed(host, *id);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -494,27 +535,101 @@ thread_local! {
     static TEST_NOTES: std::cell::RefCell<Option<Notify>> = const { std::cell::RefCell::new(None) };
 }
 
-fn set_delete_notes(notify: Option<Notify>) {
-    *DELETE_NOTES.lock().unwrap_or_else(|e| e.into_inner()) = notify;
+fn set_notes(notify: Option<Notify>) {
+    *NOTES.lock().unwrap_or_else(|e| e.into_inner()) = notify;
 }
 
-/// The document rows `ids` were deleted in the caller's transaction, not yet committed. Never
-/// blocks, never touches the DB: it only notes, and the announcement waits for the commit
-/// ([`settle_deleted`]). The one caller is `ingest::delete_document` and the rebuild's wipe beside it.
-pub fn note_deleted(ids: &[i64]) {
-    // A test of the code that deletes reports to its own host, on its own thread, so one test's
-    // deletions can never reach another's.
+fn send_note(note: Note<'_>) {
+    // A test of the code that writes reports to its own host, on its own thread, so one test's
+    // writes can never reach another's.
     #[cfg(test)]
     if let Some(notify) = TEST_NOTES.with(|n| n.borrow().clone()) {
-        notify(ids);
+        notify(note);
         return;
     }
-    let notify = DELETE_NOTES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let notify = NOTES.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(notify) = notify {
-        notify(ids);
+        notify(note);
+    }
+}
+
+/// What the code under test reported on this thread, for the tests of the writers (which have a
+/// store of their own, not a host): the notes they made, in order, whatever they would announce.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Noted {
+        Left(Vec<i64>),
+        Joined(Vec<i64>),
+    }
+
+    /// Records this thread's notes until dropped.
+    pub struct Recording(Arc<Mutex<Vec<Noted>>>);
+
+    pub fn record() -> Recording {
+        let seen: Arc<Mutex<Vec<Noted>>> = Arc::default();
+        let into = Arc::clone(&seen);
+        TEST_NOTES.with(|n| {
+            *n.borrow_mut() = Some(Arc::new(move |note| {
+                into.lock().unwrap().push(match note {
+                    Note::Left(ids) => Noted::Left(ids.to_vec()),
+                    Note::Joined(ids) => Noted::Joined(ids.to_vec()),
+                });
+            }));
+        });
+        Recording(seen)
+    }
+
+    impl Recording {
+        /// What was noted since the last call.
+        pub fn take(&self) -> Vec<Noted> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            TEST_NOTES.with(|n| *n.borrow_mut() = None);
+        }
+    }
+}
+
+/// The document rows `ids` were deleted (or archived) in the caller's transaction, not yet
+/// committed. Never blocks, never touches the DB: it only notes, and the announcement waits for the
+/// commit ([`settle_deleted`]). Callers: `ingest::delete_document` and the rebuild's wipe beside it
+/// (deletes), and [`note_listing_change`] (an archive).
+pub fn note_deleted(ids: &[i64]) {
+    send_note(Note::Left(ids));
+}
+
+/// The document rows `ids` were created (or taken off the shelf), committed or about to be. Never
+/// blocks, never touches the DB: the announcement is made at the end of the interval from the rows
+/// as they are then ([`flush_landed`]), so an id whose write rolled back, or that is archived by
+/// then, says nothing. Callers: every writer of a new document that isn't one of the two
+/// `DOCUMENT_LANDED` emit points (notes, chat births), and [`note_listing_change`] (an un-archive).
+pub fn note_landed(ids: &[i64]) {
+    send_note(Note::Joined(ids));
+}
+
+/// Whether a document with this importance is in a mod's readable set ([`documents::LISTED`] in
+/// Rust, for a writer that already holds the old value).
+pub fn importance_is_listed(importance: Option<&str>) -> bool {
+    importance != Some(documents::ARCHIVE)
+}
+
+/// A writer is about to change `id`'s importance (the one column that archives a document): it
+/// reads [`is_listed`] first, and calls this after its UPDATE with that answer. An archive
+/// (listed, now not) is noted as a deletion and an un-archive (not listed, now is) as a landing, so
+/// a mod's readable set stays what its events say. Nothing else (a move between two levels that are
+/// both readable, a row that was never readable and still isn't) is news, so an id a mod couldn't
+/// read is never announced. Inside the writer's transaction, like every note.
+pub fn note_listing_change(conn: &Connection, id: i64, was_listed: bool) {
+    match (was_listed, is_listed(conn, id)) {
+        (true, false) => note_deleted(&[id]),
+        (false, true) => note_landed(&[id]),
+        _ => {}
     }
 }
 
@@ -562,6 +677,29 @@ pub fn theme_changed<H: Host>(host: &H, session: &str, theme: &Value) -> Emitted
         &Audience::Session(session.to_owned()),
         |_| Ok(vec![payload]),
     )
+}
+
+// ---- a Rebuild ----------------------------------------------------------------------------------
+
+/// A Rebuild over store `epoch` has settled (finished, or failed part way): every live session is
+/// sent the resync notice, once, because it re-listed nothing itself and its list may now be
+/// anything.
+///
+/// **Why a notice and not `documents.added` for each document.** On the arm that wipes (a changed
+/// embedder width) every document comes back under a new id (`AUTOINCREMENT`), over minutes; on the
+/// others the rows are updated in place, with titles, chunk counts and filings that no event
+/// describes. Announcing each document would send a mod a flood it must reconcile with a wipe it
+/// was already told of (`documents.deleted`, noted by the wipe), and the in-place arm would
+/// announce every document of the vault. One notice at the end says what is true: "you missed
+/// events, list again", and the list is then right. The notice is the outbox's own (an empty
+/// `grants.changed` carrying `missed`), which reveals nothing, so it goes to every running mod,
+/// granted `documents.meta` or not. A frame that is not at that store (a swap during the run), a
+/// locked PM and a mod that isn't running hear nothing, as for any event.
+pub fn documents_resync<H: Host>(host: &H, epoch: u64) -> Emitted {
+    emit_counting(host, GRANTS_CHANGED, &Audience::Everyone, 1, |_| {
+        stays_over(host, epoch)?;
+        Ok(Vec::new())
+    })
 }
 
 // ---- grants.changed -----------------------------------------------------------------------------

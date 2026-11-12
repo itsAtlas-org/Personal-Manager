@@ -1558,6 +1558,11 @@ pub fn ingest_note_document(
         }
     };
 
+    // Committed. A note doesn't pass through the two `DOCUMENT_LANDED` emit points, so the mods that
+    // may read documents are told here, for a new note and for an edited one alike (the payload is
+    // the document as it is, and a mod keys by id, so an edit refreshes its title and chunk count).
+    crate::mods::api::events::note_landed(&[document.id]);
+
     // A promoted legacy note must be stripped from the encrypted manifest so the DB-∪-file union can't
     // resurrect it as an index-only ghost. AFTER the commit (mirror already excludes it). Idempotent.
     if matches!(&existing, Some(e) if e.source_type == SOURCE_TYPE_INDEX_ONLY) {
@@ -3197,6 +3202,11 @@ pub fn write_document_truth(
     // queryable index over it from drifting, so `@tag` can scope by a label without a full scan.
     crate::tags::set_document_group_tags(tx, doc_id, tags)?;
 
+    // Importance is the column that archives a document, and a mod's readable set is the documents
+    // that aren't archived: shelving or un-shelving here is news to mods (`documents.deleted`,
+    // `documents.added`). Noted, not announced: the announcement waits for the commit.
+    let was_listed = crate::mods::api::events::is_listed(tx, doc_id);
+
     let written = match truth_source(tx, doc_id)? {
         TruthSource::VaultFrontmatter => Some(rewrite_vault_metadata(
             tx,
@@ -3223,6 +3233,7 @@ pub fn write_document_truth(
             manifest,
         )?,
     };
+    crate::mods::api::events::note_listing_change(tx, doc_id, was_listed);
 
     // Stage-3 activity log: filing a document INTO a real project is per-project engagement, and this
     // seam is the single choke-point every user-initiated organize edit passes through (Rebuild and
@@ -7307,6 +7318,61 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(still, ["Atlas"]);
+    }
+
+    #[test]
+    fn the_filing_seam_tells_the_mods_when_a_document_is_shelved_or_taken_off_the_shelf() {
+        // `write_document_truth` is the one writer of a user's organisation edits, importance
+        // included. Archiving takes a document out of what a mod may read and un-archiving puts it
+        // back, so the seam notes both: a deletion and a landing as far as a mod can tell. A write
+        // that moves nothing across the shelf notes nothing.
+        use crate::mods::api::events::testing::{record, Noted};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let mut conn = crate::db::open(&dir.path().join("t.sqlite"), key).unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let cipher = MarkdownCipher::plaintext("test-vault");
+        let manifest = crate::index_only::ManifestCipher::from_master("v", &[7u8; 32]);
+        let born = "---\ntitle: Receipt\nsource_path: \next: pdf\ncontent_hash: h\n\
+                    created_at: 2026-01-01\ningested_at: 2026-01-01\nproject: \"Unsorted\"\n\
+                    tags: []\nimportance: null\nlast_activity: 2026-01-01\nreviewed: false\n\
+                    ---\n\nBody.\n";
+        cipher.write_to(&vault.join("r.md"), born).unwrap();
+        conn.execute(
+            "INSERT INTO documents(id, vault_path, title, content_hash, project, tags, reviewed) \
+             VALUES (1, 'r.md', 'Receipt', 'h', 'Unsorted', '[]', 0)",
+            [],
+        )
+        .unwrap();
+        let notes = record();
+        let mut file = |importance: Option<&str>| {
+            let tx = conn.transaction().unwrap();
+            write_document_truth(
+                &tx,
+                &vault,
+                &cipher,
+                1,
+                "Unsorted",
+                &[],
+                &[],
+                importance,
+                true,
+                "2026-06-20",
+                dir.path(),
+                &manifest,
+                FilingActivity::Suppress,
+                ManifestWrite::PerDocument,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            notes.take()
+        };
+        assert_eq!(file(Some("high")), [], "high to high is not news");
+        assert_eq!(file(Some("archive")), [Noted::Left(vec![1])]);
+        assert_eq!(file(Some("archive")), [], "shelved and still shelved");
+        assert_eq!(file(Some("low")), [Noted::Joined(vec![1])]);
+        assert_eq!(file(None), [], "two readable levels");
     }
 
     #[test]

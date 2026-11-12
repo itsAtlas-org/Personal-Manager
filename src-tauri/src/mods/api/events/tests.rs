@@ -339,6 +339,7 @@ fn every_way_a_session_ends_closes_its_channel_with_the_right_goodbye() {
     let b = open(&host, second("acme.b", &["storage"]), &[]);
     let c = open(&host, second("acme.c", &["storage"]), &[]);
     let d = open(&host, second("acme.d", &["storage"]), &[]);
+    let e = open(&host, second("acme.e", &["storage"]), &[]);
 
     host.runtime().pause(&id("acme.a"));
     assert_eq!(a.rec.names(), ["mod.paused", SESSION_CLOSED]);
@@ -361,15 +362,22 @@ fn every_way_a_session_ends_closes_its_channel_with_the_right_goodbye() {
         [json!({ "reason": "replaced" })]
     );
 
-    // A registry made exactly something else: a mod that left is uninstalled.
-    host.runtime().replace_all(Vec::new());
+    // A registry made exactly something else: a mod that left is uninstalled, unless its row is
+    // still there and simply doesn't serve (parked, held, paused), which is a pause.
+    let parked: std::collections::HashSet<ModId> = [id("acme.e")].into();
+    host.runtime().replace_all(Vec::new(), &parked);
     assert_eq!(
         d.rec.payloads(SESSION_CLOSED),
         [json!({ "reason": "uninstalled" })]
     );
+    assert_eq!(e.rec.names(), ["mod.paused", SESSION_CLOSED]);
+    assert_eq!(
+        e.rec.payloads(SESSION_CLOSED),
+        [json!({ "reason": "paused" })]
+    );
 
     // Never a second goodbye, and nothing after one.
-    for f in [&a, &b, &c, &d] {
+    for f in [&a, &b, &c, &d, &e] {
         assert_eq!(say(&host, DOCUMENTS_DELETED, json!({})), Emitted::default());
         let closed = f
             .rec
@@ -762,14 +770,14 @@ fn ids_noted_over_one_store_are_never_announced_over_another() {
 
 // ---- documents.deleted -----------------------------------------------------------------------------
 
-/// Reports to this test's host from `note_deleted`, on this thread, until dropped.
+/// Reports to this test's host from `note_deleted` and `note_landed`, on this thread, until dropped.
 struct Reporting;
 
 impl Reporting {
     fn to(host: &TestHost) -> Self {
         let host = host.clone();
         TEST_NOTES.with(|n| {
-            *n.borrow_mut() = Some(Arc::new(move |ids| documents_deleted(&host, ids)));
+            *n.borrow_mut() = Some(Arc::new(move |note| report(&host, note)));
         });
         Self
     }
@@ -902,6 +910,417 @@ fn the_ids_a_wipe_announces_are_the_ones_a_mod_could_see() {
     assert!(is_listed(&conn, 1));
     assert!(!is_listed(&conn, 2));
     assert!(!is_listed(&conn, 99), "no row: nothing to announce");
+}
+
+// ---- archive and un-archive ------------------------------------------------------------------------
+
+/// Set a document's importance the way a writer does: read where it stands, UPDATE, note the move.
+fn shelve(conn: &Connection, id: i64, importance: Option<&str>) {
+    let was = is_listed(conn, id);
+    conn.execute(
+        "UPDATE documents SET importance = ?2 WHERE id = ?1",
+        params![id, importance],
+    )
+    .unwrap();
+    note_listing_change(conn, id, was);
+}
+
+#[test]
+fn archiving_is_announced_as_a_deletion_and_unarchiving_as_an_addition() {
+    let host = TestHost::new();
+    let f = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    // A mod without the permission is told nothing, whatever happens to the shelf.
+    let blind = open(&host, second("acme.blind", &["storage"]), &[]);
+    host.sql(|c| {
+        doc(c, 1, None);
+        doc(c, 2, Some("low"));
+    });
+    let _report = Reporting::to(&host);
+
+    host.sql(|c| shelve(c, 1, Some("archive")));
+    assert_eq!(settle_deleted(&host).sent, 1);
+    assert_eq!(
+        f.rec.payloads(DOCUMENTS_DELETED),
+        [json!({ "ids": [1] })],
+        "shelving is a deletion to a mod"
+    );
+    assert_eq!(flush_landed(&host), Emitted::default(), "and only that");
+
+    // Off the shelf again: the document is added, as the list's DTO (nine fields, none of the
+    // secrets), under the filing it now has.
+    host.sql(|c| shelve(c, 1, Some("high")));
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert_eq!(flush_landed(&host).sent, 1);
+    let added = f.rec.payloads(DOCUMENTS_ADDED);
+    assert_eq!(added.len(), 1);
+    let documents = added[0]["documents"].as_array().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["id"], 1);
+    assert_eq!(documents[0]["importance"], "high");
+    assert_eq!(documents[0].as_object().unwrap().len(), DTO_FIELDS.len());
+    let text = serde_json::to_string(&f.rec.all()).unwrap();
+    for secret in FORBIDDEN {
+        assert!(!text.contains(secret), "{secret} reached the frame: {text}");
+    }
+    assert!(blind.rec.all().is_empty());
+
+    // A move between two readable levels is no news, and neither is shelving what is shelved.
+    host.sql(|c| {
+        shelve(c, 2, Some("high"));
+        shelve(c, 1, Some("high"));
+    });
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert_eq!(flush_landed(&host), Emitted::default());
+    assert_eq!(f.rec.all().len(), 2);
+}
+
+#[test]
+fn a_rolled_back_archive_or_unarchive_announces_nothing() {
+    let host = TestHost::new();
+    let f = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    host.sql(|c| {
+        doc(c, 1, None);
+        doc(c, 2, Some("archive"));
+    });
+    let _report = Reporting::to(&host);
+
+    host.sql(|c| {
+        let tx = c.unchecked_transaction().unwrap();
+        shelve(&tx, 1, Some("archive"));
+        shelve(&tx, 2, None);
+        tx.rollback().unwrap();
+    });
+    // Both were noted (the writer can't know it will roll back); the rows say nothing happened.
+    assert_eq!(host.hub().counts().0 .0, 1);
+    assert_eq!(host.hub().counts().1 .0, 1);
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert_eq!(
+        flush_landed(&host).sent,
+        0,
+        "the shelved one is still shelved"
+    );
+    assert!(f.rec.all().is_empty());
+}
+
+#[test]
+fn an_archive_undone_within_the_interval_is_not_announced_as_a_deletion() {
+    let host = TestHost::new();
+    let f = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    host.sql(|c| doc(c, 1, None));
+    let _report = Reporting::to(&host);
+    host.sql(|c| {
+        shelve(c, 1, Some("archive"));
+        shelve(c, 1, None);
+    });
+    // The mod never lost the document, so it is not told it did; the landing it may be told of is
+    // the document as it is, which a mod keys by id.
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert!(f.rec.payloads(DOCUMENTS_DELETED).is_empty());
+    assert_eq!(flush_landed(&host).sent, 1);
+    assert_eq!(f.rec.payloads(DOCUMENTS_ADDED).len(), 1);
+}
+
+#[test]
+fn only_a_move_across_the_shelf_is_noted() {
+    use crate::mods::api::events::testing::{record, Noted};
+    let (_dir, conn) = crate::mods::api::test_support::store();
+    doc(&conn, 1, None);
+    doc(&conn, 2, Some("archive"));
+    doc(&conn, 3, Some("low"));
+    let notes = record();
+
+    shelve(&conn, 1, Some("high"));
+    shelve(&conn, 2, Some("archive"));
+    shelve(&conn, 3, Some("medium"));
+    shelve(&conn, 3, None);
+    assert_eq!(notes.take(), [], "no id changed what a mod may read");
+
+    shelve(&conn, 1, Some("archive"));
+    assert_eq!(notes.take(), [Noted::Left(vec![1])]);
+    shelve(&conn, 2, None);
+    assert_eq!(notes.take(), [Noted::Joined(vec![2])]);
+    shelve(&conn, 2, Some("archive"));
+    assert_eq!(notes.take(), [Noted::Left(vec![2])]);
+
+    // The Rust test and the SQL test are one set.
+    for importance in [None, Some("low"), Some("high"), Some("archive")] {
+        conn.execute(
+            "UPDATE documents SET importance = ?1 WHERE id = 3",
+            [importance],
+        )
+        .unwrap();
+        assert_eq!(
+            importance_is_listed(importance),
+            is_listed(&conn, 3),
+            "{importance:?}"
+        );
+    }
+    assert!(documents::LISTED.contains(&format!("'{}'", documents::ARCHIVE)));
+}
+
+#[test]
+fn ids_noted_by_an_archive_over_one_store_are_never_announced_over_another() {
+    let host = TestHost::new();
+    let f = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    host.sql(|c| doc(c, 1, None));
+    let _report = Reporting::to(&host);
+    host.sql(|c| shelve(c, 1, Some("archive")));
+    // The store is swapped before the interval ends (the way every swap moves the epoch).
+    let conn = host.store().take_conn().unwrap().unwrap();
+    *host.store().db.lock().unwrap() = Some(conn);
+    assert_eq!(settle_deleted(&host), Emitted::default());
+    assert!(f.rec.all().is_empty());
+
+    // An un-archive likewise: noted over the old store, never announced over the new.
+    host.sql(|c| shelve(c, 1, None));
+    let conn = host.store().take_conn().unwrap().unwrap();
+    *host.store().db.lock().unwrap() = Some(conn);
+    assert_eq!(flush_landed(&host), Emitted::default());
+}
+
+// ---- documents created outside the two emit points ---------------------------------------------------
+
+#[test]
+fn a_noted_landing_is_announced_from_the_row_as_it_is() {
+    let host = TestHost::new();
+    let f = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    host.sql(|c| {
+        doc(c, 5, None);
+        doc(c, 6, Some("archive"));
+    });
+    let _report = Reporting::to(&host);
+    // A note and a chat birth are noted after their commit; 6 is shelved by the time the interval
+    // ends, 7 never committed.
+    note_landed(&[5, 6, 7]);
+    assert_eq!(flush_landed(&host).sent, 1);
+    let added = f.rec.payloads(DOCUMENTS_ADDED);
+    let ids: Vec<i64> = added[0]["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [5], "the shelved and the missing are left out");
+}
+
+#[test]
+fn nothing_is_noted_while_no_frame_is_live_and_the_noted_set_is_bounded() {
+    let host = TestHost::new();
+    host.sql(|c| doc(c, 1, None));
+    let _report = Reporting::to(&host);
+    note_landed(&[1]);
+    host.sql(|c| shelve(c, 1, Some("archive")));
+    assert_eq!(host.hub().counts(), ((0, 0), (0, 0)));
+}
+
+// ---- a Rebuild settles ---------------------------------------------------------------------------------
+
+#[test]
+fn a_rebuild_tells_every_running_frame_once_that_it_missed_events() {
+    let host = TestHost::new();
+    let granted = open(
+        &host,
+        second("acme.tool", &["documents.meta"]),
+        &["documents.meta"],
+    );
+    // The notice reveals nothing, so a mod that holds no permission at all is told as well.
+    let bare = open(&host, second("acme.bare", &[]), &[]);
+    let mut stopped = second("acme.stopped", &[]);
+    stopped.state = "paused";
+    let paused = open(&host, stopped, &[]);
+    let epoch = host.store().store_epoch();
+
+    let said = documents_resync(&host, epoch);
+    assert_eq!(
+        (said.sent, said.refused),
+        (0, 1),
+        "the paused mod isn't told"
+    );
+    for f in [&granted, &bare] {
+        let all = f.rec.all();
+        assert_eq!(all.len(), 1, "once");
+        assert_eq!((all[0].name, all[0].missed), (GRANTS_CHANGED, Some(1)));
+        assert_eq!(all[0].payload, json!({}), "it carries nothing");
+    }
+    assert!(paused.rec.all().is_empty());
+
+    // A store swapped during the rebuild: the new store's frames are told nothing of the old one's.
+    assert_eq!(documents_resync(&host, epoch + 1).sent, 0);
+    assert_eq!(granted.rec.all().len(), 1);
+    // A locked PM tells no frame anything.
+    host.0.locked.store(true, Ordering::SeqCst);
+    assert_eq!(documents_resync(&host, epoch).sent, 0);
+    assert_eq!(bare.rec.all().len(), 1);
+    host.0.locked.store(false, Ordering::SeqCst);
+    // A frame that has gone away isn't told.
+    host.runtime().uninstall(&id("acme.bare"));
+    documents_resync(&host, epoch);
+    assert_eq!(bare.rec.names(), [GRANTS_CHANGED, SESSION_CLOSED]);
+}
+
+// ---- every writer of what a mod may read is accounted for --------------------------------------------------
+
+/// The text of every non-test source file, down to its test module, under `src/`.
+fn sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let name = path
+                    .strip_prefix(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // A file of tests is not a writer of anything.
+                if name.contains("/tests/")
+                    || name.ends_with("/tests.rs")
+                    || name.ends_with("test_support.rs")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Down to the file's test module (a `#[cfg(test)]` helper earlier in a file doesn't end
+                // the live code).
+                let live = text
+                    .split("\n#[cfg(test)]\nmod tests")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                out.push((name, live));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut out,
+    );
+    out
+}
+
+/// How many statements in `text` are `UPDATE documents SET ... importance ...` (string continuations
+/// folded, so a statement split over lines is one).
+fn importance_writers(text: &str) -> usize {
+    let folded = text
+        .replace("\\\n", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    folded
+        .split("\"UPDATE documents SET")
+        .skip(1)
+        .filter(|rest| {
+            let statement = rest.split('"').next().unwrap_or_default();
+            statement.contains("importance")
+        })
+        .count()
+}
+
+/// Archiving is a write to `documents.importance`, and a mod's readable set is the documents that
+/// aren't archived. This pins every non-test statement that writes it: a new one (or a removed one)
+/// fails here until its author has decided how the mods are told, which is
+/// `events::note_listing_change` around the UPDATE for a writer of an existing document, and the
+/// Rebuild's resync for the writers that only run inside a Rebuild.
+#[test]
+fn every_writer_of_importance_is_one_that_tells_the_mods() {
+    // (file, statements, what accounts for them)
+    const WRITERS: &[(&str, usize, &str)] = &[
+        // write_document_truth's two arms (note_listing_change), and the two a Rebuild runs.
+        ("ingest.rs", 4, "note_listing_change"),
+        ("duplicates.rs", 1, "note_listing_change"),
+        ("drive.rs", 1, "note_listing_change"),
+        ("index_only.rs", 1, "note_listing_change"),
+        ("chat_index.rs", 2, "note_listing_change"),
+    ];
+    let sources = sources();
+    for (name, live) in &sources {
+        let found = importance_writers(live);
+        let expected = WRITERS.iter().find(|w| w.0 == name).map_or(0, |w| w.1);
+        assert_eq!(
+            found, expected,
+            "{name} has {found} statements writing documents.importance, accounted for {expected}: \
+             tell the mods (events::note_listing_change) or the Rebuild's resync, then update this list"
+        );
+    }
+    for (name, _, marker) in WRITERS {
+        let live = &sources.iter().find(|s| s.0 == *name).unwrap().1;
+        assert!(live.contains(marker), "{name} no longer calls {marker}");
+    }
+}
+
+/// `ingest_note_document` needs the engine to embed a note, so no unit test reaches its end: this
+/// holds the call that tells the mods to the function, after its commit.
+#[test]
+fn a_note_is_announced_after_its_commit() {
+    let sources = sources();
+    let ingest = &sources.iter().find(|s| s.0 == "ingest.rs").unwrap().1;
+    let from = ingest.find("pub fn ingest_note_document").unwrap();
+    let body = &ingest[from..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let landed = body
+        .find("events::note_landed(&[document.id])")
+        .expect("a note tells the mods");
+    let bound = body.find("let document = match result").unwrap();
+    assert!(
+        landed > bound,
+        "after the transaction's result is known, never before"
+    );
+    // And the other paths that create a document without the two emit points.
+    let chat = &sources.iter().find(|s| s.0 == "chat_index.rs").unwrap().1;
+    assert!(chat.contains("events::note_landed(&[id])"), "a chat birth");
+}
+
+/// The Rebuild is driven by a command that needs the engine and a window, so no unit test runs it:
+/// this holds the resync to the one function every rebuild (the user's, and the one resumed on
+/// launch) goes through, after its passes have run and whether they succeeded or not.
+#[test]
+fn every_rebuild_tells_the_mods_when_it_settles() {
+    let sources = sources();
+    let archivist = &sources
+        .iter()
+        .find(|s| s.0 == "commands/archivist.rs")
+        .unwrap()
+        .1;
+    let from = archivist.find("async fn rebuild_core").unwrap();
+    let body = &archivist[from..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let passes = body
+        .find("rebuild_passes(&app")
+        .expect("the passes run here");
+    let resync = body
+        .find("documents_resync(&app, store_epoch)")
+        .expect("the rebuild tells the mods when it settles");
+    let result = body.find("result?").expect("the failure is returned");
+    assert!(
+        passes < resync && resync < result,
+        "after the passes, before a failure is returned"
+    );
+    assert!(
+        body.find("let store_epoch = state.store_epoch()").unwrap() < passes,
+        "the store is read before the rebuild starts"
+    );
 }
 
 // ---- theme.changed ---------------------------------------------------------------------------------

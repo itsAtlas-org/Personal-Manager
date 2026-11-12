@@ -599,6 +599,93 @@ async fn a_call_in_flight_across_an_uninstall_commits_nothing() {
     assert!(kv_rows(&host, "atlas.map").is_empty());
 }
 
+/// The ledger's store over a test host's open store, with no vault to compare (the host has none).
+struct OverHost<'a>(&'a AppState);
+
+impl crate::mods::ledger::LedgerStore for OverHost<'_> {
+    fn with_conn<T>(
+        &self,
+        _layout: &crate::mods::disk::Layout,
+        f: impl FnOnce(&mut rusqlite::Connection) -> Result<T, crate::mods::ledger::LedgerError>,
+    ) -> Result<T, crate::mods::ledger::LedgerError> {
+        let mut conn = self
+            .0
+            .conn()
+            .map_err(|e| crate::mods::ledger::LedgerError::Store(e.to_string()))?;
+        f(&mut conn)
+    }
+}
+
+/// The signed list's blacklist applied to the host's mods (the real `Ledger::apply_blacklist`: cut
+/// the registry, write the row, remove the files), naming `atlas.map` 1.0.0 with `action`.
+fn blacklist(host: &TestHost, action: &str) {
+    let layout = crate::mods::disk::Layout::new(
+        host.dir(),
+        "11111111-2222-3333-4444-555555555555",
+        &crate::mods::disk::new_store_id().unwrap(),
+    )
+    .unwrap();
+    let index = crate::mods::safety::tests::index_with(|v| {
+        v["blacklist"] = json!([{"id": "atlas.map", "versions": "=1.0.0", "action": action,
+            "reason": "A reason."}]);
+    });
+    let store = OverHost(host.store());
+    let report = crate::mods::ledger::Ledger::new(&layout, &store, host.runtime())
+        .apply_blacklist(&index, crate::mods::safety::tests::now());
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(report.notices.len(), 1, "the list applied to the mod");
+}
+
+/// A call in flight across the safety list's pause or removal commits nothing, wherever the list
+/// lands: after the checks passed, or just before the handler reaches the store. The cut ends the
+/// session, and the handler's own reads see the row's new state; either alone stops the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_in_flight_across_the_blacklist_commits_nothing() {
+    for action in ["paused", "removed"] {
+        for point in [Point::Authorised, Point::BeforeData] {
+            let host = TestHost::new();
+            let s = installed(&host, map_row());
+            let fired = Arc::new(Mutex::new(false));
+            let once = Arc::clone(&fired);
+            let act = action.to_owned();
+            host.hook(move |host, at| {
+                let mut fired = once.lock().unwrap();
+                if at != point || *fired {
+                    return;
+                }
+                *fired = true;
+                // Not under the DB guard at these two points, so the ledger may take it.
+                blacklist(host, &act);
+            });
+            let e = error(call(&host, &s, "storage.set", set_args("settings", json!(1), 0)).await);
+            assert!(
+                matches!(e.code, Code::SessionEnded | Code::Paused),
+                "{action} at {point:?}: {:?}",
+                e.code
+            );
+            assert!(*fired.lock().unwrap(), "{action} at {point:?}");
+            assert!(
+                kv_rows(&host, "atlas.map").is_empty(),
+                "{action} at {point:?}: nothing was written"
+            );
+            // The mod is stopped for good: a new call on the old session, and a new frame, both fail.
+            host.hook(|_, _| {});
+            assert_eq!(
+                code(call(&host, &s, "storage.get", json!({"key": "settings"})).await),
+                Code::SessionEnded
+            );
+            assert!(host
+                .runtime()
+                .open_frame_in(
+                    &id("atlas.map"),
+                    host.store().store_epoch(),
+                    crate::mods::outbox::testing::discarding()
+                )
+                .is_err());
+        }
+    }
+}
+
 /// A pause written while a call is in flight stops it before its write, even before the pause's
 /// writer has told the registry; and a bump between the write and the commit (the app lock, a
 /// pause's registry half) rolls the write back.

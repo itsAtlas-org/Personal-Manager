@@ -572,7 +572,9 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         if policy::serves(&state, consented) {
             self.runtime.install(installed);
         } else {
-            self.runtime.uninstall(&m.id);
+            // The row stays, but doesn't serve (another owner's pause, a mod waiting for consent):
+            // a frame still open is told it was paused, not that the mod was uninstalled.
+            self.runtime.pause(&m.id);
         }
         let pruned = match kind {
             InstallKind::Update => disk::prune_versions(self.layout, &m.id, &version),
@@ -625,7 +627,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             Ok(rows) => rows,
             Err(e) => {
                 // Without the listing nothing can be served or proved stale.
-                self.runtime.replace_all(Vec::new());
+                self.runtime.clear();
                 return StartupReport {
                     skipped: Some(e.to_string()),
                     ..StartupReport::default()
@@ -827,7 +829,15 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
                 eprintln!("mods: couldn't record a park ({e})");
             }
         }
-        self.runtime.replace_all(serve);
+        // A row that is still here but doesn't serve (parked, held, paused, unconsented) is paused as
+        // far as a live frame is concerned, not uninstalled. A blacklist-removed row isn't named:
+        // its mod is gone as far as the user is concerned, and the goodbye already said so.
+        let parked = rows
+            .iter()
+            .filter(|row| !row.removed())
+            .filter_map(|row| ModId::parse(&row.id).ok())
+            .collect();
+        self.runtime.replace_all(serve, &parked);
         report
     }
 
@@ -1171,7 +1181,7 @@ pub fn after_writer_open(app: &AppHandle) {
     let state = app.state::<AppState>();
     let Some(layout) = active_layout(app, state.inner(), Mint::IfRows) else {
         let _ledger = runtime.ledger_lock();
-        runtime.replace_all(Vec::new());
+        runtime.clear();
         return;
     };
     // The cached safety list is applied before the load, so a row it pauses or removes never
@@ -1319,7 +1329,7 @@ fn settle_registry(runtime: &ModRuntime, writes: impl FnOnce() -> bool) -> bool 
     let _ledger = runtime.ledger_lock();
     let writes = writes();
     if !writes {
-        runtime.replace_all(Vec::new());
+        runtime.clear();
     }
     writes
 }
@@ -1329,7 +1339,7 @@ fn settle_registry(runtime: &ModRuntime, writes: impl FnOnce() -> bool) -> bool 
 pub fn on_store_closed(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<ModRuntime>() {
         let _ledger = runtime.ledger_lock();
-        runtime.replace_all(Vec::new());
+        runtime.clear();
     }
 }
 
@@ -1338,7 +1348,7 @@ pub fn on_store_closed(app: &AppHandle) {
 pub fn quiesce(app: &AppHandle) -> Option<MutexGuard<'_, ()>> {
     let runtime: &ModRuntime = app.try_state::<ModRuntime>()?.inner();
     let guard = runtime.ledger_lock();
-    runtime.replace_all(Vec::new());
+    runtime.clear();
     Some(guard)
 }
 
@@ -1355,6 +1365,8 @@ mod tests {
 
     // The safety list against the ledger (slice 5).
     mod slice5;
+    // The ledger's writers against the registry's frames (slice 6, seams).
+    mod seams;
 
     const VAULT: &str = "11111111-2222-3333-4444-555555555555";
     const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";

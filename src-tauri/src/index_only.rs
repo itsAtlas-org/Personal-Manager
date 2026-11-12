@@ -628,6 +628,12 @@ fn apply_classification(conn: &Connection, manifest: &Manifest) -> Result<bool> 
                 entity_id,
             ],
         )?;
+        // The manifest (another machine's filing) can shelve the document or bring it back.
+        crate::mods::api::events::note_listing_change(
+            conn,
+            current.id,
+            crate::mods::api::events::importance_is_listed(current.importance.as_deref()),
+        );
         crate::tags::set_document_projects(conn, current.id, &it.project, &it.linked_projects)?;
         crate::tags::set_document_group_tags(conn, current.id, &it.tags)?;
     }
@@ -2546,6 +2552,45 @@ mod tests {
             project, "Taxes",
             "the file's classification wins on reconcile"
         );
+    }
+
+    #[test]
+    fn a_reconcile_that_shelves_or_unshelves_a_row_tells_the_mods() {
+        // The manifest is truth for classification, importance included (another machine archived
+        // the document, or took it off the shelf): either changes what a mod may read.
+        use crate::mods::api::events::testing::{record, Noted};
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        insert_index_only(&conn, "s1", "Taxes");
+        let id: i64 = conn
+            .query_row("SELECT id FROM documents WHERE source_id = 's1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let cipher = ManifestCipher::from_master(VAULT_ID, &MASTER);
+        let reconcile = |importance: Option<&str>| {
+            let mut it = item("s1", "Taxes");
+            it.importance = importance.map(str::to_owned);
+            write_manifest(
+                dir.path(),
+                &cipher,
+                &Manifest {
+                    schema: MANIFEST_SCHEMA,
+                    items: vec![it],
+                },
+            )
+            .unwrap();
+            reconcile_on_open(&conn, dir.path(), &cipher).unwrap();
+        };
+        let notes = record();
+        reconcile(Some("high"));
+        assert_eq!(notes.take(), [], "unfiled to high: both readable");
+        reconcile(Some("archive"));
+        assert_eq!(notes.take(), [Noted::Left(vec![id])]);
+        reconcile(Some("archive"));
+        assert_eq!(notes.take(), [], "nothing changed");
+        reconcile(None);
+        assert_eq!(notes.take(), [Noted::Joined(vec![id])]);
     }
 
     #[test]
