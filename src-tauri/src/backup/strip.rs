@@ -1361,8 +1361,8 @@ mod tests {
         // Each makes its copy in PM's own folder, not the OS temp dir (tmpfs on many desktops).
         assert_eq!(
             backups.matches("strip::work_dir(").count(),
-            2,
-            "create_local_backup and run_backup"
+            3,
+            "create_local_backup, run_backup and the cloud restores' download folder"
         );
         assert_eq!(export.matches("strip::work_dir(").count(), 1);
         assert!(!export.contains(".tempdir()"));

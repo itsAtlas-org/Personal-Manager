@@ -1032,6 +1032,11 @@ fn remove_pointed_vault(
 /// disarms its own auto-delete (`cloud_sync::stage_temp` calls `.keep()`, so the converter can open
 /// it on Windows) and is removed only on the normal return path — so a crash, a kill, or a
 /// force-quit mid-sync strands the user's actual file, in the clear, forever.
+///
+/// The `pm-export-`, `pm-backup-`, `pm-backup-snap-` and `pm-restore-*` entries are LEGACY here:
+/// those runs now work in `data_dir/copies-in-progress` (`backup::strip::WORK_DIR`, swept at boot
+/// and removed by the wipe), but an older build may have left folders of these names in the temp
+/// dir, so they stay on the list.
 const TEMP_STAGING_PREFIXES: &[&str] = &[
     "pm-drive-",
     "pm-onedrive-",

@@ -645,7 +645,8 @@ of each step on that file, so nothing is left in a page or a free page. A snapsh
 fails is deleted and the backup fails, with an error; no archive that might hold a secret is
 written. The copies are made under `data_dir/copies-in-progress/` (`strip::WORK_DIR`), on disk,
 never the OS temp dir (tmpfs, RAM, on many Linux desktops); a run's folder goes when it ends, and
-the boot sweep and the wipe take what a crash left. The copy is opened with the key the live store
+the boot sweep and the wipe take what a crash left. A Proton or Drive restore downloads its archive
+into a folder of the same place (`restore_scratch_dir`), for the same reason. The copy is opened with the key the live store
 was opened with, read from the open session under the same DB guard as the copy, never re-resolved
 from the keychain. A new place that copies the store out calls the same function;
 `every_site_that_copies_the_store_out_goes_through_the_strip` fails on any other `vacuum_into` in

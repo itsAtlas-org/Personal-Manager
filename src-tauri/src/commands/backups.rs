@@ -1285,7 +1285,7 @@ pub async fn restore_from_proton(
     // `unwrap_restore_result` because they used to sit inside the same blocking task as the restore
     // itself: a failure here must still emit the detached `Failed` event and still read a
     // user-initiated Cancel as "Restore cancelled." rather than as the incidental IO error.
-    let dl = unwrap_restore_result(&app, &state, restore_scratch_dir(&dest))?;
+    let dl = unwrap_restore_result(&app, &state, restore_scratch_dir(&app, &dest))?;
     unwrap_restore_result(&app, &state, dest.download(&app, &name, dl.path()).await)?;
     emit_backup_progress(
         &app,
@@ -1373,12 +1373,23 @@ fn restore_staging_target(app: &AppHandle) -> Result<std::path::PathBuf> {
 }
 
 /// A scratch directory for a remote restore to download into, named for the destination so a
-/// leftover temp folder is attributable. The archive must outlive the download, so the caller owns
-/// the `TempDir` and drops it only after the restore has read the file out of it.
-fn restore_scratch_dir(dest: &BackupDestination) -> Result<tempfile::TempDir> {
-    Ok(tempfile::Builder::new()
-        .prefix(&format!("pm-restore-{}-", dest.kind()))
-        .tempdir()?)
+/// leftover folder is attributable. The archive must outlive the download, so the caller owns
+/// the `TempDir` and drops it only after the restore has read the file out of it (and on every
+/// early return, which removes the folder too).
+///
+/// It is made in PM's own copies-in-progress folder ([`backup::strip::work_dir`]), never the OS
+/// temp dir: the archive can be as big as the vault, and on many Linux desktops the temp dir is
+/// tmpfs, which is RAM. That folder is swept at boot and by the wipe, so a crash leaves nothing.
+fn restore_scratch_dir(app: &AppHandle, dest: &BackupDestination) -> Result<tempfile::TempDir> {
+    restore_scratch_in(&paths::data_dir(app)?, dest)
+}
+
+/// [`restore_scratch_dir`] with the data folder passed in, so a test needs no app.
+fn restore_scratch_in(
+    data_dir: &std::path::Path,
+    dest: &BackupDestination,
+) -> Result<tempfile::TempDir> {
+    backup::strip::work_dir(data_dir, &format!("pm-restore-{}-", dest.kind()))
 }
 
 /// Unwrap a finished restore step's result: on failure, report a user-initiated cancel as a
@@ -1641,7 +1652,7 @@ pub async fn restore_from_gdrive(
     // event (leaving the panel on its last phase), and the download failure reports the raw error
     // even when the user pressed Cancel. Unifying them would change what this command emits, so it
     // is left for a fix that can carry a changelog line rather than folded into a refactor.
-    let dl = restore_scratch_dir(&dest)?;
+    let dl = restore_scratch_dir(&app, &dest)?;
     if let Err(e) = dest.download(&app, &name, dl.path()).await {
         let msg = e.to_string();
         emit_backup_progress(
@@ -1737,6 +1748,120 @@ mod restore_adoption_tests {
 mod tests {
     use super::*;
     use crate::commands::shared::temp_db;
+
+    fn proton() -> BackupDestination {
+        BackupDestination::Proton {
+            cli: std::path::PathBuf::from("proton-drive"),
+        }
+    }
+
+    fn drive() -> BackupDestination {
+        BackupDestination::GoogleDrive {
+            token_key: "google_oauth_token_drive::me@x.com".into(),
+        }
+    }
+
+    #[test]
+    fn a_cloud_restore_downloads_into_the_copies_folder_under_the_data_dir() {
+        // The archive is as big as the vault, so it goes on PM's disk (the copies-in-progress folder
+        // the boot sweep and the wipe already empty), not into the OS temp dir (RAM on many Linux
+        // desktops). The test's data dir is itself under the temp dir, so what is pinned is the
+        // exact folder, not "somewhere that isn't temp".
+        let data = tempfile::tempdir().unwrap();
+        let wanted = data.path().join(backup::strip::WORK_DIR);
+        for (dest, prefix) in [
+            (proton(), "pm-restore-proton-"),
+            (drive(), "pm-restore-gdrive-"),
+        ] {
+            let dl = restore_scratch_in(data.path(), &dest).unwrap();
+            assert_eq!(dl.path().parent().unwrap(), wanted, "{prefix}");
+            let name = dl
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(name.starts_with(prefix), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_cloud_restore_that_fails_or_is_cancelled_leaves_no_archive_behind() {
+        // The commands return early (`?`) when the download fails or is cancelled; the guard drop is
+        // the only cleanup, so a half-downloaded archive must go with it.
+        let data = tempfile::tempdir().unwrap();
+        let kept;
+        {
+            let dl = restore_scratch_in(data.path(), &proton()).unwrap();
+            std::fs::write(dl.path().join("half.pmbackup"), b"partial archive").unwrap();
+            kept = dl.path().to_path_buf();
+            assert!(kept.join("half.pmbackup").exists());
+        }
+        assert!(!kept.exists(), "the scratch folder outlived its run");
+        assert_eq!(
+            std::fs::read_dir(data.path().join(backup::strip::WORK_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_crashed_cloud_restore_is_swept_at_boot() {
+        // A kill mid-download skips the drop; the boot sweep of the same folder takes the archive.
+        let data = tempfile::tempdir().unwrap();
+        let dl = restore_scratch_in(data.path(), &drive()).unwrap();
+        std::fs::write(dl.path().join("a.pmbackup"), b"archive").unwrap();
+        let path = dl.path().to_path_buf();
+        std::mem::forget(dl); // the crash: nothing ran the guard
+        assert_eq!(backup::strip::sweep_work_dir(data.path()), 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_scratch_folder_that_cannot_be_made_is_an_error_not_a_fallback_to_temp() {
+        // The data dir's copies folder can't be created (a file sits where it must go): the restore
+        // stops with an error rather than quietly staging the archive somewhere else.
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(data.path().join(backup::strip::WORK_DIR), b"not a folder").unwrap();
+        assert!(restore_scratch_in(data.path(), &proton()).is_err());
+    }
+
+    #[test]
+    fn no_restore_or_import_path_stages_an_archive_in_the_os_temp_dir() {
+        // Source scan over the commands that move whole archives or stores (restore, backup, export,
+        // vault join): none may reach for the OS temp dir. `tempdir_in` / `tempfile_in` with an
+        // explicit folder are fine. New small, transient temps go elsewhere in the tree on purpose.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for rel in [
+            "commands/backups.rs",
+            "commands/export.rs",
+            "commands/vaults.rs",
+            "backup/restore.rs",
+            "backup/pack.rs",
+            "backup/destination.rs",
+            "backup/strip.rs",
+        ] {
+            let src = std::fs::read_to_string(root.join(rel)).unwrap();
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            let code: String = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for banned in [
+                "temp_dir()",
+                ".tempdir()",
+                ".tempfile()",
+                "tempfile::tempdir",
+            ] {
+                assert!(
+                    !code.contains(banned),
+                    "{rel} stages in the OS temp dir ({banned})"
+                );
+            }
+        }
+    }
 
     /// The predicate standing between a restore and an unbacked-up `delete_vault_artifacts`, and the
     /// two ways it can be wrong. Reading `documents` alone missed everything a user can build before
