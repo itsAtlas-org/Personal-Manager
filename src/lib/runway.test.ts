@@ -121,6 +121,7 @@ function place(
     milestones?: Milestone[];
     stacks?: TaskStack[];
     archived?: string[];
+    hideDoneBefore?: Date | null;
   } = {},
 ): { model: RunwayModel; columns: RunwayColumn[] } {
   const today = opts.today ?? WED;
@@ -132,6 +133,7 @@ function place(
     columns,
     today,
     archived: new Set(opts.archived ?? []),
+    hideDoneBefore: opts.hideDoneBefore,
   });
   return { model, columns };
 }
@@ -562,6 +564,164 @@ describe("placeCards", () => {
       "today/foreground": "1 m1! m2",
       "past/foreground": "m3 m4",
       "later/foreground": "m7",
+    });
+  });
+
+  describe("hideDoneBefore (the Agenda's Hide done)", () => {
+    // The Agenda was opened at 09:30 on Wednesday; the tasks below finished before or after it.
+    const OPENED = new Date(2026, 10, 4, 9, 30);
+    const before = "2026-11-04T08:00:00";
+    const after = "2026-11-04T09:45:00";
+
+    it("leaves a done task out of Today and later when it finished before the cutoff, never an open one", () => {
+      const tasks = [
+        task({ id: 1, do_start: "2026-11-04" }),
+        task({ id: 2, do_start: "2026-11-04", status: "done", completed_at: before }),
+        task({
+          id: 3,
+          do_start: "2026-11-05",
+          status: "done",
+          completed_at: "2026-11-03T10:00:00",
+        }),
+        task({ id: 4, do_start: "2026-11-02" }),
+        task({ id: 5, do_start: "2026-11-04", status: "doing" }),
+        // Finished before the cutoff with no timestamp at all: counts as finished before it.
+        task({ id: 6, do_start: "2026-11-04", status: "done", completed_at: null }),
+      ];
+      const { model } = place(tasks, { hideDoneBefore: OPENED });
+      // The open and doing ones, and the open one rolled in from Monday, all stay.
+      expect(where(model)).toEqual({ "today/foreground": "1 4↻2 5" });
+      expect(model.hiddenDone).toBe(3);
+    });
+
+    it("keeps a task finished at or after the cutoff, struck through in place", () => {
+      const tasks = [
+        task({ id: 1, do_start: "2026-11-04", status: "done", completed_at: after }),
+        task({ id: 2, do_start: "2026-11-04", status: "done", completed_at: OPENED.toISOString() }),
+        task({ id: 3, do_start: "2026-11-05", status: "done", completed_at: after }),
+      ];
+      const { model } = place(tasks, { hideDoneBefore: OPENED });
+      expect(where(model)).toEqual({ "today/foreground": "1 2", "tomorrow/foreground": "3" });
+      expect(model.hiddenDone).toBe(0);
+    });
+
+    it("leaves met milestones out on any day, never an unmet or late one", () => {
+      const { model } = place([], {
+        hideDoneBefore: OPENED,
+        milestones: [
+          milestone({ id: 1, due_date: "2026-11-04", state: "met" }),
+          milestone({ id: 2, due_date: "2026-11-10", status: "done" }),
+          milestone({ id: 3, due_date: "2026-11-05" }),
+          milestone({ id: 4, due_date: "2026-11-01" }),
+        ],
+      });
+      expect(where(model)).toEqual({
+        "today/foreground": "m4!",
+        "tomorrow/foreground": "m3",
+      });
+      expect(model.hiddenDone).toBe(2);
+    });
+
+    it("never touches Before today", () => {
+      const { model } = place(
+        [
+          task({
+            id: 1,
+            do_start: "2026-11-02",
+            status: "done",
+            completed_at: "2026-11-02T12:00:00",
+          }),
+        ],
+        {
+          hideDoneBefore: OPENED,
+          milestones: [milestone({ id: 1, due_date: "2026-11-02", state: "met" })],
+        },
+      );
+      expect(where(model)).toEqual({ "past/foreground": "1 m1" });
+      expect(model.hiddenDone).toBe(0);
+    });
+
+    it("still counts what it hides in the progress, and leaves next up alone", () => {
+      const tasks = [
+        task({ id: 1, do_start: "2026-11-04", status: "done", completed_at: before }),
+        task({ id: 2, do_start: "2026-11-04", effective_deadline: "2026-11-06", title: "Send it" }),
+      ];
+      const shown = place(tasks);
+      const hidden = place(tasks, { hideDoneBefore: OPENED });
+      expect(hidden.model.progress).toEqual(shown.model.progress);
+      expect(hidden.model.progress).toEqual({ done: 1, total: 2, doing: 0 });
+      expect(hidden.model.nextUp).toEqual(shown.model.nextUp);
+      // A hidden task still has its column, for a drag or a move that starts elsewhere.
+      expect(hidden.model.columnOf.get(1)).toBe("today");
+    });
+
+    it("an opened stack's chain still lists a done member the column left out", () => {
+      const s = stack(7);
+      const { model } = place(
+        [
+          task({
+            id: 1,
+            do_start: "2026-11-04",
+            stack_id: 7,
+            status: "done",
+            completed_at: before,
+          }),
+          task({ id: 2, do_start: "2026-11-04", stack_id: 7 }),
+          task({ id: 3, do_start: "2026-11-05", stack_id: 7 }),
+        ],
+        { stacks: [s], hideDoneBefore: OPENED },
+      );
+      // Hiding the done member leaves one of the stack in Today. It is still the stack's card
+      // ("2 left", the chain to open), because the stack has not changed, only what is drawn of it.
+      const [today] = model.lanes.today.foreground;
+      expect(today.kind === "stack" && today.tasks.map((t) => t.id)).toEqual([2]);
+      expect(today.kind === "stack" && today.chain.map((m) => m.card.task.id)).toEqual([1, 2, 3]);
+      expect(today.kind === "stack" && today.left).toBe(2);
+      // Its stack-mate alone in Tomorrow is a plain card, as it is with nothing hidden.
+      expect(model.lanes.tomorrow.foreground.map((c) => c.kind)).toEqual(["task"]);
+      expect(model.hiddenDone).toBe(1);
+    });
+
+    it("a stack with no member hidden from a column stays a plain card for its one task", () => {
+      const { model } = place(
+        [
+          task({ id: 1, do_start: "2026-11-04", stack_id: 7 }),
+          task({ id: 2, do_start: "2026-11-05", stack_id: 7 }),
+        ],
+        { stacks: [stack(7)], hideDoneBefore: OPENED },
+      );
+      expect(model.lanes.today.foreground.map((c) => c.kind)).toEqual(["task"]);
+    });
+
+    it("with two open tasks of a stack in a column, the stack card's chain keeps the done one", () => {
+      const s = stack(7);
+      const { model } = place(
+        [
+          task({
+            id: 1,
+            do_start: "2026-11-04",
+            stack_id: 7,
+            status: "done",
+            completed_at: before,
+          }),
+          task({ id: 2, do_start: "2026-11-04", stack_id: 7 }),
+          task({ id: 3, do_start: "2026-11-04", stack_id: 7 }),
+        ],
+        { stacks: [s], hideDoneBefore: OPENED },
+      );
+      const [card] = model.lanes.today.foreground;
+      expect(card.kind === "stack" && card.tasks.map((t) => t.id)).toEqual([2, 3]);
+      expect(card.kind === "stack" && card.chain.map((m) => m.card.task.id)).toEqual([1, 2, 3]);
+      expect(card.kind === "stack" && card.left).toBe(2);
+    });
+
+    it("is off with no cutoff", () => {
+      const tasks = [task({ id: 1, do_start: "2026-11-04", status: "done", completed_at: before })];
+      for (const hideDoneBefore of [undefined, null]) {
+        const { model } = place(tasks, { hideDoneBefore });
+        expect(where(model)).toEqual({ "today/foreground": "1" });
+        expect(model.hiddenDone).toBe(0);
+      }
     });
   });
 

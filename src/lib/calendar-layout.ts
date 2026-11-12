@@ -23,6 +23,16 @@ export function isMilestoneEvent(ev: CalendarEvent): boolean {
   return ev.calendar_id === MILESTONE_CALENDAR_ID;
 }
 
+/** The id of the overlay event a milestone is drawn as: `milestone:<milestone id>`. */
+export function milestoneOverlayId(milestoneId: number): string {
+  return `milestone:${milestoneId}`;
+}
+
+/** What a MET milestone's overlay summary starts with. The overlay is a synthetic event with no
+ *  field to say "met", so its summary says it, and `isEventPast` reads it back: a met milestone
+ *  recedes with the past, an unmet one never does, however late. */
+export const MILESTONE_MET_MARK = "✓ ";
+
 /** The pseudo-calendar carrying the pinboard overlay: dated entries from freeform (not-yet-linked)
  *  timeline widgets. Toggled like a calendar via the same `hidden` set. */
 export const PINBOARD_CALENDAR_ID = "pm:pinboard";
@@ -383,8 +393,14 @@ export function timedSegments(ev: CalendarEvent, days: readonly Date[]): TimedSe
 /** Whether an event has fully passed as of `now` (device-local) — drives the greyed "past event"
  *  styling. A timed event is past once its end (or its start, if it has no end) is before now, however
  *  many days it runs; an all-day event is past once its last day is before today. An event happening
- *  right now, or later today, is never past. */
+ *  right now, or later today, is never past.
+ *
+ *  Late work is never past, though it sits on a day that is: a task overlay is always open work (the
+ *  overlay skips done tasks), and an unmet milestone's is late. Greying them drew work still owed
+ *  as if it were finished, so they keep their full colour and stand out. */
 export function isEventPast(ev: CalendarEvent, now: Date): boolean {
+  if (isTaskEvent(ev)) return false;
+  if (isMilestoneEvent(ev) && !ev.summary.startsWith(MILESTONE_MET_MARK)) return false;
   if (ev.all_day) {
     const span = eventDaySpan(ev);
     return !!span && span.endDay.getTime() < startOfDay(now).getTime();
