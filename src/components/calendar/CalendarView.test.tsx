@@ -32,7 +32,7 @@ import { addDays, dayKey, startOfDay, startOfWeek } from "../../lib/calendar-lay
 import { A11_NOTE } from "../../lib/calendarEdit/editReasons";
 import { COPY_CALL_OFF_NOTE } from "../../lib/calendarEdit/eventDraft";
 import { isoToDisplay } from "../../lib/dateField";
-import { formatDateLocal, pad2 } from "../../lib/format";
+import { formatDateLocal, formatDateOnly, pad2 } from "../../lib/format";
 import { BOARD_VERSION, PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
 
 const ipc = vi.hoisted(() => ({
@@ -2593,5 +2593,165 @@ describe("CalendarView: the filters", () => {
         expect(status()).toContain("Saved. Timed events are hidden while All-day is on."),
       );
     });
+  });
+});
+
+// Event | Task in the quick box (Shift+C opens the very box a click or drag on the grid does): a task
+// made there is a PM task on the clicked day, shown as the tasks overlay's chip; More options opens
+// the one task editor; the box comes back on Task after a tab switch.
+describe("CalendarView: Event | Task in quick create", () => {
+  const made = (title: string): Task => ({
+    id: 9,
+    title,
+    why: null,
+    project_name: null,
+    project_archived: false,
+    milestone_id: null,
+    event_uid: null,
+    do_start: today,
+    do_end: null,
+    deadline: null,
+    deadline_kind: "hard",
+    deadline_from: "date",
+    effective_deadline: null,
+    deadline_missing: false,
+    milestone_label: null,
+    event_title: null,
+    status: "todo",
+    completed_at: null,
+    lane: "foreground",
+    stack_id: null,
+    parked: false,
+    ordinal: 0,
+    source: "user",
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+  });
+  // The box's name follows its kind, so these find it on either (they shadow the file's, which are
+  // the event's).
+  const quick = () => screen.getByRole("dialog", { name: /^New (event|task)$/ });
+  const title = () => within(quick()).getByLabelText<HTMLInputElement>("Title");
+  const taskSeg = () => within(quick()).getByRole("button", { name: "Task" });
+  const said = () => document.querySelector('[role="status"]')?.textContent ?? "";
+
+  it("Shift+C's box has the switch, on Event", async () => {
+    await mount();
+    press("C", true);
+    const group = within(quick()).getByRole("group", { name: "Create" });
+    expect(within(group).getByRole("button", { name: "Event" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
+  it("a task made from the box lands on its day, leaves no event ghost, and shows as a chip", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy();
+    // The ghost is the task's chip on the Tasks calendar.
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    ipc.addTask.mockImplementation(() => {
+      tasks = [made("Pay rent")];
+      return Promise.resolve(9);
+    });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(ipc.addTask).toHaveBeenCalledTimes(1);
+    expect(ipc.addTask.mock.calls[0][0]).toMatchObject({
+      title: "Pay rent",
+      doStart: today,
+      doEnd: null,
+      deadline: null,
+      lane: "foreground",
+    });
+    expect(ipc.createCalendarEvent).not.toHaveBeenCalled();
+    // No ghost waiting for an event row: the task's own chip is what's drawn, read again at once.
+    expect(ghost()).toBeNull();
+    expect(await screen.findByRole("button", { name: /Pay rent/ })).toBeTruthy();
+    expect(said()).toBe(`Task added: Pay rent, ${formatDateOnly(today)}.`);
+    expect(document.activeElement).toBe(newEvent());
+  });
+
+  it("a task planned on a day that has passed is announced as showing on today", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    const day = within(quick()).getByLabelText<HTMLInputElement>("Day");
+    // The field commits on blur, so it holds focus while typed into.
+    act(() => day.focus());
+    fireEvent.change(day, { target: { value: isoToDisplay("2020-03-04") } });
+    act(() => title().focus());
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Task added: Pay rent"));
+    expect(ipc.addTask.mock.calls[0][0]).toMatchObject({ doStart: "2020-03-04" });
+    expect(said()).toBe(
+      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. It shows on today.`,
+    );
+  });
+
+  it("says when Tasks is hidden in the list that the new one won't show", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    expect(
+      within(quick()).getByText(
+        "Tasks are hidden in your calendar list, so the new task won't show until you show Tasks again.",
+      ),
+    ).toBeTruthy();
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Tasks are hidden in your calendar list."));
+  });
+
+  it("More options on Task opens the task editor on the title and day, and Cancel returns to + New event", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    fireEvent.click(within(quick()).getByRole("button", { name: "More options" }));
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Pay rent");
+    expect(within(editor).getByLabelText<HTMLInputElement>("Start doing it on").value).toBe(
+      isoToDisplay(today),
+    );
+    // One surface: the box is gone, and nothing was saved.
+    expect(screen.getAllByRole("dialog")).toEqual([editor]);
+    expect(ghost()).toBeNull();
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(newEvent());
+    // The Runway's own + Task isn't a quick one: closing it leaves focus alone (no `fromQuick`).
+    expect(ipc.addTask).not.toHaveBeenCalled();
+  });
+
+  it("a titled task draft that went with the tab comes back on Task", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    first.unmount();
+    await act(async () => {});
+    await mount(first.View);
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy());
+    expect(title().value).toBe("Pay rent");
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    // A new box starts on Event again.
+    fireEvent.click(within(quick()).getByRole("button", { name: "Discard" }));
+    press("C", true);
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+  });
+
+  it("a task chip's click still opens Edit task", async () => {
+    tasks = [made("Draft the deck")];
+    await mount();
+    fireEvent.click(await screen.findByRole("button", { name: /Draft the deck/ }));
+    const editor = await screen.findByRole("dialog", { name: "Edit task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Draft the deck");
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Not from the quick box: focus isn't sent to + New event.
+    expect(document.activeElement).not.toBe(newEvent());
   });
 });

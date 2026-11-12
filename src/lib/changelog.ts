@@ -24,6 +24,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.180.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "Click or drag on an empty spot in Month, Week or Day, or press Shift+C, and the little box that opens now has an Event | Task switch under the title. It always opens on Event, like Google Calendar's. Press Task and the same box makes a PM task: your title comes with you, and the day you clicked is the day you plan to do it. Switch back to Event and nothing is lost.",
+      "Tasks have a day, not a time, so a time you clicked in Week is dropped and the task lands on that day. Drag across several days in Month and the task is planned for the whole stretch. The new task shows on the calendar as a chip on its day, and on the Runway. If Tasks is hidden in your calendar list, or the day has already passed, the box tells you before you save where it will show up.",
+      "More options on a task opens the full task editor with the title and day filled in, for a project or a deadline. If you leave the Calendar tab with a task half-typed, it's waiting on Task when you come back. Tasks stay in PM and never go to Google, and you can add them from the pop-out Calendar too.",
+    ],
+  },
+  {
     version: "3.179.0-alpha",
     date: "2026-11-12",
     highlights: [

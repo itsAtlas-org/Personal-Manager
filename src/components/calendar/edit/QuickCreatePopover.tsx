@@ -38,6 +38,15 @@
 // off (Google adds Meet with the first guest, `meetDefault`); another calendar without Meet turns it
 // off and says so. A click on it hands focus back to the title, so Enter then saves as there; a key
 // press leaves focus on it. More options carries it on, and whether it was pressed.
+//
+// It can make a task instead (Event | Task, as Google's quick box has): the same draft read as a PM
+// task. The box opens on Event every time and never remembers the choice. A task has a day and no
+// time, so Task shows the one Day field (the clicked day, or the stretch dragged in Month, is its
+// PLAN day) and hides everything that is the event's: times, All day, Repeat, the calendar and Meet.
+// Each kind gates its own Save, so a Repeat chosen first or a missing device zone can't block a task.
+// The task save is a local insert, so it has none of the event's retry token and held states; the
+// switch is locked while an event save is held or unproven, so an event PM may have made can never
+// also become a task. More options opens the task editor on the title and days, sending nothing.
 
 import {
   useCallback,
@@ -51,8 +60,8 @@ import {
   type RefObject,
 } from "react";
 import { flushSync } from "react-dom";
-import type { CalendarOverview, TimeDraft, WriteOutcome } from "../../../lib/types";
-import type { DraftState } from "../../../lib/calendar-layout";
+import type { CalendarOverview, TaskInput, TimeDraft, WriteOutcome } from "../../../lib/types";
+import { TASK_CALENDAR_ID, dayKey, type DraftState } from "../../../lib/calendar-layout";
 import {
   NEW_EVENT_BASE,
   checkDraft,
@@ -87,10 +96,19 @@ import {
   targetById,
   type CreateTargets,
 } from "../../../lib/calendarEdit/createTargets";
+import {
+  quickTaskDefaults,
+  quickTaskInput,
+  quickTaskNotes,
+  taskDaysOf,
+  taskGhostFields,
+} from "../../../lib/calendarEdit/quickTask";
 import { formatDateOnly } from "../../../lib/format";
+import { addTask } from "../../../lib/ipc";
+import { runMutation } from "../../../lib/runMutation";
 import { useDialogLayer } from "../../../lib/useDialogLayer";
 import { deviceTimeZoneOrNull } from "../../../theme";
-import { Button, Callout, IconButton, Input, Toggle } from "../../ui";
+import { Button, Callout, IconButton, Input, SegmentedControl, Toggle } from "../../ui";
 import { DateField } from "../../DateField";
 import { TimeField } from "../../TimeField";
 import { CalendarPicker } from "./CalendarPicker";
@@ -133,16 +151,24 @@ interface Props {
   onDraft: (draft: EditorFields, calendarId: string, state: DraftState) => void;
   /** More options: carry on in the full editor. */
   onMore: (handover: CreateHandover) => void;
-  /** Gone: `saved` when the event was created, so its ghost can stay until the calendar shows it. */
-  onClose: (saved: boolean) => void;
+  /** More options on Task: the task editor carries on with the title and plan days; nothing is saved. */
+  onTaskMore: (defaults: Partial<TaskInput>) => void;
+  /** Gone: `saved` when the event was created, so its ghost can stay until the calendar shows it; or
+   *  a task (`kind` "task"), which has no ghost to keep: the calendar reads its tasks again. */
+  onClose: (saved: boolean, kind?: CreateKind) => void;
   /** Gone with the Calendar tab (never closed from inside), titled, with nothing sent: the draft, to
    *  open the box on again. Called once the box has really gone, and never for a draft that a notice
    *  or the full editor speaks for. */
   onLeave?: (left: LeftDraft) => void;
 }
 
+/** What the box is making: an event (every box opens on this) or a task. */
+export type CreateKind = "event" | "task";
+
 /** A titled draft whose box went with the Calendar tab, nothing sent: what the box opens on again. */
 export interface LeftDraft {
+  /** What it was making; absent is an event. */
+  kind?: CreateKind;
   /** The fields the box started with, for All day's switch back. */
   seed: EditorFields;
   draft: EditorFields;
@@ -199,6 +225,7 @@ export function QuickCreatePopover({
   resume,
   onDraft,
   onMore,
+  onTaskMore,
   onClose,
   onLeave,
 }: Props) {
@@ -250,6 +277,11 @@ export function QuickCreatePopover({
   // changes.
   const [meetNote, setMeetNote] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ tone: Tone; text: string } | null>(null);
+  // Event or Task. Every new box opens on Event (never remembered, Bobby: "default event all the
+  // time"); only a task draft the tab handed back opens on Task. The ref is for what the box says as
+  // it goes, which can't read state.
+  const [kind, setKindState] = useState<CreateKind>(resume?.kind ?? "event");
+  const kindRef = useRef<CreateKind>(resume?.kind ?? "event");
   // The one guard every way to save passes, set before the request goes.
   const savingRef = useRef(false);
   const [saving, setSaving] = useState(false);
@@ -301,6 +333,13 @@ export function QuickCreatePopover({
     unprovenRef.current = next;
     setUnprovenState(next);
   };
+  /** The switch. An event's error isn't the task's, so the banner goes with the change. */
+  function pickKind(next: CreateKind) {
+    if (next === kindRef.current) return;
+    kindRef.current = next;
+    setKindState(next);
+    setBanner(null);
+  }
   // Into the box: the title, or while it's locked (a save out, or Check again) Check again, else the
   // box itself, so a click that comes back here never leaves the keyboard outside it.
   const focusBox = useCallback(() => {
@@ -371,16 +410,32 @@ export function QuickCreatePopover({
 
   // The ghost follows the draft and the calendar, and says how far the event has got: once anything
   // was sent, PM may have made it.
+  // A task is drawn as the tasks overlay draws one: a chip on its plan day, in the Tasks colour.
   const ghostState: DraftState = saving ? "saving" : held || unproven ? "unsure" : "unsaved";
   useEffect(() => {
-    onDraft(draft, calendarId, ghostState);
-  }, [draft, calendarId, ghostState, onDraft]);
+    if (kind === "task") onDraft(taskGhostFields(draft), TASK_CALENDAR_ID, ghostState);
+    else onDraft(draft, calendarId, ghostState);
+  }, [draft, calendarId, ghostState, kind, onDraft]);
 
   // Going (closed, or with the Calendar tab) while PM may already have made the event leaves a
   // notice with Check again, unless the full editor took it over. A save still out says how it
   // ended itself, once it does. One whose token ended unproven leaves its words (look for it before
   // creating it again), whichever way the box went: ✕, a click outside, Escape or the tab. A titled
   // draft that went with the tab, nothing sent, is handed back to open on again.
+  /** The draft as it stands, for the tab to hand back. Refs only, so it is the same as the box goes. */
+  const leftDraft = useCallback(
+    (): LeftDraft => ({
+      kind: kindRef.current,
+      seed: seedRef.current,
+      draft: draftRef.current,
+      calendarId: calendarRef.current,
+      timeTouched: timeTouched.current,
+      length: ownLength.current ? lengthRef.current : null,
+      meetTouched: meetTouched.current,
+      badDate: badDateRef.current,
+    }),
+    [],
+  );
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -394,15 +449,7 @@ export function QuickCreatePopover({
       const left: LeftDraft | null =
         closed.current || handedOver.current || savingRef.current || h || u || !d.summary.trim()
           ? null
-          : {
-              seed: seedRef.current,
-              draft: d,
-              calendarId: calendarRef.current,
-              timeTouched: timeTouched.current,
-              length: ownLength.current ? lengthRef.current : null,
-              meetTouched: meetTouched.current,
-              badDate: badDateRef.current,
-            };
+          : leftDraft();
       queueMicrotask(() => {
         if (alive.current || handedOver.current) return;
         if (u) {
@@ -413,7 +460,7 @@ export function QuickCreatePopover({
         if (left) onLeaveRef.current?.(left);
       });
     };
-  }, []);
+  }, [leftDraft]);
 
   /** Commit whatever the focused field holds, so the draft read next is the one on screen. */
   function commitFocused() {
@@ -433,10 +480,11 @@ export function QuickCreatePopover({
   }
 
   /** Closed from inside: focus goes back to "+ New event". */
-  function closeBack(saved: boolean) {
+  function closeBack(saved: boolean, made?: CreateKind) {
     closed.current = true;
     returnFocusTo.current?.focus();
-    onClose(saved);
+    if (made) onClose(saved, made);
+    else onClose(saved);
   }
 
   /** ✕: throw the draft away (a retry token held stays as a notice). Never while saving. */
@@ -564,6 +612,58 @@ export function QuickCreatePopover({
     });
   }
 
+  /** More options on Task: the task editor opens on the title and the plan days, nothing saved. It
+   *  refuses while a date the field couldn't read is held, as Save does: the editor has no way to
+   *  carry that text on, so the date it showed would silently replace what was typed. */
+  function moreTask() {
+    if (savingRef.current) return;
+    commitFocused();
+    if (badDateRef.current !== null) {
+      refocus(document.getElementById(dateId));
+      return;
+    }
+    handedOver.current = true;
+    onTaskMore(quickTaskDefaults(draftRef.current));
+  }
+
+  /** Save on Task: a local insert through the task IPC (the Runway's + Task makes its tasks the
+   *  same way), with none of the event's retry token or held states. Its own small function, entered
+   *  before anything of the event's save (the zone check, Check again) so none of that can stop it. */
+  async function saveTask() {
+    if (savingRef.current) return;
+    commitFocused();
+    if (badDateRef.current !== null) {
+      setBanner(null);
+      refocus(document.getElementById(dateId));
+      return;
+    }
+    const input = quickTaskInput(draftRef.current);
+    if (!input.title) {
+      setBanner({ tone: "error", text: "A task needs a title." });
+      refocus(titleRef.current);
+      return;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    const ok = await runMutation(
+      () => addTask(input),
+      (m) => {
+        if (alive.current) setBanner(m ? { tone: "error", text: m } : null);
+      },
+    );
+    savingRef.current = false;
+    if (!alive.current) {
+      // The box went mid-save (a tab switch, which hands nothing back while a save is out). A task
+      // made needs nothing; one that failed is a titled draft nobody was told was lost, so it goes
+      // back to the tab to reopen on Task (C10c: a titled draft is never lost).
+      if (!ok) onLeaveRef.current?.(leftDraft());
+      return;
+    }
+    setSaving(false);
+    if (ok) closeBack(true, "task");
+    else refocusSave();
+  }
+
   /** Whether the backend has said `fields`' repeat can be saved, for exactly its rule and start (a
    *  date the blur before a save just committed is a new start, not yet asked about). */
   const repeatReady = (fields: EditorFields) =>
@@ -572,6 +672,7 @@ export function QuickCreatePopover({
   async function save() {
     // Refused before anything is blurred: focus stays put.
     if (savingRef.current) return;
+    if (kindRef.current === "task") return saveTask();
     const h = heldRef.current;
     // Without a zone a new draft can't go (that's said under the times); a held one goes as sent.
     if (!h && deviceZone === null) return;
@@ -661,22 +762,29 @@ export function QuickCreatePopover({
   const locked = saving || held !== null;
   const timeOff = deviceZone === null;
   const timeEditable = !locked && !timeOff;
+  const isTask = kind === "task";
+  // The day is editable on Task whenever nothing is saving: it needs no device zone, which a new
+  // event's times do. A held event can't be here (the switch is locked while one is).
+  const dayEditable = isTask ? !locked : timeEditable;
   const check = checkDraft(NEW_EVENT_BASE, draft);
   const t = draft.time;
   const timed = t.kind === "timed" ? t : null;
   // The End list resolves every quarter hour, so it's worked out once per time change.
   const endChoices = useMemo(() => (timed ? endTimeChoices(NEW_EVENT_BASE, timed) : []), [timed]);
   // The one date field's name, on screen and in its refusal.
-  const dateName = timed ? "Date" : "Day";
+  const dateName = timed && !isTask ? "Date" : "Day";
   const repeatHolds = repeat.state.state === "loading" || repeat.state.state === "refused";
   // A date the field couldn't read is said under the times, naming the field.
   const lines = [...new Set(check.problems.map(problemText))];
-  const notes = [
-    ...(timeOff ? [NO_ZONE_CREATE] : []),
-    ...createNotes(overview, hidden, calendarId),
-    // The compact button has no line of its own (critique C2-L4).
-    ...(meetNote !== null ? [meetNote] : []),
-  ];
+  // A task's own notes replace the event's (the zone, the calendar, Meet are none of its business).
+  const notes = isTask
+    ? quickTaskNotes(hidden, taskDaysOf(t)?.doStart ?? null, dayKey(new Date()))
+    : [
+        ...(timeOff ? [NO_ZONE_CREATE] : []),
+        ...createNotes(overview, hidden, calendarId),
+        // The compact button has no line of its own (critique C2-L4).
+        ...(meetNote !== null ? [meetNote] : []),
+      ];
 
   return (
     <div
@@ -684,9 +792,9 @@ export function QuickCreatePopover({
       role="dialog"
       // No `aria-modal`: the calendar behind stays live, and Tab can leave. Over the calendar's write
       // notices (z-[48]), as a modal's scrim is: a notice that never goes would cover Save.
-      aria-label="New event"
+      aria-label={isTask ? "New task" : "New event"}
       tabIndex={-1}
-      data-help="calendar-new-event"
+      data-help={isTask ? "calendar-new-task" : "calendar-new-event"}
       className="fixed z-50 flex w-[22rem] max-w-[calc(100vw-1rem)] flex-col gap-3 rounded-[var(--radius)] border border-border2 bg-panel p-3 shadow-2xl focus:outline-none"
       style={{
         left: pos?.left ?? anchor.left,
@@ -723,13 +831,38 @@ export function QuickCreatePopover({
         </IconButton>
       </div>
 
+      {/* Event | Task. A pointer press hands focus back to the title, so typing and Enter carry on
+          (MeetField's rule, critique C2-M3); a key press leaves it on the segment. Its own help id,
+          so help on the switch explains a task even in Event mode; the dialog's id follows the kind,
+          so help on any other field of a task explains the task. */}
+      <div
+        data-help="calendar-new-task"
+        className="w-fit"
+        onClick={(e) => {
+          if (e.detail > 0) titleRef.current?.focus();
+        }}
+      >
+        <SegmentedControl
+          ariaLabel="Create"
+          value={kind}
+          onChange={pickKind}
+          options={[
+            { value: "event", label: "Event" },
+            { value: "task", label: "Task" },
+          ]}
+          // An event PM may already have made can never also become a task.
+          disabled={held !== null || unproven !== null}
+          busy={saving}
+        />
+      </div>
+
       {banner && (
         <Callout tone={CALLOUT_TONE[banner.tone]} live>
           {banner.text}
         </Callout>
       )}
 
-      <fieldset className="flex flex-col gap-2" disabled={!timeEditable}>
+      <fieldset className="flex flex-col gap-2" disabled={!dayEditable}>
         <legend className="sr-only">When</legend>
         <div className="flex flex-wrap items-center gap-1.5 text-xs text-ink3">
           <DateField
@@ -737,7 +870,7 @@ export function QuickCreatePopover({
             ariaLabel={dateName}
             value={timed ? timed.start_date : t.kind === "all_day" ? t.first_day : ""}
             clearable={false}
-            disabled={!timeEditable}
+            disabled={!dayEditable}
             // A refusal it holds marks it wrong and points it at the line that names it.
             refused={badDate !== null}
             describedBy={badDate !== null ? refusedLineId : undefined}
@@ -753,7 +886,11 @@ export function QuickCreatePopover({
               );
             }}
           />
-          {timed ? (
+          {isTask ? (
+            // A task keeps a stretch dragged in Month as its planned span, and drops a time.
+            t.kind === "all_day" &&
+            t.last_day !== t.first_day && <span>to {formatDateOnly(t.last_day)}</span>
+          ) : timed ? (
             <>
               <TimeField
                 ariaLabel="Start time"
@@ -786,28 +923,32 @@ export function QuickCreatePopover({
             t.last_day !== t.first_day && <span>to {formatDateOnly(t.last_day)}</span>
           )}
         </div>
-        {/* Only as wide as the switch and its words: stretched across the box, a click on empty
-            space beside it switched All day. */}
-        <label className="flex w-fit items-center gap-2 text-xs text-ink3">
-          <Toggle
-            ariaLabel="All day"
-            checked={t.kind === "all_day"}
-            disabled={!timeEditable}
-            onChange={switchKind}
-          />
-          All day
-        </label>
-        <RepeatRow
-          compact
-          value={draft.recurrence}
-          view={repeat.state}
-          time={t}
-          deviceZone={deviceZone}
-          skippedTime={check.problems.some((p) => p.kind === "gap")}
-          disabled={!timeEditable}
-          onChange={(recurrence) => setDraft({ ...draftRef.current, recurrence })}
-          onCustom={() => more(true)}
-        />
+        {!isTask && (
+          <>
+            {/* Only as wide as the switch and its words: stretched across the box, a click on empty
+                space beside it switched All day. */}
+            <label className="flex w-fit items-center gap-2 text-xs text-ink3">
+              <Toggle
+                ariaLabel="All day"
+                checked={t.kind === "all_day"}
+                disabled={!timeEditable}
+                onChange={switchKind}
+              />
+              All day
+            </label>
+            <RepeatRow
+              compact
+              value={draft.recurrence}
+              view={repeat.state}
+              time={t}
+              deviceZone={deviceZone}
+              skippedTime={check.problems.some((p) => p.kind === "gap")}
+              disabled={!timeEditable}
+              onChange={(recurrence) => setDraft({ ...draftRef.current, recurrence })}
+              onCustom={() => more(true)}
+            />
+          </>
+        )}
         {/* A date the field couldn't read, said as it happens and naming the field it points at. */}
         {badDate !== null && (
           <p id={refusedLineId} role="alert" className="text-xs text-st-due">
@@ -816,17 +957,20 @@ export function QuickCreatePopover({
         )}
       </fieldset>
 
-      {check.ambiguous.map((half) => (
-        <p key={half} className="text-xs text-ink4">
-          {ambiguousText(half)}
-        </p>
-      ))}
+      {/* The event's own lines about its times: a task has none to be wrong. */}
+      {!isTask &&
+        check.ambiguous.map((half) => (
+          <p key={half} className="text-xs text-ink4">
+            {ambiguousText(half)}
+          </p>
+        ))}
       {/* What would stop the save, shown as it happens rather than only on Save. */}
-      {lines.map((text) => (
-        <p key={text} className="text-xs text-st-due">
-          {text}
-        </p>
-      ))}
+      {!isTask &&
+        lines.map((text) => (
+          <p key={text} className="text-xs text-st-due">
+            {text}
+          </p>
+        ))}
       {notes.map((n) => (
         <p key={n} className="font-mono text-[0.6875rem] leading-relaxed text-ink4">
           {n}
@@ -834,33 +978,42 @@ export function QuickCreatePopover({
       ))}
 
       <div className="flex flex-wrap items-center gap-2">
-        <CalendarPicker
-          compact
-          targets={targets}
-          value={calendarId}
-          onChange={pickCalendar}
-          privateDraft={false}
-          hidden={hidden}
-          colorOf={colorOf}
-          shapeOf={shapeOf}
-          disabled={locked}
-        />
-        <MeetField
-          compact
-          call={null}
-          value={draft.meet}
-          offered={meetOffered(targetById(targets, calendarId))}
-          disabled={locked}
-          onChange={(meet) => {
-            meetTouched.current = true;
-            setMeetNote(null);
-            setDraft({ ...draftRef.current, meet });
-          }}
-          // A click leaves the keyboard in the title, where Enter saves (critique C2-M3).
-          onPointerPress={() => titleRef.current?.focus()}
-        />
+        {!isTask && (
+          <>
+            <CalendarPicker
+              compact
+              targets={targets}
+              value={calendarId}
+              onChange={pickCalendar}
+              privateDraft={false}
+              hidden={hidden}
+              colorOf={colorOf}
+              shapeOf={shapeOf}
+              disabled={locked}
+            />
+            <MeetField
+              compact
+              call={null}
+              value={draft.meet}
+              offered={meetOffered(targetById(targets, calendarId))}
+              disabled={locked}
+              onChange={(meet) => {
+                meetTouched.current = true;
+                setMeetNote(null);
+                setDraft({ ...draftRef.current, meet });
+              }}
+              // A click leaves the keyboard in the title, where Enter saves (critique C2-M3).
+              onPointerPress={() => titleRef.current?.focus()}
+            />
+          </>
+        )}
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="tertiary" size="sm" onClick={() => more()} disabled={saving}>
+          <Button
+            variant="tertiary"
+            size="sm"
+            onClick={() => (isTask ? moreTask() : more())}
+            disabled={saving}
+          >
             More options
           </Button>
           <Button
@@ -872,7 +1025,8 @@ export function QuickCreatePopover({
             onKeyDown={(e) => {
               if (e.key === "Enter" && e.repeat) e.preventDefault();
             }}
-            disabled={saving || timeOff || repeatHolds}
+            // Each kind gates its own: a Repeat chosen first, or no device zone, are an event's.
+            disabled={isTask ? saving : saving || timeOff || repeatHolds}
           >
             {saving ? (held ? "Checking…" : "Saving…") : held ? "Check again" : "Save"}
           </Button>
