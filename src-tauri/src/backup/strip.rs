@@ -36,8 +36,11 @@
 //! to prove the values are gone. If any step fails both files are deleted and the caller gets an
 //! error: a backup that might hold a secret is never written.
 //!
-//! **Where.** The copies are made in [`WORK_DIR`] under PM's data dir, on the same disk as the
-//! store, never the OS temp dir (tmpfs, which is RAM, on many Linux desktops). A run's folder goes
+//! **Where.** The copies are made in [`WORK_DIR`] under PM's data dir, never the OS temp dir (tmpfs,
+//! which is RAM, on many Linux desktops). That is the store's own disk for a default vault, but not
+//! for a moved or pointed one, whose store is elsewhere: the copies sit beside PM's data folder.
+//! Before the first copy the volume must have twice the store free ([`check_space`]), so a copy
+//! can't fill the disk under the user's own saves. A run's folder goes
 //! when its guard drops, whether it worked or not, and [`sweep_work_dir`] removes at boot what a
 //! crash left (each is an encrypted copy of a store, nothing to keep).
 //!
@@ -89,10 +92,19 @@ pub fn keep_mod_data(state: &AppState) -> Result<bool> {
 
 /// A fresh, empty folder for one backup's or export's copies, under [`WORK_DIR`] in `data_dir`.
 /// Removed with everything in it when the returned guard drops, on success and on failure alike.
+///
+/// Only [`WORK_DIR`] is created, never `data_dir` itself (`create_dir`, not `create_dir_all`): after
+/// a full "remove PM completely" the data folder is gone on purpose and PM, still running on
+/// Linux and macOS, must create nothing (`paths::prepare_data_dir`), so a run then fails here
+/// instead of rebuilding the folder.
 pub fn work_dir(data_dir: &Path, prefix: &str) -> Result<tempfile::TempDir> {
     let parent = data_dir.join(WORK_DIR);
-    let made = std::fs::create_dir_all(&parent)
-        .and_then(|()| tempfile::Builder::new().prefix(prefix).tempdir_in(&parent));
+    let made = match std::fs::create_dir(&parent) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+    .and_then(|()| tempfile::Builder::new().prefix(prefix).tempdir_in(&parent));
     made.map_err(|e| {
         let e = Error::from(e);
         if is_disk_full(&e) {
@@ -146,6 +158,32 @@ pub(crate) fn snapshot_for_leaving(
     dest: &Path,
     keep_content: bool,
 ) -> Result<Stripped> {
+    snapshot_checked(
+        state,
+        expected_vault_id,
+        dest,
+        keep_content,
+        crate::hardware::available_bytes,
+    )
+}
+
+/// [`snapshot_for_leaving`] with the free-space read passed in (`free`: free bytes on the volume
+/// holding a folder, none when unknown), so a test can make the volume full.
+fn snapshot_checked(
+    state: &AppState,
+    expected_vault_id: &str,
+    dest: &Path,
+    keep_content: bool,
+    free: impl Fn(&Path) -> Option<u64>,
+) -> Result<Stripped> {
+    // Before any byte is written, and not under the DB lock held for the copy (reading the volume
+    // is file work): the store's size is read in a lock of its own.
+    let folder = dest.parent().unwrap_or(dest);
+    let size = {
+        let conn = state.conn()?;
+        store_bytes(&conn)?
+    };
+    check_space(free(folder), size, folder)?;
     snapshot_with(
         |work| {
             let conn = state.conn()?;
@@ -238,6 +276,30 @@ fn no_space(folder: &Path) -> Error {
          it works",
         folder.display()
     ))
+}
+
+/// The live store's size in bytes, from its own page count (no file path needed; an open store).
+fn store_bytes(conn: &Connection) -> Result<u64> {
+    // The table-valued pragmas: under SQLCipher `PRAGMA page_size` answers with text.
+    let bytes: i64 = conn.query_row(
+        "SELECT (SELECT page_count FROM pragma_page_count) * (SELECT page_size FROM pragma_page_size)",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(u64::try_from(bytes).unwrap_or(0))
+}
+
+/// Refuse before the first copy when the volume of `folder` has less than twice the store free.
+/// Twice is the peak of either phase: the strip holds the first copy and the rewrite, and a pack
+/// holds the rewrite and the archive packed from it (the first copy is gone by then). Without it a
+/// default vault, whose store is on this same disk, fills it and fails the user's own saves for as
+/// long as the copy lasts. `free` unknown (no mount point reported) is not a refusal: the failure
+/// path still says it ([`is_disk_full`]).
+fn check_space(free: Option<u64>, store_bytes: u64, folder: &Path) -> Result<()> {
+    match free {
+        Some(free) if free < store_bytes.saturating_mul(2) => Err(no_space(folder)),
+        _ => Ok(()),
+    }
 }
 
 /// Remove a copy and any sidecar SQLite may have made beside it.
@@ -393,10 +455,18 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Blanked> {
     // folder install (it has no column for that, and this change takes no migration), so it is
     // treated as one: an unsigned mod is not in the catalogue, so its name, author and repository
     // are unpublished work whichever way it was installed. Found before anything is blanked.
+    // Spend outlives the mod by itself too, so an id in `usage_log` with no `mods` row and no signed
+    // ledger row (nothing the store can prove was published) is treated the same: a mod that spent
+    // and never made a gift has no ledger row to find it by. The cost is that an uninstalled signed
+    // mod's spend with no signed gift loses its id in a copy that leaves (it reads as PM's own).
     let orphan_ids: Vec<String> = conn
         .prepare(
-            "SELECT DISTINCT mod_id FROM mod_ledger \
-             WHERE signed = 0 AND mod_id <> '' AND mod_id NOT IN (SELECT id FROM mods)",
+            "SELECT mod_id FROM mod_ledger \
+             WHERE signed = 0 AND mod_id <> '' AND mod_id NOT IN (SELECT id FROM mods) \
+             UNION \
+             SELECT mod_id FROM usage_log \
+             WHERE mod_id IS NOT NULL AND mod_id <> '' AND mod_id NOT IN (SELECT id FROM mods) \
+               AND mod_id NOT IN (SELECT mod_id FROM mod_ledger WHERE signed = 1)",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -1169,6 +1239,48 @@ mod tests {
     }
 
     #[test]
+    fn a_run_after_the_data_folder_was_removed_makes_nothing() {
+        // After "remove PM completely" the data folder is gone on purpose and PM creates nothing
+        // (paths::prepare_data_dir): a copy's folder must not bring it back.
+        let outer = tempfile::tempdir().unwrap();
+        let gone = outer.path().join("Personal Manager");
+        assert!(work_dir(&gone, "pm-export-").is_err());
+        assert!(!gone.exists(), "the data folder was rebuilt");
+        // Whereas the data folder that is there gets its one subfolder, again and again.
+        let here = outer.path().join("here");
+        std::fs::create_dir(&here).unwrap();
+        drop(work_dir(&here, "pm-backup-").unwrap());
+        drop(work_dir(&here, "pm-backup-").unwrap());
+    }
+
+    #[test]
+    fn a_copy_that_would_not_fit_is_refused_before_a_byte_is_written() {
+        let folder = Path::new("/somewhere/copies-in-progress");
+        // Twice the store (the strip holds the first copy and the rewrite; a pack holds the copy
+        // and the archive), exactly, is enough; a byte less is not; an unknown volume is not a no.
+        assert!(check_space(Some(2_000), 1_000, folder).is_ok());
+        let err = check_space(Some(1_999), 1_000, folder).unwrap_err();
+        assert!(err.to_string().contains("enough free disk space"), "{err}");
+        assert!(check_space(None, 1_000, folder).is_ok());
+        assert!(check_space(Some(0), 0, folder).is_ok());
+        assert!(check_space(Some(u64::MAX - 1), u64::MAX, folder).is_err());
+
+        // And it is wired in front of the first copy: nothing is made when the volume is too full.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let (_d, dest) = snapshot_dir();
+        let vault_id = state.active_vault_id().unwrap();
+        let err = snapshot_checked(&state, &vault_id, &dest, true, |_| Some(1)).unwrap_err();
+        assert!(err.to_string().contains("enough free disk space"), "{err}");
+        assert!(files_in(&dest).is_empty());
+        assert!(!work_path(&dest).exists());
+        // With room it copies.
+        snapshot_checked(&state, &vault_id, &dest, true, |_| Some(u64::MAX)).unwrap();
+        assert!(dest.exists());
+    }
+
+    #[test]
     fn a_folder_mods_name_author_and_repo_leave_its_gifts_and_spend() {
         // A test mod has no FK from its gifts' attribution or its spend, by design (they outlive an
         // uninstall), so deleting its `mods` row leaves its name, author and repository there. The
@@ -1385,6 +1497,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(named, 1);
+    }
+
+    #[test]
+    fn an_uninstalled_mods_spend_alone_loses_its_id_too() {
+        // `usage_log.mod_id` outlives the `mods` row by itself (I-29): a test mod that spent and
+        // never made a gift has no ledger row, so the ledger can't be where its id is found.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let spent_only = format!("dev.{}", fresh_marker("spentonly"));
+        let signed_id = format!("acme.{}", fresh_marker("published"));
+        let installed_id = format!("dev.{}", fresh_marker("installed"));
+        {
+            let conn = state.conn().unwrap();
+            add_mod(&conn, &installed_id, "file", false, "active");
+            conn.execute("INSERT INTO tasks(title) VALUES ('signed gift')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, \
+                                        install_id, task_id) \
+                 VALUES (?1, 'Published', 'second', 'acme', 'acme/r', 1, 'fedcba9876543210', ?2)",
+                params![signed_id, conn.last_insert_rowid()],
+            )
+            .unwrap();
+            for id in [&spent_only, &signed_id, &installed_id] {
+                conn.execute(
+                    "INSERT INTO usage_log(model, kind, mod_id) VALUES ('m', 'background', ?1)",
+                    [id],
+                )
+                .unwrap();
+            }
+        }
+        let (_d, dest) = snapshot_dir();
+        leave(&state, &dest, true).unwrap();
+        let bytes = decrypted_file(&dest, &key);
+        assert!(!contains(&bytes, &spent_only), "the id reached the file");
+        // A signed maker's id and an installed mod's stay; the spend itself stays for all three.
+        assert!(contains(&bytes, &signed_id));
+        assert!(contains(&bytes, &installed_id));
+        let copy = db::open_snapshot(&dest, &key).unwrap();
+        let count = |sql: &str| -> i64 { copy.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT count(*) FROM usage_log"), 3);
+        assert_eq!(
+            count("SELECT count(*) FROM usage_log WHERE mod_id IS NULL"),
+            1
+        );
     }
 
     #[test]

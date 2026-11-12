@@ -645,7 +645,9 @@ of each step on that file, so nothing is left in a page or a free page. A snapsh
 fails is deleted and the backup fails, with an error; no archive that might hold a secret is
 written. The copies are made under `data_dir/copies-in-progress/` (`strip::WORK_DIR`), on disk,
 never the OS temp dir (tmpfs, RAM, on many Linux desktops); a run's folder goes when it ends, and
-the boot sweep and the wipe take what a crash left. A Proton or Drive restore downloads its archive
+the boot sweep and the wipe take what a crash left. A run creates only that one folder, never the
+data folder itself (a wiped PM creates nothing), and refuses before the first copy when the volume
+has less than twice the store free. A Proton or Drive restore downloads its archive
 into a folder of the same place (`restore_scratch_dir`), for the same reason. The copy is opened with the key the live store
 was opened with, read from the open session under the same DB guard as the copy, never re-resolved
 from the keychain. A new place that copies the store out calls the same function;
@@ -673,7 +675,10 @@ test mod keeps its ledger rows and spend, I-29, and the ledger has no column for
 installed, so an unsigned mod is treated as one: it is not in the catalogue, so its name, author
 and repository are unpublished work). A gift of an uninstalled unsigned file mod therefore also
 reads "a test mod" in a copy that leaves, and a restore of that copy can't match it to a
-reinstall. Recording the origin at install would need a migration and would lift this limit.
+reinstall. The same holds for spend alone: a `usage_log.mod_id` with no `mods` row and no signed
+ledger row (a mod that spent and never made a gift) is blanked too, so an uninstalled signed mod's
+spend with no signed gift also reads as PM's own in a copy that leaves. Recording the origin at
+install would need a migration and would lift this limit.
 
 **Why.** A backup is portable and carries the database key, so whatever is in `pm.sqlite` is as
 readable as the passphrase is guessable, and a plain `DELETE` leaves a row's bytes in the page.
