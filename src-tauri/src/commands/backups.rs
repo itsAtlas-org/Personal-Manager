@@ -101,29 +101,33 @@ pub struct SwitchOutcome {
 /// is encrypted with, the open store's own (the archive carries it), so a passphrase vault whose
 /// key this account didn't cache in the keychain still backs up while it is open.
 ///
-/// `packed_here`: the vault whose archive will be packed into the snapshot's own folder (the
-/// scheduled and cloud backups do; the typed backup packs into the user's chosen destination, so it
-/// passes none). Its Markdown and sidecars are measured here, off the runtime, so the free-space
-/// check ahead of the copy counts what the pack will hold on that volume.
+/// `resolved` and `vault_id` are the store the caller read its metadata and Markdown folder from:
+/// the copy is refused if the open store is another's by the time it is taken (another vault, or a
+/// restored copy of this one, which keeps its vault id). `packed_here`: whether the archive will be
+/// packed into the snapshot's own folder (the scheduled and cloud backups do; the typed backup packs
+/// into the user's chosen destination). The Markdown and sidecars of `resolved` are then measured
+/// here, off the runtime, so the free-space check ahead of the copy counts what the pack will hold
+/// on that volume.
 async fn snapshot_stripped(
     app: &AppHandle,
-    expected_vault_id: &str,
+    vault_id: &str,
+    resolved: &vault::ResolvedVault,
     snapshot: &std::path::Path,
-    packed_here: Option<&vault::ResolvedVault>,
+    packed_here: bool,
 ) -> Result<backup::strip::Stripped> {
     let app = app.clone();
     let snapshot = snapshot.to_path_buf();
-    let expected = expected_vault_id.to_owned();
-    let packed_here = packed_here.cloned();
+    let from = backup::strip::Origin::of(vault_id, resolved);
+    let resolved = resolved.clone();
     spawn_blocking_result("snapshot", move || {
         let state = app.state::<AppState>();
         let keep_content = backup::strip::keep_mod_data(&state)?;
-        let beside = packed_here.map_or(0, |r| {
-            backup::pack::beside_db_bytes(&r.vault_root, &r.markdown_dir)
-        });
-        // `expected` is the vault the caller read its metadata and Markdown folder from: the copy
-        // is refused if the open store is another's by now.
-        backup::strip::snapshot_for_leaving(&state, &expected, &snapshot, keep_content, beside)
+        let beside = if packed_here {
+            backup::pack::beside_db_bytes(&resolved.vault_root, &resolved.markdown_dir)
+        } else {
+            0
+        };
+        backup::strip::snapshot_for_leaving(&state, &from, &snapshot, keep_content, beside)
     })
     .await
 }
@@ -184,7 +188,7 @@ pub async fn create_local_backup(
         .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(&app, &meta.vault_id, &snapshot, None)
+        snapshot_stripped(&app, &meta.vault_id, &resolved, &snapshot, false)
             .await
             .map_err(fail)?;
     emit_backup_progress(
@@ -250,7 +254,7 @@ pub async fn create_local_backup(
             let msg = if state.backup_cancel.load(Ordering::SeqCst) {
                 "Backup cancelled.".to_string()
             } else {
-                backup::strip::say_if_disk_full(e).to_string()
+                backup::strip::say_if_disk_full(e, backup::strip::Job::Backup).to_string()
             };
             emit_backup_progress(
                 &app,
@@ -940,7 +944,7 @@ pub(crate) async fn run_backup(
     // and the open store's key it is encrypted with. A snapshot that couldn't be stripped fails
     // the backup.
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(app, &meta.vault_id, &snapshot, Some(&resolved))
+        snapshot_stripped(app, &meta.vault_id, &resolved, &snapshot, true)
             .await
             .map_err(fail)?;
     emit_backup_progress(
@@ -1000,7 +1004,7 @@ pub(crate) async fn run_backup(
         let msg = if state.backup_cancel.load(Ordering::SeqCst) {
             "Backup cancelled.".to_string()
         } else {
-            backup::strip::say_if_disk_full(e).to_string()
+            backup::strip::say_if_disk_full(e, backup::strip::Job::Backup).to_string()
         };
         emit_backup_progress(
             app,
@@ -1410,6 +1414,17 @@ fn restore_scratch_in(
     backup::strip::work_dir(data_dir, &format!("pm-restore-{}-", dest.kind()))
 }
 
+/// What a failed restore step tells the user: a cancel as a cancel, a full disk (the download into
+/// the scratch folder, or the unpacking into the staging one: neither size is checked ahead) as
+/// that, anything else as it came.
+fn restore_failure_message(cancelled: bool, e: Error) -> String {
+    if cancelled {
+        "Restore cancelled.".to_string()
+    } else {
+        backup::strip::say_if_disk_full(e, backup::strip::Job::Restore).to_string()
+    }
+}
+
 /// Unwrap a finished restore step's result: on failure, report a user-initiated cancel as a
 /// cancel (not whatever incidental error the pipeline hit when the flag flipped), emit the
 /// detached `Failed` event, and surface the error. Shared by all three restore commands.
@@ -1420,11 +1435,7 @@ fn restore_scratch_in(
 /// the async side.
 fn unwrap_restore_result<T>(app: &AppHandle, state: &AppState, result: Result<T>) -> Result<T> {
     result.map_err(|e| {
-        let msg = if state.backup_cancel.load(Ordering::SeqCst) {
-            "Restore cancelled.".to_string()
-        } else {
-            e.to_string()
-        };
+        let msg = restore_failure_message(state.backup_cancel.load(Ordering::SeqCst), e);
         emit_backup_progress(
             app,
             BackupEvent::Failed {
@@ -1672,7 +1683,9 @@ pub async fn restore_from_gdrive(
     // is left for a fix that can carry a changelog line rather than folded into a refactor.
     let dl = restore_scratch_dir(&app, &dest)?;
     if let Err(e) = dest.download(&app, &name, dl.path()).await {
-        let msg = e.to_string();
+        // Not through `restore_failure_message`: that would also turn a Cancel into "cancelled",
+        // which is the divergence noted above; the full-disk wording is the only change here.
+        let msg = backup::strip::say_if_disk_full(e, backup::strip::Job::Restore).to_string();
         emit_backup_progress(
             &app,
             BackupEvent::Failed {
@@ -1777,6 +1790,30 @@ mod tests {
         BackupDestination::GoogleDrive {
             token_key: "google_oauth_token_drive::me@x.com".into(),
         }
+    }
+
+    #[test]
+    fn a_restore_that_runs_out_of_disk_says_so_and_a_cancel_still_reads_as_one() {
+        let full = || Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        // The Drive download's write and the unpacking fail as the OS's own error; the Proton CLI's
+        // arrives as its own text.
+        for e in [
+            full(),
+            Error::Other("proton-drive: ENOSPC: no space left on device".into()),
+            Error::Other(
+                "could not place the restored vault: No space left on device (os error 28) \
+                 (rename: Invalid cross-device link (os error 18))"
+                    .into(),
+            ),
+        ] {
+            let said = restore_failure_message(false, e);
+            assert!(said.starts_with("nothing was restored"), "{said}");
+            assert!(said.contains("ran out of space"), "{said}");
+        }
+        // Another failure keeps its own words, and a Cancel wins over whatever the pipeline hit.
+        let other = restore_failure_message(false, Error::Other("wrong passphrase".into()));
+        assert_eq!(other, "wrong passphrase");
+        assert_eq!(restore_failure_message(true, full()), "Restore cancelled.");
     }
 
     #[test]

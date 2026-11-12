@@ -651,10 +651,13 @@ has less than twice the store free, plus, for a scheduled or cloud backup (which
 into that same folder), the vault's Markdown and sidecars (`pack::beside_db_bytes`); a typed
 backup packs into the destination the user chose and an export zips there, so they count the
 store only. The check is an estimate taken once, before the copy: a pack that still hits a full
-disk says so (`strip::say_if_disk_full`) rather than failing with a raw I/O error. A Proton or
-Drive restore downloads its archive into a folder of the same place (`restore_scratch_dir`), for
-the same reason (not out of RAM); that download is NOT space-checked, its size isn't known to the
-command, so a full disk there fails the restore. The copy is opened with the key the live store
+disk says so (`strip::say_if_disk_full`, also for the last zstd frame and the rename, which keep
+the OS error's kind) rather than failing with a raw I/O error. A Proton or Drive restore downloads
+its archive into a folder of the same place (`restore_scratch_dir`), for the same reason (not out
+of RAM); that download is NOT space-checked, its size isn't known to the command, and neither is
+the unpacking nor the export zip's write, so a full disk in any of them fails the run, said as a
+full disk (`Job::Restore`, `Job::Export`; the Proton CLI's own stderr is recognised by the OS's
+wording of it). The copy is opened with the key the live store
 was opened with, read from the open session under the same DB guard as the copy, never re-resolved
 from the keychain. A new place that copies the store out calls the same function;
 `every_site_that_copies_the_store_out_goes_through_the_strip` fails on any other `vacuum_into` in
@@ -670,10 +673,11 @@ the vault's, in use by its other accounts and machines; it switches THIS device'
 their reload), so the page never takes another device's "on" from the shared store's `dev_mode`
 row. The row itself is the vault's and stays as its other devices left it, so **nothing in Rust may
 gate on it until dev mode is per device** (`no_rust_code_reads_the_shared_dev_mode_row_yet` fails
-the moment a reader appears). The copy is refused when the open store isn't the vault the caller
-read its metadata and Markdown folder from (`snapshot_for_leaving`'s `expected_vault_id`: vault
-switching doesn't take the backup run's busy flag), so an archive never pairs one vault's
-metadata with another's database.
+the moment a reader appears). The copy is refused when the open store isn't the store the caller
+read its metadata and Markdown folder from (`snapshot_for_leaving`'s `Origin`: the vault id AND the
+vault folder, because a restore keeps the vault id and its copy sits beside the original as a
+second store of one vault; vault switching doesn't take the backup run's busy flag), so an archive
+never pairs one store's metadata and notes with another's database.
 
 **Held to the limit of what the store records.** What names a mod outside the `mods` cascade is
 blanked for every folder mod AND for every unsigned mod whose row is already gone (an uninstalled
@@ -697,7 +701,11 @@ switch dev mode off for them and disconnect their apps.
 **Co-signers.** A change to the mod tables adds the new table to `strip` (the child-table guard
 test fails on a table that references `mods` and isn't listed) or says why it is safe; a new place
 that names a mod outside the `mods` cascade (mod-made documents' `source_id`, for one) blanks a
-folder mod's name there too. PR C adds the MCP switch's off value to `adopt_mods::switch_mcp_off`
+folder mod's name there too. The strip doesn't touch `documents.source_id` (`mod:<id>:<key>`) or a
+mod-made note's file name (`mod-<id>-<key>.md`) today because nothing writes them yet: the Host
+API change that does decides, in that same change, whether a folder mod's id is rewritten there
+(it is a rebuild key and in the vault's front-matter, so a rewrite must reach both) or held as a
+limit here, and adds the column to `leftover` either way. PR C adds the MCP switch's off value to `adopt_mods::switch_mcp_off`
 and makes `adopt_mods::joiner_accepts_only_its_own_clients` true (clients bound to a device). The
 Mods tab's dev-mode part pauses the unsigned rows and makes the page's switch follow the row at the
 restore's reset, and makes dev mode per device in the vault, so a joiner reads as off

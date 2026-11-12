@@ -98,6 +98,8 @@ pub async fn export_all_data(
     let vault_id = vault::load_meta(&resolved.vault_root)?
         .ok_or_else(|| Error::Other("this vault has no metadata to export".into()))?
         .vault_id;
+    // By its folder too: a restored copy of this vault keeps the vault id.
+    let from = crate::backup::strip::Origin::of(&vault_id, &resolved);
     let dest = dest_path;
     // Snapshot + zip on the blocking pool (F-42): the copy of a multi-GB store would otherwise pin a
     // tokio worker *and* hold the global DB mutex for the whole of it. The snapshot helper takes the
@@ -112,9 +114,13 @@ pub async fn export_all_data(
             // opened with the open store's own key, not the keychain's. The export is the user's own
             // copy of their data, so it keeps the mods' saved data whatever the backup toggle says:
             // that toggle is about what a backup file carries.
-            crate::backup::strip::snapshot_for_leaving(&state, &vault_id, &snapshot, true, 0)?;
+            crate::backup::strip::snapshot_for_leaving(&state, &from, &snapshot, true, 0)?;
         }
-        write_export_zip(&resolved, &snapshot, std::path::Path::new(&dest))
+        // The zip is written to the user's chosen place after the space check (which counts the
+        // store only), so a full disk there is said as one.
+        write_export_zip(&resolved, &snapshot, std::path::Path::new(&dest)).map_err(|e| {
+            crate::backup::strip::say_if_disk_full(e, crate::backup::strip::Job::Export)
+        })
     })
     .await
 }

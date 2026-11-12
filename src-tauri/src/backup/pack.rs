@@ -180,15 +180,27 @@ pub(super) fn pack_as(
 
         let aead_w = zstd_w
             .finish()
-            .map_err(|e| Error::Other(format!("compression failed: {e}")))?;
+            .map_err(|e| finish_failed(e, "compression failed"))?;
         let file = aead_w.finish()?;
         file.sync_all()?;
     }
 
     tmp.persist(dest)
-        .map_err(|e| Error::Other(format!("could not save the backup file: {e}")))?;
+        .map_err(|e| finish_failed(e.error, "could not save the backup file"))?;
     report(BackupPhase::Pack, 1.0);
     Ok(())
+}
+
+/// A failure of the pack's last writes (the final zstd frame, sealed into the last chunk, and the
+/// rename into place), worded as `what` ... unless the disk was full. A full disk stays the I/O
+/// error so `strip::say_if_disk_full` can say it as one: the last chunk is as likely to hit it as
+/// any before it, and a string made of the error would hide its kind.
+fn finish_failed(e: std::io::Error, what: &str) -> Error {
+    if e.kind() == std::io::ErrorKind::StorageFull {
+        Error::Io(e)
+    } else {
+        Error::Other(format!("{what}: {e}"))
+    }
 }
 
 /// The ordered allow-list of archive members. The manifest goes first so a restore can
@@ -372,6 +384,33 @@ fn key_mode_flag(mode: KeyMode) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_disk_at_the_last_write_stays_a_full_disk_for_the_pack_s_caller() {
+        use std::io::{Error as IoError, ErrorKind};
+        let full = finish_failed(IoError::from(ErrorKind::StorageFull), "compression failed");
+        assert!(
+            matches!(&full, Error::Io(e) if e.kind() == ErrorKind::StorageFull),
+            "{full:?}"
+        );
+        // The wording the user sees is the full-disk one, whichever of the two writes hit it.
+        for what in ["compression failed", "could not save the backup file"] {
+            let said = crate::backup::strip::say_if_disk_full(
+                finish_failed(IoError::from(ErrorKind::StorageFull), what),
+                crate::backup::strip::Job::Backup,
+            );
+            assert!(said.to_string().contains("ran out of space"), "{said}");
+        }
+        // Any other failure keeps its own wording.
+        let other = finish_failed(
+            IoError::from(ErrorKind::PermissionDenied),
+            "compression failed",
+        );
+        assert!(
+            matches!(&other, Error::Other(m) if m.starts_with("compression failed: ")),
+            "{other:?}"
+        );
+    }
 
     #[test]
     fn the_manifest_carries_the_mod_list_the_snapshot_was_stripped_to() {

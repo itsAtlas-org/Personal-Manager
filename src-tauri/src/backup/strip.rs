@@ -150,24 +150,24 @@ pub(crate) struct Stripped {
 }
 
 /// Copy the live store into `dest` (a file that doesn't exist yet, in a [`work_dir`]) stripped: the
-/// only way a copy of the store leaves (module doc). `expected_vault_id` is the vault the caller
-/// read its metadata and Markdown folder from: the copy is refused if the open store is another
-/// vault's by the time the copy is taken (a switch, a restore or a join in between), so an archive
-/// never pairs one vault's metadata and notes with another's database. The DB lock is held for the
+/// only way a copy of the store leaves (module doc). `from` is the store the caller read its
+/// metadata and Markdown folder from: the copy is refused if the open store is another's by the
+/// time the copy is taken (a switch, a restore or a join in between), so an archive never pairs one
+/// store's metadata and notes with another's database. The DB lock is held for the
 /// first copy (and the key and vault id read beside it) only; the strip is file work on that copy,
 /// after the lock is released. `packed_beside`: the bytes the archive will hold besides the
 /// database, when it is packed into this same folder (0 when it goes elsewhere, as a typed backup
 /// and an export do). Blocking: call inside `spawn_blocking`.
 pub(crate) fn snapshot_for_leaving(
     state: &AppState,
-    expected_vault_id: &str,
+    from: &Origin,
     dest: &Path,
     keep_content: bool,
     packed_beside: u64,
 ) -> Result<Stripped> {
     snapshot_checked(
         state,
-        expected_vault_id,
+        from,
         dest,
         keep_content,
         packed_beside,
@@ -175,11 +175,29 @@ pub(crate) fn snapshot_for_leaving(
     )
 }
 
+/// The store a copy is expected to be of: what its caller read the vault's metadata and Markdown
+/// folder from. A vault id alone isn't enough: a restore keeps the vault id, and its copy sits
+/// beside the store it came from as a second store of the same vault, so the folder says which.
+#[derive(Debug, Clone)]
+pub(crate) struct Origin {
+    pub vault_id: String,
+    pub vault_root: PathBuf,
+}
+
+impl Origin {
+    pub(crate) fn of(vault_id: &str, resolved: &crate::vault::ResolvedVault) -> Self {
+        Self {
+            vault_id: vault_id.to_owned(),
+            vault_root: resolved.vault_root.clone(),
+        }
+    }
+}
+
 /// [`snapshot_for_leaving`] with the free-space read passed in (`free`: free bytes on the volume
 /// holding a folder, none when unknown), so a test can make the volume full.
 fn snapshot_checked(
     state: &AppState,
-    expected_vault_id: &str,
+    from: &Origin,
     dest: &Path,
     keep_content: bool,
     packed_beside: u64,
@@ -199,7 +217,7 @@ fn snapshot_checked(
             // Under the same guard as the copy, so this is the key the copy is encrypted with and
             // the vault it is a copy of, whatever opens, switches or rekeys later.
             let key = state.session_db_key()?;
-            same_vault(state.active_vault_id().as_deref(), expected_vault_id)?;
+            same_store(open_store(state).as_ref(), from)?;
             crate::vault::migrate::vacuum_into(&conn, work)?;
             Ok(key)
         },
@@ -208,16 +226,25 @@ fn snapshot_checked(
     )
 }
 
-/// Whether the open store is the vault the caller began with (`open`: [`AppState::active_vault_id`]).
+/// The open store's vault id and folder, read from the session (none while no vault is open). Safe
+/// under the DB guard: DB then vault is the order the session is opened in.
+fn open_store(state: &AppState) -> Option<(String, PathBuf)> {
+    let guard = state.vault.lock().ok()?;
+    guard
+        .as_ref()
+        .map(|rt| (rt.cipher.vault_id().to_owned(), rt.vault_root.clone()))
+}
+
+/// Whether the open store is the one the caller began with: the same vault id AND the same folder.
 /// Vault switching doesn't take the backup run's busy flag, so this is the only thing tying the
-/// metadata a backup read to the store it copies.
-fn same_vault(open: Option<&str>, expected: &str) -> Result<()> {
-    if open == Some(expected) {
-        Ok(())
-    } else {
-        Err(Error::Other(
+/// metadata a backup read to the store it copies; the folder is what tells a restored copy of the
+/// vault (same id) from the store it came from.
+fn same_store(open: Option<&(String, PathBuf)>, expected: &Origin) -> Result<()> {
+    match open {
+        Some((id, root)) if *id == expected.vault_id && *root == expected.vault_root => Ok(()),
+        _ => Err(Error::Other(
             "the vault changed while the backup started; nothing was saved".into(),
-        ))
+        )),
     }
 }
 
@@ -268,11 +295,19 @@ fn work_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Whether an error is the disk being full (`SQLITE_FULL` from a copy, or the OS's own).
+/// Whether an error is the disk being full (`SQLITE_FULL` from a copy, or the OS's own). An error
+/// that reached here as text (the Proton CLI's own stderr, which PM can only quote) is recognised by
+/// the OS's two spellings of it.
 fn is_disk_full(e: &Error) -> bool {
     match e {
         Error::Sqlite(e) => e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull),
         Error::Io(e) => e.kind() == std::io::ErrorKind::StorageFull,
+        // The export zip's own writer wraps the OS error (its entry headers and final directory).
+        Error::Zip(zip::result::ZipError::Io(e)) => e.kind() == std::io::ErrorKind::StorageFull,
+        Error::Other(m) => {
+            let m = m.to_ascii_lowercase();
+            m.contains("no space left on device") || m.contains("not enough space on the disk")
+        }
         _ => false,
     }
 }
@@ -287,21 +322,45 @@ fn no_space(folder: &Path) -> Error {
     ))
 }
 
-/// A backup's write failing because the disk filled is said as that, not as the raw I/O error; any
-/// other failure is returned as it came. For the pack, which writes the archive after the copy's
-/// own space check passed (the destination may be another volume, or the disk may have filled with
-/// the user's own saves since).
-pub(crate) fn say_if_disk_full(e: Error) -> Error {
-    if is_disk_full(&e) {
-        Error::Other(
-            "nothing was saved: the disk ran out of space while the backup was being written. Free \
-             some space on the disk holding the backup's destination and PM's data folder, and try \
-             again"
-                .into(),
-        )
-    } else {
-        e
+/// What was being written when the disk filled, for the wording ([`say_if_disk_full`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Job {
+    Backup,
+    /// A restore: the archive downloaded from a cloud destination, and what is unpacked from it.
+    Restore,
+    /// The export zip.
+    Export,
+}
+
+/// A write failing because the disk filled is said as that, not as the raw I/O error; any other
+/// failure is returned as it came. For the pack, which writes the archive after the copy's own
+/// space check passed (the destination may be another volume, or the disk may have filled with the
+/// user's own saves since), and for the restore's download and unpacking and the export zip, whose
+/// sizes aren't checked ahead.
+pub(crate) fn say_if_disk_full(e: Error, job: Job) -> Error {
+    if !is_disk_full(&e) {
+        return e;
     }
+    Error::Other(
+        match job {
+            Job::Backup => {
+                "nothing was saved: the disk ran out of space while the backup was being written. \
+                 Free some space on the disk holding the backup's destination and PM's data \
+                 folder, and try again"
+            }
+            Job::Restore => {
+                "nothing was restored: the disk ran out of space while the backup was being \
+                 downloaded or unpacked. Free some space on the disk holding PM's data folder, and \
+                 try again"
+            }
+            Job::Export => {
+                "the export wasn't finished: the disk ran out of space while the file was being \
+                 written. Free some space on the disk holding the export's destination and PM's \
+                 data folder, and try again"
+            }
+        }
+        .into(),
+    )
 }
 
 /// The live store's size in bytes, from its own page count (no file path needed; an open store).
@@ -986,8 +1045,17 @@ mod tests {
     /// [`snapshot_for_leaving`] for the vault `state` has open, as a caller that read its metadata
     /// from that vault passes it (none open: an id no vault has).
     fn leave(state: &AppState, dest: &Path, keep_content: bool) -> Result<Stripped> {
-        let vault_id = state.active_vault_id().unwrap_or_default();
-        snapshot_for_leaving(state, &vault_id, dest, keep_content, 0)
+        snapshot_for_leaving(state, &origin_of(state), dest, keep_content, 0)
+    }
+
+    /// The store `state` has open, as a caller that read its metadata from it names it (none open:
+    /// one no store is).
+    fn origin_of(state: &AppState) -> Origin {
+        let (vault_id, vault_root) = open_store(state).unwrap_or_default();
+        Origin {
+            vault_id,
+            vault_root,
+        }
     }
 
     fn snapshot_dir() -> (tempfile::TempDir, PathBuf) {
@@ -1309,7 +1377,7 @@ mod tests {
         let key = fresh_key();
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
-        let vault_id = state.active_vault_id().unwrap();
+        let vault_id = origin_of(&state);
         let err = snapshot_checked(&state, &vault_id, &dest, true, 0, |_| Some(1)).unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
         assert!(files_in(&dest).is_empty());
@@ -1335,16 +1403,49 @@ mod tests {
     fn a_write_that_hits_a_full_disk_is_said_as_one_and_nothing_else_is_reworded() {
         // The pack writes the archive after the space check passed; its raw I/O error is worded as
         // a full disk, and any other failure comes back as it was.
-        let full = say_if_disk_full(Error::Io(std::io::Error::from(
+        let full_io = || Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let full = say_if_disk_full(full_io(), Job::Backup);
+        assert!(full.to_string().contains("ran out of space"), "{full}");
+        let other = say_if_disk_full(
+            Error::Other("a vault file has a non-UTF-8 name".into()),
+            Job::Backup,
+        );
+        assert!(other.to_string().contains("non-UTF-8"), "{other}");
+        let denied = say_if_disk_full(
+            Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            Job::Backup,
+        );
+        assert!(!denied.to_string().contains("ran out of space"), "{denied}");
+        // A restore and an export say what they were doing, not "nothing was saved".
+        let restore = say_if_disk_full(full_io(), Job::Restore).to_string();
+        assert!(restore.starts_with("nothing was restored"), "{restore}");
+        let export = say_if_disk_full(full_io(), Job::Export).to_string();
+        assert!(export.starts_with("the export wasn't finished"), "{export}");
+    }
+
+    #[test]
+    fn a_full_disk_that_reached_us_as_text_is_still_one() {
+        // The Proton CLI's own stderr is quoted, not typed: a download into a full disk fails inside
+        // the child, so the OS's wording is all there is. Both of its spellings are the same thing.
+        for text in [
+            "proton-drive failed: ENOSPC: No space left on device, write",
+            "Failed: There is not enough space on the disk. (os error 112)",
+        ] {
+            assert!(is_disk_full(&Error::Other(text.into())), "{text}");
+            let said = say_if_disk_full(Error::Other(text.into()), Job::Restore).to_string();
+            assert!(said.starts_with("nothing was restored"), "{said}");
+        }
+        // The export zip's writer wraps the OS error in its own type.
+        let zip_full = Error::Zip(zip::result::ZipError::Io(std::io::Error::from(
             std::io::ErrorKind::StorageFull,
         )));
-        assert!(full.to_string().contains("ran out of space"), "{full}");
-        let other = say_if_disk_full(Error::Other("a vault file has a non-UTF-8 name".into()));
-        assert!(other.to_string().contains("non-UTF-8"), "{other}");
-        let denied = say_if_disk_full(Error::Io(std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied,
+        assert!(is_disk_full(&zip_full));
+        let zip_other = Error::Zip(zip::result::ZipError::FileNotFound);
+        assert!(!is_disk_full(&zip_other));
+        // Anything else that mentions a disk or space is not.
+        assert!(!is_disk_full(&Error::Other(
+            "the vault has a lot of space".into()
         )));
-        assert!(!denied.to_string().contains("ran out of space"), "{denied}");
     }
 
     #[test]
@@ -1619,21 +1720,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = fresh_key();
         let (state, _) = live_state(dir.path(), &key);
-        let open = state.active_vault_id().expect("the session has a vault");
+        let open = origin_of(&state);
+        assert!(!open.vault_id.is_empty(), "the session has a vault");
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, "some-other-vault", &dest, true, 0).unwrap_err();
+        let other = Origin {
+            vault_id: "some-other-vault".into(),
+            vault_root: open.vault_root.clone(),
+        };
+        let err = snapshot_for_leaving(&state, &other, &dest, true, 0).unwrap_err();
         assert!(
             err.to_string()
                 .contains("the vault changed while the backup started"),
             "{err}"
         );
         assert!(files_in(&dest).is_empty());
-        // The same vault, and the open one by its own id, are copied.
+        // The same vault id in another folder is another store: a restored copy keeps the vault id
+        // and can be the open one by the time the copy is taken (a switch takes no busy flag).
+        let restored = Origin {
+            vault_id: open.vault_id.clone(),
+            vault_root: dir.path().join("restored-copy"),
+        };
+        let err = snapshot_for_leaving(&state, &restored, &dest, true, 0).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the vault changed while the backup started"),
+            "{err}"
+        );
+        assert!(files_in(&dest).is_empty());
+        // The same store, the open one by its own id and folder, is copied.
         snapshot_for_leaving(&state, &open, &dest, true, 0).unwrap();
         // No store open at all is another vault too.
-        assert!(same_vault(None, &open).is_err());
-        assert!(same_vault(Some(&open), &open).is_ok());
-        assert!(same_vault(Some(&open), "").is_err());
+        let live = Some((open.vault_id.clone(), open.vault_root.clone()));
+        assert!(same_store(None, &open).is_err());
+        assert!(same_store(live.as_ref(), &open).is_ok());
+        assert!(same_store(live.as_ref(), &other).is_err());
+        assert!(same_store(live.as_ref(), &restored).is_err());
     }
 
     #[test]
