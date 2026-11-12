@@ -306,7 +306,11 @@ fn is_disk_full(e: &Error) -> bool {
         Error::Zip(zip::result::ZipError::Io(e)) => e.kind() == std::io::ErrorKind::StorageFull,
         Error::Other(m) => {
             let m = m.to_ascii_lowercase();
-            m.contains("no space left on device") || m.contains("not enough space on the disk")
+            m.contains("no space left on device")
+                || m.contains("not enough space on the disk")
+                // SQLite's own text for `SQLITE_FULL`, which the restore's open/prepare steps
+                // stringify into their message (and so lose the typed code).
+                || m.contains("database or disk is full")
         }
         _ => false,
     }
@@ -1430,6 +1434,8 @@ mod tests {
         for text in [
             "proton-drive failed: ENOSPC: No space left on device, write",
             "Failed: There is not enough space on the disk. (os error 112)",
+            // restore.rs stringifies the staged database's open/prepare errors.
+            "the restored database could not be opened: database or disk is full",
         ] {
             assert!(is_disk_full(&Error::Other(text.into())), "{text}");
             let said = say_if_disk_full(Error::Other(text.into()), Job::Restore).to_string();
