@@ -187,4 +187,15 @@ describe("Tooltip", () => {
     settle();
     expect(screen.getByRole("tooltip").style.left).toBe("8px");
   });
+
+  it("puts a className on its wrapping span, for a control that fills its row", () => {
+    render(
+      <Tooltip label="New event" className="w-full">
+        <button type="button">Go</button>
+      </Tooltip>,
+    );
+    const wrap = screen.getByRole("button", { name: "Go" }).parentElement as HTMLElement;
+    expect(wrap.className).toContain("w-full");
+    expect(wrap.className).toContain("inline-flex");
+  });
 });

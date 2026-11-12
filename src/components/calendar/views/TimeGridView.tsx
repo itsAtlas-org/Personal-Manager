@@ -17,11 +17,16 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CalendarEvent } from "../../../lib/types";
-import type { CalendarRange, RangeBounds } from "../../../lib/calendarPrefs";
+import {
+  gutterWidth,
+  localColWidth,
+  zoneColWidth,
+  type CalendarRange,
+  type RangeBounds,
+} from "../../../lib/calendarPrefs";
 import {
   assignColumns,
   dayKey,
-  eventDaySpan,
   draftNote,
   inTimeGridBand,
   isEventPast,
@@ -100,8 +105,6 @@ export interface GridInteraction {
   pendingIds: ReadonlySet<string>;
 }
 
-const LOCAL_COL = 54; // width of the local hour column (px)
-const ZONE_COL = 46; // width of each extra-zone column (px)
 const HOURS = 24;
 const MIN_ROW_H = 20; // never scrunch a row below this (the full-height calendar's floor)
 
@@ -142,7 +145,6 @@ interface CardGeom {
 interface DayColumn {
   day: Date;
   isToday: boolean;
-  count: number;
   cards: CardGeom[];
 }
 
@@ -168,7 +170,9 @@ export function TimeGridView({
   // the body exactly. The grid itself always spans the full 24h; scrolling reaches the rest.
   const windowHours = bounds.endHour - bounds.startHour;
   const scrollHour = bounds.startHour;
-  const gutterPx = LOCAL_COL + zones.length * ZONE_COL;
+  // One rem string for the hour gutter, the header's ZoneGutter and the all-day band, so they can't
+  // drift and all grow with the Text size.
+  const gutter = gutterWidth(zones.length);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [bodyHeight, setBodyHeight] = useState(0);
   // Width the body's vertical scrollbar steals from its day columns. The header row and all-day band
@@ -275,23 +279,11 @@ export function TimeGridView({
           tabStop: first,
         };
       });
-      // Total events touching the day (timed pieces + bands overlapping), for the Power count line.
-      let count = dayPieces.length;
-      for (const ev of bandEvents) {
-        const span = eventDaySpan(ev);
-        if (
-          span &&
-          span.startDay.getTime() <= day.getTime() &&
-          day.getTime() <= span.endDay.getTime()
-        ) {
-          count++;
-        }
-      }
-      return { day, isToday: key === todayKey, count, cards };
+      return { day, isToday: key === todayKey, cards };
     });
     // No rowH dependency: the memo is pure minute-space, so resizing the pane (which only changes
     // rowH) doesn't re-run lane packing — the pixel multiply happens at render.
-  }, [days, events, bandEvents]);
+  }, [days, events]);
 
   // Auto-scroll to the range's window start ONCE per range (after the body is measured), not on
   // every resize — a resize only changes rowH, and re-running this would yank a scrolled-away user
@@ -374,8 +366,7 @@ export function TimeGridView({
         <ZoneGutter
           zones={zones}
           onChange={onZonesChange}
-          zoneCol={ZONE_COL}
-          localCol={LOCAL_COL}
+          at={refDay ?? nowDate}
           allowAdd={allowZones}
           corner={corner}
         />
@@ -400,9 +391,6 @@ export function TimeGridView({
             <div className={cn("font-mono text-sm", c.isToday ? "text-accent-text" : "text-ink2")}>
               {c.day.getDate()}
             </div>
-            {showPower && (
-              <div className="font-mono text-[0.625rem] text-ink4">{c.count} events</div>
-            )}
           </div>
         ))}
       </div>
@@ -411,7 +399,7 @@ export function TimeGridView({
         events={bandEvents}
         days={days}
         colorOf={colorOf}
-        gutterPx={gutterPx}
+        gutterWidth={gutter}
         endGutterPx={scrollbarW}
         showLabel={!minimal}
         now={nowDate}
@@ -436,12 +424,12 @@ export function TimeGridView({
       >
         <div className="flex" style={{ height: `${HOURS * rowH}px` }}>
           {/* Hour gutter — extra zones then the local column (nearest the grid). */}
-          <div className="flex shrink-0" style={{ width: `${gutterPx}px` }}>
+          <div className="flex shrink-0" style={{ width: gutter }}>
             {zoneLabels.map(({ zone, labels }) => (
               <div
                 key={zone}
                 className="relative border-l border-rule"
-                style={{ width: `${ZONE_COL}px` }}
+                style={{ width: zoneColWidth }}
               >
                 {labels.map((lab, h) =>
                   h === 0 ? null : (
@@ -456,7 +444,7 @@ export function TimeGridView({
                 )}
               </div>
             ))}
-            <div className="relative" style={{ width: `${LOCAL_COL}px` }}>
+            <div className="relative" style={{ width: localColWidth }}>
               {Array.from({ length: HOURS }, (_, h) => h).map((h) => (
                 <div
                   key={h}

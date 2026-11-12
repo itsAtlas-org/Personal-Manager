@@ -43,8 +43,9 @@ interface Props {
   /** The visible day columns (local midnights), left → right. */
   days: Date[];
   colorOf: (calendarId: string) => string;
-  /** Left gutter width, matched to the time-grid's hour gutter so bands align with columns. */
-  gutterPx: number;
+  /** Left gutter width as a CSS length (rem), the time grid's own string so bands align with columns
+   *  and grow with the Text size. */
+  gutterWidth: string;
   /** Right gutter matching the scrolling body's vertical-scrollbar width, so the band's columns line
    *  up with the time-grid below it (0 under overlay scrollbars). */
   endGutterPx?: number;
@@ -89,7 +90,7 @@ export function AllDayBand({
   events,
   days,
   colorOf,
-  gutterPx,
+  gutterWidth,
   endGutterPx = 0,
   showLabel,
   now,
@@ -148,7 +149,7 @@ export function AllDayBand({
     <div className="flex border-b border-rule" style={{ paddingRight: endGutterPx }}>
       <div
         className="flex shrink-0 items-start justify-end pr-2 pt-1"
-        style={{ width: `${gutterPx}px` }}
+        style={{ width: gutterWidth }}
       >
         {showLabel && <span className="font-mono text-[0.5625rem] text-ink4">all-day</span>}
       </div>

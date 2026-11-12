@@ -628,8 +628,8 @@ describe("CalendarView: a new event", () => {
     expect(quick()).toBeTruthy();
   });
 
-  // One home per view: the time grid's corner in Week and Day, above the timezone control; the
-  // header's right end where there's no corner.
+  // One home per view: the time grid's corner in Week and Day, across the gutter over the timezone
+  // row; the header's right end where there's no corner.
   it("+ New event sits in Week's grid corner and in Month's header", async () => {
     localStorage.setItem("pm.calendar.view", "week");
     const first = await mount();
@@ -643,6 +643,46 @@ describe("CalendarView: a new event", () => {
     await screen.findByRole("button", { name: "+ New event" });
     expect(screen.getAllByRole("button", { name: "+ New event" })).toHaveLength(1);
     expect(newEvent().closest("header")).not.toBeNull();
+  });
+
+  // The pop-out and the main window each keep their own copy of the zones: one added in the other
+  // window reaches this one through the `storage` event, so this window's next change can't erase it.
+  it("a zone added in the other window appears here, and goes when it is removed there", async () => {
+    localStorage.setItem("pm.calendar.view", "week");
+    await mount();
+    const zoneRow = () =>
+      screen.getByRole("button", { name: /change time zones|Add a time zone|Zone/ });
+    expect(zoneRow().textContent).toContain("+ Zone");
+    localStorage.setItem("pm.calendar.zones", JSON.stringify(["Asia/Kolkata"]));
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.zones" }));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
+    // Another key's change leaves it alone.
+    localStorage.setItem("pm.calendar.zones", JSON.stringify([]));
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.view" }));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.zones" }));
+    });
+    expect(zoneRow().textContent).toContain("+ Zone");
+  });
+
+  // A webview that never delivers `storage` between windows still catches up when the window is
+  // looked at again.
+  it("re-reads the zones when the window regains focus", async () => {
+    localStorage.setItem("pm.calendar.view", "week");
+    await mount();
+    const zoneRow = () =>
+      screen.getByRole("button", { name: /change time zones|Add a time zone|Zone/ });
+    expect(zoneRow().textContent).toContain("+ Zone");
+    localStorage.setItem("pm.calendar.zones", JSON.stringify(["Asia/Kolkata"]));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
   });
 
   it("Shift+C opens quick create, non-modal, under + New event; c the full editor", async () => {
@@ -2447,6 +2487,37 @@ describe("CalendarView: the filters", () => {
       expect(hideButton()?.textContent).toBe("Hide done");
       expect(localStorage.getItem(HIDE)).toBe("false");
       expect(localStorage.getItem(KINDS)).toBe("all");
+    });
+
+    // The pop-out and the main window share the two keys but each keeps its own state: a Reset or a
+    // toggle in the other window reaches an already-open one through `storage`, or when this window
+    // is next focused, so its own next toggle can't write a stale value back.
+    it("follows Hide done and All | All-day changed in the other window", async () => {
+      localStorage.setItem("pm.calendar.view", "month");
+      await open();
+      expect(kindsButton("All").getAttribute("aria-pressed")).toBe("true");
+      localStorage.setItem(KINDS, "all-day");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: KINDS }));
+      });
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      // Another key's change leaves it alone; a focus re-reads it.
+      localStorage.setItem(KINDS, "all");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.view" }));
+      });
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(kindsButton("All").getAttribute("aria-pressed")).toBe("true");
+      pickView("Agenda");
+      expect(hideButton()?.textContent).toBe("Hide done");
+      localStorage.setItem(HIDE, "true");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: HIDE }));
+      });
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
     });
 
     it("the Terminal look says it on its strip and leaves the same cards out", async () => {

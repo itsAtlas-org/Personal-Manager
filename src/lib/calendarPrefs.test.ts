@@ -22,8 +22,14 @@ import {
   readRunwayWindows,
   readSwipeDays,
   resetCalendarFilters,
+  gutterWidth,
+  localColWidth,
+  readZones,
   rosterCount,
   swipeDays,
+  writeZones,
+  ZONES_KEY,
+  zoneColWidth,
   toggleHiddenId,
   writeAgendaHideDone,
   writeAgendaMode,
@@ -298,5 +304,27 @@ describe("the calendar list's two helpers, shared by the sidebar and the pop-out
     // listed) or an overlay changes nothing.
     expect(rosterCount(calendars, new Set(["b", "c", "pm:tasks"]))).toEqual({ shown: 2, total: 3 });
     expect(rosterCount([], new Set())).toEqual({ shown: 0, total: 0 });
+  });
+});
+
+describe("the hour gutter's width", () => {
+  it("is one rem string: the local column plus one column per extra zone", () => {
+    // 60 px + 52 px per extra zone at the default text size.
+    expect(gutterWidth(0)).toBe("3.75rem");
+    expect(gutterWidth(1)).toBe("7rem");
+    expect(gutterWidth(2)).toBe("10.25rem");
+    expect(localColWidth).toBe("3.75rem");
+    expect(zoneColWidth).toBe("3.25rem");
+  });
+});
+
+describe("the extra timezones", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("round-trips through storage, capped, and skips ids the runtime rejects", () => {
+    writeZones(["Asia/Kolkata", "America/New_York", "Europe/Paris"]);
+    expect(readZones()).toEqual(["Asia/Kolkata", "America/New_York"]);
+    localStorage.setItem(ZONES_KEY, JSON.stringify(["Nope/Zone", "Asia/Kolkata", "Asia/Kolkata"]));
+    expect(readZones()).toEqual(["Asia/Kolkata"]);
   });
 });
