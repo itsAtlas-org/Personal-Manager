@@ -15,7 +15,10 @@
 //!   could install again, and unpublished work), with the rows that hang off it. Such a mod's
 //!   name also sits where its `mods` row can't take it along (no FK, by design): its gifts'
 //!   attribution (`mod_ledger`: id, name, author, source repo) is blanked to "a test mod", its
-//!   spend (`usage_log.mod_id`) loses the id, and its overlay leaves the calendar's hidden set.
+//!   spend (`usage_log.mod_id`) loses the id, and its overlay leaves the calendar's hidden set. The
+//!   same goes for an unsigned mod that is already uninstalled (its ledger rows and spend outlive
+//!   its row, and the ledger doesn't record how it was installed, so every unsigned mod with no
+//!   `mods` row is treated as a test mod).
 //! - **Out unless the user keeps it** (`BACKUP_MOD_DATA_KEY`, default on): content-class `mod_kv`,
 //!   the mods' own saved data. Off, a restore brings those mods back empty.
 //! - **Never taken out:** `mod_overlay` and the gift rows (`mod_ledger` and the tasks and
@@ -131,26 +134,44 @@ pub(crate) struct Stripped {
 }
 
 /// Copy the live store into `dest` (a file that doesn't exist yet, in a [`work_dir`]) stripped: the
-/// only way a copy of the store leaves (module doc). The DB lock is held for the first copy (and the
-/// key read beside it) only; the strip is file work on that copy, after the lock is released.
-/// Blocking: call inside `spawn_blocking`.
+/// only way a copy of the store leaves (module doc). `expected_vault_id` is the vault the caller
+/// read its metadata and Markdown folder from: the copy is refused if the open store is another
+/// vault's by the time the copy is taken (a switch, a restore or a join in between), so an archive
+/// never pairs one vault's metadata and notes with another's database. The DB lock is held for the
+/// first copy (and the key and vault id read beside it) only; the strip is file work on that copy,
+/// after the lock is released. Blocking: call inside `spawn_blocking`.
 pub(crate) fn snapshot_for_leaving(
     state: &AppState,
+    expected_vault_id: &str,
     dest: &Path,
     keep_content: bool,
 ) -> Result<Stripped> {
     snapshot_with(
         |work| {
             let conn = state.conn()?;
-            // Under the same guard as the copy, so this is the key the copy is encrypted with,
-            // whatever opens or rekeys later.
+            // Under the same guard as the copy, so this is the key the copy is encrypted with and
+            // the vault it is a copy of, whatever opens, switches or rekeys later.
             let key = state.session_db_key()?;
+            same_vault(state.active_vault_id().as_deref(), expected_vault_id)?;
             crate::vault::migrate::vacuum_into(&conn, work)?;
             Ok(key)
         },
         dest,
         keep_content,
     )
+}
+
+/// Whether the open store is the vault the caller began with (`open`: [`AppState::active_vault_id`]).
+/// Vault switching doesn't take the backup run's busy flag, so this is the only thing tying the
+/// metadata a backup read to the store it copies.
+fn same_vault(open: Option<&str>, expected: &str) -> Result<()> {
+    if open == Some(expected) {
+        Ok(())
+    } else {
+        Err(Error::Other(
+            "the vault changed while the backup started; nothing was saved".into(),
+        ))
+    }
 }
 
 /// [`snapshot_for_leaving`] with the first copy passed in (it writes the copy at the path it is
@@ -237,7 +258,7 @@ fn strip_snapshot(
     keep_content: bool,
 ) -> Result<Vec<BackupMod>> {
     let conn = db::open_snapshot(work, key_hex)?;
-    let folder_ids = strip(&conn, keep_content)?;
+    let blanked = strip(&conn, keep_content)?;
     // Rewrite the whole file from what is live, so no free page the deletes made goes along.
     crate::vault::migrate::vacuum_into(&conn, dest)?;
     close(conn)?;
@@ -254,7 +275,7 @@ fn strip_snapshot(
             "{free} free pages survived the vacuum"
         )));
     }
-    let left = leftover(&out, keep_content, &folder_ids)?;
+    let left = leftover(&out, keep_content, &blanked)?;
     if left != 0 {
         return Err(Error::Other(format!(
             "{left} rows were back after the vacuum"
@@ -275,9 +296,9 @@ fn pragma_i64(conn: &Connection, name: &str) -> Result<i64> {
 }
 
 /// How many rows the strip takes are still in `conn`: D4's tables, folder mods, cache-class (and,
-/// when the content isn't kept, every) `mod_kv` row, and anything still naming one of `folder_ids`
-/// (the folder mods the strip found, whose attribution and spend it blanked).
-fn leftover(conn: &Connection, keep_content: bool, folder_ids: &[String]) -> Result<i64> {
+/// when the content isn't kept, every) `mod_kv` row, and anything still naming one of the mods the
+/// strip blanked (`blanked`: their attribution and spend).
+fn leftover(conn: &Connection, keep_content: bool, blanked: &Blanked) -> Result<i64> {
     let mut sql = format!(
         "SELECT (SELECT count(*) FROM mod_secrets) + (SELECT count(*) FROM mcp_clients) \
          + (SELECT count(*) FROM mod_doc_data) \
@@ -290,7 +311,17 @@ fn leftover(conn: &Connection, keep_content: bool, folder_ids: &[String]) -> Res
         sql.push_str(" + (SELECT count(*) FROM mod_kv)");
     }
     let mut left: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
-    for id in folder_ids {
+    // An unsigned, uninstalled mod's rows are all its ledger rows with no signature to keep; a
+    // signed one of the same id (a later signed install) is not the strip's.
+    for id in &blanked.orphans {
+        left += conn.query_row(
+            "SELECT (SELECT count(*) FROM mod_ledger WHERE mod_id = ?1 AND signed = 0) \
+                  + (SELECT count(*) FROM usage_log WHERE mod_id = ?1)",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )?;
+    }
+    for id in &blanked.folder {
         left += conn.query_row(
             "SELECT (SELECT count(*) FROM mod_ledger WHERE mod_id = ?1) \
                   + (SELECT count(*) FROM usage_log WHERE mod_id = ?1)",
@@ -330,8 +361,8 @@ fn calendar_names(conn: &Connection, id: &str) -> Result<bool> {
 /// The strip itself, on an open connection to a copy (not yet rewritten). Every step is checked,
 /// because a step that quietly did nothing (a pragma a build ignores, foreign keys off, a delete
 /// that matched nothing it should have) is exactly how a secret would stay in the file. Returns the
-/// ids of the folder mods it took out, for the check of the rewritten file.
-fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<String>> {
+/// ids of the mods whose names it blanked, for the check of the rewritten file.
+fn strip(conn: &Connection, keep_content: bool) -> Result<Blanked> {
     // Freed bytes are overwritten with zeros, not just unlinked.
     conn.execute_batch("PRAGMA secure_delete = ON")?;
     if pragma_i64(conn, "secure_delete")? != 1 {
@@ -357,7 +388,27 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<String>> {
         .prepare(&folder)?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    // An unsigned mod that is no longer installed leaves its name behind in the same two places
+    // (uninstall keeps `mod_ledger` and `usage_log.mod_id`, I-29). The ledger can't say it was a
+    // folder install (it has no column for that, and this change takes no migration), so it is
+    // treated as one: an unsigned mod is not in the catalogue, so its name, author and repository
+    // are unpublished work whichever way it was installed. Found before anything is blanked.
+    let orphan_ids: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT mod_id FROM mod_ledger \
+             WHERE signed = 0 AND mod_id <> '' AND mod_id NOT IN (SELECT id FROM mods)",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let tx = conn.unchecked_transaction()?;
+    for id in &orphan_ids {
+        tx.execute(
+            "UPDATE mod_ledger SET mod_id = '', mod_name = ?2, author = '', source_repo = '' \
+             WHERE mod_id = ?1 AND signed = 0",
+            rusqlite::params![id, STRIPPED_MOD_NAME],
+        )?;
+        tx.execute("UPDATE usage_log SET mod_id = NULL WHERE mod_id = ?1", [id])?;
+    }
     for id in &folder_ids {
         // Its gifts stay the user's (I-16, I-29), made by "a test mod": no id a later install
         // could match (a real id is at least three characters), no author, no repository.
@@ -405,11 +456,22 @@ fn strip(conn: &Connection, keep_content: bool) -> Result<Vec<String>> {
 
     // Prove the rows are gone before the file is rewritten, so a delete that matched nothing it
     // should have is an error and not a hope.
-    let left = leftover(conn, keep_content, &folder_ids)?;
+    let blanked = Blanked {
+        folder: folder_ids,
+        orphans: orphan_ids,
+    };
+    let left = leftover(conn, keep_content, &blanked)?;
     if left != 0 {
         return Err(Error::Other(format!("{left} rows were still there")));
     }
-    Ok(folder_ids)
+    Ok(blanked)
+}
+
+/// The mod ids the strip blanked out of the copy's attribution: the folder mods it took out, and
+/// the unsigned mods that were already uninstalled (only their ledger and spend rows remained).
+struct Blanked {
+    folder: Vec<String>,
+    orphans: Vec<String>,
 }
 
 /// The mods the (already stripped) snapshot holds, for the manifest.
@@ -817,6 +879,13 @@ mod tests {
         AppState::new(Some(conn), runtime, sidecar, None, None)
     }
 
+    /// [`snapshot_for_leaving`] for the vault `state` has open, as a caller that read its metadata
+    /// from that vault passes it (none open: an id no vault has).
+    fn leave(state: &AppState, dest: &Path, keep_content: bool) -> Result<Stripped> {
+        let vault_id = state.active_vault_id().unwrap_or_default();
+        snapshot_for_leaving(state, &vault_id, dest, keep_content)
+    }
+
     fn snapshot_dir() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("pm.sqlite");
@@ -873,7 +942,7 @@ mod tests {
         let (state, p) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
 
-        let Stripped { mods, key: used } = snapshot_for_leaving(&state, &dest, true).unwrap();
+        let Stripped { mods, key: used } = leave(&state, &dest, true).unwrap();
         assert_eq!(
             used.expose(),
             key,
@@ -942,7 +1011,7 @@ mod tests {
         let (state, p) = live_state(dir.path(), &key);
         for keep in [true, false] {
             let (_d, dest) = snapshot_dir();
-            snapshot_for_leaving(&state, &dest, keep).unwrap();
+            leave(&state, &dest, keep).unwrap();
             let bytes = decrypted_file(&dest, &key);
             assert_eq!(contains(&bytes, &p.content), keep, "keep_content = {keep}");
             // The mods themselves come back either way, so a restore finds them (empty).
@@ -989,7 +1058,7 @@ mod tests {
         plant(&conn);
         let state = state_with(dir.path(), conn, Some(&fresh_key()));
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, &dest, true).unwrap_err();
+        let err = leave(&state, &dest, true).unwrap_err();
         assert!(err.to_string().contains("nothing was saved"), "{err}");
         assert!(
             files_in(&dest).is_empty(),
@@ -1004,7 +1073,7 @@ mod tests {
             conn.execute_batch("DROP TABLE mcp_clients").unwrap();
         }
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, &dest, true).unwrap_err();
+        let err = leave(&state, &dest, true).unwrap_err();
         assert!(err.to_string().contains("nothing was saved"), "{err}");
         assert!(files_in(&dest).is_empty());
     }
@@ -1018,7 +1087,7 @@ mod tests {
         let key = fresh_key();
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
-        let stripped = snapshot_for_leaving(&state, &dest, true).unwrap();
+        let stripped = leave(&state, &dest, true).unwrap();
         assert_eq!(stripped.key.expose(), key);
         db::open_snapshot(&dest, stripped.key.expose()).expect("the copy opens with that key");
 
@@ -1027,9 +1096,7 @@ mod tests {
         let conn = db::open(&dir.path().join("live.sqlite"), &key).unwrap();
         let state = state_with(dir.path(), conn, None);
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, &dest, true)
-            .unwrap_err()
-            .to_string();
+        let err = leave(&state, &dest, true).unwrap_err().to_string();
         assert!(
             err.contains("this vault's key isn't available on this device"),
             "{err}"
@@ -1157,7 +1224,7 @@ mod tests {
         }
 
         let (_d, dest) = snapshot_dir();
-        snapshot_for_leaving(&state, &dest, true).unwrap();
+        leave(&state, &dest, true).unwrap();
         let bytes = decrypted_file(&dest, &key);
         for (what, v) in [
             ("its id", &id),
@@ -1211,12 +1278,146 @@ mod tests {
     }
 
     #[test]
+    fn an_uninstalled_unsigned_mods_name_leaves_its_gifts_and_spend_too() {
+        // Uninstalling a test mod deletes its `mods` row and keeps its ledger rows and spend (I-29),
+        // so by the time a backup runs there is no folder row to find it by. The ledger has no
+        // column for how a mod was installed, so every unsigned mod without a `mods` row is blanked;
+        // a signed one's attribution (published work) and an installed mod's stay.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let gone = format!("dev.{}", fresh_marker("uninstalled"));
+        let gone_name = fresh_marker("Unreleased");
+        let gone_author = fresh_marker("someone-private");
+        let gone_repo = fresh_marker("private-org/unreleased");
+        let signed_id = format!("acme.{}", fresh_marker("published"));
+        let signed_name = fresh_marker("Published");
+        let installed_id = format!("dev.{}", fresh_marker("installed"));
+        {
+            let conn = state.conn().unwrap();
+            add_mod(&conn, &installed_id, "file", false, "active");
+            for (i, (id, name, author, repo, tier, signed)) in [
+                (&gone, &gone_name, &gone_author, &gone_repo, "third", 0),
+                (
+                    &signed_id,
+                    &signed_name,
+                    &fresh_marker("acme"),
+                    &fresh_marker("acme/r"),
+                    "second",
+                    1,
+                ),
+                (
+                    &installed_id,
+                    &format!("{installed_id} name"),
+                    &"someone".to_string(),
+                    &"r/r".to_string(),
+                    "third",
+                    0,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO tasks(title) VALUES (?1)",
+                    [format!("gift {i}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, \
+                                            install_id, task_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'fedcba9876543210', ?7)",
+                    params![
+                        id,
+                        name,
+                        tier,
+                        author,
+                        repo,
+                        signed,
+                        conn.last_insert_rowid()
+                    ],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO usage_log(model, kind, mod_id) VALUES ('m', 'background', ?1)",
+                    [id],
+                )
+                .unwrap();
+            }
+        }
+        let (_d, dest) = snapshot_dir();
+        leave(&state, &dest, true).unwrap();
+        let bytes = decrypted_file(&dest, &key);
+        for (what, v) in [
+            ("its id", &gone),
+            ("its name", &gone_name),
+            ("its author", &gone_author),
+            ("its repository", &gone_repo),
+        ] {
+            assert!(!contains(&bytes, v), "{what} reached the file");
+        }
+        // What isn't an unsigned orphan keeps its name.
+        assert!(contains(&bytes, &signed_name));
+        assert!(contains(&bytes, &installed_id));
+        let copy = db::open_snapshot(&dest, &key).unwrap();
+        let count = |sql: &str| -> i64 { copy.query_row(sql, [], |r| r.get(0)).unwrap() };
+        // All three gifts and all three spends survive; the orphan's are attributed to nobody.
+        assert_eq!(count("SELECT count(*) FROM mod_ledger"), 3);
+        assert_eq!(
+            count("SELECT count(*) FROM usage_log WHERE mod_id IS NOT NULL"),
+            2
+        );
+        assert_eq!(
+            count(&format!(
+                "SELECT count(*) FROM mod_ledger WHERE mod_id = '' AND mod_name = '{STRIPPED_MOD_NAME}' \
+                 AND author = '' AND source_repo = '' AND signed = 0"
+            )),
+            1
+        );
+        // The live store still names it.
+        let named: i64 = state
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM mod_ledger WHERE mod_id = ?1 AND mod_name = ?2",
+                params![gone, gone_name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(named, 1);
+    }
+
+    #[test]
+    fn a_copy_of_another_vaults_store_is_refused() {
+        // Vault switching doesn't take the backup run's busy flag, so a backup that read vault A's
+        // metadata can find vault B's store open when it takes the copy.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let (state, _) = live_state(dir.path(), &key);
+        let open = state.active_vault_id().expect("the session has a vault");
+        let (_d, dest) = snapshot_dir();
+        let err = snapshot_for_leaving(&state, "some-other-vault", &dest, true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the vault changed while the backup started"),
+            "{err}"
+        );
+        assert!(files_in(&dest).is_empty());
+        // The same vault, and the open one by its own id, are copied.
+        snapshot_for_leaving(&state, &open, &dest, true).unwrap();
+        // No store open at all is another vault too.
+        assert!(same_vault(None, &open).is_err());
+        assert!(same_vault(Some(&open), &open).is_ok());
+        assert!(same_vault(Some(&open), "").is_err());
+    }
+
+    #[test]
     fn a_folder_mods_rows_are_gone_from_every_table_that_hangs_off_mods() {
         let key = fresh_key();
         let dir = tempfile::tempdir().unwrap();
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
-        snapshot_for_leaving(&state, &dest, true).unwrap();
+        leave(&state, &dest, true).unwrap();
         let conn = db::open_snapshot(&dest, &key).unwrap();
         for table in MOD_CHILD_TABLES {
             let orphans: i64 = conn
@@ -1274,7 +1475,7 @@ mod tests {
         let meta = crate::vault::ensure_device_meta(&root).unwrap();
         let (_snap_dir, snap) = snapshot_dir();
         // The key the archive carries is the one the strip hands back, as the backup sites use it.
-        let Stripped { mods, key: used } = snapshot_for_leaving(&state, &snap, true).unwrap();
+        let Stripped { mods, key: used } = leave(&state, &snap, true).unwrap();
         let archive = dir.path().join("b.pmbackup");
         let cancel = std::sync::atomic::AtomicBool::new(false);
         pack(

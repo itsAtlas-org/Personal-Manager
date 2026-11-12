@@ -657,7 +657,23 @@ value left in the file is found where grepping the encrypted bytes could not. A 
 cleared, MCP off (PR C's switch), all in one transaction, before the store is attached, so before
 the first load of its mods. A reset that fails refuses the switch. Joining a shared vault
 (`adopt_shared_vault`) resets nothing: dev mode and connected apps are per device, and the store is
-the vault's, in use by its other accounts and machines.
+the vault's, in use by its other accounts and machines; it switches THIS device's page switch off
+(`markJustJoinedVault` writes this webview's own `pm:dev:mode`, which both join paths call before
+their reload), so the page never takes another device's "on" from the shared store's `dev_mode`
+row. The row itself is the vault's and stays as its other devices left it, so **nothing in Rust may
+gate on it until dev mode is per device** (`no_rust_code_reads_the_shared_dev_mode_row_yet` fails
+the moment a reader appears). The copy is refused when the open store isn't the vault the caller
+read its metadata and Markdown folder from (`snapshot_for_leaving`'s `expected_vault_id`: vault
+switching doesn't take the backup run's busy flag), so an archive never pairs one vault's
+metadata with another's database.
+
+**Held to the limit of what the store records.** What names a mod outside the `mods` cascade is
+blanked for every folder mod AND for every unsigned mod whose row is already gone (an uninstalled
+test mod keeps its ledger rows and spend, I-29, and the ledger has no column for how a mod was
+installed, so an unsigned mod is treated as one: it is not in the catalogue, so its name, author
+and repository are unpublished work). A gift of an uninstalled unsigned file mod therefore also
+reads "a test mod" in a copy that leaves, and a restore of that copy can't match it to a
+reinstall. Recording the origin at install would need a migration and would lift this limit.
 
 **Why.** A backup is portable and carries the database key, so whatever is in `pm.sqlite` is as
 readable as the passphrase is guessable, and a plain `DELETE` leaves a row's bytes in the page.
@@ -674,7 +690,9 @@ folder mod's name there too. PR C adds the MCP switch's off value to `adopt_mods
 and makes `adopt_mods::joiner_accepts_only_its_own_clients` true (clients bound to a device). The
 Mods tab's dev-mode part pauses the unsigned rows and makes the page's switch follow the row at the
 restore's reset, and makes dev mode per device in the vault, so a joiner reads as off
-(`adopt_mods::joiner_dev_mode_is_per_device`).
+(`adopt_mods::joiner_dev_mode_is_per_device`); **that per-device change lands before, or in the same
+change as, the first Rust code that gates on `dev_mode`**, and that change updates
+`no_rust_code_reads_the_shared_dev_mode_row_yet`.
 
 ---
 

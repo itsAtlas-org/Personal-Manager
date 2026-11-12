@@ -102,14 +102,18 @@ pub struct SwitchOutcome {
 /// key this account didn't cache in the keychain still backs up while it is open.
 async fn snapshot_stripped(
     app: &AppHandle,
+    expected_vault_id: &str,
     snapshot: &std::path::Path,
 ) -> Result<backup::strip::Stripped> {
     let app = app.clone();
     let snapshot = snapshot.to_path_buf();
+    let expected = expected_vault_id.to_owned();
     spawn_blocking_result("snapshot", move || {
         let state = app.state::<AppState>();
         let keep_content = backup::strip::keep_mod_data(&state)?;
-        backup::strip::snapshot_for_leaving(&state, &snapshot, keep_content)
+        // `expected` is the vault the caller read its metadata and Markdown folder from: the copy
+        // is refused if the open store is another's by now.
+        backup::strip::snapshot_for_leaving(&state, &expected, &snapshot, keep_content)
     })
     .await
 }
@@ -170,7 +174,9 @@ pub async fn create_local_backup(
         .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(&app, &snapshot).await.map_err(fail)?;
+        snapshot_stripped(&app, &meta.vault_id, &snapshot)
+            .await
+            .map_err(fail)?;
     emit_backup_progress(
         &app,
         BackupEvent::Phase {
@@ -924,7 +930,9 @@ pub(crate) async fn run_backup(
     // and the open store's key it is encrypted with. A snapshot that couldn't be stripped fails
     // the backup.
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(app, &snapshot).await.map_err(fail)?;
+        snapshot_stripped(app, &meta.vault_id, &snapshot)
+            .await
+            .map_err(fail)?;
     emit_backup_progress(
         app,
         BackupEvent::Phase {

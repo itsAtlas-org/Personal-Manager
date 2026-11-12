@@ -20,12 +20,12 @@
 // travels with the data folder.
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { DEV_MODE_LS_KEY as LS_KEY } from "./devModeStorage";
 import { getPref, setPref } from "./ipc";
 
 /** Build-time signal: true only in a dev build. The ONE place `import.meta.env.DEV` is read. */
 export const isDevBuild: boolean = import.meta.env.DEV;
 
-const LS_KEY = "pm:dev:mode";
 const PREF_KEY = "dev_mode";
 
 interface CapabilityState {

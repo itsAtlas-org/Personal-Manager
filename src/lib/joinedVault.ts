@@ -7,10 +7,17 @@
 // personal on this account. localStorage lives in the per-Windows-user webview profile,
 // so the flag can never leak to the vault owner's side. Dismissing clears it for good.
 
+import { switchDevModeOffOnThisDevice } from "./devModeStorage";
+
 const JUST_JOINED_VAULT_KEY = "pm:justJoinedVault";
 
-/** Mark this profile as having just joined a shared vault (called before the reload). */
+/** Mark this profile as having just joined a shared vault (called before the reload). Joining also
+ *  switches this device's developer mode off (spec §1.15: adopting a shared vault switches it
+ *  off): written to this webview's own switch, not the shared store, which holds the choice of
+ *  the vault's other devices. Both join paths (the boot gate and the vault card) call this before
+ *  they reload. */
 export function markJustJoinedVault() {
+  switchDevModeOffOnThisDevice();
   localStorage.setItem(JUST_JOINED_VAULT_KEY, "1");
 }
 

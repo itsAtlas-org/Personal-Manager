@@ -66,11 +66,15 @@ fn switch_mcp_off(_conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Slice 6 part dev-mode: a joiner's dev mode is off because dev mode is per device. That part makes
-/// dev mode "on for this device in this vault", so a device that has just joined has no entry and
-/// reads as off, while the vault's other devices keep theirs; nothing in the shared store is
-/// written at the join. Until it lands the `dev_mode` row is the vault's, and the page's switch
-/// reads this device's own `localStorage` first (`capabilities.tsx`). Called by
+/// A joiner's dev mode is off because dev mode is per device. Today the page's switch is this
+/// webview's own `localStorage` (`capabilities.tsx`), and the join (`joinedVault.ts`,
+/// `markJustJoinedVault`, which both join paths call before they reload) writes it off there, so the
+/// page never takes another device's "on" from the shared store's `dev_mode` row. Nothing in the
+/// shared store is written at the join. **Owed by slice 6's dev-mode part, before anything in Rust
+/// gates an unsigned install on `dev_mode`:** make it "on for this device in this vault", so a
+/// device that has just joined has no entry and reads as off while the vault's other devices keep
+/// theirs; until then the row is the vault's and a Rust reader of it would honour another device's
+/// choice. `no_rust_code_reads_the_shared_dev_mode_row_yet` fails the moment one appears. Called by
 /// `commands::vaults::adopt_shared_vault`; takes no store on purpose.
 pub fn joiner_dev_mode_is_per_device() {}
 
@@ -416,6 +420,48 @@ mod tests {
         let reset = switch.find("reset_for_adopt(").expect("the restore resets");
         let attach = switch.find("attach_profile_here(").expect("and attaches");
         assert!(reset < attach, "the reset comes before the attach");
+    }
+
+    #[test]
+    fn no_rust_code_reads_the_shared_dev_mode_row_yet() {
+        // The join writes nothing to the shared store (see the module doc), and the two seams it
+        // calls are empty until their parts land. Until dev mode is per device, a Rust reader of the
+        // `dev_mode` row would honour another device's switch on a machine that just joined, so the
+        // moment one appears this fails: make the switch per device first (the seam
+        // `joiner_dev_mode_is_per_device`), then add the file here.
+        let allowed = [
+            "backup/adopt_mods.rs", // the restore's reset writes it off
+            "settings.rs",          // the webview's allow-list of keys
+            "commands_dev.rs",      // the list of keys the preferences migration moved
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root.clone()];
+        let mut seen = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if allowed.contains(&rel.as_str()) {
+                        seen += 1;
+                        continue;
+                    }
+                    let prod = production(&std::fs::read_to_string(&path).unwrap());
+                    assert!(
+                        !prod.contains("\"dev_mode\"") && !prod.contains("DEV_MODE_KEY"),
+                        "{rel} reads the dev_mode row, which is the vault's and not this device's: \
+                         make dev mode per device before anything gates on it"
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, allowed.len(), "every allowed file still exists");
     }
 
     fn row(signed: bool, state: &str, reason: Option<&str>) -> ModRow {
