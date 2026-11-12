@@ -5,16 +5,17 @@
 //! Every writer takes its strings from here, and a pin test in `db/migrations.rs` reads each set
 //! back out of v60's CHECKs, so the two can't drift. `mods.tier` is owned by [`super::ids::Tier`].
 //!
-//! The ledger (`ledger.rs`: install, update, uninstall, the startup load) and the dispatcher (slice
-//! 4) are the writers. Until the Mods tab calls install (slice 6) and the dispatcher lands, some of
-//! these have only test readers.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The ledger (`ledger.rs`: install, update, uninstall, the startup load), the Mods tab's commands
+//! and the dispatcher are the writers. The folder test-mod loader (slice 6, part 3) is the one
+//! writer still to come: `FROM_FOLDER` and the pieces only it uses carry their own allowances.
 
 use super::package::DataClass;
 
 /// `mods.state`. `installing` until the files are written and verified; `parked` makes no calls
 /// (a closed room, missing files, an API major outside the window); `paused` is the user's, the
-/// blacklist's or dev mode's (spec §1.3, §1.10, §1.15).
+/// blacklist's or dev mode's (spec §1.3, §1.10, §1.15). The whole set is read by the pin tests
+/// (here and in `db/migrations.rs`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const STATES: [&str; 4] = [STATE_ACTIVE, STATE_PAUSED, STATE_PARKED, STATE_INSTALLING];
 pub const STATE_ACTIVE: &str = "active";
 pub const STATE_PAUSED: &str = "paused";
@@ -42,6 +43,14 @@ pub fn is_ledger_reason(reason: &str) -> bool {
     LEDGER_REASONS.contains(&reason)
 }
 
+/// `mods.state_reason` of a mod the user paused from the Mods tab. Only the user's own resume lifts
+/// it: the blacklist leaves such a row alone ([`super::safety::plan_row`]) and the ledger keeps it
+/// through an update ([`super::policy::state_after_install`]).
+pub const REASON_USER: &str = "user";
+/// `mods.state_reason` of an unsigned mod paused because developer mode is off (spec §1.15), until
+/// it is on again. Written by the dev-mode part of slice 6; the Mods tab only words it.
+pub const REASON_DEV_MODE: &str = "dev-mode";
+
 /// `mods.state_reason` of a mod the signed index paused (Mods spec §1.10): stopped, its data kept.
 /// The index's own words are read from the cached index, not stored here, so a corrected reason
 /// reaches the strip.
@@ -64,22 +73,33 @@ pub const SETTING_RESUMED: &str = "mods_resumed";
 /// PM). Slice 6's "update waiting" reads it; an approved install or a newer update clears it.
 pub const SETTING_UPDATES_WAITING: &str = "mods_updates_waiting";
 
+/// `settings` key: which devices have accepted the Mods disclaimer in this vault, a JSON object
+/// `{"v": 1, "devices": ["<device id>", ...]}` (`tab::disclaimer`). The vault-side half of "per
+/// device AND per vault": a new machine, or a vault that has never heard of this one, asks again.
+pub const SETTING_DISCLAIMER: &str = "mods_disclaimer";
+
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from
 /// file"), or a developer's unpacked test folder, which has no package sha256 and is left out of
-/// backups (§1.15).
+/// backups (§1.15). The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const INSTALLED_FROM: [&str; 3] = [FROM_CATALOGUE, FROM_FILE, FROM_FOLDER];
 pub const FROM_CATALOGUE: &str = "catalogue";
 pub const FROM_FILE: &str = "file";
+/// Written by the folder test-mod loader (slice 6, part 3), which doesn't exist yet.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const FROM_FOLDER: &str = "folder";
 
 /// `mod_grants.decision`. No row means the permission hasn't been asked yet (a first-use grant).
+/// The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const DECISIONS: [&str; 2] = [GRANTED, DENIED];
 pub const GRANTED: &str = "granted";
 pub const DENIED: &str = "denied";
 
 /// `mod_kv.class`: the manifest's class for the key. Content is the user's (kept on update, asked
 /// about on uninstall, in backups by default, counted as user data); cache is rebuildable and
-/// stripped from backups (D4).
+/// stripped from backups (D4). The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const KV_CLASSES: [&str; 2] = [KV_CONTENT, KV_CACHE];
 pub const KV_CONTENT: &str = "content";
 pub const KV_CACHE: &str = "cache";

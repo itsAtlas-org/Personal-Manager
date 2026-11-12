@@ -15,7 +15,7 @@ token and chats in the clear to a public address); a launch-time update check ag
 signed release feed (and the download if you accept an update); a fetch of PM's signed mod safety
 list (two small files from the project's public `PM-Mods` GitHub release, at launch and every six
 hours, sending nothing but a generic `PM-mods/1` user agent, accepted only with the project's
-signature; plus, for a mod you installed, its updates from the same place); a one-time first-run download
+signature; plus, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); a one-time first-run download
 of PM's on-device models and Python dependencies (your local model runner, if you use one, fetches
 model weights itself — PM does not); and, only if you configure them, a calendar fetch
 (read-only unless you turn on editing for a Google account, after which PM also sends the

@@ -34,10 +34,6 @@
 //! is no longer the store the change began in (another vault, or another store of this one). All of
 //! this is synchronous: the Mods tab (slice 6) calls it from `spawn_blocking`.
 
-// The install and uninstall paths have no caller until the Mods tab (slice 6); the startup load
-// is live.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
@@ -51,6 +47,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
+use super::api::grants::GrantError;
 use super::disk::{self, Layout, PathRefusal, Step, SweepReport, VersionName};
 use super::headers::APP_DIR;
 use super::ids::{self, ModId};
@@ -68,6 +65,8 @@ use crate::AppState;
 // (slice 5). What slice 6's strips read is re-exported for it.
 mod blacklist;
 mod updates;
+// The user's own pause, resume and first-open consent (slice 6).
+mod user;
 #[allow(unused_imports)]
 pub use blacklist::{
     clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
@@ -75,6 +74,7 @@ pub use blacklist::{
 };
 #[allow(unused_imports)]
 pub use updates::{Landed, Pass, RepairTarget};
+pub use user::{ChangeRefusal, Standing};
 
 /// The `settings` key of the calendar's view prefs, whose `hidden` set names a mod's overlay by
 /// [`overlay_source`] (SYNC-SET.md). An uninstall takes the mod out of it.
@@ -116,6 +116,10 @@ pub enum LedgerError {
     /// The open store is another one now: another vault's, or another store of this vault.
     VaultChanged,
     NotInstalled,
+    /// The user's own change (a pause, a resume, a first-open "Turn on") isn't allowed now.
+    Change(ChangeRefusal),
+    /// The grants a consent wrote were refused (`mods::api::grants`); nothing was written.
+    Grants(GrantError),
 }
 
 impl fmt::Display for LedgerError {
@@ -133,6 +137,8 @@ impl fmt::Display for LedgerError {
                 f.write_str("The vault changed while the mod was installing. Nothing changed.")
             }
             Self::NotInstalled => f.write_str("That mod isn't installed."),
+            Self::Change(why) => write!(f, "{why}"),
+            Self::Grants(why) => write!(f, "{why}"),
         }
     }
 }
@@ -346,6 +352,26 @@ pub struct Installed {
     pub pruned: Vec<String>,
 }
 
+/// What an install would be, for the consent screen ([`Ledger::preview`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub kind: InstallKind,
+    /// The version installed now, for an update or a repair.
+    pub installed_version: Option<String>,
+    /// What an update asks for that the installed version didn't have.
+    pub widening: Vec<policy::Widening>,
+}
+
+/// What the checks decided, for the write that follows them.
+struct Checked {
+    kind: InstallKind,
+    current: Option<Current>,
+    /// The permissions the installed row has granted.
+    granted: BTreeSet<String>,
+    version: VersionName,
+    manifest_text: String,
+}
+
 /// What an uninstall did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Uninstalled {
@@ -431,11 +457,19 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         }
     }
 
-    fn with_conn<T>(
+    /// One step on the open store, bound to this ledger's store ([`LedgerStore::with_conn`]). The
+    /// Mods tab's commands read through it too: `f` holds the DB lock, so it does no file I/O and
+    /// never reaches for the store again.
+    pub(crate) fn with_conn<T>(
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
     ) -> Result<T, LedgerError> {
         self.store.with_conn(self.layout, f)
+    }
+
+    /// The folders this ledger writes to.
+    pub(crate) fn layout(&self) -> &Layout {
+        self.layout
     }
 
     /// Install, update or repair from a signed `.pmmod`'s bytes, verified against `keys`: the
@@ -454,18 +488,39 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         self.install_verified(&pkg, &sha, opts, now)
     }
 
-    /// The install path from a package the verifier passed, with the `.pmmod`'s own sha256.
-    fn install_verified(
+    /// Every check an install makes, before anything is written, as the Mods tab's consent screen
+    /// needs them: what this package would be (fresh, an update, a repair) and what an update would
+    /// widen, or the refusal the install itself would give. Writes nothing. Not a promise: the
+    /// install runs every check again, and its commit re-reads the row.
+    pub fn preview(
         &self,
         pkg: &VerifiedPackage,
         package_sha256: &str,
         opts: &InstallOptions<'_>,
-        now: DateTime<Utc>,
-    ) -> Result<Installed, LedgerError> {
-        let m = &pkg.manifest;
+    ) -> Result<Preview, LedgerError> {
         let _ledger = self.runtime.ledger_lock();
+        let checked = self.checks(pkg, package_sha256, opts)?;
+        let widening = match &checked.current {
+            Some(c) if checked.kind == InstallKind::Update => {
+                policy::widening(&c.manifest, &pkg.manifest, &checked.granted)
+            }
+            _ => Vec::new(),
+        };
+        Ok(Preview {
+            kind: checked.kind,
+            installed_version: checked.current.map(|c| c.pinned.version),
+            widening,
+        })
+    }
 
-        // ---- Every check, before anything is written ----
+    /// The checks, under the ledger lock the caller holds.
+    fn checks(
+        &self,
+        pkg: &VerifiedPackage,
+        package_sha256: &str,
+        opts: &InstallOptions<'_>,
+    ) -> Result<Checked, LedgerError> {
+        let m = &pkg.manifest;
         ids::check_tier(&m.id, m.publisher.tier).map_err(|e| Refusal::Tier(e.to_string()))?;
         let version = VersionName::new(&m.version)?;
         match policy::api_fit(m.api, MOD_API_VERSION, MOD_API_OLDEST_MAJOR) {
@@ -523,6 +578,36 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
                 return Err(Refusal::NeedsApproval(wider).into());
             }
         }
+        Ok(Checked {
+            kind,
+            current,
+            granted,
+            version,
+            manifest_text,
+        })
+    }
+
+    /// The install path from a package the verifier passed, with the `.pmmod`'s own sha256. The
+    /// Mods tab's consent flow verifies once (it needs the manifest to read the user's answers
+    /// against) and installs what it verified.
+    pub(crate) fn install_verified(
+        &self,
+        pkg: &VerifiedPackage,
+        package_sha256: &str,
+        opts: &InstallOptions<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<Installed, LedgerError> {
+        let m = &pkg.manifest;
+        let _ledger = self.runtime.ledger_lock();
+
+        // ---- Every check, before anything is written ----
+        let Checked {
+            kind,
+            current,
+            version,
+            manifest_text,
+            ..
+        } = self.checks(pkg, package_sha256, opts)?;
         let files: Vec<FileRecord> = pkg
             .files
             .iter()
@@ -1206,6 +1291,9 @@ pub fn after_writer_open(app: &AppHandle) {
     if !report.sweep.is_empty() {
         eprintln!("mods: boot sweep {:?}", report.sweep);
     }
+    // The registry was just made from the rows (or, when they couldn't be read, emptied): a Mods
+    // tab that is already up reads them again.
+    super::refresh::emit_changed(app, super::refresh::CHANGED_LOADED);
     if report.skipped.is_some() {
         return;
     }
@@ -1367,6 +1455,8 @@ mod tests {
     mod slice5;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
+    // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).
+    mod slice6;
 
     const VAULT: &str = "11111111-2222-3333-4444-555555555555";
     const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";

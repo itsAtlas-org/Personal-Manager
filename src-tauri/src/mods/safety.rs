@@ -360,6 +360,10 @@ pub enum ModNotice {
         name: String,
         version: String,
     },
+    /// This machine's record of the safety list is damaged or unreadable, so no index is being
+    /// taken and nothing is checked. `unreadable`: it couldn't be read (may mend by itself), as
+    /// against damaged (only a reset mends it). The page offers the reset for damage.
+    RecordFault { unreadable: bool, text: String },
     /// "Update PM to get version N": the newest version needs a mod API this PM doesn't have.
     UpdateNeedsNewerPm {
         id: String,

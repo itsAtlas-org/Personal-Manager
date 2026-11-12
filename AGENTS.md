@@ -176,7 +176,13 @@ release remain the open post-v1 work.
     that runs them, and what runs at launch and at a restore. A dev override of the index URL or
     the test key lives only in `cfg(debug_assertions)` code behind `PM_DATA_DIR`. In the page,
     `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and `modBridge.ts`
-    is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
+    is its bridge. `tab/` is the Mods tab's command surface (`tab/commands.rs`: main window only,
+    each command with an `ipc.ts` wrapper and a typed refusal, types in `src/lib/modsTypes.ts`):
+    `listing` and `words` say what a row is and what it offers, `install`/`stage`/`consent` are
+    the two-step signed install (INVARIANTS.md I-33), `uninstall` is the preview and the gifts,
+    `status` the safety list's strips, `disclaimer` and `device` the per-device-and-vault
+    disclaimer; the user's own pause, resume and "Turn on" are `ledger/user.rs`, and every change
+    to the rows or the registry ends in one `mods://changed` (`refresh::emit_changed`). `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
 - **Sidecar** — `sidecar/pm_sidecar.py` + `requirements.txt` (committed code). A managed venv

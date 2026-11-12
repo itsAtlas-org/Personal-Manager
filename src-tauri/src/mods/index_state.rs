@@ -349,6 +349,32 @@ pub fn save(data_dir: &Path, state: &IndexState) -> io::Result<()> {
     Ok(())
 }
 
+/// Start over from a record nothing stands in for: when the record is unusable ([`Loaded::fault`]:
+/// the main file and its backup are both damaged, or can't be read), delete both files, so the next
+/// index is taken as a first run. `Ok(false)` when the record is usable, and then nothing is touched
+/// (a healthy record is never reset: it holds the seen seq and the revoked keys). The cost is real
+/// and is why the Mods tab asks first: the seen seq goes back to the release's `MIN_INDEX_SEQ` and
+/// revocations are forgotten until an index names them again. Under the same lock as every read and
+/// write of the record, so a fetch can't land between the check and the delete.
+pub fn reset_unusable(data_dir: &Path, ring: &KeyRing) -> io::Result<bool> {
+    let _guard = STATE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    if !load(data_dir, ring).fault {
+        return Ok(false);
+    }
+    for path in [state_path(data_dir), backup_path(data_dir)] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    remove_temps(data_dir, STATE_FILE);
+    remove_temps(data_dir, BACKUP_FILE);
+    let _ = disk::sync_dir(data_dir);
+    eprintln!("mods: {STATE_FILE} and {BACKUP_FILE} were deleted at the user's request, to start the safety list over");
+    Ok(true)
+}
+
 /// `.<name>.<16 hex>.tmp`: dot-named, so nothing takes it for PM data.
 fn temp_name(name: &str, random: &str) -> String {
     format!(".{name}.{random}.tmp")
@@ -1240,6 +1266,56 @@ mod tests {
         fs::remove_file(backup_path(dir.path())).unwrap();
         let first = load(dir.path(), &ring);
         assert!(!first.fault && first.problem.is_none());
+    }
+
+    #[test]
+    fn a_reset_deletes_a_record_nothing_stands_in_for_and_the_next_index_is_a_first_run() {
+        let dir = scratch();
+        let keys = Keys::new();
+        let ring = keys.ring();
+        // An index taken and saved, then both files damaged: a fault.
+        let (bytes, sig) = signed(&good_index(40), &keys.main);
+        accept(dir.path(), &ring, &bytes, &sig, t(NOW), Origin::Fetched);
+        fs::write(state_path(dir.path()), b"{").unwrap();
+        fs::write(backup_path(dir.path()), b"{").unwrap();
+        // A leftover temp file of a crashed write goes with them.
+        let temp = dir.path().join(temp_name(STATE_FILE, "0123456789abcdef"));
+        fs::write(&temp, b"x").unwrap();
+        assert!(load(dir.path(), &ring).fault);
+        assert!(reset_unusable(dir.path(), &ring).unwrap());
+        assert!(!state_path(dir.path()).exists());
+        assert!(!backup_path(dir.path()).exists());
+        assert!(!temp.exists());
+        let after = load(dir.path(), &ring);
+        assert!(!after.fault && after.state == IndexState::default());
+        // The next index is taken as the first one, whatever its seq.
+        let (older, sig) = signed(&good_index(12), &keys.main);
+        let out = accept(dir.path(), &ring, &older, &sig, t(NOW), Origin::Fetched);
+        assert!(
+            matches!(out.verdict, Ok(Verdict::Newer { .. })),
+            "{:?}",
+            out.verdict
+        );
+    }
+
+    #[test]
+    fn a_reset_never_touches_a_record_that_is_whole_or_stood_in_for_or_not_there() {
+        let dir = scratch();
+        let keys = Keys::new();
+        let ring = keys.ring();
+        // No file: a first run, nothing to reset.
+        assert!(!reset_unusable(dir.path(), &ring).unwrap());
+        let (bytes, sig) = signed(&good_index(40), &keys.main);
+        accept(dir.path(), &ring, &bytes, &sig, t(NOW), Origin::Fetched);
+        let main = fs::read(state_path(dir.path())).unwrap();
+        assert!(!reset_unusable(dir.path(), &ring).unwrap());
+        assert_eq!(fs::read(state_path(dir.path())).unwrap(), main);
+        // The main file damaged but the backup whole: the backup stands in, and a reset would only
+        // throw away the seq and the revoked keys it holds.
+        fs::write(state_path(dir.path()), b"{").unwrap();
+        assert!(!reset_unusable(dir.path(), &ring).unwrap());
+        assert!(backup_path(dir.path()).exists());
+        assert_eq!(load(dir.path(), &ring).state.seq, 40);
     }
 
     fn replay_is_refused_against_backup(dir: &Path, keys: &Keys) {

@@ -195,7 +195,6 @@ pub struct ServedFile {
 
 impl InstalledMod {
     /// A verified package whose files have been written under `root`.
-    #[cfg_attr(not(test), allow(dead_code))] // the ledger's install, which the Mods tab calls (slice 6)
     pub fn from_package(pkg: &VerifiedPackage, root: &Path) -> std::io::Result<Self> {
         let files = pkg.files.iter().map(|(path, f)| {
             let served = ServedFile {
@@ -387,8 +386,7 @@ impl Drop for Locked<'_> {
 pub enum Audience {
     /// Every live session of every mod.
     Everyone,
-    /// Every live session of one mod (`grants.changed`, which slice 6's prompts send).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Every live session of one mod (`grants.changed`, which the Mods tab's commands send).
     Mod(ModId),
     /// One session.
     Session(String),
@@ -484,6 +482,13 @@ impl ModRuntime {
         self.lock().installed.get(id).map(|m| m.root.clone())
     }
 
+    /// Whether the registry holds `id`, so its frame is served when it opens: the truth a restore's
+    /// "is back" reads (`backup::adopt_mods::settled`), since an `active` row can still be held
+    /// back (an unaccepted pilot, the safety list, files that didn't check out).
+    pub fn is_installed(&self, id: &ModId) -> bool {
+        self.lock().installed.contains_key(id)
+    }
+
     /// The scheme handler's turnstile.
     pub fn gate(&self) -> &ServeGate {
         &self.gate
@@ -498,7 +503,6 @@ impl ModRuntime {
     }
 
     /// Install (or replace) a mod in the registry. A replacement ends every frame of the old one.
-    #[cfg_attr(not(test), allow(dead_code))] // the ledger's install, which the Mods tab calls (slice 6)
     pub fn install(&self, installed: InstalledMod) {
         let mut inner = self.lock();
         inner.drop_mod(&installed.id, Ending::Replaced);

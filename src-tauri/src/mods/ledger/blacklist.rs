@@ -56,6 +56,8 @@ pub struct ApplyReport {
 }
 
 impl ApplyReport {
+    /// Whether the pass did and found nothing (the tests' "a second pass changes nothing").
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.notices.is_empty()
             && self.failed.is_empty()

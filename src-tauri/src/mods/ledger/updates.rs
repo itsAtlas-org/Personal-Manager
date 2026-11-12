@@ -7,8 +7,6 @@
 //! that has to wait for the user. Nothing here downloads, and nothing here is reached with the DB
 //! lock held.
 
-use std::collections::BTreeMap;
-
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -301,10 +299,18 @@ impl<S: LedgerStore> Ledger<'_, S> {
         self.install_package(bytes, keys, &opts, now)
     }
 
-    /// Every record this updater keeps, for the Mods tab: `(waiting updates, resumed mods)`.
+    /// Every record this updater keeps: `(waiting updates, resumed mods)`. The Mods tab reads them
+    /// with its rows in one step (`tab::listing::read_all`); this is the tests' read of the two.
+    #[cfg(test)]
     pub fn notes(
         &self,
-    ) -> Result<(BTreeMap<String, Waiting>, Vec<blacklist::Resumed>), LedgerError> {
+    ) -> Result<
+        (
+            std::collections::BTreeMap<String, Waiting>,
+            Vec<blacklist::Resumed>,
+        ),
+        LedgerError,
+    > {
         self.with_conn(|c| Ok((blacklist::read_waiting(c)?, blacklist::read_resumed(c)?)))
     }
 }

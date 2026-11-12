@@ -7,6 +7,22 @@ import { announceSettingSaved, isSettingWrite } from "./settingsSaved";
 import { pushLanding } from "./documentFeed";
 import type { RepairOutcome, VaultFault } from "./types";
 import type {
+  Catalogue,
+  ConsentScreen,
+  InstallResult,
+  ModIcon,
+  ModInfo,
+  ModNotice,
+  ModStandingAfter,
+  ModUninstalled,
+  ModsChanged,
+  ModsDisclaimerState,
+  ModsResetResult,
+  ModsSafetyStatus,
+  Repaired,
+  UninstallPreview,
+} from "./modsTypes";
+import type {
   LocalGpuResidency,
   LocalReleaseSettings,
   AiProviderStatus,
@@ -2234,3 +2250,95 @@ export const modFrameClose = (session: string) => invoke<void>("mod_frame_close"
  *  `readVectors` reads it). */
 export const modCall = (session: string, method: string, args: string) =>
   invoke<unknown>("mod_call", { session, method, args });
+
+// --- Mods: the Mods tab (Mods spec §1.13) -------------------------------------------------------
+// Main window only, and every one refuses while the vault is locked or another PM window is the
+// writer. A refusal rejects with `{code, message}` (`modsErrorOf` in modsTypes.ts reads it): show the
+// message, branch on the code. The types are in modsTypes.ts; every sentence in them is the
+// backend's.
+
+/** Every installed mod: its standing and the sentence for it, its permissions (with the maker's
+ *  reason, the class, the decision and what is allowed now), an update waiting and why. */
+export const listMods = () => invoke<ModInfo[]>("list_mods");
+
+/** A mod's icon (PNG or WebP, from its verified files) for a `blob:` URL (`iconBlob`). */
+export const modIcon = (modId: string) => invoke<ModIcon>("mod_icon", { modId });
+
+/** The signed catalogue (Available), from the cached index. */
+export const listCatalogue = () => invoke<Catalogue>("list_catalogue");
+
+/** Read and verify the signed `.pmmod` at `path` and return what the consent screen shows,
+ *  installing nothing. An unsigned file rejects with the `unsigned` code. */
+export const installModFile = (path: string) => invoke<ConsentScreen>("install_mod_file", { path });
+
+/** Install what a consent screen's `token` staged, writing `decisions` (permission id to yes or no:
+ *  an answer for every permission the screen marked `answerRequired`) as grants. Good once. */
+export const installModConsented = (token: string, decisions: Record<string, boolean>) =>
+  invoke<InstallResult>("install_mod_consented", { token, decisions });
+
+/** Download a catalogue mod and return its consent screen, installing nothing. */
+export const installFromCatalogue = (modId: string) =>
+  invoke<ConsentScreen>("install_from_catalogue", { modId });
+
+/** An update waiting for approval: download it and return the consent screen with what is new
+ *  marked, then `installModConsented`. */
+export const approveUpdate = (modId: string) => invoke<ConsentScreen>("approve_update", { modId });
+
+/** Put back exactly the installed version of a parked signed catalogue mod. */
+export const repairMod = (modId: string) => invoke<Repaired>("repair_mod", { modId });
+
+/** What uninstalling would take and what would stay (the tasks, milestones and documents it made). */
+export const uninstallPreview = (modId: string) =>
+  invoke<UninstallPreview>("uninstall_preview", { modId });
+
+/** Uninstall, deleting what the mod made only with `alsoDeleteGifts`. Show the preview first: the mod's
+ *  private storage goes with it. The answer says what to prune from `localStorage` (`prune`). */
+export const uninstallMod = (modId: string, alsoDeleteGifts: boolean) =>
+  invoke<ModUninstalled>("uninstall_mod", { modId, alsoDeleteGifts });
+
+/** Pause a running mod: its data stays. */
+export const pauseMod = (modId: string) => invoke<void>("pause_mod", { modId });
+
+/** Turn the user's own pause off. Rejects with the safety list's words while it names the mod, and
+ *  never lifts the safety list's or developer mode's pause. */
+export const resumeMod = (modId: string) => invoke<ModStandingAfter>("resume_mod", { modId });
+
+/** The first-open "Turn on" of an auto-installed mod (D17): the user's answers become grants, the mod
+ *  starts, and this counts as accepting the Mods disclaimer. */
+export const consentMod = (modId: string, decisions: Record<string, boolean>) =>
+  invoke<ModStandingAfter>("consent_mod", { modId, decisions });
+
+/** One permission toggled on a mod's row (or a first-use prompt's answer). Rejects with
+ *  `grant-refused` where unsigned mods may not hold both reads and the internet. */
+export const modPermissionDecide = (modId: string, permission: string, granted: boolean) =>
+  invoke<void>("mod_permission_decide", { modId, permission, granted });
+
+/** Whether this device has accepted the Mods disclaimer in this vault (per device AND per vault). */
+export const modsDisclaimerState = () => invoke<ModsDisclaimerState>("mods_disclaimer_state");
+
+/** "I understand". */
+export const acceptModsDisclaimer = () => invoke<void>("accept_mods_disclaimer");
+
+/** When the safety list was last checked ("not checked since …" after 30 days), whether this
+ *  machine's record of it is damaged, and the strips to draw. */
+export const modsSafetyStatus = () => invoke<ModsSafetyStatus>("mods_safety_status");
+
+/** Dismiss the "X is back on" strip. */
+export const dismissModResumed = (modId: string) => invoke<void>("dismiss_mod_resumed", { modId });
+
+/** Start the safety list over from a damaged record: it forgets the highest list seen and the keys
+ *  seen revoked until a list names them again, so ask first. Rejects `not-allowed` unless the record
+ *  really is unusable. Then fetches. */
+export const resetSafetyRecord = () => invoke<ModsResetResult>("reset_safety_record");
+
+/** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
+ *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows
+ *  again; a listener that missed one reads them on mount anyway. */
+export const onModsChanged = (handler: (e: ModsChanged) => void): Promise<UnlistenFn> =>
+  listen<ModsChanged>("mods://changed", (e) => handler(e.payload));
+
+/** Subscribe to `mods://notice`: the safety list paused, resumed or removed a mod, an update waits,
+ *  or the record is damaged. It may fire before the page listens, so draw the strips from
+ *  `modsSafetyStatus` too. */
+export const onModsNotice = (handler: (n: ModNotice) => void): Promise<UnlistenFn> =>
+  listen<ModNotice>("mods://notice", (e) => handler(e.payload));

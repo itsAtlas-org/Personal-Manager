@@ -66,6 +66,7 @@ pub mod refresh;
 pub mod runtime;
 pub mod safety;
 pub mod store;
+pub mod tab;
 pub mod updater;
 
 use std::path::Path;

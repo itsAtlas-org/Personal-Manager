@@ -708,10 +708,9 @@ pub fn documents_resync<H: Host>(host: &H, epoch: u64) -> Emitted {
 /// has committed: each is told to re-ask. The payload is empty on purpose: it says only that the
 /// answers to "may I?" may differ, never what another mod holds (D3 makes one unsigned mod's grant
 /// another's refusal, so naming permissions could leak it). The writers of a grant
-/// (`grants::record_install_consent`, `grants::set_decision`) have no caller yet; slice 6's commands
-/// call this after their commit, for the mod and, when the grant was a read or an egress one of an
-/// unsigned mod, for every other unsigned mod.
-#[cfg_attr(not(test), allow(dead_code))] // the Mods tab's prompts (slice 6)
+/// (`grants::record_install_consent`, `grants::set_decision`) are called by the Mods tab's commands,
+/// which call this after their commit, for the mod and, when the change touched a read or an egress
+/// permission of an unsigned mod, for every other unsigned mod (`tab::consent::announce`).
 pub fn grants_changed<H: Host>(host: &H, mods: &[ModId]) -> Emitted {
     let mut total = Emitted::default();
     let distinct: BTreeSet<&ModId> = mods.iter().collect();

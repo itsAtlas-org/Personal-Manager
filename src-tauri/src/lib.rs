@@ -1372,6 +1372,8 @@ pub fn run() {
             // landing notes: `mods::api::events::Note`).
             app.manage(mods::api::events::Hub::default());
             mods::api::events::install_notes(handle.clone());
+            // The consent screens waiting for their answer (`mods::tab::stage`).
+            app.manage(mods::tab::stage::Stage::default());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;
@@ -2099,6 +2101,28 @@ pub fn run() {
             mods::mod_call,
             mods::mod_events_ack,
             mods::mod_theme_changed,
+            // The Mods tab (spec §1.13): what is installed, installing from a file or the catalogue
+            // with the user's consent, uninstalling, pausing, permissions, the disclaimer and the
+            // safety list's status. Main window only.
+            mods::tab::commands::list_mods,
+            mods::tab::commands::mod_icon,
+            mods::tab::commands::list_catalogue,
+            mods::tab::commands::install_mod_file,
+            mods::tab::commands::install_mod_consented,
+            mods::tab::commands::install_from_catalogue,
+            mods::tab::commands::approve_update,
+            mods::tab::commands::repair_mod,
+            mods::tab::commands::uninstall_preview,
+            mods::tab::commands::uninstall_mod,
+            mods::tab::commands::pause_mod,
+            mods::tab::commands::resume_mod,
+            mods::tab::commands::consent_mod,
+            mods::tab::commands::mod_permission_decide,
+            mods::tab::commands::mods_disclaimer_state,
+            mods::tab::commands::accept_mods_disclaimer,
+            mods::tab::commands::mods_safety_status,
+            mods::tab::commands::dismiss_mod_resumed,
+            mods::tab::commands::reset_safety_record,
             // Developer mode (issue #78) — read-only inspection. Always registered (the
             // commands are harmless reads); only the UI is gated by the runtime `devMode`.
             commands_dev::dev_system_info,

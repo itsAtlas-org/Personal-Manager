@@ -630,6 +630,37 @@ folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index
 it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its
 blacklist.
 
+### I-33 · A signed mod installs only the bytes its consent screen showed, and only on its user's answer — **Held**
+
+A signed install from the Mods tab (a picked file, a catalogue download, an approved update) is two
+commands, never one: `install_mod_file`, `install_from_catalogue` or `approve_update` verify the
+package, run every check the install would (`Ledger::preview`: the verifier, the signed list, the
+publisher pin, the API range) and return the consent screen *without installing*; then
+`install_mod_consented` installs what the first staged. The staged bytes live in memory under a
+single-use, ten-minute token bound to their sha256 (`tab::stage`), and the second command never
+reads the path or the URL again, so a file swapped on disk, or a release replaced, between the
+screen and "Install" can't install anything the user wasn't shown. It verifies once more with the
+keys trusted *now*, so a key revoked while the screen waited is refused. The user's answers are
+turned into a grant plan before anything is written (`tab::consent::plan`): one answer for every
+permission asked at install, none for a permission the mod didn't declare, so a page can't write a
+grant for something else; a yes writes a `mod_grants` row only for what is asked at install (a
+first-use permission waits for its prompt), a no is always recorded. D3 and the sealed-engine rule
+run at grant time, so a forbidden pair can't be recorded either. A signed install or repair is
+refused outright while this machine's record of the safety list is unusable (`tab::commands`'s
+`View::for_install`): with the revoked keys unknown, a revoked key could still sign. The
+auto-installed pilot's first-open "Turn on" (D17) sets `consented_at`, writes its grants and records
+the disclaimer in one transaction.
+
+**Why.** A consent screen is only worth anything if what is installed is what it described. And an
+installer that trusts a page-supplied list of grants, or one that can install without the safety
+list's revocations, turns "the user agreed" into whatever the page, or a leaked key, says.
+
+**Co-signers.** Any new install path (the unsigned file install of slice 6, part 3, the folder test
+loader) shows its own screen first and installs from staged bytes through the same token, never from
+a path. Anything that writes `mod_grants` goes through `tab::consent` or `api::grants`, so D3 is
+asked at the write. The unsigned path has its own screen and its own rules (D3 across all unsigned
+mods); it doesn't borrow this one's.
+
 ---
 
 ## 6. Build tooling and dependencies

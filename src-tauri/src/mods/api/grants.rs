@@ -428,9 +428,8 @@ fn grantable(
 /// for their prompt, even when the install screen listed them. Every id must be one the installed
 /// manifest declares. All or nothing. Returns the permissions recorded.
 ///
-/// The Mods tab's install (slice 6) calls it right after the ledger's commit, for the mod's own
-/// permissions or, for an update that widened, the ones the user just approved.
-#[cfg_attr(not(test), allow(dead_code))] // the Mods tab's install (slice 6)
+/// The Mods tab's install (`tab::install::finish`) calls it right after the ledger's commit, and the
+/// first-open "Turn on" (`consent_mod`) inside its transaction, both through `tab::consent::apply`.
 pub fn record_install_consent(
     conn: &Connection,
     id: &ModId,
@@ -453,9 +452,8 @@ pub fn record_install_consent(
 }
 
 /// Record one decision: the user's answer to a first-use or unsigned prompt, or a toggle in the
-/// mod's row of the Mods tab (slice 6). A grant D3 or the unsealed engine forbids is refused, and
-/// nothing is written; a denial always is (taking a permission away is always allowed).
-#[cfg_attr(not(test), allow(dead_code))] // the permission prompts and the Mods tab (slice 6)
+/// mod's row of the Mods tab (`mod_permission_decide`). A grant D3 or the unsealed engine forbids is
+/// refused, and nothing is written; a denial always is (taking a permission away is always allowed).
 pub fn set_decision(
     conn: &Connection,
     id: &ModId,

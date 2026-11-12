@@ -96,6 +96,12 @@ pub fn spawn_refresher(app: AppHandle) {
                     if !e.is_quiet() {
                         eprintln!("mods: the safety list wasn't refreshed: {e}");
                     }
+                    // A damaged or unreadable record is silent in the log after the first line, and
+                    // nothing is fetched until it is mended: the strip must appear without a
+                    // restart, so the page is told on every pass that meets it.
+                    if let Some(notice) = record_notice(e) {
+                        emit_notices(&app, &[notice]);
+                    }
                 }
                 let jitter = Utc::now().timestamp_subsec_nanos();
                 schedule.record(now, schedule_ok(&result), jitter);
@@ -125,7 +131,9 @@ pub enum RefreshError {
     /// fetching would only repeat the same refusal. The cause is local and mends only when the
     /// record is deleted or PM is reinstalled at a version that reads it, so the retry is on the
     /// full six hours ([`Self::counts_as_failure`]), not the short back-off, and the line
-    /// [`index_state::load`] logs is the only noise. Slice 6 reads [`record_fault`] to tell the user.
+    /// [`index_state::load`] logs is the only noise. The Mods tab tells the user: a
+    /// [`ModNotice::RecordFault`] goes out each time ([`spawn_refresher`]), and `mods_safety_status`
+    /// reads [`fault_of`].
     RecordUnusable(String),
     /// The same refusal, but the cause is that the record couldn't be *read* (a transient I/O
     /// error, a data folder on a network or synced drive that is briefly away), not that it is
@@ -226,6 +234,21 @@ pub async fn refresh_once(app: &AppHandle) -> Result<(), RefreshError> {
     refused.map_or(Ok(()), Err)
 }
 
+/// The notice a pass that stopped at the record is owed (pure): none for any other outcome.
+fn record_notice(e: &RefreshError) -> Option<ModNotice> {
+    match e {
+        RefreshError::RecordUnusable(text) => Some(ModNotice::RecordFault {
+            unreadable: false,
+            text: text.clone(),
+        }),
+        RefreshError::RecordUnreadable(text) => Some(ModNotice::RecordFault {
+            unreadable: true,
+            text: text.clone(),
+        }),
+        _ => None,
+    }
+}
+
 /// How a pass's result is told to the schedule: ok waits the full six hours, a failure backs off.
 fn schedule_ok(result: &Result<(), RefreshError>) -> bool {
     result
@@ -256,7 +279,15 @@ async fn fetch_pair_if_record_usable<T: Transport>(
 /// Why the record at `data_dir` is unusable, `None` when it is whole, backed up, or not there yet;
 /// with whether it was an I/O failure reading it (`unread`: may mend by itself) rather than damage.
 fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<(String, bool)> {
-    let loaded = index_state::load(data_dir, ring);
+    fault_of(&index_state::load(data_dir, ring))
+}
+
+/// Why a record that was read is unusable, in a sentence, with whether the cause was an I/O failure
+/// reading it (`true`: may mend by itself) rather than damage; `None` when it is whole, backed up,
+/// or not there yet (pure). The Mods tab's strip says it, and `reset_safety_record` is its one way
+/// out, which forgets the seen seq and the revoked keys (the floor goes back to `MIN_INDEX_SEQ`),
+/// so it is the user's confirmed choice, never automatic.
+pub fn fault_of(loaded: &index_state::Loaded) -> Option<(String, bool)> {
     loaded.fault.then(|| {
         let problem = loaded.problem.as_deref().unwrap_or("unreadable");
         let why = if loaded.unread {
@@ -266,18 +297,6 @@ fn record_fault_in(data_dir: &Path, ring: &KeyRing) -> Option<(String, bool)> {
         };
         (why, loaded.unread)
     })
-}
-
-/// The typed state for slice 6 to surface ("the safety list's record is damaged: reset it"): why
-/// the record is unusable, `None` when it is fine. Blocking: small file reads.
-///
-/// Slice 6 seam: the reset is deleting `mods-index.json` and `mods-index.json.bak` from the data
-/// folder. That forgets the seen seq and the revoked keys (the floor goes back to `MIN_INDEX_SEQ`),
-/// so it is the user's confirmed choice, never automatic.
-#[allow(dead_code)] // slice 6's strip reads it
-pub fn record_fault(app: &AppHandle) -> Option<String> {
-    let data_dir = crate::paths::data_dir(app).ok()?;
-    record_fault_in(&data_dir, safety::ring()).map(|(why, _)| why)
 }
 
 /// Steps 3 to 5 of a pass, for the index in force.
@@ -311,6 +330,9 @@ async fn work_on<T: Transport>(
         .unwrap_or_default()
     };
     emit_notices(app, &planned.notices);
+    if !planned.notices.is_empty() {
+        emit_changed(app, CHANGED_DECIDED);
+    }
     if planned.downloads.is_empty() {
         return;
     }
@@ -348,7 +370,10 @@ async fn work_on<T: Transport>(
             Landed::Installed(i) => {
                 installed_any = true;
                 eprintln!("mods: {id} updated to {} ({})", i.version, i.state);
+                emit_changed(app, CHANGED_UPDATED);
             }
+            // A newly recorded waiting update is a note the list reads (and a notice was sent).
+            Landed::Waiting { changed: true, .. } => emit_changed(app, CHANGED_DECIDED),
             Landed::Waiting { .. } => {}
             Landed::Failed(why) => eprintln!("mods: {id} {version} not installed: {why}"),
         }
@@ -415,6 +440,10 @@ pub fn report_applied(app: &AppHandle, report: &ApplyReport) {
         eprintln!("mods: {id}'s files couldn't all be removed ({why}); retried next time");
     }
     emit_notices(app, &report.notices);
+    // A notice is a row that changed (paused, resumed, removed): the list reads the rows again.
+    if !report.notices.is_empty() {
+        emit_changed(app, CHANGED_SAFETY);
+    }
 }
 
 /// Send the notices to the main window, the only one that draws strips.
@@ -423,6 +452,47 @@ pub fn emit_notices(app: &AppHandle, notices: &[ModNotice]) {
         if let Err(e) = app.emit_to(super::MAIN_LABEL, NOTICE_EVENT, n) {
             eprintln!("mods: a notice wasn't delivered ({e})");
         }
+    }
+}
+
+/// The one event that says "the installed mods, or what the registry serves, changed": sent to the
+/// main window after every change to the `mods` rows or the registry, whoever made it (the Mods
+/// tab's own commands, the safety list's apply, the background updater, the startup load, a
+/// same-machine restore's recovery). The payload says why ([`ModsChanged::cause`]); the page's
+/// answer is always the same, to read the rows again (`list_mods`). A listener that missed one reads
+/// the rows on mount anyway: this is a convenience, not the record.
+pub const CHANGED_EVENT: &str = "mods://changed";
+/// [`ModsChanged::cause`] for mods whose files were copied back from another store of the vault
+/// after a same-machine restore (track B's `after_writer_open` emit, routed through here when the
+/// two branches merge).
+#[allow(dead_code)]
+pub const CHANGED_RECOVERED: &str = "recovered";
+/// A mod was installed, updated or repaired from the Mods tab.
+pub const CHANGED_INSTALLED: &str = "installed";
+pub const CHANGED_UNINSTALLED: &str = "uninstalled";
+pub const CHANGED_PAUSED: &str = "paused";
+pub const CHANGED_RESUMED: &str = "resumed";
+/// A first-open "Turn on" (D17).
+pub const CHANGED_CONSENTED: &str = "consented";
+/// The safety list paused, resumed or removed a mod.
+pub const CHANGED_SAFETY: &str = "safety";
+/// The background updater installed a newer version.
+pub const CHANGED_UPDATED: &str = "updated";
+/// The startup load made the registry from the rows.
+pub const CHANGED_LOADED: &str = "loaded";
+/// A permission decision, or a note kept for a strip (dismissed, waiting), changed.
+pub const CHANGED_DECIDED: &str = "decided";
+
+/// What `mods://changed` carries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModsChanged {
+    pub cause: &'static str,
+}
+
+/// Tell the main window the installed mods changed (see [`CHANGED_EVENT`]).
+pub fn emit_changed(app: &AppHandle, cause: &'static str) {
+    if let Err(e) = app.emit_to(super::MAIN_LABEL, CHANGED_EVENT, ModsChanged { cause }) {
+        eprintln!("mods: a change notice wasn't delivered ({e})");
     }
 }
 
@@ -769,6 +839,83 @@ mod tests {
             assert_eq!((i, s), (bytes.clone(), sig.clone()));
             assert!(record_fault_in(dir.path(), &ring).is_none());
         }
+    }
+
+    /// The page's `ModsChangedCause` is exactly the causes this side sends, and every `CHANGED_*`
+    /// constant is one of them, so a cause added here can't reach the page unnamed.
+    #[test]
+    fn the_pages_change_causes_are_the_constants_here() {
+        let consts = [
+            CHANGED_RECOVERED,
+            CHANGED_INSTALLED,
+            CHANGED_UNINSTALLED,
+            CHANGED_PAUSED,
+            CHANGED_RESUMED,
+            CHANGED_CONSENTED,
+            CHANGED_SAFETY,
+            CHANGED_UPDATED,
+            CHANGED_LOADED,
+            CHANGED_DECIDED,
+        ];
+        let source = include_str!("refresh.rs");
+        let declared = source
+            .lines()
+            .filter(|l| {
+                l.starts_with("pub const CHANGED_") && !l.starts_with("pub const CHANGED_EVENT")
+            })
+            .count();
+        assert_eq!(
+            declared,
+            consts.len(),
+            "a CHANGED_* constant isn't in this list"
+        );
+        let mut here: Vec<String> = consts.iter().map(|c| (*c).to_owned()).collect();
+        let mut page = crate::mods::tab::error::tests::ts_union("ModsChangedCause");
+        here.sort();
+        page.sort();
+        assert_eq!(here, page);
+        assert_eq!(CHANGED_EVENT, "mods://changed");
+        assert_eq!(
+            serde_json::to_value(ModsChanged {
+                cause: CHANGED_SAFETY
+            })
+            .unwrap(),
+            serde_json::json!({"cause": "safety"})
+        );
+    }
+
+    /// A pass that stops at the record tells the page, so the strip appears without a restart; no
+    /// other outcome does, and a damaged record is told apart from one that couldn't be read.
+    #[test]
+    fn only_a_pass_that_stopped_at_the_record_owes_the_page_a_notice() {
+        let damaged = record_notice(&RefreshError::RecordUnusable("it is damaged".into())).unwrap();
+        assert_eq!(
+            damaged,
+            ModNotice::RecordFault {
+                unreadable: false,
+                text: "it is damaged".into()
+            }
+        );
+        let unread = record_notice(&RefreshError::RecordUnreadable("eio".into())).unwrap();
+        assert!(matches!(
+            unread,
+            ModNotice::RecordFault {
+                unreadable: true,
+                ..
+            }
+        ));
+        for other in [
+            RefreshError::Fetch(FetchError::Offline("no route".into())),
+            RefreshError::Local("no folder".into()),
+            RefreshError::Refused("stale".into()),
+        ] {
+            assert!(record_notice(&other).is_none(), "{other:?}");
+        }
+        // And the wire shape the page reads.
+        assert_eq!(
+            serde_json::to_value(&damaged).unwrap(),
+            serde_json::json!({"kind": "recordFault", "unreadable": false, "text": "it is damaged"})
+        );
     }
 
     /// An I/O failure reading the record (both files, so no backup stands in) is not damage: the
