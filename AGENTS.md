@@ -181,7 +181,11 @@ release remain the open post-v1 work.
     `listing` and `words` say what a row is and what it offers, `install`/`stage`/`consent` are
     the two-step signed install (INVARIANTS.md I-33), `uninstall` is the preview and the gifts,
     `status` the safety list's strips, `disclaimer` and `device` the per-device-and-vault
-    disclaimer; the user's own pause, resume and "Turn on" are `ledger/user.rs`, and every change
+    disclaimer; `unsigned` and `dev_commands` are the unsigned file install (its own stark screen,
+    D3 judged before consent, `ledger/unsigned.rs`) and developer mode's commands: developer mode
+    is per device, only Rust reads it (`devmode.rs`, `ledger/dev_switch.rs`, INVARIANTS.md I-34),
+    and the page's `useDevMode` shows the backend's answer; the user's own pause, resume and "Turn
+    on" are `ledger/user.rs`, and every change
     to the rows or the registry ends in one `mods://changed` (`refresh::emit_changed`). `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).

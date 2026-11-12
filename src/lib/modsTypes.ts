@@ -32,6 +32,8 @@ export type ModsErrorCode =
   | "not-allowed"
   | "offline"
   | "download-refused"
+  | "dev-mode-off"
+  | "confirm-mismatch"
   | "internal";
 
 export interface ModsError {
@@ -46,6 +48,12 @@ export function modsErrorOf(e: unknown): ModsError | null {
   const f = e as Record<string, unknown>;
   if (typeof f.code !== "string" || typeof f.message !== "string" || "op" in f) return null;
   return { code: f.code as ModsErrorCode, message: f.message };
+}
+
+/** What to tell the user about any caught rejection of a Mods command: the backend's own sentence
+ *  when it sent a typed refusal, else an error's message, else `fallback`. */
+export function failureText(e: unknown, fallback: string): string {
+  return modsErrorOf(e)?.message ?? (e instanceof Error && e.message ? e.message : fallback);
 }
 
 // ---- The installed list ---------------------------------------------------------------------------
@@ -183,7 +191,9 @@ export interface ConsentScreen {
   repo: string;
   /** The commit the maker's signed build came from (second party shows "reviewed at commit …"). */
   commit: string;
-  tier: "first" | "second";
+  /** `third` is an unsigned file: `unsigned` is then set, and author, repo and commit are only what
+   *  the file claims about itself. */
+  tier: "first" | "second" | "third";
   kind: "fresh" | "update" | "repair";
   installedVersion: string | null;
   from: "file" | "catalogue";
@@ -195,6 +205,42 @@ export interface ConsentScreen {
   calendarOverlay: string | null;
   /** What an update asks for that the installed version didn't. */
   widening: string[];
+  /** Set for an unsigned file: the stark screen's extras. `null` for a signed mod. */
+  unsigned: UnsignedScreen | null;
+}
+
+/** The stark screen of an unsigned file (`installUnsignedFile`): nobody has checked it, it is judged
+ *  together with the other unsigned mods (D3), and installing asks the user to type its id. */
+export interface UnsignedScreen {
+  /** What the user types, exactly, to confirm: send it as `installModConsented`'s `confirmId`. */
+  confirmId: string;
+  /** It replaces an earlier unsigned install of this id: a fresh install, grants and secrets reset
+   *  unless approved again, its stored data kept. */
+  reinstall: boolean;
+  /** The web engine is sealed (an unsigned mod can't be granted a read otherwise). */
+  engineSealed: boolean;
+  /** Set when the file asks for both reading the user's data and reaching outside PM: the user may
+   *  allow one side, never both. */
+  readOrInternet: {
+    read: string[];
+    internet: string[];
+    /** Which side another unsigned mod already holds, if any. */
+    heldByOthers: "read" | "internet" | null;
+  } | null;
+}
+
+/** What `devModeState` answers: developer mode for THIS device in this vault. */
+export interface DevModeState {
+  on: boolean;
+  /** Why it reads as off when this device couldn't be named. */
+  problem: string | null;
+}
+
+/** What `devModeSwitch` did: developer mode now, and which unsigned mods it paused or resumed. */
+export interface DevSwitch {
+  on: boolean;
+  paused: string[];
+  resumed: string[];
 }
 
 export interface InstallResult {
@@ -349,7 +395,8 @@ export type ModsChangedCause =
   | "safety"
   | "updated"
   | "loaded"
-  | "decided";
+  | "decided"
+  | "dev-mode";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

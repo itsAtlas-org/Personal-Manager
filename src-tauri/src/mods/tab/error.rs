@@ -59,6 +59,11 @@ pub enum Code {
     Offline,
     /// A download PM won't accept (wrong file, too large, a redirect it won't follow).
     DownloadRefused,
+    /// An unsigned file while developer mode is off for this device. Read by PM itself, not
+    /// something the page can claim.
+    DevModeOff,
+    /// The stark screen's "type the mod's id" didn't match.
+    ConfirmMismatch,
     Internal,
 }
 
@@ -128,6 +133,7 @@ impl From<Refusal> for ModsError {
             Refusal::ApiRetired => Code::ApiRetired,
             Refusal::Catalogue(_) => Code::SafetyList,
             Refusal::Changed => Code::Changed,
+            Refusal::DevModeOff => Code::DevModeOff,
             _ => Code::Refused,
         };
         // The catalogue's own words already read as a sentence of their own.
@@ -237,6 +243,10 @@ pub(crate) mod tests {
             code_of(LedgerError::Refused(Refusal::Changed)),
             Code::Changed
         );
+        assert_eq!(
+            code_of(LedgerError::Refused(Refusal::DevModeOff)),
+            Code::DevModeOff
+        );
         for r in [
             Refusal::Publisher,
             Refusal::Downgrade {
@@ -246,6 +256,7 @@ pub(crate) mod tests {
             Refusal::UnreadableRecord,
             Refusal::RemovedPending,
             Refusal::NothingToUpdate,
+            Refusal::OtherInstallHoldsId,
             Refusal::Tier("nope".into()),
             Refusal::Path(PathRefusal::Version("x".into())),
         ] {
@@ -341,6 +352,8 @@ pub(crate) mod tests {
             Code::NotAllowed,
             Code::Offline,
             Code::DownloadRefused,
+            Code::DevModeOff,
+            Code::ConfirmMismatch,
             Code::Internal,
         ];
         for c in &all {
@@ -366,6 +379,8 @@ pub(crate) mod tests {
                 | Code::NotAllowed
                 | Code::Offline
                 | Code::DownloadRefused
+                | Code::DevModeOff
+                | Code::ConfirmMismatch
                 | Code::Internal => {}
             }
         }

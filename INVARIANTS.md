@@ -661,6 +661,35 @@ a path. Anything that writes `mod_grants` goes through `tab::consent` or `api::g
 asked at the write. The unsigned path has its own screen and its own rules (D3 across all unsigned
 mods); it doesn't borrow this one's.
 
+### I-34 · An unsigned mod installs and runs only while developer mode is on for this device, and only Rust says whether it is — **Held**
+
+Developer mode is "on for this device in this vault" (`mods::devmode`: the `mods_dev_devices`
+settings record, a list of device ids named by `data_dir/mods-device-id`), never a vault-wide
+switch, so a restore onto another machine, a joined shared vault or a copied database carries no
+"on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
+or writes it: the old webview-written `dev_mode` row is out of the page's allow-list, read once to
+carry an old "on" over to the first device that asks (and no other), and turned off by the restore
+reset (`devmode::all_devices_off`, which also writes an empty record so nothing is carried over
+afterwards). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+cache for first paint and never wins. The one function that switches it for this device
+(`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
+**ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row
+with the reason `dev-mode` whenever the registry's copy of the switch (`ModRuntime::unsigned_allowed`,
+false until the writer's open has looked it up, and again whenever the store closes) is off, and
+resumes exactly the rows it paused when it is on (asking the cached safety list first). So there is
+no path that reloads the registry (a startup, a resume, a recovery, a restore's open) and serves an
+unsigned mod while developer mode is off. The unsigned install reads the record itself, before the
+file is parsed, in the preview, and again inside the commit's transaction, so a switch-off while
+the files were staging wins; it refuses a package that carries a signature, a manifest that isn't
+third party, every `atlas.` id, a catalogue id, a file the blacklist names, and an id held by
+anything but an earlier unsigned file install. A reinstall of the same id is a fresh install (a new
+install id, grants and secrets reset, stored content kept, I-16).
+
+**Why.** Unsigned mods are the only mods nobody has checked, so the switch that lets them in is the
+switch that must not be carried in by a restore, written by a page, or left half applied: a
+vault-wide boolean the webview could write would make "dev mode" mean whatever the last backup or
+the page said.
+
 ---
 
 ## 6. Build tooling and dependencies

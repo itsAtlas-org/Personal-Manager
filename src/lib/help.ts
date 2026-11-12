@@ -531,7 +531,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-developer": {
     title: "Developer mode",
-    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens. It's strictly read-only (it never changes your data), independent of the density preset, and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle.",
+    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens; those never change your data. It also allows unsigned mods — installing a mod file nobody has signed, and loading a test mod from a folder — so it belongs to this computer only: a restored backup or a shared vault never turns it on elsewhere, and turning it off pauses every unsigned mod until it's on again. It's independent of the density preset and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle.",
   },
 
   // Developer mode (issue #78) — read-only inspection

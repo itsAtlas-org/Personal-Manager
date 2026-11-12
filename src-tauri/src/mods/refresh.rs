@@ -482,6 +482,8 @@ pub const CHANGED_UPDATED: &str = "updated";
 pub const CHANGED_LOADED: &str = "loaded";
 /// A permission decision, or a note kept for a strip (dismissed, waiting), changed.
 pub const CHANGED_DECIDED: &str = "decided";
+/// Developer mode was switched for this device: unsigned mods were paused or resumed with it.
+pub const CHANGED_DEV_MODE: &str = "dev-mode";
 
 /// What `mods://changed` carries.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -856,6 +858,7 @@ mod tests {
             CHANGED_UPDATED,
             CHANGED_LOADED,
             CHANGED_DECIDED,
+            CHANGED_DEV_MODE,
         ];
         let source = include_str!("refresh.rs");
         let declared = source

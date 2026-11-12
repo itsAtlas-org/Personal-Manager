@@ -6,7 +6,7 @@
 //! back out of v60's CHECKs, so the two can't drift. `mods.tier` is owned by [`super::ids::Tier`].
 //!
 //! The ledger (`ledger.rs`: install, update, uninstall, the startup load), the Mods tab's commands
-//! and the dispatcher are the writers. The folder test-mod loader (slice 6, part 3) is the one
+//! and the dispatcher are the writers. The folder test-mod loader (slice 6, part 4) is the one
 //! writer still to come: `FROM_FOLDER` and the pieces only it uses carry their own allowances.
 
 use super::package::DataClass;
@@ -48,7 +48,9 @@ pub fn is_ledger_reason(reason: &str) -> bool {
 /// through an update ([`super::policy::state_after_install`]).
 pub const REASON_USER: &str = "user";
 /// `mods.state_reason` of an unsigned mod paused because developer mode is off (spec §1.15), until
-/// it is on again. Written by the dev-mode part of slice 6; the Mods tab only words it.
+/// it is on again. Written by the ledger's load (`policy::dev_mode_state`), which pauses an active
+/// unsigned row while developer mode is off for this device and resumes exactly these rows when it
+/// is on; the Mods tab only words it.
 pub const REASON_DEV_MODE: &str = "dev-mode";
 
 /// `mods.state_reason` of a mod the signed index paused (Mods spec §1.10): stopped, its data kept.
@@ -78,6 +80,17 @@ pub const SETTING_UPDATES_WAITING: &str = "mods_updates_waiting";
 /// device AND per vault": a new machine, or a vault that has never heard of this one, asks again.
 pub const SETTING_DISCLAIMER: &str = "mods_disclaimer";
 
+/// `settings` key: which devices have developer mode on in this vault, a JSON object
+/// `{"v": 1, "devices": ["<device id>", ...]}` (`mods::devmode`). Developer mode is per device AND
+/// per vault, so a restore onto another machine or a joined shared vault never inherits it, and
+/// switching it never reaches another machine using the same vault. Not in the webview's pref
+/// allow-list: only Rust reads or writes it, and unsigned installs trust nothing else.
+pub const SETTING_DEV_DEVICES: &str = "mods_dev_devices";
+/// The pre-per-device boolean row (`"true"`/`"false"`), once webview-written. Read once, to carry an
+/// old "on" over to the device that first reads it; never an authority after that
+/// ([`SETTING_DEV_DEVICES`] exists), and a restore turns it off too.
+pub const SETTING_DEV_MODE_LEGACY: &str = "dev_mode";
+
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from
 /// file"), or a developer's unpacked test folder, which has no package sha256 and is left out of
 /// backups (§1.15). The whole set is read by the pin tests.
@@ -85,7 +98,7 @@ pub const SETTING_DISCLAIMER: &str = "mods_disclaimer";
 pub const INSTALLED_FROM: [&str; 3] = [FROM_CATALOGUE, FROM_FILE, FROM_FOLDER];
 pub const FROM_CATALOGUE: &str = "catalogue";
 pub const FROM_FILE: &str = "file";
-/// Written by the folder test-mod loader (slice 6, part 3), which doesn't exist yet.
+/// Written by the folder test-mod loader (slice 6, part 4), which doesn't exist yet.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const FROM_FOLDER: &str = "folder";
 

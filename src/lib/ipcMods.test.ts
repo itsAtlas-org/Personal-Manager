@@ -48,6 +48,20 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     { token: "tok", decisions: { "documents.meta": true, ai: false } },
   ],
   [
+    "installModConsented (an unsigned screen's typed id)",
+    () => ipc.installModConsented("tok", { internet: true }, "acme.tool"),
+    "install_mod_consented",
+    { token: "tok", decisions: { internet: true }, confirmId: "acme.tool" },
+  ],
+  [
+    "installUnsignedFile",
+    () => ipc.installUnsignedFile("/tmp/a.pmmod"),
+    "install_unsigned_file",
+    { path: "/tmp/a.pmmod" },
+  ],
+  ["devModeState", () => ipc.devModeState(), "dev_mode_state", undefined],
+  ["devModeSwitch", () => ipc.devModeSwitch(true), "dev_mode_switch", { on: true }],
+  [
     "installFromCatalogue",
     () => ipc.installFromCatalogue("atlas.map"),
     "install_from_catalogue",
@@ -128,6 +142,14 @@ describe("the Mods tab's listeners", () => {
     expect(listenMock).toHaveBeenCalledWith("mods://changed", expect.any(Function));
     listenMock.mock.calls[0][1]({ payload: { cause: "safety" } });
     expect(seen).toEqual([{ cause: "safety" }]);
+  });
+
+  it("onDevMode hears mods://dev-mode from any window", async () => {
+    const seen: unknown[] = [];
+    await ipc.onDevMode((e) => seen.push(e));
+    expect(listenMock).toHaveBeenCalledWith("mods://dev-mode", expect.any(Function));
+    listenMock.mock.calls[0][1]({ payload: { on: false } });
+    expect(seen).toEqual([{ on: false }]);
   });
 
   it("onModsNotice hears mods://notice", async () => {

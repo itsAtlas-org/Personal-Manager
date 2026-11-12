@@ -50,6 +50,7 @@
 //! when the main window couldn't be, every window without it.
 
 pub mod api;
+pub mod devmode;
 pub mod disk;
 pub mod engine;
 pub mod fetch;

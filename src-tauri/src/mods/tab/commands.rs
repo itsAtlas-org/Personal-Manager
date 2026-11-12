@@ -38,7 +38,7 @@ use super::error::{Code, ModsError, Result};
 use super::icon::{self, Icon};
 use super::install::{self, ConsentScreen, Env, InstallResult};
 use super::listing::{self, ModDto};
-use super::stage::{Stage, Staged};
+use super::stage::{Stage, Staged, Trust};
 use super::status::{self, SafetyStatus};
 use super::uninstall::{self, UninstallPreview, Uninstalled};
 use crate::mods::api::events as mod_events;
@@ -97,7 +97,7 @@ fn ready(app: &AppHandle) -> Result<()> {
 
 /// Run `f` on a blocking thread, after the window check and the store gate. Everything a command
 /// does that touches a file or the store goes through here.
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     webview: &Webview,
     f: impl FnOnce(&AppHandle) -> Result<T> + Send + 'static,
 ) -> Result<T> {
@@ -118,26 +118,27 @@ fn parse_id(id: &str) -> Result<ModId> {
 
 /// What a command knows of the safety list: the record as read, the keys it still trusts and the
 /// index in force.
-struct View {
+pub(super) struct View {
     loaded: Loaded,
     keys: TrustedKeys,
 }
 
 impl View {
-    fn read(app: &AppHandle) -> Result<Self> {
+    pub(super) fn read(app: &AppHandle) -> Result<Self> {
         let data_dir = crate::paths::data_dir(app).map_err(ModsError::internal)?;
         let loaded = index_state::load(&data_dir, safety::ring());
         let keys = safety::trusted_keys(&loaded.state);
         Ok(Self { loaded, keys })
     }
 
-    fn index(&self) -> Option<&Index> {
+    pub(super) fn index(&self) -> Option<&Index> {
         self.loaded.index.as_ref().map(|v| &v.index)
     }
 
     /// A signed install or repair needs a record it can trust: without it the revoked keys are
-    /// unknown.
-    fn for_install(&self) -> Result<()> {
+    /// unknown. An unsigned install needs it too, for the blacklist by sha256 and the catalogue's
+    /// ids.
+    pub(super) fn for_install(&self) -> Result<()> {
         install_gate(&self.loaded)
     }
 
@@ -164,7 +165,7 @@ pub fn install_gate(loaded: &Loaded) -> Result<()> {
 }
 
 /// A ledger over the open store for a change to mods: the store folder is minted when `mint` says.
-fn with_ledger<T>(
+pub(super) fn with_ledger<T>(
     app: &AppHandle,
     mint: Mint,
     f: impl FnOnce(&Ledger<'_, AppState>) -> Result<T>,
@@ -237,7 +238,11 @@ fn installed_versions(app: &AppHandle) -> Result<BTreeMap<String, String>> {
 // ---- Installing: the consent screen, then the install ---------------------------------------------
 
 /// Stage `staged` and hand the screen its token.
-fn with_token(app: &AppHandle, mut screen: ConsentScreen, staged: Staged) -> Result<ConsentScreen> {
+pub(super) fn with_token(
+    app: &AppHandle,
+    mut screen: ConsentScreen,
+    staged: Staged,
+) -> Result<ConsentScreen> {
     let stage = app.state::<Stage>();
     screen.token = stage
         .put(staged, Instant::now())
@@ -266,12 +271,16 @@ pub async fn install_mod_file(webview: Webview, path: String) -> Result<ConsentS
 
 /// Install what the consent screen `token` staged and write the grants `decisions` make (permission
 /// id to yes or no, one for each permission the screen said it needs an answer for, and any it
-/// likes for the rest). The token is good once.
+/// likes for the rest). The token is good once. A screen made for an unsigned file
+/// (`install_unsigned_file`) finishes here too, and only as one: `confirm_id` must then be the mod's
+/// id, typed by the user (checked in Rust), and developer mode is read again; a signed screen
+/// ignores `confirm_id`.
 #[tauri::command]
 pub async fn install_mod_consented(
     webview: Webview,
     token: String,
     decisions: BTreeMap<String, bool>,
+    confirm_id: Option<String>,
 ) -> Result<InstallResult> {
     blocking(&webview, move |app| {
         let staged = app
@@ -280,10 +289,21 @@ pub async fn install_mod_consented(
             .ok_or_else(ModsError::consent_expired)?;
         let view = View::read(app)?;
         view.for_install()?;
-        let env = view.env(app);
-        let finished = with_ledger(app, Mint::Always, |ledger| {
-            install::finish(ledger, staged, &decisions as &Answers, &env)
-        })?;
+        let finished = match staged.trust {
+            Trust::Signed => {
+                let env = view.env(app);
+                with_ledger(app, Mint::Always, |ledger| {
+                    install::finish(ledger, staged, &decisions as &Answers, &env)
+                })?
+            }
+            Trust::Unsigned => super::dev_commands::finish_unsigned(
+                app,
+                &view,
+                staged,
+                &decisions,
+                confirm_id.as_deref(),
+            )?,
+        };
         announce(app, &finished.told);
         refresh::emit_changed(app, refresh::CHANGED_INSTALLED);
         Ok(finished.result)

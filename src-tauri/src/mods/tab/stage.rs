@@ -29,6 +29,16 @@ pub const TTL: Duration = Duration::from_secs(10 * 60);
 /// Consent screens held at once.
 pub const MAX_STAGED: usize = 2;
 
+/// Which install the staged bytes are for. Decided when the screen is made and carried by the
+/// staged entry itself, never by what the page sends back, so a token made for an unsigned file can
+/// only finish as one (with the stark screen's id confirm and developer mode checked again) and a
+/// signed one only as signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    Signed,
+    Unsigned,
+}
+
 /// What one screen is about.
 #[derive(Debug, Clone)]
 pub struct Staged {
@@ -37,6 +47,7 @@ pub struct Staged {
     /// The `.pmmod`'s sha256, lowercase hex, as the screen showed it.
     pub sha256: String,
     pub source: Source,
+    pub trust: Trust,
     pub bytes: Vec<u8>,
 }
 
@@ -122,6 +133,7 @@ mod tests {
             version: "1.0.0".into(),
             sha256: sha_of(&bytes),
             source: Source::File,
+            trust: Trust::Signed,
             bytes,
         }
     }

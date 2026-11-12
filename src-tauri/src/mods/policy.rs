@@ -161,6 +161,12 @@ pub enum Refusal {
     /// A background install of a mod that isn't installed: unattended work only ever updates or
     /// repairs, so a mod uninstalled while its update downloaded stays uninstalled.
     NothingToUpdate,
+    /// An unsigned file while developer mode is off for this device (the install reads the store's
+    /// record itself; a page can't say it is on).
+    DevModeOff,
+    /// An unsigned file whose id is held by an installed mod that didn't come from an unsigned file
+    /// (a signed mod, or a test folder): only its own kind of install can replace it.
+    OtherInstallHoldsId,
 }
 
 impl fmt::Display for Refusal {
@@ -195,7 +201,68 @@ impl fmt::Display for Refusal {
                 "PM's safety list removed the installed mod with this id: uninstall it first",
             ),
             Self::NothingToUpdate => f.write_str("the mod it would update is no longer installed"),
+            Self::DevModeOff => f.write_str(
+                "developer mode is off on this computer, and an unsigned file installs only while \
+                 it is on",
+            ),
+            Self::OtherInstallHoldsId => f.write_str(
+                "a mod with this id is installed that didn't come from an unsigned file: uninstall \
+                 it first",
+            ),
         }
+    }
+}
+
+/// What an installed row looks like to an unsigned file with its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldBy<'a> {
+    pub signed: bool,
+    pub installed_from: &'a str,
+    pub reason: Option<&'a str>,
+}
+
+/// An unsigned file against the row that holds its id: always a fresh install. With no row it is
+/// plain; over a row left by an earlier unsigned file it is a fresh install again (the caller mints a
+/// new install id and resets the grants and secrets, spec §1.1); over anything else it is refused.
+/// There is no version rule: a developer reinstalls the version they are working on. Pure.
+pub fn decide_unsigned(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal> {
+    let Some(h) = held else {
+        return Ok(InstallKind::Fresh);
+    };
+    if h.reason == Some(store::REASON_BLACKLIST_REMOVED) {
+        return Err(Refusal::RemovedPending);
+    }
+    if h.signed || h.installed_from != store::FROM_FILE {
+        return Err(Refusal::OtherInstallHoldsId);
+    }
+    // An earlier unsigned file's row: the install over it is a fresh one.
+    Ok(InstallKind::Fresh)
+}
+
+/// What the load does to a row about developer mode (pure): `None` leaves it. `allowed` is whether
+/// developer mode is on for this device in this vault; `state` and `reason` are the row's after
+/// the load's own parks and unparks. A signed row is never touched.
+/// - **Off:** an active unsigned row is paused, `dev-mode`. Another owner's stop (the user's, the
+///   safety list's, a park) is left as it is: it serves nothing already.
+/// - **On:** a row paused `dev-mode` is resumed, and nothing else is: exactly what developer mode
+///   being off had stopped. The caller asks the safety list first.
+pub fn dev_mode_state(
+    signed: bool,
+    allowed: bool,
+    state: &str,
+    reason: Option<&str>,
+) -> Option<(&'static str, Option<&'static str>)> {
+    if signed {
+        return None;
+    }
+    match (allowed, state, reason) {
+        (false, store::STATE_ACTIVE, _) => {
+            Some((store::STATE_PAUSED, Some(store::REASON_DEV_MODE)))
+        }
+        (true, store::STATE_PAUSED, Some(store::REASON_DEV_MODE)) => {
+            Some((store::STATE_ACTIVE, None))
+        }
+        _ => None,
     }
 }
 
@@ -704,5 +771,93 @@ mod tests {
         let mut signed = maker(true, first);
         signed.tier = "third".into();
         assert!(!made_it(&maker(false, first), &signed));
+    }
+
+    #[test]
+    fn an_unsigned_file_is_always_a_fresh_install_and_only_over_its_own_kind_of_row() {
+        let held = |signed, installed_from, reason| {
+            decide_unsigned(Some(HeldBy {
+                signed,
+                installed_from,
+                reason,
+            }))
+        };
+        assert_eq!(decide_unsigned(None), Ok(InstallKind::Fresh));
+        // Over an earlier unsigned file install, whatever state it is in, and with any version.
+        assert_eq!(held(false, "file", None), Ok(InstallKind::Fresh));
+        assert_eq!(held(false, "file", Some("user")), Ok(InstallKind::Fresh));
+        assert_eq!(
+            held(false, "file", Some("dev-mode")),
+            Ok(InstallKind::Fresh)
+        );
+        // Over a signed mod, a catalogue or folder install: refused, so an id can't be taken over.
+        for (signed, from) in [
+            (true, "file"),
+            (true, "catalogue"),
+            (false, "folder"),
+            (false, "catalogue"),
+        ] {
+            assert_eq!(
+                held(signed, from, None),
+                Err(Refusal::OtherInstallHoldsId),
+                "{signed} {from}"
+            );
+        }
+        // A row the safety list removed waits for its uninstall, whoever made it.
+        assert_eq!(
+            held(false, "file", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+        assert_eq!(
+            held(true, "catalogue", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+    }
+
+    #[test]
+    fn developer_mode_pauses_an_active_unsigned_row_and_resumes_only_what_it_paused() {
+        use store::{REASON_DEV_MODE, STATE_ACTIVE, STATE_PARKED, STATE_PAUSED};
+        let off_paused = Some((STATE_PAUSED, Some(REASON_DEV_MODE)));
+        // Off: an active unsigned row is paused for developer mode.
+        assert_eq!(dev_mode_state(false, false, STATE_ACTIVE, None), off_paused);
+        // Off: everything else is left (it serves nothing already, and it is another owner's).
+        for (state, reason) in [
+            (STATE_PAUSED, Some("user")),
+            (STATE_PAUSED, Some("blacklist")),
+            (STATE_PAUSED, Some("blacklist-removed")),
+            (STATE_PAUSED, Some(REASON_DEV_MODE)),
+            (STATE_PARKED, Some("files-missing")),
+            ("installing", None),
+        ] {
+            assert_eq!(
+                dev_mode_state(false, false, state, reason),
+                None,
+                "{state} {reason:?}"
+            );
+        }
+        // On: exactly the rows developer mode paused come back; nothing else is resumed.
+        assert_eq!(
+            dev_mode_state(false, true, STATE_PAUSED, Some(REASON_DEV_MODE)),
+            Some((STATE_ACTIVE, None))
+        );
+        for (state, reason) in [
+            (STATE_PAUSED, Some("user")),
+            (STATE_PAUSED, Some("blacklist")),
+            (STATE_PAUSED, None),
+            (STATE_ACTIVE, None),
+            (STATE_PARKED, Some("files-missing")),
+        ] {
+            assert_eq!(
+                dev_mode_state(false, true, state, reason),
+                None,
+                "{state} {reason:?}"
+            );
+        }
+        // A signed row is never touched, in either direction.
+        assert_eq!(dev_mode_state(true, false, STATE_ACTIVE, None), None);
+        assert_eq!(
+            dev_mode_state(true, true, STATE_PAUSED, Some(REASON_DEV_MODE)),
+            None
+        );
     }
 }

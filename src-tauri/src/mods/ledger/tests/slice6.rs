@@ -307,7 +307,7 @@ fn turning_on_a_pilot_sets_consent_writes_the_grants_and_the_disclaimer_and_load
         .consent(&id("atlas.map"), &serve_all(), now(), |conn| {
             let plan = consent::GrantPlan {
                 grant: vec!["documents.meta".into()],
-                deny: vec![],
+                ..consent::GrantPlan::default()
             };
             consent::apply(conn, &id("atlas.map"), &plan, true)?;
             disclaimer::record(conn, DEVICE).map_err(|e| GrantError::Db(e.to_string()))
@@ -344,7 +344,7 @@ fn a_refused_grant_at_turn_on_leaves_the_mod_off_and_rolls_back_whatever_was_wri
                 &id("atlas.map"),
                 &consent::GrantPlan {
                     grant: vec!["documents.meta".into()],
-                    deny: vec![],
+                    ..consent::GrantPlan::default()
                 },
                 true,
             )?;

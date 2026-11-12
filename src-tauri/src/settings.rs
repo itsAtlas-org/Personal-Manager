@@ -343,10 +343,13 @@ pub fn set_time_zone(state: State<'_, AppState>, zone: String) -> Result<()> {
 /// absent from a `.pmbackup`, and not covered by the store's key. They each get their OWN key rather
 /// than joining `project_ui`: `useSidebarSplit` rewrites that blob whole on every divider drag, so a
 /// co-tenant would be silently deleted.
+///
+/// `dev_mode` is no longer one of them: developer mode is per device and decides whether unsigned
+/// mods may install and run, so the page can't write it (`mods::devmode`, the `dev_mode_state` and
+/// `dev_mode_switch` commands). The old row stays in the store, read once to carry an old "on" over.
 const WEBVIEW_PREFS: &[&str] = &[
     "appearance",
     "pinboard",
-    "dev_mode",
     "map",
     "project_ui",
     "milestone_ui",
@@ -585,14 +588,13 @@ mod tests {
     #[test]
     fn webview_prefs_allowlist_excludes_sensitive_settings() {
         // I-04: get_pref/set_pref gate on this list, so a compromised webview can read or write ONLY
-        // its own UI blobs. Lock it: the eight UI keys are in, and schema-critical / sensitive rows
+        // its own UI blobs. Lock it: the seven UI keys are in, and schema-critical / sensitive rows
         // are out — a future edit that accidentally adds one trips this test. The last three carry
         // user content (project names, calendar ids, backup account ids) that used to sit in the
         // webview's plaintext localStorage, so dropping one of them silently sends it back there.
         for ui in [
             "appearance",
             "pinboard",
-            "dev_mode",
             "map",
             "project_ui",
             "milestone_ui",
@@ -601,12 +603,16 @@ mod tests {
         ] {
             assert!(WEBVIEW_PREFS.contains(&ui), "{ui} should be webview-owned");
         }
+        // Developer mode gates unsigned mods: a page that could write it could switch it on (the
+        // old `dev_mode` row and the per-device record, `mods_dev_devices`, are Rust's alone).
         for sensitive in [
             "embedding_dim",
             "embedding_model",
             "learning_profile",
             "last_backup_at",
             "backup_gdrive_account",
+            "dev_mode",
+            "mods_dev_devices",
         ] {
             assert!(
                 !WEBVIEW_PREFS.contains(&sensitive),

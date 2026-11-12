@@ -61,7 +61,7 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -411,6 +411,12 @@ pub struct ModRuntime {
     /// uninstall, the startup load and sweep, the wipe), so the sweep can never see an install's
     /// folder between its rename and its row's commit.
     ledger: Mutex<()>,
+    /// Whether unsigned mods may be served: developer mode is on for this device in the open vault
+    /// (`devmode`). Set by the writer's startup before the load and by the dev-mode switch, from the
+    /// store's record, and read by every ledger load; false (nothing unsigned served) until then and
+    /// whenever the store closes, so no path can serve an unsigned mod without developer mode having
+    /// been looked up. The record in the store is the truth, this is its in-memory shadow.
+    unsigned_allowed: AtomicBool,
 }
 
 impl ModRuntime {
@@ -421,7 +427,19 @@ impl ModRuntime {
             inner: Mutex::new(Inner::default()),
             gate: ServeGate::new(MAX_SERVING, MAX_WAITING),
             ledger: Mutex::new(()),
+            unsigned_allowed: AtomicBool::new(false),
         }
+    }
+
+    /// Whether unsigned mods may be served now (developer mode is on for this device in this vault).
+    pub fn unsigned_allowed(&self) -> bool {
+        self.unsigned_allowed.load(Ordering::SeqCst)
+    }
+
+    /// Record what the store says about developer mode for this device. The caller reads it from
+    /// the open store ([`super::devmode::is_on`]) and then loads, so the registry follows.
+    pub fn set_unsigned_allowed(&self, allowed: bool) {
+        self.unsigned_allowed.store(allowed, Ordering::SeqCst);
     }
 
     /// The ledger's lock. Synchronous work only: never held across an `.await`. A panic part way
@@ -470,6 +488,9 @@ impl ModRuntime {
     /// was uninstalled or paused, so no frame is told it was: the sessions' store is gone and the
     /// page that held them goes with it; their next call finds the session ended.
     pub fn clear(&self) {
+        // Nothing unsigned is served by a store that hasn't looked developer mode up (the writer's
+        // next open sets it again).
+        self.set_unsigned_allowed(false);
         let mut inner = self.lock();
         inner.installed.clear();
         inner.tickets.clear();

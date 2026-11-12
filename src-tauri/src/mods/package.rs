@@ -24,8 +24,8 @@
 //! entry's agreement and the whole file's sha256 against it, the blacklist, "newer than installed"
 //! (or a repair's pinned version and sha256), the publisher pin, and whether PM supports the API
 //! range. The install path runs them on the [`VerifiedPackage`]. So does the check that an unsigned
-//! file's id isn't a catalogue id; unsigned (third-party) files get their own entry point with the
-//! dev-mode install.
+//! file's id isn't a catalogue id; unsigned (third-party) files get their own entry point,
+//! [`verify_unsigned`], for developer mode's file install.
 //!
 //! **The trusted comment's format** (the pm-mods sign job writes it with `minisign -S -t`): eight
 //! `key:value` fields separated by tabs, in this order, each exactly once:
@@ -145,6 +145,9 @@ pub enum Refusal {
     TotalTooLarge,
     Corrupt,
     Unsigned,
+    /// An archive that carries a signature, offered to the unsigned entry point ([`verify_unsigned`]):
+    /// a file is either verified as signed or plain unsigned, never both.
+    Signed,
     Signature,
     UntrustedKey,
     BadSignature,
@@ -197,10 +200,18 @@ pub struct VerifiedPackage {
     pub manifest: Manifest,
     /// Every file `checksums.json` lists, keyed by package path, as the bytes that were hashed.
     pub files: BTreeMap<String, VerifiedFile>,
-    /// Which of the trusted keys signed it.
-    pub signer: usize,
-    /// The signed trusted comment, verbatim.
-    pub trusted_comment: String,
+    /// Which of the trusted keys signed it; `None` for an unsigned file ([`verify_unsigned`]).
+    pub signer: Option<usize>,
+    /// The signed trusted comment, verbatim; `None` for an unsigned file.
+    pub trusted_comment: Option<String>,
+}
+
+impl VerifiedPackage {
+    /// Whether a trusted Atlas key signed it. The signed install path refuses a package that wasn't
+    /// (the unsigned one has its own, `ledger::unsigned`), so the two can't be mixed up.
+    pub fn is_signed(&self) -> bool {
+        self.signer.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,11 +481,87 @@ pub fn verify_with(
     let (signer, trusted_comment) = verify_signature(&checksums, &signature, keys)?;
     let comment = TrustedComment::parse(&trusted_comment)?;
     let listed = parse_checksums(&checksums)?;
+    let (manifest, files) = read_listed(&mut reader, &names, &listed, true)?;
+    comment.check_against(&manifest)?;
+    ids::check_tier(&manifest.id, manifest.publisher.tier)
+        .map_err(|e| refuse(Refusal::Id, e.to_string()))?;
+    check_licence_text(&files)?;
+    Ok(VerifiedPackage {
+        manifest,
+        files,
+        signer: Some(signer),
+        trusted_comment: Some(trusted_comment),
+    })
+}
 
-    // Exactly the listed files, plus the two that list and sign them.
+/// Verify an unsigned `.pmmod` (developer mode's file install, Mods spec §1.1, §1.15): the same
+/// archive without its signature. Everything the signed verifier checks but the signature is
+/// checked the same way: the zip's structure and every entry's name and type, `pmmod/checksums.json`
+/// listing exactly the files the zip holds, each one's sha256, every size cap on the bytes actually
+/// decompressed, the manifest's fields, the licence. The file is third party: its manifest must say
+/// so, and so no `atlas.` id passes ([`ids::check_tier`]). An archive that carries a signature is
+/// refused here: it is either a signed file (verified by [`verify`] against keys PM trusts) or an
+/// unsigned one, so a signed file with a bad signature can't be installed as an unsigned one. With
+/// no signature nothing vouches for the checksums' authenticity: this proves the file is whole and
+/// well formed, not who made it, which is why the install around it is the stark one.
+pub fn verify_unsigned(bytes: &[u8]) -> Result<VerifiedPackage, PackageError> {
+    verify_unsigned_with(bytes, &Limits::DEFAULT)
+}
+
+/// [`verify_unsigned`] under the given caps.
+pub fn verify_unsigned_with(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<VerifiedPackage, PackageError> {
+    if bytes.len() > limits.file {
+        return Err(refuse(Refusal::TooLarge, "the file is too large"));
+    }
+    let mut reader = Archive::open(bytes, limits)?;
+    let names = reader.check_entries()?;
+    if names.iter().any(|n| n == SIGNATURE) {
+        return Err(refuse(
+            Refusal::Signed,
+            "it carries a signature, so it isn't an unsigned file",
+        ));
+    }
+    let checksums = reader
+        .read(CHECKSUMS, CHECKSUMS_CAP)?
+        .ok_or_else(|| refuse(Refusal::Missing, format!("it has no {CHECKSUMS}")))?;
+    let listed = parse_checksums(&checksums)?;
+    let (manifest, files) = read_listed(&mut reader, &names, &listed, false)?;
+    if manifest.publisher.tier != Tier::Third {
+        return Err(refuse(
+            Refusal::Manifest,
+            "an unsigned file must say it is third party (publisher.tier \"third\")",
+        ));
+    }
+    ids::check_tier(&manifest.id, manifest.publisher.tier)
+        .map_err(|e| refuse(Refusal::Id, e.to_string()))?;
+    check_licence_text(&files)?;
+    Ok(VerifiedPackage {
+        manifest,
+        files,
+        signer: None,
+        trusted_comment: None,
+    })
+}
+
+/// What the signed and the unsigned verifier share once the checksums are in hand: the zip holds
+/// exactly the listed files (plus `pmmod/checksums.json`, and the signature when `signed`), each
+/// one's sha256 matches, the manifest parses and its paths are among the files, and the licence is
+/// the AGPL's.
+fn read_listed(
+    reader: &mut Archive<'_>,
+    names: &[String],
+    listed: &BTreeMap<String, [u8; 32]>,
+    signed: bool,
+) -> Result<(Manifest, BTreeMap<String, VerifiedFile>), PackageError> {
+    // Exactly the listed files, plus the two that list and sign them (one, unsigned).
     let mut expected: BTreeSet<&str> = listed.keys().map(String::as_str).collect();
     expected.insert(CHECKSUMS);
-    expected.insert(SIGNATURE);
+    if signed {
+        expected.insert(SIGNATURE);
+    }
     let present: BTreeSet<&str> = names.iter().map(String::as_str).collect();
     if let Some(extra) = present.difference(&expected).next() {
         return Err(refuse(
@@ -493,11 +580,11 @@ pub fn verify_with(
     }
 
     let mut files = BTreeMap::new();
-    for (path, want) in &listed {
+    for (path, want) in listed {
         let cap = if path == MANIFEST {
             MANIFEST_CAP
         } else {
-            limits.entry
+            reader.limits.entry
         };
         let bytes = reader
             .read(path, cap)?
@@ -506,7 +593,15 @@ pub fn verify_with(
         if &got != want {
             return Err(refuse(
                 Refusal::ChecksumMismatch,
-                format!("{} isn't the file that was signed", quote(path)),
+                format!(
+                    "{} isn't the file {}",
+                    quote(path),
+                    if signed {
+                        "that was signed"
+                    } else {
+                        "its checksums list"
+                    }
+                ),
             ));
         }
         files.insert(path.clone(), VerifiedFile { sha256: got, bytes });
@@ -517,17 +612,7 @@ pub fn verify_with(
         .ok_or_else(|| refuse(Refusal::Missing, format!("it has no {MANIFEST}")))?
         .bytes;
     let manifest = parse_manifest(manifest_bytes, &files)?;
-    comment.check_against(&manifest)?;
-    ids::check_tier(&manifest.id, manifest.publisher.tier)
-        .map_err(|e| refuse(Refusal::Id, e.to_string()))?;
-    check_licence_text(&files)?;
-
-    Ok(VerifiedPackage {
-        manifest,
-        files,
-        signer,
-        trusted_comment,
-    })
+    Ok((manifest, files))
 }
 
 /// The zip, opened strictly, with a running budget for what has been decompressed.
@@ -1673,6 +1758,22 @@ pub(crate) mod tests {
         (f.bytes(), f.key.public())
     }
 
+    /// An unsigned `.pmmod` for other modules' tests (the ledger's and the tab's): a third-party
+    /// manifest (`acme.tool`), the same files, no signature entry, `change` applied to the manifest
+    /// and files first.
+    pub(crate) fn unsigned_package(
+        change: impl FnOnce(&mut Value, &mut BTreeMap<String, Vec<u8>>),
+    ) -> Vec<u8> {
+        let mut f = Fixture::new();
+        f.manifest["id"] = json!("acme.tool");
+        f.manifest["publisher"]["tier"] = json!("third");
+        f.manifest["publisher"]["author"] = json!("Acme");
+        f.manifest["publisher"]["sourceRepo"] = json!("acme/tool");
+        f.signature = Some(None);
+        change(&mut f.manifest, &mut f.files);
+        f.bytes()
+    }
+
     /// Rewrite a field in an entry's local and central headers alike (so they still agree).
     fn patch_headers(zip: &mut [u8], name: &str, local_at: usize, central_at: usize, value: &[u8]) {
         let mut patched = 0;
@@ -1705,7 +1806,8 @@ pub(crate) mod tests {
         let other = TestKey::new();
         // Any trusted key may have signed it; the result says which.
         let pkg = verify(&f.bytes(), &[other.public(), f.key.public()]).unwrap();
-        assert_eq!(pkg.signer, 1);
+        assert_eq!(pkg.signer, Some(1));
+        assert!(pkg.is_signed());
         let m = &pkg.manifest;
         assert_eq!(m.id.as_str(), "atlas.map");
         assert_eq!(m.name, "Map");
@@ -1741,7 +1843,7 @@ pub(crate) mod tests {
         let main = &pkg.files["app/main.js"];
         assert_eq!(main.bytes, b"console.log('map');");
         assert_eq!(main.sha256, <[u8; 32]>::from(Sha256::digest(&main.bytes)));
-        assert_eq!(pkg.trusted_comment, comment_for(&f.manifest));
+        assert_eq!(pkg.trusted_comment, Some(comment_for(&f.manifest)));
     }
 
     /// The whole path a slice-3 install will take: verify, write the verified bytes, register, open
@@ -1890,7 +1992,7 @@ pub(crate) mod tests {
              commit:0123456789abcdef0123456789abcdef01234567\tapi:1.0-1.0"
         );
         let f = Fixture::new();
-        assert_eq!(f.verify().unwrap().trusted_comment, comment);
+        assert_eq!(f.verify().unwrap().trusted_comment, Some(comment));
     }
 
     #[test]
@@ -2671,6 +2773,142 @@ pub(crate) mod tests {
                 .verify()
                 .is_ok()
         );
+    }
+
+    // ---- The unsigned entry point ------------------------------------------------------------
+
+    fn unsigned_fixture() -> Fixture {
+        let mut f = Fixture::new();
+        f.manifest["id"] = json!("acme.tool");
+        f.manifest["publisher"]["tier"] = json!("third");
+        f.manifest["publisher"]["author"] = json!("Acme");
+        f.manifest["publisher"]["sourceRepo"] = json!("acme/tool");
+        f.signature = Some(None);
+        f
+    }
+
+    fn unsigned_refusal(f: &Fixture) -> Refusal {
+        match verify_unsigned(&f.bytes()) {
+            Ok(_) => panic!("the unsigned package was accepted"),
+            Err(e) => e.refusal,
+        }
+    }
+
+    #[test]
+    fn a_well_formed_unsigned_file_verifies_and_says_it_is_not_signed() {
+        let f = unsigned_fixture();
+        let pkg = verify_unsigned(&f.bytes()).unwrap();
+        assert!(!pkg.is_signed());
+        assert_eq!((pkg.signer, pkg.trusted_comment.as_deref()), (None, None));
+        assert_eq!(pkg.manifest.id.as_str(), "acme.tool");
+        assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+        assert_eq!(pkg.files["app/main.js"].bytes, b"console.log('map');");
+        // The same bytes are not a signed package: the signed verifier names the missing signature.
+        assert_eq!(
+            refusal(verify(&f.bytes(), &[f.key.public()])),
+            Refusal::Unsigned
+        );
+    }
+
+    #[test]
+    fn an_archive_with_a_signature_is_never_an_unsigned_file() {
+        // A perfectly good signed package, and a badly signed one, both go to the signed verifier.
+        let mut f = unsigned_fixture();
+        f.signature = None;
+        assert_eq!(unsigned_refusal(&f), Refusal::Signed);
+        f.signature = Some(Some(b"not a signature".to_vec()));
+        assert_eq!(unsigned_refusal(&f), Refusal::Signed);
+    }
+
+    #[test]
+    fn an_unsigned_file_is_held_to_every_rule_but_the_signature() {
+        // Structure and checksums.
+        let mut f = unsigned_fixture();
+        f.checksums = Some(b"{}".to_vec());
+        assert_eq!(unsigned_refusal(&f), Refusal::Checksums);
+        let mut f = unsigned_fixture();
+        f.tampered
+            .insert("app/main.js".to_owned(), b"evil()".to_vec());
+        let err = verify_unsigned(&f.bytes()).unwrap_err();
+        assert_eq!(err.refusal, Refusal::ChecksumMismatch);
+        assert!(err.detail.contains("checksums list"), "{}", err.detail);
+        let mut f = unsigned_fixture();
+        f.extra.push(("app/extra.js".to_owned(), b"x".to_vec()));
+        assert_eq!(unsigned_refusal(&f), Refusal::Unlisted);
+        let mut f = unsigned_fixture();
+        f.omitted.push("app/layout.js".to_owned());
+        assert_eq!(unsigned_refusal(&f), Refusal::Missing);
+        assert_eq!(
+            verify_unsigned(b"not a zip").unwrap_err().refusal,
+            Refusal::NotAZip
+        );
+        // The manifest, the licence, and the caps.
+        let mut f = unsigned_fixture();
+        f.manifest["name"] = json!("");
+        assert_eq!(unsigned_refusal(&f), Refusal::Manifest);
+        let mut f = unsigned_fixture();
+        f.files.insert("LICENCE.txt".to_owned(), b"MIT".to_vec());
+        assert_eq!(unsigned_refusal(&f), Refusal::Licence);
+        let tiny = Limits {
+            entry: 8,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            verify_unsigned_with(&unsigned_fixture().bytes(), &tiny)
+                .unwrap_err()
+                .refusal,
+            Refusal::EntryTooLarge
+        );
+        let small = Limits {
+            file: 16,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            verify_unsigned_with(&unsigned_fixture().bytes(), &small)
+                .unwrap_err()
+                .refusal,
+            Refusal::TooLarge
+        );
+        // No checksums file at all.
+        let mut zw = ZipWriter::new(Cursor::new(Vec::new()));
+        zw.start_file("manifest.json", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(b"{}").unwrap();
+        let bytes = zw.finish().unwrap().into_inner();
+        assert_eq!(
+            verify_unsigned(&bytes).unwrap_err().refusal,
+            Refusal::Missing
+        );
+    }
+
+    #[test]
+    fn an_unsigned_file_must_say_it_is_third_party() {
+        for tier in ["first", "second"] {
+            let mut f = unsigned_fixture();
+            f.manifest["publisher"]["tier"] = json!(tier);
+            assert_eq!(unsigned_refusal(&f), Refusal::Manifest, "{tier}");
+        }
+    }
+
+    #[test]
+    fn an_unsigned_file_is_never_in_atlas_s_id_space() {
+        let mut f = unsigned_fixture();
+        f.manifest["id"] = json!("atlas.map");
+        assert_eq!(unsigned_refusal(&f), Refusal::Id);
+        // Not by case either (the id grammar is lowercase, so a capital is a grammar refusal).
+        let mut f = unsigned_fixture();
+        f.manifest["id"] = json!("Atlas.map");
+        assert!(matches!(
+            unsigned_refusal(&f),
+            Refusal::Id | Refusal::Manifest
+        ));
+    }
+
+    #[test]
+    fn the_unsigned_test_helper_makes_a_file_the_unsigned_verifier_takes() {
+        let bytes = unsigned_package(|m, _| m["version"] = json!("2.0.0"));
+        let pkg = verify_unsigned(&bytes).unwrap();
+        assert_eq!(pkg.manifest.version, semver::Version::new(2, 0, 0));
     }
 
     #[test]

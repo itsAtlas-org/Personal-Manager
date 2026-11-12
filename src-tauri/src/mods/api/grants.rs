@@ -209,6 +209,17 @@ fn read_decision(
 /// with a granted row, or with no row and an `Auto` policy. What D3 judges, across the tier's
 /// whole set, paused and parked mods included (a pause keeps its grants).
 pub fn holdings(conn: &Connection, tier: PolicyTier) -> rusqlite::Result<Vec<(PolicyTier, Class)>> {
+    holdings_except(conn, tier, None)
+}
+
+/// [`holdings`] without `except`'s own: what the rest of the tier holds. An unsigned file installed
+/// over an earlier install of the same id starts with no grants (its old ones are reset), so the
+/// screen and the plan judge it against everyone else's.
+pub fn holdings_except(
+    conn: &Connection,
+    tier: PolicyTier,
+    except: Option<&ModId>,
+) -> rusqlite::Result<Vec<(PolicyTier, Class)>> {
     let mut mods = conn.prepare("SELECT id, signed, tier, manifest FROM mods")?;
     let rows = mods.query_map([], |r| {
         Ok((
@@ -234,7 +245,7 @@ pub fn holdings(conn: &Connection, tier: PolicyTier) -> rusqlite::Result<Vec<(Po
     for row in rows {
         let (id, signed, stored_tier, manifest) = row?;
         let this_tier = PolicyTier::of(signed, &stored_tier);
-        if this_tier != tier {
+        if this_tier != tier || except.is_some_and(|e| e.as_str() == id) {
             continue;
         }
         let (declared, _) = manifest_declarations(&manifest);
@@ -795,6 +806,45 @@ mod tests {
         )
         .unwrap();
         assert!(set_decision(&conn, &reader, "documents.meta", Decision::Granted, true).is_err());
+    }
+
+    /// What an unsigned file's screen and plan judge a fresh install of an id against: everyone
+    /// else's grants. Its own old ones are about to be reset, so they must not count.
+    #[test]
+    fn holdings_except_leaves_out_one_mods_own_grants_and_nothing_else() {
+        let (_dir, conn) = store();
+        insert_mod(
+            &conn,
+            &ModRow::unsigned("acme.reader", &["documents.meta", "internet"]),
+        );
+        insert_mod(&conn, &ModRow::unsigned("acme.poster", &["internet"]));
+        set_decision(
+            &conn,
+            &id("acme.reader"),
+            "documents.meta",
+            Decision::Granted,
+            true,
+        )
+        .unwrap();
+        set_decision(
+            &conn,
+            &id("acme.poster"),
+            "internet",
+            Decision::Denied,
+            true,
+        )
+        .unwrap();
+        let all = holdings(&conn, Unsigned).unwrap();
+        assert!(all.contains(&(Unsigned, Class::Read)));
+        // Without the reader, nothing reads: the rest holds no read.
+        let rest = holdings_except(&conn, Unsigned, Some(&id("acme.reader"))).unwrap();
+        assert!(!rest.contains(&(Unsigned, Class::Read)));
+        // Excluding nobody is `holdings`; excluding another id changes nothing.
+        assert_eq!(holdings_except(&conn, Unsigned, None).unwrap(), all);
+        assert_eq!(
+            holdings_except(&conn, Unsigned, Some(&id("acme.poster"))).unwrap(),
+            all
+        );
     }
 
     #[test]

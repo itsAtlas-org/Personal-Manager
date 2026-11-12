@@ -34,7 +34,8 @@ use serde::Serialize;
 use super::consent::{self, Answers, GrantPlan};
 use super::error::{Code, ModsError, Result};
 use super::listing::{self, PermissionDto};
-use super::stage::{self, Staged};
+use super::stage::{self, Staged, Trust};
+use super::unsigned::UnsignedScreen;
 use crate::mods::api::grants::Decision;
 use crate::mods::api::permissions::{self, PolicyTier};
 use crate::mods::fetch::{self, Endpoints, Transport};
@@ -109,7 +110,8 @@ pub struct ConsentScreen {
     /// The source repo, `owner/repo`, and the commit the maker's signed build came from.
     pub repo: String,
     pub commit: String,
-    /// `first` or `second`: signed mods only (an unsigned file has its own, stark, screen).
+    /// `first` or `second` for a signed mod; `third` for an unsigned file, whose `unsigned` part
+    /// makes it the stark screen.
     pub tier: String,
     /// `fresh`, `update` or `repair`.
     pub kind: &'static str,
@@ -126,6 +128,10 @@ pub struct ConsentScreen {
     /// What an update asks for that the installed version didn't (`permission:ai`,
     /// `host:example.com`, `secret:key`, `contribution:nav.tab`).
     pub widening: Vec<String>,
+    /// Set for an unsigned file: nobody has checked it, it is judged with the other unsigned mods
+    /// (D3), and installing it asks the user to type its id (`install_mod_consented`'s
+    /// `confirm_id`). `None` for a signed mod.
+    pub unsigned: Option<UnsignedScreen>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -238,6 +244,7 @@ pub fn screen(
         nav_tab: m.contributions.nav_tab.clone(),
         calendar_overlay: m.contributions.calendar_overlay.clone(),
         widening: preview.widening.iter().map(widening_text).collect(),
+        unsigned: None,
     }
 }
 
@@ -272,6 +279,7 @@ pub fn prepare<S: LedgerStore>(
         version: pkg.manifest.version.to_string(),
         sha256,
         source,
+        trust: Trust::Signed,
         bytes,
     };
     Ok((screen, staged))
@@ -345,6 +353,11 @@ pub fn finish<S: LedgerStore>(
     answers: &Answers,
     env: &Env<'_>,
 ) -> Result<Finished> {
+    // A token made for an unsigned file never finishes as a signed install (its own finish has the
+    // id confirm and developer mode).
+    if staged.trust != Trust::Signed {
+        return Err(ModsError::consent_expired());
+    }
     // Verified again, with the keys this machine trusts now: a key revoked while the screen waited
     // is refused here.
     let pkg: VerifiedPackage = package::verify(&staged.bytes, env.keys.public_keys())?;

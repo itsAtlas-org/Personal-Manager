@@ -2123,6 +2123,12 @@ pub fn run() {
             mods::tab::commands::mods_safety_status,
             mods::tab::commands::dismiss_mod_resumed,
             mods::tab::commands::reset_safety_record,
+            // Developer mode's switch, per device, and the unsigned file install's first step
+            // (Mods slice 6, part 3). Not the `commands_dev` readers below: those are harmless
+            // reads; these decide whether unsigned mods may be installed and run.
+            mods::tab::dev_commands::dev_mode_state,
+            mods::tab::dev_commands::dev_mode_switch,
+            mods::tab::dev_commands::install_unsigned_file,
             // Developer mode (issue #78) — read-only inspection. Always registered (the
             // commands are harmless reads); only the UI is gated by the runtime `devMode`.
             commands_dev::dev_system_info,

@@ -67,11 +67,16 @@ mod blacklist;
 mod updates;
 // The user's own pause, resume and first-open consent (slice 6).
 mod user;
+// The unsigned file install, and developer mode's switch for this device (slice 6, part 3).
+mod dev_switch;
+mod unsigned;
 #[allow(unused_imports)]
 pub use blacklist::{
     clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
     Waiting, WaitingKind,
 };
+pub use dev_switch::{set_dev_mode_for_this_device, DevSwitch};
+pub use unsigned::{UnsignedInstall, UnsignedOptions};
 #[allow(unused_imports)]
 pub use updates::{Landed, Pass, RepairTarget};
 pub use user::{ChangeRefusal, Standing};
@@ -393,6 +398,10 @@ pub struct StartupReport {
     pub unrecovered: Vec<String>,
     /// Rows the [`ServeCheck`] kept from being served, with its reason.
     pub held: Vec<(String, String)>,
+    /// Unsigned rows this load paused because developer mode is off for this device, and rows it
+    /// resumed because it is on ([`policy::dev_mode_state`]).
+    pub dev_paused: Vec<String>,
+    pub dev_resumed: Vec<String>,
     /// Why nothing was loaded or swept, when the listing couldn't be read.
     pub skipped: Option<String>,
     pub sweep: SweepReport,
@@ -423,6 +432,8 @@ struct Row {
     id: String,
     version: String,
     package_sha256: Option<String>,
+    /// Whether an Atlas key signed it; an unsigned row is served only while developer mode is on.
+    signed: bool,
     state: String,
     reason: Option<String>,
     consented: bool,
@@ -513,13 +524,10 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         })
     }
 
-    /// The checks, under the ledger lock the caller holds.
-    fn checks(
-        &self,
-        pkg: &VerifiedPackage,
-        package_sha256: &str,
-        opts: &InstallOptions<'_>,
-    ) -> Result<Checked, LedgerError> {
+    /// The rules every install shares, signed or not: the id belongs to the tier it claims, the
+    /// version names a folder, this PM serves the API range, and (on Windows) the paths fit.
+    /// Returns the version's folder name.
+    fn static_checks(&self, pkg: &VerifiedPackage) -> Result<VersionName, LedgerError> {
         let m = &pkg.manifest;
         ids::check_tier(&m.id, m.publisher.tier).map_err(|e| Refusal::Tier(e.to_string()))?;
         let version = VersionName::new(&m.version)?;
@@ -536,6 +544,26 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
                 pkg.files.keys().map(String::as_str),
             )?;
         }
+        Ok(version)
+    }
+
+    /// The checks, under the ledger lock the caller holds.
+    fn checks(
+        &self,
+        pkg: &VerifiedPackage,
+        package_sha256: &str,
+        opts: &InstallOptions<'_>,
+    ) -> Result<Checked, LedgerError> {
+        let m = &pkg.manifest;
+        // This is the signed install. An unsigned package (`package::verify_unsigned`) has its own
+        // path (`ledger::unsigned`) with its own rules, and must never get in through this one.
+        if !pkg.is_signed() {
+            return Err(LedgerError::Package(PackageError {
+                refusal: package::Refusal::Unsigned,
+                detail: "it isn't signed".into(),
+            }));
+        }
+        let version = self.static_checks(pkg)?;
         opts.catalogue
             .check(pkg, package_sha256, opts.source)
             .map_err(Refusal::Catalogue)?;
@@ -608,21 +636,6 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             manifest_text,
             ..
         } = self.checks(pkg, package_sha256, opts)?;
-        let files: Vec<FileRecord> = pkg
-            .files
-            .iter()
-            .map(|(path, f)| FileRecord {
-                path: path.clone(),
-                sha256: hex::encode(f.sha256),
-                size: f.bytes.len() as u64,
-            })
-            .collect();
-        let project_refs: Vec<Value> = m
-            .data
-            .project_refs
-            .iter()
-            .map(|r| serde_json::json!({"key": r.key, "path": r.path}))
-            .collect();
         let write = RowWrite {
             id: m.id.as_str(),
             name: &m.name,
@@ -631,12 +644,12 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             author: &m.publisher.author,
             source_repo: &m.publisher.source_repo,
             source_commit: &m.publisher.commit,
+            signed: true,
             installed_from: opts.source.stored(),
             package_sha256,
             manifest: &manifest_text,
-            files: serde_json::to_string(&files)
-                .map_err(|e| LedgerError::Disk(io::Error::other(e)))?,
-            project_refs: Value::Array(project_refs).to_string(),
+            files: file_records_json(pkg)?,
+            project_refs: project_refs_json(m),
             consented_at: opts.consented.then(|| time_text(now)),
             install_id: disk::new_install_id().map_err(LedgerError::Disk)?,
             now: time_text(now),
@@ -870,12 +883,48 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             });
             let problem = checked.as_ref().err().copied();
             let change = policy::startup_state(&row.state, row.reason.as_deref(), problem);
-            let state = change.map_or(row.state.as_str(), |(s, _)| s);
-            if let Some((to, why)) = change {
+            if let Some((_, why)) = change {
                 match why {
                     Some(why) => report.parked.push((row.id.clone(), why)),
                     None => report.unparked.push(row.id.clone()),
                 }
+            }
+            // Developer mode, on the row as the park above leaves it: an unsigned mod is served only
+            // while it is on for this device in this vault. This is in the load, not only in the
+            // switch, so every path that reloads the registry (a startup, a resume, a recovery, a
+            // restore's open) pauses an unsigned row that developer mode being off would let serve,
+            // whatever else changed it (a park lifted, a user's resume).
+            let (after_park, reason_after) =
+                change.map_or((row.state.as_str(), row.reason.as_deref()), |(s, r)| (s, r));
+            let dev = match policy::dev_mode_state(
+                row.signed,
+                self.runtime.unsigned_allowed(),
+                after_park,
+                reason_after,
+            ) {
+                // Not turned back on while its files don't check out: the park comes first, and the
+                // row says what stopped it meanwhile.
+                Some((store::STATE_ACTIVE, None)) if checked.is_err() => None,
+                // Nor past a safety-list entry that names it: that list owns the stop now.
+                Some((store::STATE_ACTIVE, None))
+                    if check
+                        .hold(&row.id, &row.version, row.package_sha256.as_deref())
+                        .is_some() =>
+                {
+                    Some((store::STATE_PAUSED, Some(store::REASON_BLACKLIST)))
+                }
+                other => other,
+            };
+            match dev {
+                Some((store::STATE_PAUSED, Some(store::REASON_DEV_MODE))) => {
+                    report.dev_paused.push(row.id.clone());
+                }
+                Some((store::STATE_ACTIVE, None)) => report.dev_resumed.push(row.id.clone()),
+                _ => {}
+            }
+            let change = dev.or(change);
+            let state = change.map_or(row.state.as_str(), |(s, _)| s);
+            if let Some((to, why)) = change {
                 changes.push((row, to, why));
             }
             let Ok(ok) = checked else { continue };
@@ -937,6 +986,31 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
     }
 }
 
+/// The `files` column: every verified file as `{path, sha256, size}`.
+fn file_records_json(pkg: &VerifiedPackage) -> Result<String, LedgerError> {
+    let files: Vec<FileRecord> = pkg
+        .files
+        .iter()
+        .map(|(path, f)| FileRecord {
+            path: path.clone(),
+            sha256: hex::encode(f.sha256),
+            size: f.bytes.len() as u64,
+        })
+        .collect();
+    serde_json::to_string(&files).map_err(|e| LedgerError::Disk(io::Error::other(e)))
+}
+
+/// The `project_refs` column: the manifest's `data.projectRefs`.
+fn project_refs_json(m: &package::Manifest) -> String {
+    let refs: Vec<Value> = m
+        .data
+        .project_refs
+        .iter()
+        .map(|r| serde_json::json!({"key": r.key, "path": r.path}))
+        .collect();
+    Value::Array(refs).to_string()
+}
+
 /// The row's values for an install's commit.
 struct RowWrite<'a> {
     id: &'a str,
@@ -946,6 +1020,8 @@ struct RowWrite<'a> {
     author: &'a str,
     source_repo: &'a str,
     source_commit: &'a str,
+    /// Whether an Atlas key signed it (an unsigned file's row says no: policy reads it).
+    signed: bool,
     installed_from: &'a str,
     package_sha256: &'a str,
     manifest: &'a str,
@@ -1001,7 +1077,7 @@ fn read_granted(conn: &Connection, id: &ModId) -> rusqlite::Result<BTreeSet<Stri
 fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT id, version, package_sha256, state, state_reason, consented_at IS NOT NULL, \
-                manifest, files \
+                manifest, files, signed \
          FROM mods ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1014,6 +1090,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
             consented: r.get(5)?,
             manifest: r.get(6)?,
             files: r.get(7)?,
+            signed: r.get(8)?,
         })
     })?;
     rows.collect()
@@ -1030,8 +1107,22 @@ fn commit(
     expected: Option<&Pinned>,
 ) -> Result<Committed, LedgerError> {
     let tx = conn.transaction()?;
+    let committed = write_row(&tx, w, kind, expected)?;
+    disk::failpoint(Step::Commit).map_err(LedgerError::Disk)?;
+    tx.commit()?;
+    Ok(committed)
+}
+
+/// [`commit`]'s writes, in the caller's transaction (the unsigned install adds its own rule to the
+/// same one).
+fn write_row(
+    tx: &Connection,
+    w: &RowWrite<'_>,
+    kind: InstallKind,
+    expected: Option<&Pinned>,
+) -> Result<Committed, LedgerError> {
     let id = ModId::parse(w.id).map_err(|_| Refusal::UnreadableRecord)?;
-    let now = read_current(&tx, &id)?;
+    let now = read_current(tx, &id)?;
     if now.as_ref().map(|c| &c.pinned) != expected {
         return Err(Refusal::Changed.into());
     }
@@ -1063,11 +1154,17 @@ fn commit(
             "INSERT INTO mods(id, name, version, tier, author, source_repo, source_commit, signed, \
                               installed_from, package_sha256, manifest, files, project_refs, state, \
                               state_reason, consented_at, installed_at, updated_at, install_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16, \
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?18, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16, \
                      ?17)",
-            [values, &[&w.install_id as &dyn rusqlite::ToSql]]
-                .concat()
-                .as_slice(),
+            [
+                values,
+                &[
+                    &w.install_id as &dyn rusqlite::ToSql,
+                    &w.signed as &dyn rusqlite::ToSql,
+                ],
+            ]
+            .concat()
+            .as_slice(),
         )?,
         // Tier, author and source repo are the pin, unchanged by construction; the install id is
         // the row's, kept.
@@ -1081,9 +1178,7 @@ fn commit(
         )?,
     };
     // A waiting update this install satisfies is no longer waiting.
-    blacklist::clear_waiting(&tx, w.id, Some(w.version))?;
-    disk::failpoint(Step::Commit).map_err(LedgerError::Disk)?;
-    tx.commit()?;
+    blacklist::clear_waiting(tx, w.id, Some(w.version))?;
     Ok(Committed { state, consented })
 }
 
@@ -1247,7 +1342,9 @@ pub fn with_active_ledger<T>(
 /// writes and, for a removed mod, its folder; the cached file is one small read), so a row it
 /// pauses or removes never reaches the registry, and no frame can mount before it. A restore's
 /// store comes through here too, and the startup load's [`SafetyCheck`] holds back anything the
-/// apply could not write.
+/// apply could not write. Developer mode for this device is looked up before anything loads
+/// ([`dev_switch::on_here`], from the store's own record) and given to the registry, so the load
+/// pauses an unsigned row while it is off and serves none (INVARIANTS.md I-34).
 ///
 /// The load and the sweep's moves run inline, so two loads can't race across a vault switch: one
 /// query, a stat per file, a rename per stray folder, and the hashing of a quarantined copy only
@@ -1264,11 +1361,18 @@ pub fn after_writer_open(app: &AppHandle) {
         return;
     };
     let state = app.state::<AppState>();
+    // Developer mode for this device in this vault decides whether an unsigned row may serve: it is
+    // looked up from the store's own record before anything loads, and a lookup that fails is off.
+    let dev_on = dev_switch::on_here(app, state.inner());
     let Some(layout) = active_layout(app, state.inner(), Mint::IfRows) else {
         let _ledger = runtime.ledger_lock();
         runtime.clear();
+        // A store with no mods folder yet can still have it on: the first unsigned install into it
+        // writes the folder, and a later load must not pause that mod.
+        runtime.set_unsigned_allowed(dev_on);
         return;
     };
+    runtime.set_unsigned_allowed(dev_on);
     // The cached safety list is applied before the load, so a row it pauses or removes never
     // reaches the registry, and so before any frame can mount (spec §1.10). A restored store's rows
     // meet it here too: a restore commit opens its store through this same path.
@@ -1457,6 +1561,8 @@ mod tests {
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).
     mod slice6;
+    // The unsigned file install, and developer mode as the ledger carries it out (slice 6, part 3).
+    mod dev_unsigned;
 
     const VAULT: &str = "11111111-2222-3333-4444-555555555555";
     const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -2068,6 +2174,7 @@ mod tests {
             author: "Atlas",
             source_repo: "itsAtlas-org/Personal-Manager",
             source_commit: &"0".repeat(40),
+            signed: true,
             installed_from: store::FROM_CATALOGUE,
             package_sha256: &"a".repeat(64),
             manifest: "{}",

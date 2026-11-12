@@ -46,6 +46,13 @@ pub enum PlanError {
     Undeclared(String),
     /// A permission asked at install, with no answer.
     Missing(String),
+    /// An unsigned mod: yes to reading the user's data and to reaching outside PM (D3: one or the
+    /// other, never both).
+    BothSides,
+    /// An unsigned mod: D3 refuses this yes, because another unsigned mod holds the other side.
+    Exclusion(String),
+    /// An unsigned mod: a read, while the web engine isn't sealed.
+    UnsealedEngine(String),
 }
 
 impl std::fmt::Display for PlanError {
@@ -54,21 +61,40 @@ impl std::fmt::Display for PlanError {
             Self::Unknown(p) => write!(f, "{p:?} isn't a permission PM has."),
             Self::Undeclared(p) => write!(f, "This mod didn't ask for {p:?}."),
             Self::Missing(p) => write!(f, "The screen left out an answer for {p:?}."),
+            Self::BothSides => f.write_str(
+                "An unsigned mod may read your data or reach the internet, never both. Choose one.",
+            ),
+            Self::Exclusion(p) => write!(
+                f,
+                "Unsigned mods may read your data or reach the internet, never both, and another \
+                 unsigned mod already holds the other ({p})."
+            ),
+            Self::UnsealedEngine(p) => write!(
+                f,
+                "Unsigned mods can't read your data until PM's web engine is sealed ({p})."
+            ),
         }
     }
 }
 
-/// The rows to write: install-time grants, and denials.
+/// The rows to write: install-time grants, an unsigned mod's yes answers, and denials.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrantPlan {
     pub grant: Vec<String>,
+    /// An unsigned mod's yes answers: asked one by one on its own install screen
+    /// ([`When::Ask`]), written as decisions rather than install consent.
+    pub grant_asked: Vec<String>,
     pub deny: Vec<String>,
 }
 
 impl GrantPlan {
     /// Every permission the plan touches.
     pub fn touched(&self) -> impl Iterator<Item = &str> {
-        self.grant.iter().chain(&self.deny).map(String::as_str)
+        self.grant
+            .iter()
+            .chain(&self.grant_asked)
+            .chain(&self.deny)
+            .map(String::as_str)
     }
 }
 
@@ -108,6 +134,66 @@ pub fn plan(
     Ok(out)
 }
 
+/// The plan for an unsigned mod's answers (pure), judged BEFORE anything is installed: the stark
+/// screen asks every permission that is asked one by one ([`When::Ask`]), strictly as [`plan`] does
+/// (no answer for what the mod didn't declare, one for each that is asked), and then D3's rules are
+/// applied to the yes answers: never a read and an egress together, never one against what the other
+/// unsigned mods hold (`held_others`: every grant of the other unsigned mods), and no read while the
+/// engine isn't sealed. A forbidden pair is refused here, so it is never installed; the grant
+/// writers check again when the rows are written.
+pub fn plan_unsigned(
+    declared: &BTreeSet<String>,
+    answers: &Answers,
+    held_others: &[(PolicyTier, Class)],
+    engine_sealed: bool,
+) -> Result<GrantPlan, PlanError> {
+    let tier = PolicyTier::Unsigned;
+    for asked in answers.keys() {
+        if permissions::policy(asked).is_none() {
+            return Err(PlanError::Unknown(asked.clone()));
+        }
+        if !declared.contains(asked) {
+            return Err(PlanError::Undeclared(asked.clone()));
+        }
+    }
+    let asked_here = |when: When| matches!(when, When::Install | When::Ask);
+    for id in declared {
+        let Some(policy) = permissions::policy(id) else {
+            continue;
+        };
+        if asked_here(policy.when(tier)) && !answers.contains_key(id) {
+            return Err(PlanError::Missing(id.clone()));
+        }
+    }
+    let mut out = GrantPlan::default();
+    let (mut reads, mut egress) = (false, false);
+    for (id, yes) in answers {
+        let Some(policy) = permissions::policy(id) else {
+            continue;
+        };
+        if !yes {
+            out.deny.push(id.clone());
+            continue;
+        }
+        if !asked_here(policy.when(tier)) {
+            continue; // first use: waits for its prompt
+        }
+        if !permissions::allowed_by_engine(tier, policy.class, engine_sealed) {
+            return Err(PlanError::UnsealedEngine(id.clone()));
+        }
+        if permissions::excluded(tier, policy.class, held_others.iter().copied()) {
+            return Err(PlanError::Exclusion(id.clone()));
+        }
+        reads |= policy.class == Class::Read;
+        egress |= policy.class == Class::Egress;
+        out.grant_asked.push(id.clone());
+    }
+    if reads && egress {
+        return Err(PlanError::BothSides);
+    }
+    Ok(out)
+}
+
 /// Write the plan's rows. The caller owns the transaction: a refusal part way leaves rows written
 /// before it, so run this inside one (or use [`apply_atomically`]).
 pub fn apply(
@@ -118,6 +204,9 @@ pub fn apply(
 ) -> Result<(), GrantError> {
     let grant: Vec<&str> = plan.grant.iter().map(String::as_str).collect();
     grants::record_install_consent(conn, id, &grant, engine_sealed)?;
+    for p in &plan.grant_asked {
+        grants::set_decision(conn, id, p, Decision::Granted, engine_sealed)?;
+    }
     for p in &plan.deny {
         grants::set_decision(conn, id, p, Decision::Denied, engine_sealed)?;
     }
@@ -154,8 +243,23 @@ pub fn announce<'a>(
     id: &ModId,
     touched: impl IntoIterator<Item = &'a str>,
 ) -> rusqlite::Result<Vec<ModId>> {
+    announce_with(conn, id, touched.into_iter().any(touches_d3))
+}
+
+/// [`announce`] for a change that may have moved D3's line without naming a permission: an unsigned
+/// install over an earlier one reset the mod's grants, which may free the other side for every
+/// other unsigned mod.
+pub fn announce_unsigned_set(conn: &Connection, id: &ModId) -> rusqlite::Result<Vec<ModId>> {
+    announce_with(conn, id, true)
+}
+
+fn announce_with(
+    conn: &Connection,
+    id: &ModId,
+    judged_together: bool,
+) -> rusqlite::Result<Vec<ModId>> {
     let mut out = vec![id.clone()];
-    if !touched.into_iter().any(touches_d3) {
+    if !judged_together {
         return Ok(out);
     }
     let mut stmt = conn.prepare("SELECT id, signed, tier FROM mods")?;
@@ -387,6 +491,7 @@ mod tests {
         let good = GrantPlan {
             grant: vec!["documents.meta".into(), "tasks.read".into()],
             deny: vec!["storage".into()],
+            ..GrantPlan::default()
         };
         apply_atomically(&mut c, &id("atlas.map"), &good, true).unwrap();
         assert_eq!(
@@ -401,7 +506,7 @@ mod tests {
         c.execute("DELETE FROM mod_grants", []).unwrap();
         let bad = GrantPlan {
             grant: vec!["documents.meta".into(), "internet".into()],
-            deny: vec![],
+            ..GrantPlan::default()
         };
         assert_eq!(
             apply_atomically(&mut c, &id("atlas.map"), &bad, true),
@@ -519,5 +624,251 @@ mod tests {
         let mut tell: Vec<&str> = tell.iter().map(ModId::as_str).collect();
         tell.sort();
         assert_eq!(tell, ["acme.one", "acme.two"]);
+    }
+
+    // ---- an unsigned mod's plan ----------------------------------------------------------------
+
+    const READ: (PolicyTier, Class) = (Unsigned, Class::Read);
+    const NET: (PolicyTier, Class) = (Unsigned, Class::Egress);
+
+    fn unsigned_plan(
+        declared: &[&str],
+        said: &[(&str, bool)],
+        held: &[(PolicyTier, Class)],
+        sealed: bool,
+    ) -> Result<GrantPlan, PlanError> {
+        plan_unsigned(&set(declared), &answers(said), held, sealed)
+    }
+
+    #[test]
+    fn an_unsigned_mods_answers_are_strict_like_a_signed_ones() {
+        let declared = ["documents.meta", "storage"];
+        assert_eq!(
+            unsigned_plan(&declared, &[], &[], true),
+            Err(PlanError::Missing("documents.meta".into())),
+            "asked one by one, so each needs its answer"
+        );
+        assert_eq!(
+            unsigned_plan(
+                &declared,
+                &[("documents.meta", true), ("internet", true)],
+                &[],
+                true
+            ),
+            Err(PlanError::Undeclared("internet".into()))
+        );
+        assert_eq!(
+            unsigned_plan(
+                &declared,
+                &[("documents.meta", true), ("made.up", true)],
+                &[],
+                true
+            ),
+            Err(PlanError::Unknown("made.up".into()))
+        );
+        // Automatic permissions need no answer.
+        assert!(unsigned_plan(&["storage"], &[], &[], true)
+            .unwrap()
+            .touched()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn an_unsigned_yes_is_a_decision_a_no_is_a_denial_and_first_use_waits() {
+        let declared = ["documents.meta", "tasks.write", "ai", "storage"];
+        let p = unsigned_plan(
+            &declared,
+            &[
+                ("documents.meta", true),
+                ("tasks.write", false),
+                ("ai", true),
+                ("storage", true),
+            ],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert_eq!(p.grant_asked, ["documents.meta"]);
+        assert!(
+            p.grant.is_empty(),
+            "nothing is install consent for an unsigned mod"
+        );
+        assert_eq!(p.deny, ["tasks.write"]);
+        assert_eq!(
+            p.touched().collect::<Vec<_>>(),
+            ["documents.meta", "tasks.write"],
+            "ai (first use) and storage (automatic) write nothing"
+        );
+        // A no to everything is the plan that installs nothing granted.
+        let none = unsigned_plan(
+            &declared,
+            &[("documents.meta", false), ("tasks.write", false)],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(none.grant_asked.is_empty());
+    }
+
+    #[test]
+    fn both_sides_of_one_unsigned_manifest_are_refused_before_anything_is_written() {
+        let both = ["documents.meta", "internet"];
+        assert_eq!(
+            unsigned_plan(
+                &both,
+                &[("documents.meta", true), ("internet", true)],
+                &[],
+                true
+            ),
+            Err(PlanError::BothSides)
+        );
+        // `links` is egress too: read and links together are as refused as read and internet.
+        assert_eq!(
+            unsigned_plan(
+                &["documents.text", "links"],
+                &[("documents.text", true), ("links", true)],
+                &[],
+                true
+            ),
+            Err(PlanError::BothSides)
+        );
+        // One side is the user's choice, and a no to both is always fine.
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", true), ("internet", false)],
+            &[],
+            true
+        )
+        .is_ok());
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", false), ("internet", false)],
+            &[],
+            true
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_other_unsigned_mods_holdings_refuse_the_opposite_side_before_anything_is_written() {
+        let both = ["documents.meta", "internet"];
+        // One side, with the other side held by another unsigned mod.
+        assert_eq!(
+            unsigned_plan(
+                &both,
+                &[("documents.meta", true), ("internet", false)],
+                &[NET],
+                true
+            ),
+            Err(PlanError::Exclusion("documents.meta".into()))
+        );
+        assert_eq!(
+            unsigned_plan(
+                &both,
+                &[("documents.meta", false), ("internet", true)],
+                &[READ],
+                true
+            ),
+            Err(PlanError::Exclusion("internet".into()))
+        );
+        // Another mod holding the SAME side, or holding nothing, is fine.
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", true), ("internet", false)],
+            &[READ],
+            true
+        )
+        .is_ok());
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", false), ("internet", true)],
+            &[NET],
+            true
+        )
+        .is_ok());
+        // A no is always allowed, under any holdings.
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", false), ("internet", false)],
+            &[READ, NET],
+            true
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_unsealed_engine_refuses_an_unsigned_read_but_not_the_internet() {
+        let both = ["documents.meta", "internet"];
+        assert_eq!(
+            unsigned_plan(
+                &both,
+                &[("documents.meta", true), ("internet", false)],
+                &[],
+                false
+            ),
+            Err(PlanError::UnsealedEngine("documents.meta".into()))
+        );
+        assert!(unsigned_plan(
+            &both,
+            &[("documents.meta", false), ("internet", true)],
+            &[],
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_unsigned_plan_is_written_as_decisions_and_the_writers_check_d3_again() {
+        let (_d, mut c) = test_store();
+        insert(
+            &c,
+            &Row {
+                id: "acme.one",
+                signed: false,
+                tier: "third",
+                installed_from: "file",
+                manifest: manifest(&["documents.meta", "internet", "storage"]),
+                ..Row::default()
+            },
+        );
+        let plan = unsigned_plan(
+            &["documents.meta", "internet", "storage"],
+            &[("documents.meta", true), ("internet", false)],
+            &[],
+            true,
+        )
+        .unwrap();
+        apply_atomically(&mut c, &id("acme.one"), &plan, true).unwrap();
+        assert_eq!(
+            grants_of(&c, "acme.one"),
+            BTreeMap::from([
+                ("documents.meta".into(), "granted".into()),
+                ("internet".into(), "denied".into()),
+            ])
+        );
+        // A plan built against stale holdings is still refused when written: whole or not at all.
+        c.execute("DELETE FROM mod_grants", []).unwrap();
+        let stale = GrantPlan {
+            grant_asked: vec!["documents.meta".into(), "internet".into()],
+            ..GrantPlan::default()
+        };
+        assert!(apply_atomically(&mut c, &id("acme.one"), &stale, true).is_err());
+        assert!(grants_of(&c, "acme.one").is_empty(), "nothing written");
+    }
+
+    #[test]
+    fn every_refusal_of_an_unsigned_plan_has_its_words() {
+        for e in [
+            PlanError::BothSides,
+            PlanError::Exclusion("documents.meta".into()),
+            PlanError::UnsealedEngine("documents.meta".into()),
+        ] {
+            let said = e.to_string();
+            assert!(
+                said.contains("never both") || said.contains("sealed"),
+                "{said}"
+            );
+        }
     }
 }

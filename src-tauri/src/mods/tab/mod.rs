@@ -18,6 +18,8 @@
 //! - [`status`]: how fresh the safety list is, the record's health and the strips.
 //! - [`error`]: the typed refusals.
 //! - [`commands`]: the Tauri commands, over all of it.
+//! - [`unsigned`], [`dev_commands`]: the unsigned file install (developer mode, the stark screen, D3
+//!   judged before consent) and developer mode's commands (part 3 of slice 6).
 //!
 //! The user's own pause, resume and first-open "Turn on" are the ledger's (`ledger/user.rs`): they
 //! change rows and the registry, so they live beside the other writers of both.
@@ -25,6 +27,7 @@
 pub mod catalogue;
 pub mod commands;
 pub mod consent;
+pub mod dev_commands;
 pub mod device;
 pub mod disclaimer;
 pub mod error;
@@ -36,4 +39,5 @@ pub mod status;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod uninstall;
+pub mod unsigned;
 pub mod words;

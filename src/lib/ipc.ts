@@ -9,6 +9,8 @@ import type { RepairOutcome, VaultFault } from "./types";
 import type {
   Catalogue,
   ConsentScreen,
+  DevModeState,
+  DevSwitch,
   InstallResult,
   ModIcon,
   ModInfo,
@@ -2272,9 +2274,34 @@ export const listCatalogue = () => invoke<Catalogue>("list_catalogue");
 export const installModFile = (path: string) => invoke<ConsentScreen>("install_mod_file", { path });
 
 /** Install what a consent screen's `token` staged, writing `decisions` (permission id to yes or no:
- *  an answer for every permission the screen marked `answerRequired`) as grants. Good once. */
-export const installModConsented = (token: string, decisions: Record<string, boolean>) =>
-  invoke<InstallResult>("install_mod_consented", { token, decisions });
+ *  an answer for every permission the screen marked `answerRequired`) as grants. Good once. For an
+ *  unsigned file's screen (`screen.unsigned` set) `confirmId` must be the mod's id as the user typed
+ *  it, or this rejects with `confirm-mismatch`; developer mode is read again (`dev-mode-off`). A
+ *  signed screen ignores `confirmId`. */
+export const installModConsented = (
+  token: string,
+  decisions: Record<string, boolean>,
+  confirmId?: string,
+) => invoke<InstallResult>("install_mod_consented", { token, decisions, confirmId });
+
+/** Read and verify the UNSIGNED `.pmmod` at `path` (the one `installModFile` rejected with
+ *  `unsigned`) and return the stark screen, installing nothing. Rejects `dev-mode-off` while developer
+ *  mode is off for this device (PM reads that itself). Then `installModConsented` with the typed
+ *  id. */
+export const installUnsignedFile = (path: string) =>
+  invoke<ConsentScreen>("install_unsigned_file", { path });
+
+/** Whether developer mode is on for THIS device in this vault: PM's own record, the only authority
+ *  (`capabilities.tsx` keeps a cache of it). Rejects `no-store` until the vault is open. */
+export const devModeState = () => invoke<DevModeState>("dev_mode_state");
+
+/** Switch developer mode for this device and wait for the write. Off pauses every unsigned mod, on
+ *  resumes exactly those it paused. The answer is what it is now; a rejection means nothing changed. */
+export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch", { on });
+
+/** Subscribe to `mods://dev-mode`: developer mode was switched for this device, from any window. */
+export const onDevMode = (handler: (e: { on: boolean }) => void): Promise<UnlistenFn> =>
+  listen<{ on: boolean }>("mods://dev-mode", (e) => handler(e.payload));
 
 /** Download a catalogue mod and return its consent screen, installing nothing. */
 export const installFromCatalogue = (modId: string) =>

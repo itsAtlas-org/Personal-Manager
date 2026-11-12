@@ -44,8 +44,8 @@ pub fn is_device_id(s: &str) -> bool {
 }
 
 /// This device's id, minted on first use. Blocking: a small file read, and on first use a write.
-/// Small and reusable: the disclaimer reads it today, and the dev-mode part of slice 6 makes
-/// developer mode per device with it.
+/// Small and reusable: the disclaimer reads it, and developer mode (`mods::devmode`) is per device
+/// with it.
 pub fn device_id(data_dir: &Path) -> io::Result<String> {
     let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let file = path(data_dir);
