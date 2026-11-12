@@ -23,6 +23,7 @@ import {
   dropPlan,
   isDropColumn,
   linkedEvent,
+  milestoneDone,
   orderAfterDrop,
   type RunwayCard,
   type RunwayColumn,
@@ -640,7 +641,7 @@ function MilestoneCardView({
   ctx: CardCtx;
 }) {
   const m = card.milestone;
-  const met = m.state === "met" || m.status === "done";
+  const met = milestoneDone(m);
   // Its deadline, toned like a task's, wherever it sits (a met one reads plain).
   const info = milestoneDue(m, ctx.today);
   const words = `◆ ${m.label} · ${m.project_name}`;
@@ -761,7 +762,7 @@ function StackCardView({
 
 /** A milestone's deadline as its card shows it: toned late or soon, plain once it's met. */
 function milestoneDue(m: Milestone, today: Date) {
-  const met = m.state === "met" || m.status === "done";
+  const met = milestoneDone(m);
   return m.due_date ? deadlineInfo(m.due_date.slice(0, 10), "hard", today, met) : null;
 }
 

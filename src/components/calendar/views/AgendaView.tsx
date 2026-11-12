@@ -34,6 +34,9 @@ interface Props {
   now?: Date;
   /** Open an event's detail popup, anchored at the row's on-screen rect. */
   onEventClick?: (ev: CalendarEvent, anchor: DOMRect) => void;
+  /** What an empty list says, when a filter is why it is empty (Hide done, All-day). Defaults to
+   *  "No events in view." */
+  emptyText?: string;
 }
 
 /** An event's clock time for the agenda row: the local start time, or "all-day". */
@@ -41,7 +44,7 @@ function eventTime(ev: CalendarEvent): string {
   return ev.all_day ? "all-day" : formatClockIso(ev.start);
 }
 
-export function AgendaView({ events, fromDay, colorOf, now, onEventClick }: Props) {
+export function AgendaView({ events, fromDay, colorOf, now, onEventClick, emptyText }: Props) {
   const { showMeta, showPower } = useDepth();
   const nowDate = now ?? new Date();
 
@@ -50,7 +53,7 @@ export function AgendaView({ events, fromDay, colorOf, now, onEventClick }: Prop
   if (groups.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
-        <p className="text-sm text-ink4">No events in view.</p>
+        <p className="text-sm text-ink4">{emptyText ?? "No events in view."}</p>
       </div>
     );
   }

@@ -10,7 +10,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent } from "../../../lib/types";
-import { DRAFT_EVENT_ID } from "../../../lib/calendar-layout";
+import { DRAFT_EVENT_ID, TASK_CALENDAR_ID } from "../../../lib/calendar-layout";
 import { formatClock } from "../../../lib/format";
 
 vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
@@ -104,5 +104,44 @@ describe("AgendaView", () => {
     expect(within(row).getByText("Review").className).toContain("line-through");
     const plain = screen.getByRole("button", { name: new RegExp(`^${clock(11)}\\s*Plain$`) });
     expect(within(plain).getByText("Plain").className).not.toContain("line-through");
+  });
+
+  // #1090: when a filter (Hide done, All-day) is why nothing is left, the empty list says so
+  // instead of the plain line, which would read as nothing being on the calendar at all.
+  it("says what the calendar gives it when the list is empty, and the plain line otherwise", () => {
+    const empty = (emptyText?: string) =>
+      render(
+        <AgendaView
+          events={[]}
+          fromDay={new Date(2026, 9, 12)}
+          colorOf={() => "#336699"}
+          emptyText={emptyText}
+        />,
+      );
+    empty("No all-day events in view.");
+    expect(screen.getByText("No all-day events in view.")).toBeTruthy();
+    expect(screen.queryByText("No events in view.")).toBeNull();
+    cleanup();
+    empty();
+    expect(screen.getByText("No events in view.")).toBeTruthy();
+  });
+
+  // Late work stands out (#1090): a task's overdue "Due:" chip is open work, not something over.
+  it("never greys a task's overdue chip, though its day has passed", () => {
+    agenda([
+      ev({
+        id: "task:5",
+        calendar_id: TASK_CALENDAR_ID,
+        summary: "Due: Send the deck",
+        start: "2026-10-12",
+        end: null,
+        all_day: true,
+      }),
+      ev({ id: "p", summary: "Plain" }),
+    ]);
+    const chip = screen.getByText("Due: Send the deck").closest("li");
+    expect(chip?.className).not.toContain("opacity-60");
+    // A synced row from the same day is over, and recedes as ever.
+    expect(screen.getByText("Plain").closest("li")?.className).toContain("opacity-60");
   });
 });

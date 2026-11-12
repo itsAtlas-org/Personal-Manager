@@ -84,6 +84,7 @@ const env = vi.hoisted(() => ({
   hidden: new Set<string>(),
   written: [] as string[][],
   yearEvents: null as CalendarEvent[] | null,
+  monthEvents: null as CalendarEvent[] | null,
   // The Runway's named windows, as the stored prefs cache holds them (read again on the app-wide
   // settings signal, as the other window's change arrives).
   windows: [] as { id: string; label: string; start: string; end: string }[],
@@ -125,6 +126,20 @@ vi.mock("./views/YearView", () => ({
     return null;
   },
 }));
+
+// Month is the real one (jsdom lays out none of its weeks, so its chips can't be looked at), with
+// what it was handed kept beside it, as the Year stand-in keeps its own.
+vi.mock("./views/MonthView", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./views/MonthView")>();
+  const { createElement } = await import("react");
+  return {
+    ...real,
+    MonthView: (props: Parameters<typeof real.MonthView>[0]) => {
+      env.monthEvents = props.events;
+      return createElement(real.MonthView, props);
+    },
+  };
+});
 
 const ME = "gcal:me@x.com";
 const PERSONAL = `${ME}:me@x.com`;
@@ -248,6 +263,7 @@ beforeEach(() => {
   env.hidden = new Set();
   env.written = [];
   env.yearEvents = null;
+  env.monthEvents = null;
   env.windows = [];
   reads = [];
   held = false;
@@ -2169,5 +2185,413 @@ describe("CalendarView: the calendar list in the header", () => {
     act(() => void window.dispatchEvent(new Event("pm:settings-changed")));
     expect(screen.getByRole("button", { name: "Calendars 1/2" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Standup/ })).toBeNull();
+  });
+});
+
+// The two view filters: the Agenda's Hide done (Runway and List) and the header's All | All-day.
+// Both are applied to the views' own props, never to what search, the drag and a task's link read.
+describe("CalendarView: the filters", () => {
+  const HIDE = "pm.calendar.agendaHideDone";
+  const KINDS = "pm.calendar.eventKinds";
+  const at = (daysFromToday: number, time: string) =>
+    `${dayKey(addDays(startOfDay(new Date()), daysFromToday))}T${time}`;
+  const allDay = (id: string, summary: string, daysFromToday = 0): CalendarEvent =>
+    row({
+      id,
+      summary,
+      uid: id,
+      all_day: true,
+      start: dayKey(addDays(startOfDay(new Date()), daysFromToday)),
+      end: dayKey(addDays(startOfDay(new Date()), daysFromToday + 1)),
+    });
+  const timedRow = (
+    id: string,
+    summary: string,
+    daysFromToday: number,
+    from = "09:00:00",
+    to = "10:00:00",
+  ) => row({ id, summary, uid: id, start: at(daysFromToday, from), end: at(daysFromToday, to) });
+  const hour = 3_600_000;
+  const iso = (ms: number) => {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
+  };
+  /** An event running now: an hour ago to an hour ahead. */
+  const runningNow = (summary: string) =>
+    row({
+      id: "running",
+      summary,
+      uid: "running",
+      start: iso(Date.now() - hour),
+      end: iso(Date.now() + hour),
+    });
+  const task = (over: Partial<Task>): Task => ({
+    id: 1,
+    title: "Draft the deck",
+    why: null,
+    project_name: null,
+    project_archived: false,
+    milestone_id: null,
+    event_uid: null,
+    do_start: today,
+    do_end: null,
+    deadline: null,
+    deadline_kind: "hard",
+    deadline_from: "date",
+    effective_deadline: null,
+    deadline_missing: false,
+    milestone_label: null,
+    event_title: null,
+    status: "todo",
+    completed_at: null,
+    lane: "foreground",
+    stack_id: null,
+    parked: false,
+    ordinal: 0,
+    source: "user",
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+    ...over,
+  });
+  /** The Calendar tab, fresh, once its reads have landed: the header is drawn once the calendars
+   *  are read, and the events, milestones and tasks land beside them. (Some of these tests leave no
+   *  row on screen, so `mount`'s wait for a Standup row can't be the signal.) */
+  async function open() {
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("group", { name: "Calendar view" });
+    await act(async () => {});
+    await act(async () => {});
+  }
+  /** A view, picked from the view switcher (the range control has a "Day" of its own). */
+  const pickView = (name: string) =>
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "Calendar view" })).getByRole("button", { name }),
+    );
+  const hideButton = () => screen.queryByRole("button", { name: /^(Hide|Show) done/ });
+  const status = () =>
+    screen
+      .getAllByRole("status")
+      .map((s) => s.textContent)
+      .join("|");
+  const kinds = () => screen.queryByRole("group", { name: "Which events" });
+  const kindsButton = (name: string) =>
+    within(screen.getByRole("group", { name: "Which events" })).getByRole("button", { name });
+  const seen = (summary: RegExp) => screen.queryAllByRole("button", { name: summary }).length > 0;
+
+  describe("Hide done in the List", () => {
+    beforeEach(() => {
+      // From the 1st of last month, as the List opens after paging back: both days are drawn.
+      rows = [
+        timedRow("old", "Standup last week", -3),
+        runningNow("Standup running"),
+        timedRow("later", "Standup tomorrow", 1),
+        allDay("yesterday", "Standup holiday", -1),
+      ];
+    });
+
+    it("drops ended events on every day the List draws, never one running now or later", async () => {
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(seen(/last week/)).toBe(true);
+      expect(seen(/holiday/)).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(seen(/last week/)).toBe(false);
+      expect(seen(/holiday/)).toBe(false);
+      expect(seen(/running/)).toBe(true);
+      expect(seen(/tomorrow/)).toBe(true);
+      // The label says how many it took off the screen, and the toggle is said in the live region.
+      expect(hideButton()?.textContent).toBe("Show done (2)");
+      expect(status()).toContain("2 done items hidden");
+      fireEvent.click(screen.getByRole("button", { name: /Show done/ }));
+      expect(seen(/last week/)).toBe(true);
+      expect(hideButton()?.textContent).toBe("Hide done");
+      expect(status()).toContain("Done items shown");
+    });
+
+    it("remembers the choice across a remount, and the pop-out reads it when it opens", async () => {
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(localStorage.getItem(HIDE)).toBe("true");
+      cleanup();
+      await open();
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
+    });
+
+    it("says how many are hidden when nothing is left", async () => {
+      rows = [timedRow("old", "Standup last week", -3)];
+      // No milestone due today either: the default one would be the List's one row left.
+      ipc.listAllMilestones.mockResolvedValue([]);
+      localStorage.setItem(HIDE, "true");
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(await screen.findByText("Nothing left in view — 1 done hidden.")).toBeTruthy();
+    });
+
+    it("takes a met milestone's overlay off the List, never an unmet one", async () => {
+      rows = [timedRow("later", "Standup tomorrow", 1)];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 2, label: "Opened", state: "met" },
+        {
+          ...milestone,
+          id: 3,
+          label: "Still owed",
+          due_date: dayKey(addDays(startOfDay(new Date()), -2)),
+        },
+      ]);
+      localStorage.setItem(HIDE, "true");
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(screen.queryByText(/Opened/)).toBeNull();
+      expect(screen.getByText(/Still owed/)).toBeTruthy();
+    });
+
+    it("an overdue task chip and a late milestone are not greyed as if finished, in any view", async () => {
+      rows = [timedRow("later", "Standup tomorrow", 1)];
+      const twoDaysAgo = dayKey(addDays(startOfDay(new Date()), -2));
+      tasks = [
+        task({ id: 5, title: "Send the deck", do_start: null, effective_deadline: twoDaysAgo }),
+      ];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 3, label: "Still owed", due_date: twoDaysAgo },
+        { ...milestone, id: 4, label: "Opened", due_date: twoDaysAgo, state: "met" },
+      ]);
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      const row = (name: RegExp) => screen.getByText(name).closest("li")!;
+      expect(row(/Due: Send the deck/).className).not.toContain("opacity-60");
+      expect(row(/Still owed/).className).not.toContain("opacity-60");
+      // A met milestone still recedes.
+      expect(row(/Opened/).className).toContain("opacity-60");
+    });
+  });
+
+  describe("Hide done on the Runway", () => {
+    beforeEach(() => {
+      localStorage.removeItem("pm.calendar.agendaMode");
+      ipc.listAllMilestones.mockResolvedValue([]);
+    });
+
+    it("hides a task done before the Agenda opened, keeps one ticked since, and keeps counting both", async () => {
+      const doneBefore = task({
+        id: 2,
+        title: "Done before",
+        status: "done",
+        completed_at: new Date(Date.now() - 3 * hour).toISOString(),
+      });
+      tasks = [task({ id: 1, title: "Open one" }), doneBefore];
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(within(todayCol).getByText("Done before")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+      expect(within(todayCol).getByText("Open one")).toBeTruthy();
+      expect(hideButton()?.textContent).toBe("Show done (1)");
+      expect(status()).toContain("1 done item hidden");
+      // "1/2 done" still counts what is hidden.
+      expect(screen.getByText("1/2 done")).toBeTruthy();
+      // Ticked now, after Hide done went on (the editor's status select or the other window reach
+      // it the same way, as a fresh `completed_at`): it stays, struck through, until the toggle flips.
+      tasks = [
+        task({ id: 1, title: "Open one", status: "done", completed_at: new Date().toISOString() }),
+        doneBefore,
+      ];
+      await act(async () => tasksChanged());
+      expect(within(todayCol).getByText("Open one")).toBeTruthy();
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+      expect(screen.getByText("2/2 done")).toBeTruthy();
+      // A moment on, Show done, then Hide done again: the cutoff is fresh, so now both were done
+      // before it.
+      await act(() => new Promise((r) => setTimeout(r, 5)));
+      fireEvent.click(screen.getByRole("button", { name: /Show done/ }));
+      expect(within(todayCol).getByText("Done before")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByText("Open one")).toBeNull();
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+    });
+    it("drops the strips' events that have ended, keeps the one running now, and counts them", async () => {
+      rows = [
+        // Midnight to 00:01 today: over, unless this runs in the day's first minute.
+        timedRow("old", "Standup earlier", 0, "00:00:00", "00:01:00"),
+        runningNow("Standup running"),
+      ];
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(within(todayCol).getByRole("button", { name: /Standup earlier/ })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByRole("button", { name: /Standup earlier/ })).toBeNull();
+      expect(within(todayCol).getByRole("button", { name: /Standup running/ })).toBeTruthy();
+      // No task is done, so the one hidden is the event.
+      expect(hideButton()?.textContent).toBe("Show done (1)");
+    });
+
+    it("sits beside Runway | List, in the List too, and in no other view", async () => {
+      await open();
+      expect(hideButton()).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "List" }));
+      expect(hideButton()).not.toBeNull();
+      for (const view of ["Month", "Week", "Day", "Year"]) {
+        pickView(view);
+        expect(hideButton(), view).toBeNull();
+      }
+    });
+
+    it("General → Reset turns it off, and the open Calendar follows", async () => {
+      localStorage.setItem(HIDE, "true");
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
+      const { resetCalendarFilters } = await import("../../lib/calendarPrefs");
+      act(() => resetCalendarFilters());
+      expect(hideButton()?.textContent).toBe("Hide done");
+      expect(localStorage.getItem(HIDE)).toBe("false");
+      expect(localStorage.getItem(KINDS)).toBe("all");
+    });
+
+    it("the Terminal look says it on its strip and leaves the same cards out", async () => {
+      env.system = "terminal";
+      localStorage.setItem(HIDE, "true");
+      tasks = [
+        task({ id: 1, title: "Open one" }),
+        task({
+          id: 2,
+          title: "Done before",
+          status: "done",
+          completed_at: new Date(Date.now() - 3 * hour).toISOString(),
+        }),
+      ];
+      await open();
+      await screen.findByText("Open one");
+      expect(screen.queryByText("Done before")).toBeNull();
+      expect(screen.getByText("cal --runway --hide-done")).toBeTruthy();
+    });
+  });
+
+  describe("All | All-day", () => {
+    beforeEach(() => {
+      localStorage.setItem("pm.calendar.view", "month");
+      rows = [
+        allDay("holiday", "Standup holiday"),
+        timedRow("lunch", "Standup lunch", 0, "12:00:00", "13:00:00"),
+        { ...timedRow("review", "Standup review", 0, "14:00:00", "15:00:00"), uid: "review-uid" },
+      ];
+      tasks = [task({ id: 5, title: "Draft the deck" })];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 9, label: "Ship it", event_uid: "review-uid" },
+      ]);
+    });
+
+    /** The summaries Month was last handed. */
+    const inMonth = () => (env.monthEvents ?? []).map((e) => e.summary);
+
+    it("Month keeps an all-day bar, a task chip and a milestone's linked timed event, and drops other timed chips", async () => {
+      await open();
+      expect(inMonth()).toContain("Standup lunch");
+      fireEvent.click(kindsButton("All-day"));
+      expect(localStorage.getItem(KINDS)).toBe("all-day");
+      expect(inMonth()).not.toContain("Standup lunch");
+      expect(inMonth()).toContain("Standup holiday");
+      // The milestone is drawn as the timed event it links to, so that stays.
+      expect(inMonth()).toContain("Standup review");
+      expect(inMonth()).toContain("Draft the deck");
+    });
+
+    it("Week and Day still show the timed event, and have no such control", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(kinds()).not.toBeNull();
+      pickView("Week");
+      expect(kinds()).toBeNull();
+      expect(seen(/Standup lunch/)).toBe(true);
+      pickView("Day");
+      expect(kinds()).toBeNull();
+      expect(seen(/Standup lunch/)).toBe(true);
+      // Still remembered for the views that carry it.
+      pickView("Month");
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("is remembered across a remount, and shows in Month, Year and the List", async () => {
+      await open();
+      fireEvent.click(kindsButton("All-day"));
+      cleanup();
+      await open();
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      expect(inMonth()).not.toContain("Standup lunch");
+      pickView("Year");
+      expect(kinds()).not.toBeNull();
+      const inYear = (env.yearEvents ?? []).map((e) => e.summary);
+      expect(inYear).toContain("Standup holiday");
+      expect(inYear).not.toContain("Standup lunch");
+      pickView("Agenda");
+      expect(kinds()).not.toBeNull();
+    });
+
+    it("ANDs with the Calendars list: a hidden calendar's all-day event stays hidden", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      env.hidden = new Set([PERSONAL]);
+      rows = [
+        allDay("holiday", "Standup holiday"),
+        { ...allDay("offsite", "Standup offsite"), calendar_id: WORK_CAL },
+        { ...timedRow("lunch", "Standup lunch", 0, "12:00:00", "13:00:00"), calendar_id: WORK_CAL },
+      ];
+      await open();
+      expect(inMonth()).toContain("Standup offsite");
+      expect(inMonth()).not.toContain("Standup holiday");
+      expect(inMonth()).not.toContain("Standup lunch");
+    });
+
+    it("the Terminal's month table honours it, and its strip echoes it", async () => {
+      env.system = "terminal";
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(screen.queryByText(/lunch/)).toBeNull();
+      expect(screen.getAllByText(/holiday/).length).toBeGreaterThan(0);
+      expect(screen.getByText("cal --month --all-day")).toBeTruthy();
+    });
+
+    it("the List says 'No all-day events in view.' when only timed events are left", async () => {
+      localStorage.setItem("pm.calendar.view", "agenda");
+      localStorage.setItem(KINDS, "all-day");
+      rows = [timedRow("lunch", "Standup lunch", 1, "12:00:00", "13:00:00")];
+      tasks = [];
+      ipc.listAllMilestones.mockResolvedValue([]);
+      await open();
+      expect(await screen.findByText("No all-day events in view.")).toBeTruthy();
+    });
+
+    it("on the Runway it shows only while the strips do, and thins them", async () => {
+      localStorage.setItem("pm.calendar.view", "agenda");
+      localStorage.removeItem("pm.calendar.agendaMode");
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(kinds()).not.toBeNull();
+      expect(within(todayCol).queryByRole("button", { name: /Standup lunch/ })).toBeNull();
+      expect(within(todayCol).getByRole("button", { name: /Standup holiday/ })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide events" }));
+      expect(kinds()).toBeNull();
+    });
+
+    it("a search hit on a timed event the filter hides still opens its details", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      const View = (await import("./CalendarView")).CalendarView;
+      const lunch = rows[1];
+      render(<View reveal={{ event: lunch, nonce: 1 }} />);
+      expect(await screen.findByRole("dialog", { name: /Standup lunch/ })).toBeTruthy();
+    });
+
+    it("says so when a timed event is saved while All-day hides it", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      ipc.createCalendarEvent.mockResolvedValue(saved);
+      await open();
+      press("C", true);
+      fireEvent.change(title(), { target: { value: "Dentist" } });
+      fireEvent.click(within(quick()).getByRole("button", { name: "Save" }));
+      await waitFor(() =>
+        expect(status()).toContain("Saved. Timed events are hidden while All-day is on."),
+      );
+    });
   });
 });

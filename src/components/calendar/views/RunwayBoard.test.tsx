@@ -12,6 +12,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EventKinds } from "../../../lib/calendarFilters";
 import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import { formatClockIso, formatDateLocal } from "../../../lib/format";
 import type { CalendarEvent, Milestone, Task, TaskStack } from "../../../lib/types";
@@ -88,11 +89,19 @@ function Runway({
   milestones = [],
   archived = new Set<string>(),
   chrome,
+  hideDone = false,
+  doneCutoff = OPENED,
+  eventKinds = "all",
+  milestoneUids = new Set<string>(),
   ...props
 }: Omit<RunwayProps, "runway" | "chrome"> & {
   milestones?: Milestone[];
   archived?: ReadonlySet<string>;
   chrome: HTMLElement | null;
+  hideDone?: boolean;
+  doneCutoff?: Date;
+  eventKinds?: EventKinds;
+  milestoneUids?: ReadonlySet<string>;
 }) {
   const runway = useRunwayModel({
     tasks: props.tasks,
@@ -102,12 +111,19 @@ function Runway({
     archived,
     windows: props.windows,
     now: props.now,
+    hideDone,
+    doneCutoff,
+    eventKinds,
+    milestoneUids,
   });
   return <RunwayBoard {...props} runway={runway} chrome={chrome} />;
 }
 
 // Wednesday 04-11-2026: Today, Tomorrow (Thu 05), the rest of the week (06–08), next week (09–15).
 const NOW = new Date(2026, 10, 4, 10, 0);
+// When the Agenda was opened, for Hide done's cutoff: a task finished after this is one ticked while
+// hiding, and stays.
+const OPENED = new Date(2026, 10, 4, 9, 30);
 
 function task(over: Partial<Task> = {}): Task {
   return {
@@ -172,6 +188,9 @@ function board(
     events?: CalendarEvent[];
     windows?: RunwayWindow[];
     archived?: string[];
+    hideDone?: boolean;
+    eventKinds?: EventKinds;
+    milestoneUids?: string[];
   } = {},
 ) {
   const spies = {
@@ -191,6 +210,9 @@ function board(
       windows={over.windows ?? []}
       now={NOW}
       chrome={chrome}
+      hideDone={over.hideDone}
+      eventKinds={over.eventKinds}
+      milestoneUids={new Set(over.milestoneUids ?? [])}
       {...spies}
     />,
   );
@@ -517,6 +539,128 @@ describe("RunwayBoard", () => {
     expect(onEventClick).toHaveBeenCalledWith(ev, expect.anything());
     // The deadline follows the event, and says so.
     expect(screen.getByText(/^due .* · Review$/)).toBeTruthy();
+  });
+
+  it("Hide done leaves out what was finished before the Agenda opened, never open work, a task ticked since, or Before today", () => {
+    board({
+      hideDone: true,
+      tasks: [
+        task({ id: 1, title: "Open one" }),
+        task({ id: 2, title: "Done earlier", status: "done", completed_at: "2026-11-04T08:00:00" }),
+        task({
+          id: 3,
+          title: "Ticked just now",
+          status: "done",
+          completed_at: "2026-11-04T09:45:00",
+        }),
+        task({
+          id: 4,
+          title: "Done last week",
+          status: "done",
+          do_start: "2026-10-30",
+          completed_at: "2026-10-30T12:00:00",
+        }),
+        task({
+          id: 5,
+          title: "Done for tomorrow",
+          status: "done",
+          do_start: "2026-11-05",
+          completed_at: "2026-11-03T12:00:00",
+        }),
+        task({ id: 6, title: "Rolled late", do_start: "2026-11-02" }),
+      ],
+      milestones: [
+        { ...milestone, state: "met" },
+        { ...milestone, id: 2, label: "Missed", due_date: "2026-11-01", state: null },
+      ],
+    });
+    const today = within(column("Today"));
+    expect(today.getByText("Open one")).toBeTruthy();
+    expect(today.getByText("Ticked just now")).toBeTruthy();
+    expect(today.getByText("Rolled late")).toBeTruthy();
+    // A late milestone is open work: it stays, and says so.
+    expect(today.getByRole("button", { name: "◆ Missed · Atlas" })).toBeTruthy();
+    expect(today.queryByText("Done earlier")).toBeNull();
+    // A done task on a later day, and a met milestone, are gone too.
+    expect(screen.queryByText("Done for tomorrow")).toBeNull();
+    expect(screen.queryByRole("button", { name: "◆ Pitch · Atlas" })).toBeNull();
+    // They still count: 5 tasks and 2 milestones from today on (Before today's isn't counted), 4 of
+    // them done.
+    expect(screen.getByText("4/7 done")).toBeTruthy();
+    // Before today is the place to look back, and still holds what was done there.
+    // Its fold counts the one it holds (the met milestone is due tomorrow, so it isn't there).
+    fireEvent.click(screen.getByRole("button", { name: "Show Before today, 1" }));
+    expect(within(column("Before today")).getByText("Done last week")).toBeTruthy();
+  });
+
+  it("Hide done also drops the events that have ended from each column's strip", () => {
+    const ev = (id: string, start: string, end: string): CalendarEvent => ({
+      id,
+      calendar_id: "c",
+      summary: id,
+      description: null,
+      location: null,
+      start,
+      end,
+      all_day: false,
+      html_link: null,
+      uid: id,
+    });
+    const events = [
+      ev("Breakfast", "2026-11-04T08:00:00", "2026-11-04T09:00:00"),
+      ev("Workshop", "2026-11-04T09:30:00", "2026-11-04T11:00:00"),
+      ev("Dinner", "2026-11-04T19:00:00", "2026-11-04T21:00:00"),
+    ];
+    board({ events });
+    expect(screen.getAllByRole("button", { name: /Breakfast|Workshop|Dinner/ })).toHaveLength(3);
+    cleanup();
+    board({ events, hideDone: true });
+    expect(screen.queryByRole("button", { name: /Breakfast/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Workshop/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Dinner/ })).toBeTruthy();
+  });
+
+  it("All-day keeps only all-day events in the strips, and a task's linked timed event keeps its chip", () => {
+    const ev = (id: string, start: string, over: Partial<CalendarEvent> = {}): CalendarEvent => ({
+      id,
+      calendar_id: "c",
+      summary: id,
+      description: null,
+      location: null,
+      start,
+      end: null,
+      all_day: !start.includes("T"),
+      html_link: null,
+      uid: id,
+      ...over,
+    });
+    const events = [
+      ev("Holiday", "2026-11-04"),
+      ev("Standup", "2026-11-04T09:00:00", { end: "2026-11-04T09:15:00" }),
+      ev("Review", "2026-11-06T14:00:00", { end: "2026-11-06T15:00:00" }),
+    ];
+    board({
+      events,
+      eventKinds: "all-day",
+      milestoneUids: [],
+      tasks: [
+        task({
+          event_uid: "Review",
+          deadline_from: "event",
+          effective_deadline: "2026-11-06",
+          event_title: "Review",
+        }),
+      ],
+    });
+    const strip = within(column("Today")).getByRole("group", { name: "Events, Today" });
+    expect(within(strip).getByRole("button", { name: /Holiday/ })).toBeTruthy();
+    expect(within(strip).queryByRole("button", { name: /Standup/ })).toBeNull();
+    // Review is timed, so its column's strip is empty.
+    expect(
+      within(column("Rest of this week")).queryByRole("group", { name: /^Events/ }),
+    ).toBeNull();
+    // The linked event still resolves for its task, from the unfiltered events.
+    expect(screen.getByRole("button", { name: "Open the event Review" })).toBeTruthy();
   });
 
   it("opens the shared task editor from ✎, and has no + Task of its own", async () => {

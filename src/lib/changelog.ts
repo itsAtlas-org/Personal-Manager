@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.179.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "The Agenda has a Hide done button, beside Runway | List, to clear away what's finished: tasks you've ticked off, milestones you've met and events that are over, on the Runway and in the List alike. Open and late work always stays, and so does anything happening now or later today. While it's on, the button says how many it's hiding, like Show done (4), and one click brings them back. A task you tick while it's on stays, struck through, until you leave the Agenda or switch it off, so nothing vanishes under your pointer, and the Runway's 3/7 done still counts what's hidden.",
+      "A new All | All-day switch in Month, Year and the Agenda trims a busy calendar to its all-day events: holidays, birthdays, trips, days off. Your tasks, milestones and pinboard entries stay too. Week and Day always show everything, since that's where you plan your hours. On the Runway the switch shows while its events do.",
+      "Both choices are remembered on this device, and the pop-out Calendar picks them up when it opens. Reset on the General tab of Settings turns them both off.",
+      "Late work stands out now. A task's overdue Due: chip, and a milestone you haven't met by its date, used to fade like something finished once its day had passed. They now keep their full colour in every view.",
+    ],
+  },
+  {
     version: "3.178.0-alpha",
     date: "2026-11-11",
     highlights: [

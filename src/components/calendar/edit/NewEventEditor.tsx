@@ -170,6 +170,9 @@ interface Props {
   handover?: CreateHandover;
   /** A copy of an event (Duplicate, C18c): `seed` holds its fields. */
   copyOf?: CopyOf;
+  /** The event was made (Google saved it), as the editor closes: whether it has a time of day. The
+   *  calendar says when its All-day filter is hiding it. */
+  onSaved?: (timed: boolean) => void;
   onClose: () => void;
 }
 
@@ -252,6 +255,7 @@ export function NewEventEditor({
   focusRef,
   handover,
   copyOf,
+  onSaved,
   onClose,
 }: Props) {
   const deviceZone = useMemo(() => deviceTimeZoneOrNull(), []);
@@ -717,6 +721,7 @@ export function NewEventEditor({
       // Made again after the look-first words: they've done their job.
       setUnproven(null);
       noteCreateResult(sent, token, outcome, whereOf(sent.calendarId));
+      onSaved?.(sent.draft.time.kind === "timed");
       onClose();
       return;
     }
