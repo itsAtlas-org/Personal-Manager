@@ -127,6 +127,9 @@ import {
   writeRunwayWindows,
   writeView,
   writeZones,
+  ZONES_KEY,
+  HIDE_DONE_KEY,
+  EVENT_KINDS_KEY,
   type AgendaMode,
   type CalendarRange,
   type CalendarViewMode,
@@ -789,6 +792,48 @@ export function CalendarView({
   const onZonesChange = useCallback((next: string[]) => {
     setZones(next);
     writeZones(next);
+  }, []);
+
+  // The pop-out and the main window share this storage but each keeps its own copy, so a zone added
+  // in one would be overwritten by the other's next change. Follow `storage` events and re-read;
+  // a webview that doesn't deliver them between windows is covered by re-reading when this window
+  // regains focus or becomes visible, which is when it is next looked at. Stays in localStorage,
+  // not calendar_ui: it is per-device view state (storedPrefs.test.ts pins that). Hide done and
+  // All | All-day are the same kind of state and follow the same way, so a Reset or a toggle in
+  // the other window reaches an already-open one, and its next toggle can't flip a stale value.
+  useEffect(() => {
+    const reread = () => {
+      const next = readZones();
+      // The same list keeps the same state, so a focus change doesn't re-render the grid.
+      setZones((prev) =>
+        prev.length === next.length && prev.every((z, i) => z === next[i]) ? prev : next,
+      );
+      // Primitives, so a read that changes nothing re-renders nothing.
+      setHideDone(readAgendaHideDone());
+      setEventKinds(readEventKinds());
+    };
+    const onStorage = (e: StorageEvent) => {
+      // A null key is storage being cleared.
+      if (
+        e.key !== null &&
+        e.key !== ZONES_KEY &&
+        e.key !== HIDE_DONE_KEY &&
+        e.key !== EVENT_KINDS_KEY
+      )
+        return;
+      reread();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reread();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", reread);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", reread);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   const onBoundsChange = useCallback((r: CalendarRange, bounds: RangeBounds | null) => {
@@ -1495,9 +1540,10 @@ export function CalendarView({
 
   const label = viewLabel(view, cursor, dayCount);
   const isTerminal = system === "terminal";
-  // "+ New event" has one home per view: the time grid's top-left corner in Week and Day, above the
-  // timezone control, and the header's right end where there's no corner (Month, Year, Agenda, and
-  // Terminal, which draws no grid). Either way it's the same button: quick create opens under it.
+  // "+ New event" has one home per view: the time grid's top-left corner in Week and Day, across
+  // the gutter and over the timezone row, and the header's right end where there's no corner
+  // (Month, Year, Agenda, and Terminal, which draws no grid). Either way it's the same button:
+  // quick create opens under it.
   const createInCorner = !isTerminal && (view === "week" || view === "day");
   const newEventInCorner =
     hasGoogle && createInCorner ? (

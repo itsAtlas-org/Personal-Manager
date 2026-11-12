@@ -218,8 +218,8 @@ export function writeRunwayShowEvents(show: boolean): void {
 
 // --- the Agenda's and the views' filters ---------------------------------------------------------
 
-const HIDE_DONE_KEY = "pm.calendar.agendaHideDone";
-const EVENT_KINDS_KEY = "pm.calendar.eventKinds";
+export const HIDE_DONE_KEY = "pm.calendar.agendaHideDone";
+export const EVENT_KINDS_KEY = "pm.calendar.eventKinds";
 
 /** Is the Agenda hiding what is done (tasks ticked off, met milestones, events that have ended)?
  *  Shown until the user hides it, one switch for both layouts, the Runway and the List. View state,
@@ -366,9 +366,27 @@ export function writeRange(range: CalendarRange): void {
 
 // --- extra timezones (Week/Day gutter) -----------------------------------------------------------
 
-const ZONES_KEY = "pm.calendar.zones";
+/** Exported so a window can follow a `storage` event for it (the pop-out and the main window each hold
+ *  their own copy of the zones). */
+export const ZONES_KEY = "pm.calendar.zones";
 /** Up to this many EXTRA timezone columns beside the local one. */
 export const MAX_EXTRA_ZONES = 2;
+
+/** The hour gutter's columns, in rem so they grow with the Text size axis like the text inside them
+ *  (px widths clipped the zone codes and wrapped "+ New" at Large). 60 px for the local column and 52
+ *  px per extra zone at the default size. */
+export const LOCAL_COL_REM = 3.75;
+export const ZONE_COL_REM = 3.25;
+
+/** One column's width, as a CSS length. */
+export const localColWidth = `${LOCAL_COL_REM}rem`;
+export const zoneColWidth = `${ZONE_COL_REM}rem`;
+
+/** The whole gutter's width for `extra` extra zones. The hour gutter, the header's ZoneGutter and the
+ *  all-day band all take this one string, so they can't drift apart. */
+export function gutterWidth(extra: number): string {
+  return `${LOCAL_COL_REM + extra * ZONE_COL_REM}rem`;
+}
 
 /** The user's chosen extra IANA zones for the gutter (validated, deduped, capped). */
 export function readZones(): string[] {

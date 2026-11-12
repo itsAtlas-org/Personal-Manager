@@ -18,6 +18,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { cn } from "./cn";
 
 export interface TooltipProps {
   /** The text to show (e.g. `Bullet list · Ctrl+Shift+8`). */
@@ -25,6 +26,9 @@ export interface TooltipProps {
   /** Above the control (the default), or below it for one at the top of the window, where above is
    *  off-screen (the title bar's window controls). */
   placement?: "above" | "below";
+  /** Extra classes for the wrapping span, for a control that has to fill its row (w-full): the span
+   *  is inline-flex, so a full-width child would otherwise shrink to its text. */
+  className?: string;
   children: ReactNode;
 }
 
@@ -46,7 +50,7 @@ function isKeyboardFocus(target: EventTarget): boolean {
   }
 }
 
-export function Tooltip({ label, placement = "above", children }: TooltipProps) {
+export function Tooltip({ label, placement = "above", className, children }: TooltipProps) {
   const [shown, setShown] = useState(false);
   // Viewport coords for the shown tooltip. Null until measured, which also keeps it invisible for
   // that first frame so it never flashes at 0,0.
@@ -122,7 +126,7 @@ export function Tooltip({ label, placement = "above", children }: TooltipProps) 
   return (
     <span
       ref={triggerRef}
-      className="inline-flex"
+      className={cn("inline-flex", className)}
       onPointerEnter={enter}
       onPointerLeave={leave}
       // A press on the control dismisses it (the tooltip is in the way of what was pressed); a press

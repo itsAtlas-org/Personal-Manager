@@ -67,8 +67,8 @@ interface Spies {
 }
 
 /** A Day/Week grid as the views mark it: the strip with an all-day bar, the hours (40 px an hour)
- *  with two day columns and a 09:00-10:00 card in the first, the hour gutter, and the add-zone
- *  button. */
+ *  with two day columns and a 09:00-10:00 card in the first, the hour gutter, and a stand-in for the
+ *  gutter's zone-row button (a plain button, which is all the gesture's controls check sees). */
 function Grid({
   host,
   rows,

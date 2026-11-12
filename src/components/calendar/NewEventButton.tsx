@@ -8,9 +8,10 @@
 // stays the one primary button on screen.
 //
 // It has two homes, one per view and never both at once. In Week and Day it sits in the grid's
-// top-left corner, above the timezone control, where there's room for it (`compact`: "+ New", and a
-// click's reason drops below it, since the corner has no width to say it beside). In Month, Year,
-// Agenda and the Terminal views there is no corner, so it sits at the header's right end.
+// top-left corner, one line across the whole gutter and above the timezone row, where there's room
+// for it (`compact`: "+ New", and a click's reason drops below it, since the corner has no width to
+// say it beside). In Month, Year, Agenda and the Terminal views there is no corner, so it sits at
+// the header's right end.
 
 import { useEffect, useId, useState, type Ref } from "react";
 import { Button, Tooltip, VisuallyHidden, cn } from "../ui";
@@ -44,8 +45,11 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
   }, [createReason]);
 
   return (
-    <div className={cn("flex items-center gap-2", compact && "relative")} data-no-create="">
-      <Tooltip label={createReason ?? "New event · c, or Shift+C for a quick event or task"}>
+    <div className={cn("flex items-center gap-2", compact && "relative w-full")} data-no-create="">
+      <Tooltip
+        label={createReason ?? "New event · c, or Shift+C for a quick event or task"}
+        className={compact ? "w-full" : undefined}
+      >
         <Button
           ref={createRef}
           variant="secondary"
@@ -55,7 +59,12 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
           aria-keyshortcuts="c"
           // The same name in the corner, where only "+ New" fits on screen.
           aria-label={compact ? "+ New event" : undefined}
-          className="aria-disabled:cursor-not-allowed aria-disabled:text-ink4"
+          className={cn(
+            "aria-disabled:cursor-not-allowed aria-disabled:text-ink4",
+            // Across the whole gutter on one line: the corner is wide enough for "+ New" only if it
+            // never wraps.
+            compact && "w-full whitespace-nowrap",
+          )}
           onClick={() => {
             if (createReason !== null) setSaid((n) => n + 1);
             else onCreate();
