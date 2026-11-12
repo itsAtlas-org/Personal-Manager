@@ -100,20 +100,30 @@ pub struct SwitchOutcome {
 /// backup sites call this and nothing else. It returns the mods the snapshot holds and the key it
 /// is encrypted with, the open store's own (the archive carries it), so a passphrase vault whose
 /// key this account didn't cache in the keychain still backs up while it is open.
+///
+/// `packed_here`: the vault whose archive will be packed into the snapshot's own folder (the
+/// scheduled and cloud backups do; the typed backup packs into the user's chosen destination, so it
+/// passes none). Its Markdown and sidecars are measured here, off the runtime, so the free-space
+/// check ahead of the copy counts what the pack will hold on that volume.
 async fn snapshot_stripped(
     app: &AppHandle,
     expected_vault_id: &str,
     snapshot: &std::path::Path,
+    packed_here: Option<&vault::ResolvedVault>,
 ) -> Result<backup::strip::Stripped> {
     let app = app.clone();
     let snapshot = snapshot.to_path_buf();
     let expected = expected_vault_id.to_owned();
+    let packed_here = packed_here.cloned();
     spawn_blocking_result("snapshot", move || {
         let state = app.state::<AppState>();
         let keep_content = backup::strip::keep_mod_data(&state)?;
+        let beside = packed_here.map_or(0, |r| {
+            backup::pack::beside_db_bytes(&r.vault_root, &r.markdown_dir)
+        });
         // `expected` is the vault the caller read its metadata and Markdown folder from: the copy
         // is refused if the open store is another's by now.
-        backup::strip::snapshot_for_leaving(&state, &expected, &snapshot, keep_content)
+        backup::strip::snapshot_for_leaving(&state, &expected, &snapshot, keep_content, beside)
     })
     .await
 }
@@ -174,7 +184,7 @@ pub async fn create_local_backup(
         .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(&app, &meta.vault_id, &snapshot)
+        snapshot_stripped(&app, &meta.vault_id, &snapshot, None)
             .await
             .map_err(fail)?;
     emit_backup_progress(
@@ -240,7 +250,7 @@ pub async fn create_local_backup(
             let msg = if state.backup_cancel.load(Ordering::SeqCst) {
                 "Backup cancelled.".to_string()
             } else {
-                e.to_string()
+                backup::strip::say_if_disk_full(e).to_string()
             };
             emit_backup_progress(
                 &app,
@@ -930,7 +940,7 @@ pub(crate) async fn run_backup(
     // and the open store's key it is encrypted with. A snapshot that couldn't be stripped fails
     // the backup.
     let backup::strip::Stripped { mods, key: db_key } =
-        snapshot_stripped(app, &meta.vault_id, &snapshot)
+        snapshot_stripped(app, &meta.vault_id, &snapshot, Some(&resolved))
             .await
             .map_err(fail)?;
     emit_backup_progress(
@@ -990,7 +1000,7 @@ pub(crate) async fn run_backup(
         let msg = if state.backup_cancel.load(Ordering::SeqCst) {
             "Backup cancelled.".to_string()
         } else {
-            e.to_string()
+            backup::strip::say_if_disk_full(e).to_string()
         };
         emit_backup_progress(
             app,

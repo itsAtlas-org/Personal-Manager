@@ -647,8 +647,14 @@ written. The copies are made under `data_dir/copies-in-progress/` (`strip::WORK_
 never the OS temp dir (tmpfs, RAM, on many Linux desktops); a run's folder goes when it ends, and
 the boot sweep and the wipe take what a crash left. A run creates only that one folder, never the
 data folder itself (a wiped PM creates nothing), and refuses before the first copy when the volume
-has less than twice the store free. A Proton or Drive restore downloads its archive
-into a folder of the same place (`restore_scratch_dir`), for the same reason. The copy is opened with the key the live store
+has less than twice the store free, plus, for a scheduled or cloud backup (which packs its archive
+into that same folder), the vault's Markdown and sidecars (`pack::beside_db_bytes`); a typed
+backup packs into the destination the user chose and an export zips there, so they count the
+store only. The check is an estimate taken once, before the copy: a pack that still hits a full
+disk says so (`strip::say_if_disk_full`) rather than failing with a raw I/O error. A Proton or
+Drive restore downloads its archive into a folder of the same place (`restore_scratch_dir`), for
+the same reason (not out of RAM); that download is NOT space-checked, its size isn't known to the
+command, so a full disk there fails the restore. The copy is opened with the key the live store
 was opened with, read from the open session under the same DB guard as the copy, never re-resolved
 from the keychain. A new place that copies the store out calls the same function;
 `every_site_that_copies_the_store_out_goes_through_the_strip` fails on any other `vacuum_into` in

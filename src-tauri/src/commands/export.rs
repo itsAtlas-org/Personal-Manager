@@ -112,7 +112,7 @@ pub async fn export_all_data(
             // opened with the open store's own key, not the keychain's. The export is the user's own
             // copy of their data, so it keeps the mods' saved data whatever the backup toggle says:
             // that toggle is about what a backup file carries.
-            crate::backup::strip::snapshot_for_leaving(&state, &vault_id, &snapshot, true)?;
+            crate::backup::strip::snapshot_for_leaving(&state, &vault_id, &snapshot, true, 0)?;
         }
         write_export_zip(&resolved, &snapshot, std::path::Path::new(&dest))
     })

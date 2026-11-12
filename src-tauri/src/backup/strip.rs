@@ -39,9 +39,13 @@
 //! **Where.** The copies are made in [`WORK_DIR`] under PM's data dir, never the OS temp dir (tmpfs,
 //! which is RAM, on many Linux desktops). That is the store's own disk for a default vault, but not
 //! for a moved or pointed one, whose store is elsewhere: the copies sit beside PM's data folder.
-//! Before the first copy the volume must have twice the store free ([`check_space`]), so a copy
-//! can't fill the disk under the user's own saves. A run's folder goes
-//! when its guard drops, whether it worked or not, and [`sweep_work_dir`] removes at boot what a
+//! Before the first copy the volume must have room for the run's peak ([`check_space`]): twice the
+//! store for the strip (the first copy and the rewrite), and for a scheduled or cloud backup, whose
+//! archive is packed into the same folder, the rewrite plus the archive, which holds the store again
+//! and the vault's Markdown and sidecars (`packed_beside`), so twice the store plus those. A copy
+//! can't then fill the disk under the user's own saves. (A typed backup packs into the destination
+//! the user chose, and a cloud restore's download is not measured: its size isn't known to the
+//! command.) A run's folder goes when its guard drops, whether it worked or not, and [`sweep_work_dir`] removes at boot what a
 //! crash left (each is an encrypted copy of a store, nothing to keep).
 //!
 //! **Which key.** The copy is opened with the key the live store was opened with, read from the
@@ -151,18 +155,22 @@ pub(crate) struct Stripped {
 /// vault's by the time the copy is taken (a switch, a restore or a join in between), so an archive
 /// never pairs one vault's metadata and notes with another's database. The DB lock is held for the
 /// first copy (and the key and vault id read beside it) only; the strip is file work on that copy,
-/// after the lock is released. Blocking: call inside `spawn_blocking`.
+/// after the lock is released. `packed_beside`: the bytes the archive will hold besides the
+/// database, when it is packed into this same folder (0 when it goes elsewhere, as a typed backup
+/// and an export do). Blocking: call inside `spawn_blocking`.
 pub(crate) fn snapshot_for_leaving(
     state: &AppState,
     expected_vault_id: &str,
     dest: &Path,
     keep_content: bool,
+    packed_beside: u64,
 ) -> Result<Stripped> {
     snapshot_checked(
         state,
         expected_vault_id,
         dest,
         keep_content,
+        packed_beside,
         crate::hardware::available_bytes,
     )
 }
@@ -174,6 +182,7 @@ fn snapshot_checked(
     expected_vault_id: &str,
     dest: &Path,
     keep_content: bool,
+    packed_beside: u64,
     free: impl Fn(&Path) -> Option<u64>,
 ) -> Result<Stripped> {
     // Before any byte is written, and not under the DB lock held for the copy (reading the volume
@@ -183,7 +192,7 @@ fn snapshot_checked(
         let conn = state.conn()?;
         store_bytes(&conn)?
     };
-    check_space(free(folder), size, folder)?;
+    check_space(free(folder), size, packed_beside, folder)?;
     snapshot_with(
         |work| {
             let conn = state.conn()?;
@@ -272,10 +281,27 @@ fn is_disk_full(e: &Error) -> bool {
 fn no_space(folder: &Path) -> Error {
     Error::Other(format!(
         "nothing was saved: there isn't enough free disk space for the copy of your data. PM makes \
-         it in its own folder ({}), and needs about twice your database's size free there while \
-         it works",
+         it in its own folder ({}), and needs room there for about twice your database plus your \
+         notes while it works",
         folder.display()
     ))
+}
+
+/// A backup's write failing because the disk filled is said as that, not as the raw I/O error; any
+/// other failure is returned as it came. For the pack, which writes the archive after the copy's
+/// own space check passed (the destination may be another volume, or the disk may have filled with
+/// the user's own saves since).
+pub(crate) fn say_if_disk_full(e: Error) -> Error {
+    if is_disk_full(&e) {
+        Error::Other(
+            "nothing was saved: the disk ran out of space while the backup was being written. Free \
+             some space on the disk holding the backup's destination and PM's data folder, and try \
+             again"
+                .into(),
+        )
+    } else {
+        e
+    }
 }
 
 /// The live store's size in bytes, from its own page count (no file path needed; an open store).
@@ -289,15 +315,23 @@ fn store_bytes(conn: &Connection) -> Result<u64> {
     Ok(u64::try_from(bytes).unwrap_or(0))
 }
 
-/// Refuse before the first copy when the volume of `folder` has less than twice the store free.
-/// Twice is the peak of either phase: the strip holds the first copy and the rewrite, and a pack
-/// holds the rewrite and the archive packed from it (the first copy is gone by then). Without it a
-/// default vault, whose store is on this same disk, fills it and fails the user's own saves for as
-/// long as the copy lasts. `free` unknown (no mount point reported) is not a refusal: the failure
-/// path still says it ([`is_disk_full`]).
-fn check_space(free: Option<u64>, store_bytes: u64, folder: &Path) -> Result<()> {
+/// Refuse before the first copy when the volume of `folder` lacks the run's peak: twice the store,
+/// plus `packed_beside`. Twice the store is the strip's peak (the first copy and the rewrite). A
+/// pack into this folder holds the rewrite and the archive packed from it (the first copy is gone
+/// by then), and the archive is the store again (SQLCipher pages don't compress) plus the Markdown
+/// and sidecars, `packed_beside` (uncompressed size: an upper bound). Without it a default vault,
+/// whose store is on this same disk, fills it and fails the user's own saves for as long as the
+/// copy lasts. `free` unknown (no mount point reported) is not a refusal: the failure path still
+/// says it ([`is_disk_full`]).
+fn check_space(
+    free: Option<u64>,
+    store_bytes: u64,
+    packed_beside: u64,
+    folder: &Path,
+) -> Result<()> {
+    let needed = store_bytes.saturating_mul(2).saturating_add(packed_beside);
     match free {
-        Some(free) if free < store_bytes.saturating_mul(2) => Err(no_space(folder)),
+        Some(free) if free < needed => Err(no_space(folder)),
         _ => Ok(()),
     }
 }
@@ -953,7 +987,7 @@ mod tests {
     /// from that vault passes it (none open: an id no vault has).
     fn leave(state: &AppState, dest: &Path, keep_content: bool) -> Result<Stripped> {
         let vault_id = state.active_vault_id().unwrap_or_default();
-        snapshot_for_leaving(state, &vault_id, dest, keep_content)
+        snapshot_for_leaving(state, &vault_id, dest, keep_content, 0)
     }
 
     fn snapshot_dir() -> (tempfile::TempDir, PathBuf) {
@@ -1256,14 +1290,19 @@ mod tests {
     #[test]
     fn a_copy_that_would_not_fit_is_refused_before_a_byte_is_written() {
         let folder = Path::new("/somewhere/copies-in-progress");
-        // Twice the store (the strip holds the first copy and the rewrite; a pack holds the copy
-        // and the archive), exactly, is enough; a byte less is not; an unknown volume is not a no.
-        assert!(check_space(Some(2_000), 1_000, folder).is_ok());
-        let err = check_space(Some(1_999), 1_000, folder).unwrap_err();
+        // Twice the store (the strip holds the first copy and the rewrite), exactly, is enough when
+        // nothing else is packed beside it; a byte less is not; an unknown volume is not a no.
+        assert!(check_space(Some(2_000), 1_000, 0, folder).is_ok());
+        let err = check_space(Some(1_999), 1_000, 0, folder).unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
-        assert!(check_space(None, 1_000, folder).is_ok());
-        assert!(check_space(Some(0), 0, folder).is_ok());
-        assert!(check_space(Some(u64::MAX - 1), u64::MAX, folder).is_err());
+        assert!(check_space(None, 1_000, 0, folder).is_ok());
+        assert!(check_space(Some(0), 0, 0, folder).is_ok());
+        assert!(check_space(Some(u64::MAX - 1), u64::MAX, 0, folder).is_err());
+        // A pack into this folder also holds the Markdown and sidecars beside the store's pages:
+        // twice the store plus those, exactly, is enough, a byte less is not.
+        assert!(check_space(Some(2_300), 1_000, 300, folder).is_ok());
+        assert!(check_space(Some(2_299), 1_000, 300, folder).is_err());
+        assert!(check_space(Some(u64::MAX - 1), 1, u64::MAX, folder).is_err());
 
         // And it is wired in front of the first copy: nothing is made when the volume is too full.
         let dir = tempfile::tempdir().unwrap();
@@ -1271,13 +1310,41 @@ mod tests {
         let (state, _) = live_state(dir.path(), &key);
         let (_d, dest) = snapshot_dir();
         let vault_id = state.active_vault_id().unwrap();
-        let err = snapshot_checked(&state, &vault_id, &dest, true, |_| Some(1)).unwrap_err();
+        let err = snapshot_checked(&state, &vault_id, &dest, true, 0, |_| Some(1)).unwrap_err();
         assert!(err.to_string().contains("enough free disk space"), "{err}");
         assert!(files_in(&dest).is_empty());
         assert!(!work_path(&dest).exists());
+        // The Markdown beside the store is counted by the wired call, not only by the pure check:
+        // exactly the store's twice is room for the copy alone, a byte short of it plus 500 is not.
+        let store = store_bytes(&state.conn().unwrap()).unwrap();
+        let err = snapshot_checked(&state, &vault_id, &dest, true, 500, move |_| {
+            Some(store * 2 + 499)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("enough free disk space"), "{err}");
+        assert!(files_in(&dest).is_empty());
         // With room it copies.
-        snapshot_checked(&state, &vault_id, &dest, true, |_| Some(u64::MAX)).unwrap();
+        snapshot_checked(&state, &vault_id, &dest, true, 500, move |_| {
+            Some(store * 2 + 500)
+        })
+        .unwrap();
         assert!(dest.exists());
+    }
+
+    #[test]
+    fn a_write_that_hits_a_full_disk_is_said_as_one_and_nothing_else_is_reworded() {
+        // The pack writes the archive after the space check passed; its raw I/O error is worded as
+        // a full disk, and any other failure comes back as it was.
+        let full = say_if_disk_full(Error::Io(std::io::Error::from(
+            std::io::ErrorKind::StorageFull,
+        )));
+        assert!(full.to_string().contains("ran out of space"), "{full}");
+        let other = say_if_disk_full(Error::Other("a vault file has a non-UTF-8 name".into()));
+        assert!(other.to_string().contains("non-UTF-8"), "{other}");
+        let denied = say_if_disk_full(Error::Io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert!(!denied.to_string().contains("ran out of space"), "{denied}");
     }
 
     #[test]
@@ -1554,7 +1621,7 @@ mod tests {
         let (state, _) = live_state(dir.path(), &key);
         let open = state.active_vault_id().expect("the session has a vault");
         let (_d, dest) = snapshot_dir();
-        let err = snapshot_for_leaving(&state, "some-other-vault", &dest, true).unwrap_err();
+        let err = snapshot_for_leaving(&state, "some-other-vault", &dest, true, 0).unwrap_err();
         assert!(
             err.to_string()
                 .contains("the vault changed while the backup started"),
@@ -1562,7 +1629,7 @@ mod tests {
         );
         assert!(files_in(&dest).is_empty());
         // The same vault, and the open one by its own id, are copied.
-        snapshot_for_leaving(&state, &open, &dest, true).unwrap();
+        snapshot_for_leaving(&state, &open, &dest, true, 0).unwrap();
         // No store open at all is another vault too.
         assert!(same_vault(None, &open).is_err());
         assert!(same_vault(Some(&open), &open).is_ok());

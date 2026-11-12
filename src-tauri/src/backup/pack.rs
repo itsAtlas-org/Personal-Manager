@@ -263,6 +263,33 @@ fn enumerate_sources(inputs: &PackInputs) -> Result<Vec<Source>> {
     Ok(out)
 }
 
+/// The bytes an archive holds besides the database snapshot: the vault metadata, the sidecars and
+/// the whole Markdown tree, uncompressed (an upper bound on what they add to the archive). The
+/// free-space check ahead of a scheduled or cloud backup (`strip::check_space`), which packs into
+/// the same folder as the copy, counts them. It uses the same pieces the pack does
+/// ([`enumerate_sources`]); what it can't read counts as 0, since the pack itself refuses on it
+/// with its own error and a size that can't be measured is not a reason to refuse. Blocking: a
+/// metadata walk of the vault, off the runtime and off the DB lock.
+pub(crate) fn beside_db_bytes(vault_root: &Path, markdown_dir: &Path) -> u64 {
+    let mut out = Vec::new();
+    for name in [
+        vault::META_FILENAME,
+        crate::entities::RULES_FILENAME,
+        crate::index_only::MANIFEST_FILENAME,
+    ] {
+        let _ = push_optional(&mut out, &vault_root.join(name), name);
+    }
+    if std::fs::metadata(markdown_dir).is_ok_and(|m| m.is_dir()) {
+        let _ = collect_tree(&mut out, markdown_dir, "vault");
+    }
+    out.iter()
+        .map(|s| match s {
+            Source::File { len, .. } => *len,
+            Source::Bytes { .. } => 0,
+        })
+        .fold(0, u64::saturating_add)
+}
+
 fn push_required(out: &mut Vec<Source>, disk: &Path, name: &str) -> Result<()> {
     let len = std::fs::metadata(disk)
         .map_err(|e| Error::Other(format!("backup could not read {name}: {e}")))?
@@ -384,5 +411,59 @@ mod tests {
         // "No mods installed" is written as an empty list, not left out.
         assert_eq!(manifest_of(Some(Vec::new())).mods, Some(Vec::new()));
         assert_eq!(manifest_of(None).mods, None);
+    }
+
+    #[test]
+    fn what_the_archive_holds_besides_the_database_is_counted_from_the_pack_s_own_sources() {
+        // The free-space check counts these bytes for a pack into the copy's own folder; they must
+        // be what `enumerate_sources` really packs besides the snapshot, the Markdown tree (nested
+        // folders too) and the sidecars included.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, vec![0u8; 5_000]).unwrap();
+        let md = dir.path().join("vault");
+        std::fs::create_dir_all(md.join("a/b")).unwrap();
+        std::fs::write(md.join("one.md"), vec![b'x'; 300]).unwrap();
+        std::fs::write(md.join("a/b/two.md"), vec![b'x'; 70]).unwrap();
+        std::fs::write(
+            dir.path().join(crate::entities::RULES_FILENAME),
+            vec![b'x'; 11],
+        )
+        .unwrap();
+        let inputs = PackInputs {
+            vault_root: dir.path().to_path_buf(),
+            db_snapshot: snap,
+            markdown_dir: md.clone(),
+            meta,
+            db_key_hex: Secret::from("00".repeat(32)),
+            app_version: "test".into(),
+            created_at: "2026-11-11T00:00:00Z".into(),
+            mods_index: None,
+            mods: None,
+        };
+        let packed_besides_the_db: u64 = enumerate_sources(&inputs)
+            .unwrap()
+            .iter()
+            .filter_map(|s| match s {
+                Source::File { path, len, .. } if path != vault::DB_FILENAME => Some(*len),
+                _ => None,
+            })
+            .sum();
+        let counted = beside_db_bytes(dir.path(), &md);
+        assert!(
+            counted >= 300 + 70 + 11,
+            "the tree and a sidecar: {counted}"
+        );
+        assert_eq!(counted, packed_besides_the_db);
+        // No Markdown folder yet loses exactly the tree; no vault folder at all, nothing, no error.
+        assert_eq!(
+            beside_db_bytes(dir.path(), &dir.path().join("nope")),
+            counted - 370
+        );
+        assert_eq!(
+            beside_db_bytes(&dir.path().join("gone"), &dir.path().join("nope")),
+            0
+        );
     }
 }
