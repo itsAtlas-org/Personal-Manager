@@ -286,6 +286,11 @@ export const HELP: Record<string, HelpEntry> = {
     title: "New event",
     body: "Create an event on a calendar you choose. It goes straight to Google, with the calendar's usual notifications and colour unless you set your own, and nobody gets an email unless you add guests and choose to send one. PM starts it on the calendar you last created one in. + New event or c opens the full editor; Shift+C, or a click on an empty time, opens the quick box: type a title and press Enter, or More options for the full editor. The new event shows on the calendar as you type, except in the Year view and the Terminal look. Clicking elsewhere closes the quick box only while it has no title, and a titled one is still there if you switch tabs and come back. If the days you pick in Repeat don't include the start date, PM starts it on the first day that fits and says so. Either can add a Google Meet call where the calendar offers one; if your Google Calendar adds Meet to new events, PM adds it with the first guest. Birthdays are added in Google Calendar or Google Contacts, not here.",
   },
+  // The Event | Task switch in the quick box. Its own entry: the event's has no room left.
+  "calendar-new-task": {
+    title: "New task",
+    body: "Switch the quick box to Task to add a task to PM instead of an event. A task stays in PM and never goes to Google. It takes a day, not a time: the title carries over, the day you clicked is the day you plan to do it, a time clicked in Week is dropped, and days dragged across in Month keep the whole stretch. It shows on that day, or on today once that day has passed, until it's done; if Tasks is hidden in your calendar list it won't show on the calendar. More options opens the task editor, where you can give it a project or a deadline. The box always opens on Event, and switching back keeps your title.",
+  },
   // A change to a repeating event and its delete both ask here.
   "calendar-choices": {
     title: "Which occurrences",

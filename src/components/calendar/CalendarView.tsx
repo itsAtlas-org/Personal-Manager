@@ -98,6 +98,7 @@ import {
   type EventCopy,
 } from "../../lib/calendarEdit/eventDraft";
 import { slotSeed } from "../../lib/calendarEdit/slotSeed";
+import { taskGhostFields } from "../../lib/calendarEdit/quickTask";
 import {
   clampDayCount,
   readAgendaHideDone,
@@ -137,7 +138,7 @@ import { useSettledDate } from "../../lib/useSettledDate";
 import { calendarNavKey, calendarUndoKey } from "../../lib/calendarNavKey";
 import { isAnyDialogOpen } from "../../lib/useDialogLayer";
 import { resolveRangeBounds } from "../../lib/calendarGeom";
-import { formatDateLocal } from "../../lib/format";
+import { formatDateLocal, formatDateOnly } from "../../lib/format";
 import {
   addDays,
   dayKey,
@@ -366,8 +367,10 @@ export function CalendarView({
   // The one task editor this tab owns (null = closed): an existing task opened from the tasks
   // overlay, or a new one with its starting values (+ Task in the Runway's header). The board's own
   // editor serves only a card's ✎.
+  // `fromQuick`: the editor opened from quick create's More options on Task, whose box is gone, so
+  // focus goes back to "+ New event" when it closes (as the event editor's does).
   const [taskEditing, setTaskEditing] = useState<
-    { task: Task } | { defaults: Partial<TaskInput> } | null
+    { task: Task } | { defaults: Partial<TaskInput>; fromQuick?: true } | null
   >(null);
   // The header's slot for the Runway's readout and buttons (the header holds the element, the board
   // draws into it). A state setter is a stable ref callback, so it is passed straight in.
@@ -928,8 +931,28 @@ export function CalendarView({
     [announce],
   );
   const onQuickClose = useCallback(
-    (saved: boolean) => {
+    (saved: boolean, kind?: "event" | "task") => {
       const last = quickDraftRef.current;
+      if (saved && kind === "task") {
+        // A task has no ghost to keep: the overlay's chip arrives with the read that follows (a local
+        // read straight after a local insert; `tasks://changed` does the same), and the box's last
+        // draft says what was made and on which day.
+        const day = last?.draft.time.kind === "all_day" ? last.draft.time.first_day : null;
+        const title = last?.draft.summary.trim() ?? "";
+        void loadTasks();
+        // A planned day that has passed draws on today until the task is done (the box said so), so
+        // say where the chip is, not only the day it was planned for.
+        const passed = day !== null && day < dayKey(startOfDay(new Date()));
+        announce(
+          `Task added: ${title}${day ? `, ${formatDateOnly(day)}` : ""}.` +
+            (passed ? " It shows on today." : "") +
+            (hidden.has(TASK_CALENDAR_ID) ? " Tasks are hidden in your calendar list." : ""),
+        );
+        quickDraftRef.current = null;
+        setQuickDraft(null);
+        setCreating(null);
+        return;
+      }
       const ev = saved && last ? draftEvent(last.draft, last.calendarId, "saved") : null;
       if (ev) {
         setLanded({ ev, after: readsStarted.current });
@@ -940,13 +963,20 @@ export function CalendarView({
       setQuickDraft(null);
       setCreating(null);
     },
-    [loadEvents, onTimedSaved],
+    [loadEvents, loadTasks, announce, hidden, onTimedSaved],
   );
   // More options: the full editor carries on with quick create's draft; nothing is sent.
   const onQuickMore = useCallback((handover: CreateHandover) => {
     quickDraftRef.current = null;
     setQuickDraft(null);
     setCreating((c) => (c ? { ...c, mode: "full", anchor: null, handover } : c));
+  }, []);
+  // More options on Task: the task editor opens on the box's title and plan days, nothing saved.
+  const onQuickTaskMore = useCallback((defaults: Partial<TaskInput>) => {
+    quickDraftRef.current = null;
+    setQuickDraft(null);
+    setCreating(null);
+    setTaskEditing({ defaults, fromQuick: true });
   }, []);
 
   // Back on the calendar after a titled quick create went with the tab (`leftQuick`): the box opens
@@ -1205,7 +1235,11 @@ export function CalendarView({
       // Until the box first says what it holds, what it opens on: a slot clicked or dragged on the
       // grid goes from the drag's outline to the draft with no frame of neither (C17).
       if (!quickDraft) {
-        return draftEvent(creating.resume?.draft ?? creating.seed, creating.calendarId);
+        const first = creating.resume?.draft ?? creating.seed;
+        // A task draft the tab handed back opens as the task chip it was.
+        return creating.resume?.kind === "task"
+          ? draftEvent(taskGhostFields(first), TASK_CALENDAR_ID)
+          : draftEvent(first, creating.calendarId);
       }
       return draftEvent(quickDraft.draft, quickDraft.calendarId, quickDraft.state);
     }
@@ -2144,6 +2178,7 @@ export function CalendarView({
           timeTouched={creating.timeTouched}
           onDraft={onQuickDraft}
           onMore={onQuickMore}
+          onTaskMore={onQuickTaskMore}
           onClose={onQuickClose}
           onLeave={leaveQuick}
         />
@@ -2224,7 +2259,13 @@ export function CalendarView({
         open={taskEditing !== null}
         task={taskEditing && "task" in taskEditing ? taskEditing.task : null}
         defaults={taskEditing && "defaults" in taskEditing ? taskEditing.defaults : undefined}
-        onClose={() => setTaskEditing(null)}
+        onClose={() => {
+          // From quick create, the editor opened from its More options, which is gone: focus goes
+          // back to "+ New event", as quick create's own close would have sent it.
+          const fromQuick = taskEditing !== null && "fromQuick" in taskEditing;
+          setTaskEditing(null);
+          if (fromQuick) createButtonRef.current?.focus();
+        }}
       />
       <VisuallyHidden role="status" aria-live="polite">
         {said}

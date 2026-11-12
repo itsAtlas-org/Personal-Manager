@@ -222,6 +222,7 @@ describe("the calendar's help", () => {
     "calendar-event",
     "calendar-editor",
     "calendar-new-event",
+    "calendar-new-task",
     "calendar-choices",
     "calendar-delete",
     "calendar-description-format",
@@ -305,6 +306,9 @@ describe("the calendar's help", () => {
     expect(HELP["calendar-editor"].body).toMatch(/Duplicate makes a copy to change/);
     expect(HELP["calendar-editor"].body).toMatch(/organiser's unless they let guests change it/);
     expect(HELP["calendar-new-event"].body).toMatch(/full editor.*quick box/);
+    // A task made in the quick box: where it lives, and where its project and deadline are set.
+    expect(HELP["calendar-new-task"].body).toMatch(/never goes to Google/);
+    expect(HELP["calendar-new-task"].body).toMatch(/More options opens the task editor/);
     expect(HELP["calendar-choices"].body).toMatch(/a delete offers the same choices/);
     expect(HELP["focus-agenda"].body).toContain("Settings → Connectors");
   });

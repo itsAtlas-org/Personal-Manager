@@ -45,7 +45,7 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
 
   return (
     <div className={cn("flex items-center gap-2", compact && "relative")} data-no-create="">
-      <Tooltip label={createReason ?? "New event · c, or Shift+C for a quick one"}>
+      <Tooltip label={createReason ?? "New event · c, or Shift+C for a quick event or task"}>
         <Button
           ref={createRef}
           variant="secondary"
