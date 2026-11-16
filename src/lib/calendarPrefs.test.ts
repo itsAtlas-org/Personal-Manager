@@ -11,17 +11,23 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { getPref, setPref } from "./ipc";
 import {
+  calendarFiltersAreDefault,
+  readAgendaHideDone,
   readAgendaMode,
+  readEventKinds,
   readHidden,
   readLastCreate,
   readRunwayFolded,
   readRunwayPastOpen,
   readRunwayWindows,
   readSwipeDays,
+  resetCalendarFilters,
   rosterCount,
   swipeDays,
   toggleHiddenId,
+  writeAgendaHideDone,
   writeAgendaMode,
+  writeEventKinds,
   writeHidden,
   writeLastCreate,
   writeRunwayFolded,
@@ -220,6 +226,52 @@ describe("the Agenda's layout and the Runway (PA-2)", () => {
     );
     await hydrateStoredPrefs();
     expect(readRunwayWindows()).toEqual([]);
+  });
+});
+
+describe("the Agenda's Hide done and the All | All-day filter", () => {
+  it("shows everything until the user chooses otherwise, and remembers the choice", () => {
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+    writeAgendaHideDone(true);
+    writeEventKinds("all-day");
+    expect(localStorage.getItem("pm.calendar.agendaHideDone")).toBe("true");
+    expect(localStorage.getItem("pm.calendar.eventKinds")).toBe("all-day");
+    expect(readAgendaHideDone()).toBe(true);
+    expect(readEventKinds()).toBe("all-day");
+    writeAgendaHideDone(false);
+    writeEventKinds("all");
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+  });
+
+  it("reads anything it doesn't know as showing everything", () => {
+    localStorage.setItem("pm.calendar.agendaHideDone", "yes");
+    localStorage.setItem("pm.calendar.eventKinds", "timed-only");
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+  });
+
+  it("Reset turns both off and tells the open Calendar", () => {
+    writeAgendaHideDone(true);
+    writeEventKinds("all-day");
+    expect(calendarFiltersAreDefault()).toBe(false);
+    const told = vi.fn();
+    window.addEventListener("pm:settings-changed", told);
+    resetCalendarFilters();
+    window.removeEventListener("pm:settings-changed", told);
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+    expect(calendarFiltersAreDefault()).toBe(true);
+    expect(told).toHaveBeenCalledTimes(1);
+  });
+
+  it("either filter alone is not the default", () => {
+    writeAgendaHideDone(true);
+    expect(calendarFiltersAreDefault()).toBe(false);
+    writeAgendaHideDone(false);
+    writeEventKinds("all-day");
+    expect(calendarFiltersAreDefault()).toBe(false);
   });
 });
 

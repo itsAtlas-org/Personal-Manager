@@ -18,6 +18,7 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
 
 import { CalendarHeader } from "./CalendarHeader";
 import type { AgendaMode, CalendarViewMode } from "../../lib/calendarPrefs";
+import type { EventKinds } from "../../lib/calendarFilters";
 import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
 import { formatClock } from "../../lib/format";
 
@@ -46,6 +47,11 @@ interface Over {
   onAgendaModeChange?: (mode: AgendaMode) => void;
   runwaySlotRef?: (el: HTMLDivElement | null) => void;
   onCreateTask?: () => void;
+  hideDone?: boolean;
+  hiddenCount?: number;
+  onToggleHideDone?: () => void;
+  eventKinds?: EventKinds;
+  onEventKindsChange?: (kinds: EventKinds) => void;
   onPopOut?: () => void;
   roster?: ReactNode;
   onRefresh?: () => void;
@@ -299,6 +305,108 @@ describe("CalendarHeader: the Agenda layout", () => {
     cleanup();
     header();
     expect(screen.queryByRole("button", { name: /Calendars/ })).toBeNull();
+  });
+});
+
+// The Agenda's Hide done and the All | All-day filter (#1090): each is drawn only where CalendarView
+// hands it a handler, so which views carry them is CalendarView's test; this one is how they read.
+describe("CalendarHeader: the filters", () => {
+  const hideDone = () => screen.queryByRole("button", { name: /^(Hide|Show) done/ });
+
+  it("Hide done sits beside Runway | List in the Agenda, and flips its label with the count", () => {
+    const onToggleHideDone = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      onToggleHideDone,
+      hideDone: false,
+      hiddenCount: 0,
+    });
+    const button = screen.getByRole("button", { name: "Hide done" });
+    // No aria-pressed: the label flips instead, as Hide events does.
+    expect(button.getAttribute("aria-pressed")).toBeNull();
+    const layout = screen.getByRole("group", { name: "Agenda layout" });
+    expect(layout.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(button);
+    expect(onToggleHideDone).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "runway",
+        onAgendaModeChange: vi.fn(),
+        onToggleHideDone,
+        hideDone: true,
+        hiddenCount: 4,
+      }),
+    );
+    expect(hideDone()?.textContent).toBe("Show done (4)");
+    // Nothing hidden now: plain "Show done", with no "(0)".
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        onToggleHideDone,
+        hideDone: true,
+        hiddenCount: 0,
+      }),
+    );
+    expect(hideDone()?.textContent).toBe("Show done");
+  });
+
+  it("Hide done names what it hides in its tooltip, and is there only where it is given", () => {
+    header({ view: "agenda", agendaMode: "list", onToggleHideDone: vi.fn() });
+    expect(hideDone()?.getAttribute("title")).toMatch(
+      /tasks you've finished.*events that have ended/,
+    );
+    cleanup();
+    for (const view of ["month", "year", "week", "day"] as const) {
+      header({ view });
+      expect(hideDone()).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("All | All-day is a two-option control named Which events, where it is given", () => {
+    const onEventKindsChange = vi.fn();
+    const view = header({ view: "month", eventKinds: "all", onEventKindsChange });
+    const group = screen.getByRole("group", { name: "Which events" });
+    const all = within(group).getByRole("button", { name: "All" });
+    const allDay = within(group).getByRole("button", { name: "All-day" });
+    expect(all.getAttribute("aria-pressed")).toBe("true");
+    expect(allDay.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(allDay);
+    expect(onEventKindsChange).toHaveBeenCalledWith("all-day");
+    view.rerender(element({ view: "month", eventKinds: "all-day", onEventKindsChange }));
+    expect(
+      within(screen.getByRole("group", { name: "Which events" }))
+        .getByRole("button", { name: "All-day" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    // Not given (Week, Day, the Runway with its events hidden): not drawn.
+    view.rerender(element({ view: "week" }));
+    expect(screen.queryByRole("group", { name: "Which events" })).toBeNull();
+  });
+
+  it("both sit before the view switcher, and the header keeps Refresh last", () => {
+    header({
+      view: "agenda",
+      agendaMode: "list",
+      onAgendaModeChange: vi.fn(),
+      onToggleHideDone: vi.fn(),
+      onEventKindsChange: vi.fn(),
+    });
+    const hide = screen.getByRole("button", { name: "Hide done" });
+    const kinds = screen.getByRole("group", { name: "Which events" });
+    const views = screen.getByRole("group", { name: "Calendar view" });
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    const follows = (a: HTMLElement, b: HTMLElement) =>
+      !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(hide, kinds)).toBe(true);
+    expect(follows(kinds, views)).toBe(true);
+    expect(follows(views, refresh)).toBe(true);
   });
 });
 

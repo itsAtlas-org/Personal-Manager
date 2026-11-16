@@ -6,7 +6,8 @@
 // and the window's own controls. In Agenda, a Runway | List switch sits beside the view switcher; the
 // Runway always runs from today, so with it on, the nav and the date label give way to "From today".
 //
-// THE ORDER AT THE RIGHT, set once for every control that joins it: view-specific controls, the view
+// THE ORDER AT THE RIGHT, set once for every control that joins it: view-specific controls (in the
+// Agenda: Runway | List, Hide done, then All | All-day, which Month and Year carry too), the view
 // switcher, + Task (the Runway only), + New event, then Pop out (main window) or Calendars n/m (the pop-out, which has no
 // sidebar to hold the list), then Refresh in the corner. Refresh always takes the last corner because
 // that is where a hand goes for it (Bobby: "i instinctively click top right for refresh").
@@ -42,6 +43,7 @@ import {
   type CalendarViewMode,
   type RangeBounds,
 } from "../../lib/calendarPrefs";
+import type { EventKinds } from "../../lib/calendarFilters";
 import { pageKeyHint } from "../../lib/calendarNavKey";
 import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
 import { useTheme, type Coords } from "../../theme";
@@ -101,6 +103,15 @@ interface Props {
   runwaySlotRef?: (el: HTMLDivElement | null) => void;
   /** Start a new task (the Runway's + Task, before + New event). Absent outside the Runway. */
   onCreateTask?: () => void;
+  /** The Agenda's Hide done, beside Runway | List: whether it is on, how many it is hiding now, and
+   *  the switch. Absent outside the Agenda, where there is no such control. */
+  hideDone?: boolean;
+  hiddenCount?: number;
+  onToggleHideDone?: () => void;
+  /** The All | All-day filter, before the view switcher. Absent where it does nothing (Week, Day,
+   *  and the Runway while its events are hidden). */
+  eventKinds?: EventKinds;
+  onEventKindsChange?: (kinds: EventKinds) => void;
   /** Open the Calendar in a window of its own (#1039), or bring that window forward. Absent in the
    *  pop-out itself. */
   onPopOut?: () => void;
@@ -112,6 +123,15 @@ interface Props {
 const AGENDA_OPTIONS: SegOption<AgendaMode>[] = [
   { value: "runway", label: "Runway", title: "Your tasks in columns, from today on" },
   { value: "list", label: "List", title: "Your events, day by day" },
+];
+
+const KIND_OPTIONS: SegOption<EventKinds>[] = [
+  { value: "all", label: "All", title: "Every event" },
+  {
+    value: "all-day",
+    label: "All-day",
+    title: "Only all-day events, and your tasks and milestones",
+  },
 ];
 
 const VIEW_LABEL: Record<CalendarViewMode, string> = {
@@ -149,6 +169,11 @@ export function CalendarHeader({
   onAgendaModeChange,
   runwaySlotRef,
   onCreateTask,
+  hideDone = false,
+  hiddenCount = 0,
+  onToggleHideDone,
+  eventKinds = "all",
+  onEventKindsChange,
   onPopOut,
   roster,
 }: Props) {
@@ -250,6 +275,40 @@ export function CalendarHeader({
               value={agendaMode}
               onChange={onAgendaModeChange}
             />
+          )}
+          {onToggleHideDone && (
+            // Agenda only, beside the layout switch: one switch for the Runway and the List. It
+            // flips its label rather than being pressed (as Hide events does), at every Depth: a
+            // control that hides things has to stay reachable. The count is what it is hiding now.
+            <Button
+              variant="tertiary"
+              onClick={onToggleHideDone}
+              data-help="calendar-filters"
+              title={
+                hideDone
+                  ? "Done tasks, met milestones and events that have ended are hidden. Late and open work is never hidden."
+                  : "Hide the tasks you've finished, the milestones that are met and the events that have ended"
+              }
+            >
+              {hideDone
+                ? hiddenCount > 0
+                  ? `Show done (${hiddenCount})`
+                  : "Show done"
+                : "Hide done"}
+            </Button>
+          )}
+          {onEventKindsChange && (
+            // Month, Year and the Agenda (the Runway while its events show), never Week or Day: a
+            // hidden timed event would leave the hour grid empty where you create and drag. It
+            // thins what KIND of event shows; which calendars show is the sidebar's list.
+            <div data-help="calendar-filters">
+              <SegmentedControl
+                ariaLabel="Which events"
+                options={KIND_OPTIONS}
+                value={eventKinds}
+                onChange={onEventKindsChange}
+              />
+            </div>
           )}
           {view === "day" && (
             // Day only: Week IS the 7-day window, so offering a width control there would be two

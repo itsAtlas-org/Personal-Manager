@@ -8,6 +8,7 @@
 // `pm.focus.sort` localStorage pattern in FocusView.
 
 import { isValidTimeZone } from "../theme/timezones";
+import type { EventKinds } from "./calendarFilters";
 import { readStored, writeStored } from "./storedPrefs";
 import type { Calendar } from "./types";
 
@@ -60,10 +61,11 @@ export function writeView(view: CalendarViewMode): void {
  *  last calendar an event was created in, `readLastCreate`, and the Runway's named windows,
  *  `readRunwayWindows`): a Google/Outlook calendar id is routinely the account's email address, and a
  *  window's name is the user's own words ("Lisbon trip"). All three therefore live in the encrypted
- *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other thirteen keys here —
+ *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other fifteen keys here —
  *  view, range, roster fold, zones, bounds, day count, openOn, the cursor, the swipe distance, the
- *  agenda layout, the Runway's "Before today" fold, its events switch and its other folded columns
- *  — stay in localStorage, which is what they are for. */
+ *  agenda layout, the Runway's "Before today" fold, its events switch and its other folded columns,
+ *  the Agenda's Hide done and the All | All-day filter — stay in localStorage, which is what they
+ *  are for. */
 export function readHidden(): Set<string> {
   const arr = readStored(PREF_KEY).hidden;
   if (Array.isArray(arr)) {
@@ -211,6 +213,66 @@ export function writeRunwayShowEvents(show: boolean): void {
     localStorage.setItem(RUNWAY_EVENTS_KEY, show ? "shown" : "hidden");
   } catch {
     // Best-effort.
+  }
+}
+
+// --- the Agenda's and the views' filters ---------------------------------------------------------
+
+const HIDE_DONE_KEY = "pm.calendar.agendaHideDone";
+const EVENT_KINDS_KEY = "pm.calendar.eventKinds";
+
+/** Is the Agenda hiding what is done (tasks ticked off, met milestones, events that have ended)?
+ *  Shown until the user hides it, one switch for both layouts, the Runway and the List. View state,
+ *  so localStorage, which the pop-out shares: it reads this when it opens. */
+export function readAgendaHideDone(): boolean {
+  try {
+    return localStorage.getItem(HIDE_DONE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function writeAgendaHideDone(hide: boolean): void {
+  try {
+    localStorage.setItem(HIDE_DONE_KEY, hide ? "true" : "false");
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Which events Month, Year and the Agenda draw: every one, or only the all-day ones. One setting
+ *  for every view that carries the control. Anything but "all-day" (including junk) reads as all,
+ *  the default: a filter that hides data must be switched on by a choice. */
+export function readEventKinds(): EventKinds {
+  try {
+    return localStorage.getItem(EVENT_KINDS_KEY) === "all-day" ? "all-day" : "all";
+  } catch {
+    return "all";
+  }
+}
+
+export function writeEventKinds(kinds: EventKinds): void {
+  try {
+    localStorage.setItem(EVENT_KINDS_KEY, kinds);
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Both filters off (the defaults): what General → Reset restores. */
+export function calendarFiltersAreDefault(): boolean {
+  return !readAgendaHideDone() && readEventKinds() === "all";
+}
+
+/** Put both filters back to showing everything, and tell the open Calendar, which re-reads them on
+ *  the app-wide settings signal (Settings is an overlay over the still-mounted tab). */
+export function resetCalendarFilters(): void {
+  writeAgendaHideDone(false);
+  writeEventKinds("all");
+  try {
+    window.dispatchEvent(new Event("pm:settings-changed"));
+  } catch {
+    /* non-browser context (tests) */
   }
 }
 

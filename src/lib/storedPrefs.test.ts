@@ -17,9 +17,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { announceStoredPref, getPref, onStoredPref, setPref } from "./ipc";
 import {
+  readAgendaHideDone,
   readAgendaMode,
   readCursorDay,
   readDayCount,
+  readEventKinds,
   readHidden,
   readOpenOn,
   readRunwayFolded,
@@ -223,8 +225,8 @@ describe("the backup dismissal prefix scan", () => {
 });
 
 describe("what deliberately stays in localStorage", () => {
-  it("moves only pm.calendar.hidden — the other thirteen calendar keys are untouched", async () => {
-    // calendarPrefs holds fourteen localStorage keys and exactly ONE of them is user content (a
+  it("moves only pm.calendar.hidden — the other fifteen calendar keys are untouched", async () => {
+    // calendarPrefs holds sixteen localStorage keys and exactly ONE of them is user content (a
     // calendar id is routinely the account's email). The rest are view state, and dragging them
     // behind an IPC round trip would be against the decision this change implements, not for it.
     // (The other user content, the last calendar created in and the Runway's named windows, was
@@ -247,6 +249,9 @@ describe("what deliberately stays in localStorage", () => {
       // The Runway's events switch, and the rest of its folded columns.
       "pm.calendar.runwayEvents": "hidden",
       "pm.calendar.runwayFolded": JSON.stringify(["today", "window:w1"]),
+      // The Agenda's Hide done, and the All | All-day filter.
+      "pm.calendar.agendaHideDone": "true",
+      "pm.calendar.eventKinds": "all-day",
     };
     for (const [k, v] of Object.entries(stays)) localStorage.setItem(k, v);
     localStorage.setItem("pm.calendar.hidden", JSON.stringify(["a@example.com"]));
@@ -271,6 +276,8 @@ describe("what deliberately stays in localStorage", () => {
     expect(readRunwayPastOpen()).toBe(true);
     expect(readRunwayShowEvents()).toBe(false);
     expect([...readRunwayFolded()]).toEqual(["today", "window:w1"]);
+    expect(readAgendaHideDone()).toBe(true);
+    expect(readEventKinds()).toBe("all-day");
     // The one that moved reads from the store instead.
     expect([...readHidden()]).toEqual(["a@example.com"]);
   });

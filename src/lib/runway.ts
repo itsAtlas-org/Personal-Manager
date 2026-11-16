@@ -383,6 +383,9 @@ export interface RunwayModel {
   /** The column each placed task sits in, by task id (parked and left-off tasks aren't here):
    *  where a drag or a move comes from. */
   columnOf: ReadonlyMap<number, string>;
+  /** How many done tasks and met milestones `hideDoneBefore` left out of Today and the later
+   *  columns (0 when it isn't set): what "Show done (N)" counts. */
+  hiddenDone: number;
 }
 
 export interface PlaceInput {
@@ -393,6 +396,13 @@ export interface PlaceInput {
   today: Date;
   /** Archived project names: their tasks and milestones are left off. */
   archived: ReadonlySet<string>;
+  /** Hide done (the Agenda's toggle) when set: a done task is left out of its column when it has
+   *  no `completed_at` or finished before this instant, and so is every met milestone. A task
+   *  finished at or after it stays, struck through, so one ticked while hiding doesn't vanish under
+   *  the pointer. Only Today and later are cut: "Before today" is the folded place to look back.
+   *  A left-out item still counts in `progress`, still joins its stack's chain and still has a
+   *  `columnOf` entry. */
+  hideDoneBefore?: Date | null;
 }
 
 /** The task cards in a lane's display order, stack members inline: what a reorder works over. */
@@ -405,8 +415,9 @@ export function laneTaskIds(cards: readonly RunwayCard[]): number[] {
   return ids;
 }
 
-/** A milestone that's reached (met, or its status done). */
-function milestoneDone(m: Milestone): boolean {
+/** A milestone that's reached (met, or its status done). The one test every surface asks: the
+ *  boards' strike-through, the overlay's check mark, and the Agenda's Hide done. */
+export function milestoneDone(m: Milestone): boolean {
   return m.state === "met" || m.status === "done";
 }
 
@@ -448,6 +459,11 @@ export function placeCards(input: PlaceInput): RunwayModel {
   const todayCol = columns.find((c) => c.today) ?? columnForDay(columns, tk);
   const past = columns.find((c) => c.kind === "past") ?? null;
   const stackById = new Map(stacks.map((s) => [s.id, s]));
+  const cutMs = input.hideDoneBefore ? input.hideDoneBefore.getTime() : null;
+  let hiddenDone = 0;
+  // The stacks Hide done took a member of out of a lane (`column/lane`): a stack whose done member
+  // is hidden keeps its card ("N left", the opening chain) for the members still shown.
+  const cutStacks = new Map<string, Set<number>>();
 
   type Placed = { card: RunwayTaskCard | RunwayMilestoneCard; lane: TaskLane };
   const at = new Map<string, Placed[]>();
@@ -546,7 +562,21 @@ export function placeCards(input: PlaceInput): RunwayModel {
       col = windowMatch(t) ?? columnForDay(columns, day);
       placed = card();
     }
-    put(col, placed);
+    // Hide done leaves a finished task out of Today and later, but it is still placed: it counts
+    // as done, joins its stack's chain and has a column, as a visible one does.
+    if (col && col.kind !== "past" && !open && cutMs !== null && !(finishedAt(t) >= cutMs)) {
+      hiddenDone += 1;
+      // Remember the stack it left this lane: its last visible member still gets the stack card.
+      const sid = t.stack_id;
+      if (sid !== null && stackById.has(sid)) {
+        const key = `${col.id}/${lane}`;
+        const cut = cutStacks.get(key);
+        if (cut) cut.add(sid);
+        else cutStacks.set(key, new Set([sid]));
+      }
+    } else {
+      put(col, placed);
+    }
     if (col) {
       columnOf.set(t.id, col.id);
       joinStack({ card: placed.card as RunwayTaskCard, columnId: col.id });
@@ -578,7 +608,12 @@ export function placeCards(input: PlaceInput): RunwayModel {
     } else {
       col = columnForDay(columns, due);
     }
-    put(col, { card: { kind: "milestone", milestone: m, late }, lane: "foreground" });
+    // A met milestone has no finishing time to keep it past a tick, so Hide done takes them all.
+    if (col && col.kind !== "past" && done && cutMs !== null) {
+      hiddenDone += 1;
+    } else {
+      put(col, { card: { kind: "milestone", milestone: m, late }, lane: "foreground" });
+    }
     if (col && col.kind !== "past") {
       progress.total += 1;
       if (done) progress.done += 1;
@@ -594,11 +629,13 @@ export function placeCards(input: PlaceInput): RunwayModel {
         placed.filter((p) => p.lane === "foreground").map((p) => p.card),
         stackById,
         stackMembers,
+        cutStacks.get(`${c.id}/foreground`),
       ),
       background: arrange(
         placed.filter((p) => p.lane === "background").map((p) => p.card),
         stackById,
         stackMembers,
+        cutStacks.get(`${c.id}/background`),
       ),
     };
   }
@@ -611,7 +648,14 @@ export function placeCards(input: PlaceInput): RunwayModel {
     progress,
     nextUp: n && info ? { title: n.title, deadlineText: info.text, tone: info.tone } : null,
     columnOf,
+    hiddenDone,
   };
+}
+
+/** When a task finished, as a time; NaN when it has no `completed_at` (or it doesn't parse), which
+ *  no cutoff comparison passes, so such a task counts as finished before any cutoff. */
+function finishedAt(t: Task): number {
+  return t.completed_at === null ? NaN : Date.parse(t.completed_at);
 }
 
 /** The local day a `completed_at` instant fell on, `YYYY-MM-DD`, or null. */
@@ -622,11 +666,13 @@ function completedDay(at: string | null): string | null {
 }
 
 /** One lane's cards: tasks in the global order (stacks of two or more folded into one card where
- *  the first of them is, counted over the whole stack), then milestones by date. */
+ *  the first of them is, counted over the whole stack), then milestones by date. `cut` names the
+ *  stacks Hide done took a member of out of this lane: one member left is still their card. */
 function arrange(
   cards: (RunwayTaskCard | RunwayMilestoneCard)[],
   stackById: Map<number, TaskStack>,
   stackMembers: Map<number, RunwayStackMember[]>,
+  cut?: ReadonlySet<number>,
 ): RunwayCard[] {
   const taskCards = cards
     .filter((c): c is RunwayTaskCard => c.kind === "task")
@@ -652,7 +698,7 @@ function arrange(
   for (const c of taskCards) {
     const sid = c.task.stack_id;
     const group = sid === null ? undefined : members.get(sid);
-    if (sid === null || !group || group.length < 2) {
+    if (sid === null || !group || (group.length < 2 && !cut?.has(sid))) {
       out.push(c);
       continue;
     }

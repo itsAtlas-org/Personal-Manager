@@ -23,6 +23,7 @@ import {
   writeRunwayShowEvents,
   type RunwayWindow,
 } from "../../../lib/calendarPrefs";
+import { hideFinished, keepAllDay, type EventKinds } from "../../../lib/calendarFilters";
 import { storedPrefsHydrated } from "../../../lib/storedPrefs";
 import { dayKey, parseLocal, startOfDay } from "../../../lib/calendar-layout";
 import { changeTaskStatus, planTask, reorderTasks } from "../../../lib/ipc";
@@ -66,7 +67,21 @@ export interface RunwayModelInput {
   archived: ReadonlySet<string>;
   windows: RunwayWindow[];
   now: Date;
+  /** The Agenda's Hide done: leave out the done tasks and met milestones (Today and later), and the
+   *  strips' events that have ended. A task finished at or after `doneCutoff` stays, struck through
+   *  (it was ticked while hiding). */
+  hideDone: boolean;
+  doneCutoff: Date;
+  /** The header's All | All-day, applied to the strips' events only: a task's link still resolves
+   *  from `events`, so a linked timed event keeps its chip. `milestoneUids` are the events a
+   *  milestone links to, which All-day keeps. */
+  eventKinds: EventKinds;
+  milestoneUids: ReadonlySet<string>;
 }
+
+/** No milestone overlays reach the strips (the board draws milestones as cards), so Hide done has
+ *  no met ids to look for there. */
+const NO_IDS: ReadonlySet<string> = new Set();
 
 /** The Runway model, and the events switch that shapes it: what `useRunwayModel` returns. */
 export type RunwayState = ReturnType<typeof useRunwayModel>;
@@ -107,11 +122,17 @@ export function useRunwayModel({
   archived,
   windows,
   now,
+  hideDone,
+  doneCutoff,
+  eventKinds,
+  milestoneUids,
 }: RunwayModelInput): {
   today: Date;
   columns: RunwayColumn[];
   model: RunwayModel;
   strips: Record<string, RunwayEventStrip>;
+  /** How many events Hide done left out of the strips (0 while the strips are hidden). */
+  hiddenEvents: number;
   showEvents: boolean;
   toggleEvents: () => void;
 } {
@@ -119,9 +140,10 @@ export function useRunwayModel({
   const todayKey = dayKey(startOfDay(now));
   const today = useMemo(() => parseLocal(todayKey, true) ?? startOfDay(new Date()), [todayKey]);
   const columns = useMemo(() => buildColumns(today, windows), [today, windows]);
+  const hideDoneBefore = hideDone ? doneCutoff : null;
   const model = useMemo(
-    () => placeCards({ tasks, stacks, milestones, columns, today, archived }),
-    [tasks, stacks, milestones, columns, today, archived],
+    () => placeCards({ tasks, stacks, milestones, columns, today, archived, hideDoneBefore }),
+    [tasks, stacks, milestones, columns, today, archived, hideDoneBefore],
   );
   const [showEvents, setShowEvents] = useState(readRunwayShowEvents);
   const toggleEvents = useCallback(() => {
@@ -130,11 +152,32 @@ export function useRunwayModel({
       return !v;
     });
   }, []);
+  // What the strips are built from: the kind filter, then Hide done. Events end on the minute tick,
+  // so the clock is a dependency only while hiding (otherwise the strips would rebuild each minute).
+  const clock = hideDone ? now.getTime() : 0;
+  const stripEvents = useMemo(() => {
+    const kept = eventKinds === "all-day" ? keepAllDay(events, milestoneUids) : events;
+    if (!hideDone) return { events: kept, hidden: 0 };
+    const { shown, hidden } = hideFinished(kept, {
+      now: new Date(clock),
+      metIds: NO_IDS,
+      fromDay: today,
+    });
+    return { events: shown, hidden };
+  }, [events, eventKinds, milestoneUids, hideDone, clock, today]);
   const strips = useMemo(
-    () => (showEvents ? placeEvents(events, columns, today) : {}),
-    [showEvents, events, columns, today],
+    () => (showEvents ? placeEvents(stripEvents.events, columns, today) : {}),
+    [showEvents, stripEvents, columns, today],
   );
-  return { today, columns, model, strips, showEvents, toggleEvents };
+  return {
+    today,
+    columns,
+    model,
+    strips,
+    hiddenEvents: showEvents ? stripEvents.hidden : 0,
+    showEvents,
+    toggleEvents,
+  };
 }
 
 /** Which Runway columns are folded, remembered on this device (view state: localStorage). Both

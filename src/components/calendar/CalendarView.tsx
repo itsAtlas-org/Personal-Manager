@@ -62,7 +62,14 @@ import {
   type MonthWindow,
 } from "../../lib/calendarWindow";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
-import { taskOverlayEvents } from "../../lib/runway";
+import { milestoneDone, taskOverlayEvents } from "../../lib/runway";
+import {
+  hideFinished,
+  keepAllDay,
+  metMilestoneIds,
+  milestoneEventUids,
+  type EventKinds,
+} from "../../lib/calendarFilters";
 import { askOwnerFor, copyRank, duplicable, eventRights } from "../../lib/calendarEdit/editReasons";
 import { guestSuggestions } from "../../lib/calendarEdit/guests";
 import { applyPending, DEFAULT_LENGTH_MIN, dragCapability } from "../../lib/calendarDrag";
@@ -93,9 +100,11 @@ import {
 import { slotSeed } from "../../lib/calendarEdit/slotSeed";
 import {
   clampDayCount,
+  readAgendaHideDone,
   readAgendaMode,
   readCursorDay,
   readDayCount,
+  readEventKinds,
   readHidden,
   readLastCreate,
   readOpenOn,
@@ -106,9 +115,11 @@ import {
   readZones,
   swipeDays,
   toggleHiddenId,
+  writeAgendaHideDone,
   writeAgendaMode,
   writeCursorDay,
   writeDayCount,
+  writeEventKinds,
   writeHidden,
   writeRange,
   writeRangeBounds,
@@ -139,6 +150,8 @@ import {
   isPinboardEvent,
   isTaskEvent,
   MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
+  milestoneOverlayId,
   occurrenceKey,
   parseLocal,
   PINBOARD_CALENDAR_ID,
@@ -362,6 +375,23 @@ export function CalendarView({
   const [hidden, setHidden] = useState<Set<string>>(() => readHidden());
   const [view, setView] = useState<CalendarViewMode>(() => readView(AVAILABLE_VIEWS, DEFAULT_VIEW));
   const [agendaMode, setAgendaMode] = useState<AgendaMode>(() => readAgendaMode());
+  // The two view filters, remembered on this device: the Agenda's Hide done (Runway and List) and
+  // the header's All | All-day (Month, Year, the List and the Runway's strips). Both off by default.
+  const [hideDone, setHideDone] = useState(readAgendaHideDone);
+  const [eventKinds, setEventKinds] = useState<EventKinds>(readEventKinds);
+  // The moment Hide done counts from: a task finished at or after it stays on the Runway, struck
+  // through, so one ticked while hiding doesn't vanish under the pointer or drop focus. Set afresh
+  // when you arrive at the Agenda, change its layout, or turn Hide done on; it keys on the task's
+  // `completed_at`, so the editor's status select and the other window behave as the tick does.
+  // Adjusted during render (React's pattern for state derived from other state), so the first frame
+  // of a new arrival already holds the new cutoff and nothing flashes.
+  const doneKey = `${view === "agenda"}:${agendaMode}:${hideDone}`;
+  const [doneKeyWas, setDoneKeyWas] = useState(doneKey);
+  const [doneCutoff, setDoneCutoff] = useState(() => new Date());
+  if (doneKeyWas !== doneKey) {
+    setDoneKeyWas(doneKey);
+    setDoneCutoff(new Date());
+  }
   const [range, setRange] = useState<CalendarRange>(() => readRange());
   // Extra gutter timezones + any custom Work/Day hour windows (both per-device view prefs).
   const [zones, setZones] = useState<string[]>(() => readZones());
@@ -698,6 +728,10 @@ export function CalendarView({
       // (Kept as the same list when unchanged, so a calendar tick doesn't rebuild the Runway.)
       const next = readRunwayWindows();
       setWindows((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      // General → Reset turns both filters off through this signal (primitives, so a read that
+      // changes nothing re-renders nothing).
+      setHideDone(readAgendaHideDone());
+      setEventKinds(readEventKinds());
     };
     window.addEventListener("pm:settings-changed", sync);
     return () => window.removeEventListener("pm:settings-changed", sync);
@@ -721,6 +755,16 @@ export function CalendarView({
   const onAgendaModeChange = useCallback((m: AgendaMode) => {
     setAgendaMode(m);
     writeAgendaMode(m);
+  }, []);
+  const onToggleHideDone = useCallback(() => {
+    setHideDone((v) => {
+      writeAgendaHideDone(!v);
+      return !v;
+    });
+  }, []);
+  const onEventKindsChange = useCallback((kinds: EventKinds) => {
+    setEventKinds(kinds);
+    writeEventKinds(kinds);
   }, []);
   // The Runway is on screen: Agenda in its board layout. It always runs from today, so paging,
   // the date label and the out-of-range hint have nothing to say there.
@@ -872,6 +916,17 @@ export function CalendarView({
 
   // Quick create closed: when it saved, its last draft stays drawn until a read that started after
   // the save lands (one starts now: the read the save itself set off may have begun before it).
+  // A timed event saved while All-day is filtering the view won't show once its ghost gives way to
+  // its row, so say so (a ref: the filter's state is worked out further down).
+  const kindsActiveRef = useRef(false);
+  const onTimedSaved = useCallback(
+    (timed: boolean) => {
+      if (timed && kindsActiveRef.current) {
+        announce("Saved. Timed events are hidden while All-day is on.");
+      }
+    },
+    [announce],
+  );
   const onQuickClose = useCallback(
     (saved: boolean) => {
       const last = quickDraftRef.current;
@@ -879,12 +934,13 @@ export function CalendarView({
       if (ev) {
         setLanded({ ev, after: readsStarted.current });
         void loadEvents();
+        onTimedSaved(!ev.all_day);
       }
       quickDraftRef.current = null;
       setQuickDraft(null);
       setCreating(null);
     },
-    [loadEvents],
+    [loadEvents, onTimedSaved],
   );
   // More options: the full editor carries on with quick create's draft; nothing is sent.
   const onQuickMore = useCallback((handover: CreateHandover) => {
@@ -1007,12 +1063,13 @@ export function CalendarView({
       if (!m.due_date) continue;
       if (!(m.event_uid === null || m.event_missing)) continue;
       out.push({
-        id: `milestone:${m.id}`,
+        id: milestoneOverlayId(m.id),
         calendar_id: MILESTONE_CALENDAR_ID,
         // Suffix the owning project so two milestones with similar labels in different projects are
         // distinguishable on the all-day row (a milestone always belongs to exactly one project).
-        summary:
-          m.state === "met" ? `✓ ${m.label} · ${m.project_name}` : `${m.label} · ${m.project_name}`,
+        // The check mark is what `isEventPast` reads to let a met milestone recede and never an
+        // unmet one: the same test the board strikes through with (`milestoneDone`).
+        summary: `${milestoneDone(m) ? MILESTONE_MET_MARK : ""}${m.label} · ${m.project_name}`,
         description: null,
         location: null,
         start: m.due_date.slice(0, 10),
@@ -1361,6 +1418,10 @@ export function CalendarView({
   // + Window are drawn from it (by the board, through the header's slot), and the Agenda's filters
   // read it where the Runway is not mounted. It is cheap (memoised on the lists) and, like the
   // events switch inside it, always built, so a layout switch loses nothing.
+  // The events a milestone links to (All-day keeps them: the milestone has no overlay of its own)
+  // and the met milestones' overlay ids (Hide done takes their overlays off the List).
+  const milestoneUids = useMemo(() => milestoneEventUids(milestones), [milestones]);
+  const metIds = useMemo(() => metMilestoneIds(milestones), [milestones]);
   const runway = useRunwayModel({
     tasks,
     stacks,
@@ -1369,6 +1430,10 @@ export function CalendarView({
     archived,
     windows,
     now,
+    hideDone,
+    doneCutoff,
+    eventKinds,
+    milestoneUids,
   });
   // + Task: a new task that starts today, the Runway's own default.
   const runwayToday = runway.today;
@@ -1577,9 +1642,70 @@ export function CalendarView({
     [overview, view, settledCursor, dayCount, runwayShown, later],
   );
 
+  // THE VIEW FILTERS. They go on the views' own props and nowhere earlier: `visibleEvents` and
+  // `shownEvents` also feed the search reveal, the drag and a task's link to its event, which must
+  // still find what a filter is hiding. Order: the Calendars list (already applied above), then the
+  // kind, then done.
+  //
+  // All | All-day acts in Month, Year, the List and the Runway's strips while they show. Week and Day
+  // never filter: dropping their timed events would empty the hour grid where you create and drag.
+  const kindsInView =
+    view === "month" ||
+    view === "year" ||
+    (view === "agenda" && (agendaMode === "list" || runway.showEvents));
+  const kindsActive = kindsInView && eventKinds === "all-day";
+  const hideDoneActive = hideDone && view === "agenda";
+  useEffect(() => {
+    kindsActiveRef.current = kindsActive;
+  }, [kindsActive]);
+  const kindsShown = useMemo(
+    () => (kindsActive ? keepAllDay(shownEvents, milestoneUids) : shownEvents),
+    [kindsActive, shownEvents, milestoneUids],
+  );
+  const kindsVisible = useMemo(
+    () => (kindsActive ? keepAllDay(visibleEvents, milestoneUids) : visibleEvents),
+    [kindsActive, visibleEvents, milestoneUids],
+  );
+  // The List, after Hide done too: every day it draws, from the cursor on. Events end on the
+  // minute tick, so a meeting leaves the List when it ends.
+  const listSource = isTerminal ? kindsVisible : kindsShown;
+  const listHides = hideDoneActive && agendaMode === "list";
+  const list = useMemo(
+    () =>
+      listHides
+        ? hideFinished(listSource, { now, metIds, fromDay: cursor })
+        : { shown: listSource, hidden: 0 },
+    [listHides, listSource, now, metIds, cursor],
+  );
+  // What "Show done (N)" counts: the Runway's cards and strip events left out, or the List's rows.
+  const hiddenDoneCount = !hideDoneActive
+    ? 0
+    : agendaMode === "runway"
+      ? runway.model.hiddenDone + runway.hiddenEvents
+      : list.hidden;
+  const listEmptyText =
+    list.hidden > 0
+      ? `Nothing left in view — ${list.hidden} done hidden.`
+      : kindsActive
+        ? "No all-day events in view."
+        : undefined;
+  // Turning Hide done on or off is said in the live region, with how many it took off the screen.
+  const hideDoneSaid = useRef(hideDone);
+  useEffect(() => {
+    if (hideDoneSaid.current === hideDone) return;
+    hideDoneSaid.current = hideDone;
+    if (view !== "agenda") return;
+    announce(
+      hideDone
+        ? `${hiddenDoneCount} done ${hiddenDoneCount === 1 ? "item" : "items"} hidden`
+        : "Done items shown",
+    );
+  }, [hideDone, hiddenDoneCount, view, announce]);
+
   // The count the Terminal chrome strip shows at Power depth. For the bounded grids it's the events
   // touching the visible period (so it matches what's on screen, not the whole −1..+13-month mirror);
-  // for the open-ended agenda it's everything from the anchor day forward.
+  // for the open-ended agenda it's everything from the anchor day forward. What a filter is hiding
+  // isn't counted: the strip says what the view shows.
   const chromeCount = useMemo(() => {
     // The Runway counts the open tasks it can show (not parked, not an archived project's).
     if (runwayShown) {
@@ -1593,7 +1719,7 @@ export function CalendarView({
     }
     if (view === "agenda") {
       const fromMs = startOfDay(cursor).getTime();
-      return visibleEvents.filter((e) => {
+      return list.shown.filter((e) => {
         if (isOverlayEvent(e)) return false; // count synced events only, honest to "N events"
         const span = eventDaySpan(e);
         return span && span.endDay.getTime() >= fromMs;
@@ -1602,12 +1728,12 @@ export function CalendarView({
     const { start, end } = visibleRange(view, cursor, dayCount);
     const startMs = start.getTime();
     const endMs = end.getTime(); // exclusive
-    return visibleEvents.filter((e) => {
+    return kindsVisible.filter((e) => {
       if (isOverlayEvent(e)) return false; // count synced events only, honest to "N events"
       const span = eventDaySpan(e);
       return span && span.startDay.getTime() < endMs && span.endDay.getTime() >= startMs;
     }).length;
-  }, [visibleEvents, view, cursor, dayCount, runwayShown, tasks, archived]);
+  }, [list, kindsVisible, view, cursor, dayCount, runwayShown, tasks, archived]);
 
   if (loading && !overview) {
     return (
@@ -1653,7 +1779,7 @@ export function CalendarView({
           return (
             <TerminalMonthTable
               cursor={cursor}
-              events={visibleEvents}
+              events={kindsVisible}
               colorOf={colorOf}
               now={now}
               onEventClick={onEventClick}
@@ -1663,7 +1789,7 @@ export function CalendarView({
           return (
             <TerminalYearTable
               cursor={cursor}
-              events={visibleEvents}
+              events={kindsVisible}
               onSelectDay={onSelectYearDay}
             />
           );
@@ -1684,11 +1810,12 @@ export function CalendarView({
             <TerminalRunway {...runwayProps} />
           ) : (
             <TerminalAgenda
-              events={visibleEvents}
+              events={list.shown}
               colorOf={colorOf}
               fromDay={cursor}
               now={now}
               onEventClick={onEventClick}
+              emptyText={listEmptyText}
             />
           );
       }
@@ -1701,18 +1828,19 @@ export function CalendarView({
           <RunwayBoard {...runwayProps} />
         ) : (
           <AgendaView
-            events={shownEvents}
+            events={list.shown}
             fromDay={cursor}
             colorOf={colorOf}
             now={now}
             onEventClick={onEventClick}
+            emptyText={listEmptyText}
           />
         );
       case "month":
         return (
           <MonthView
             cursor={cursor}
-            events={shownEvents}
+            events={kindsShown}
             colorOf={colorOf}
             shapeOf={shapeOf}
             onFocusDate={onFocusDate}
@@ -1734,7 +1862,7 @@ export function CalendarView({
         return (
           <YearView
             cursor={cursor}
-            events={visibleEvents}
+            events={kindsVisible}
             onSelectDay={onSelectYearDay}
             onFocusDate={onFocusDate}
           />
@@ -1802,6 +1930,11 @@ export function CalendarView({
         onAgendaModeChange={onAgendaModeChange}
         runwaySlotRef={setRunwaySlot}
         onCreateTask={runwayShown ? openNewTask : undefined}
+        hideDone={hideDone}
+        hiddenCount={hiddenDoneCount}
+        onToggleHideDone={view === "agenda" ? onToggleHideDone : undefined}
+        eventKinds={eventKinds}
+        onEventKindsChange={kindsInView ? onEventKindsChange : undefined}
         onPopOut={onPopOut}
         roster={
           rosterInHeader && overview ? (
@@ -1821,6 +1954,7 @@ export function CalendarView({
         <TerminalChrome
           view={view}
           flag={runwayShown ? "runway" : undefined}
+          filters={[...(hideDoneActive ? ["hide-done"] : []), ...(kindsActive ? ["all-day"] : [])]}
           label={runwayShown ? "from today" : label}
           count={chromeCount}
           noun={runwayShown ? "task" : "event"}
@@ -1970,6 +2104,7 @@ export function CalendarView({
           focusRef={focusCreateRef}
           handover={creating.handover}
           copyOf={creating.copy}
+          onSaved={onTimedSaved}
           onClose={() => {
             // From quick create, the editor opened from its More options, which is gone: focus
             // goes back to "+ New event", as quick create's own close would have sent it. A copy's

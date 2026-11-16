@@ -14,12 +14,16 @@ import {
   isDraftEvent,
   isEventPast,
   isMultiDay,
+  MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
   minutesFromLocalMidnight,
   occurrenceKey,
   packBands,
+  PINBOARD_CALENDAR_ID,
   spokenName,
   startOfDay,
   startOfWeek,
+  TASK_CALENDAR_ID,
   timedEndMinutes,
   timedSegments,
 } from "./calendar-layout";
@@ -199,6 +203,32 @@ describe("isEventPast", () => {
     const ev = { ...timedEv("2026-10-12", "2026-10-14"), all_day: true };
     expect(isEventPast(ev, new Date(2026, 9, 13, 23, 0))).toBe(false);
     expect(isEventPast(ev, new Date(2026, 9, 14, 0, 1))).toBe(true);
+  });
+
+  it("never greys late work: an overdue task chip, or a milestone that isn't met", () => {
+    const base = { ...timedEv("2026-10-01", "2026-10-02"), all_day: true, end: null };
+    const later = new Date(2026, 9, 20);
+    expect(
+      isEventPast({ ...base, calendar_id: TASK_CALENDAR_ID, summary: "Due: Deck" }, later),
+    ).toBe(false);
+    expect(
+      isEventPast(
+        { ...base, calendar_id: MILESTONE_CALENDAR_ID, summary: "Launch · Atlas" },
+        later,
+      ),
+    ).toBe(false);
+    // A met one recedes with the past, as it did, and as a pinboard entry does.
+    expect(
+      isEventPast(
+        {
+          ...base,
+          calendar_id: MILESTONE_CALENDAR_ID,
+          summary: `${MILESTONE_MET_MARK}Launch · Atlas`,
+        },
+        later,
+      ),
+    ).toBe(true);
+    expect(isEventPast({ ...base, calendar_id: PINBOARD_CALENDAR_ID }, later)).toBe(true);
   });
 });
 

@@ -81,11 +81,13 @@ function Mounted({
   milestones = [],
   archived = new Set<string>(),
   chrome,
+  hideDone = false,
   ...props
 }: Omit<RunwayProps, "runway" | "chrome"> & {
   milestones?: Milestone[];
   archived?: ReadonlySet<string>;
   chrome: HTMLElement | null;
+  hideDone?: boolean;
 }) {
   const runway = useRunwayModel({
     tasks: props.tasks,
@@ -95,11 +97,17 @@ function Mounted({
     archived,
     windows: props.windows,
     now: props.now,
+    hideDone,
+    doneCutoff: OPENED,
+    eventKinds: "all",
+    milestoneUids: new Set(),
   });
   return <TerminalRunway {...props} runway={runway} chrome={chrome} />;
 }
 
 const NOW = new Date(2026, 10, 4, 10, 0);
+// When the Agenda was opened: Hide done's cutoff.
+const OPENED = new Date(2026, 10, 4, 9, 30);
 
 function task(over: Partial<Task> = {}): Task {
   return {
@@ -132,7 +140,9 @@ function task(over: Partial<Task> = {}): Task {
   };
 }
 
-function runway(over: { tasks?: Task[]; stacks?: TaskStack[]; windows?: RunwayWindow[] } = {}) {
+function runway(
+  over: { tasks?: Task[]; stacks?: TaskStack[]; windows?: RunwayWindow[]; hideDone?: boolean } = {},
+) {
   const spies = { onWindowsChange: vi.fn(), announce: vi.fn(), onOpenProject: vi.fn() };
   const chrome = makeSlot();
   render(
@@ -141,6 +151,7 @@ function runway(over: { tasks?: Task[]; stacks?: TaskStack[]; windows?: RunwayWi
       stacks={over.stacks ?? []}
       events={[]}
       windows={over.windows ?? []}
+      hideDone={over.hideDone}
       now={NOW}
       chrome={chrome}
       {...spies}
@@ -165,6 +176,21 @@ describe("TerminalRunway", () => {
     // Before today starts folded.
     expect(screen.getByRole("button", { name: /── Before today \(0\) ▸ ──/ })).toBeTruthy();
     expect(document.querySelector('[data-help="calendar-runway"]')).not.toBeNull();
+  });
+
+  it("leaves done cards out under Hide done, from the same model as the board", () => {
+    runway({
+      hideDone: true,
+      tasks: [
+        task(),
+        task({ id: 2, title: "Done one", status: "done", completed_at: "2026-11-04T08:00:00" }),
+        task({ id: 3, title: "Just ticked", status: "done", completed_at: "2026-11-04T09:45:00" }),
+      ],
+    });
+    const section = within(screen.getByRole("region", { name: "Today" }));
+    expect(section.getByText("Draft the deck")).toBeTruthy();
+    expect(section.getByText("Just ticked")).toBeTruthy();
+    expect(section.queryByText("Done one")).toBeNull();
   });
 
   it("hides and shows the events from the header, as the board does", () => {

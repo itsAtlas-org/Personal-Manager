@@ -14,6 +14,7 @@ import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import {
   cardCount,
   linkedEvent,
+  milestoneDone,
   type RunwayCard,
   type RunwayColumn,
   type RunwayTaskCard,
@@ -233,7 +234,7 @@ function Row({
     return <TaskRow card={card} column={column} laneCards={laneCards} ctx={ctx} />;
   if (card.kind === "milestone") {
     const m = card.milestone;
-    const met = m.state === "met" || m.status === "done";
+    const met = milestoneDone(m);
     // Its deadline in its tone wherever it sits (plain once met), as a task's is.
     const info = m.due_date ? deadlineInfo(m.due_date.slice(0, 10), "hard", ctx.today, met) : null;
     return (
