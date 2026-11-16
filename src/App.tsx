@@ -31,6 +31,7 @@ import { LockScreen } from "./components/LockScreen";
 import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
+import { ModsRoute } from "./components/mods/ModsRoute";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsView } from "./components/SettingsView";
@@ -61,7 +62,7 @@ import { useExternalLinks } from "./lib/useExternalLinks";
 import { useFollowSignIns } from "./lib/signInPages";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
-import { isModView, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
+import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
 
 const LAST_SEEN_VERSION_KEY = "pm:lastSeenVersion";
 import {
@@ -1226,9 +1227,10 @@ export default function App() {
                   that crashes ProjectView would poison the next project opened (`view` alone stays
                   "project").
 
-                  A mod's tab (`mod:<id>`) draws nothing here yet: ModFrame comes in a later slice,
-                  no entry can open one until then, and the fallback effect sends a stray one to
-                  Focus. It must never fall through to the last branch, which is the chat's. */}
+                  A mod's tab (`mod:<id>`) goes through ModTab, which puts the mod's frame in it when
+                  the mod can run and PM's own panel when it can't; the frame dies with the tab (the
+                  `view` key above remounts it). A `mod:` view must never fall through to the last
+                  branch, which is the chat's. */}
               <ErrorBoundary key={`${view}:${selectedProject ?? ""}`} what="This view">
                 {view === "focus" ? (
                   <main className="flex h-full flex-1 flex-col">
@@ -1290,7 +1292,17 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <DevView />
                   </main>
-                ) : isModView(view) ? null : (
+                ) : isModsRoute(view) ? (
+                  // The Mods tab and every mod's own tab. min-w-0 for the frame's sake: its width
+                  // is the mod's to ask for, and must not push the sidebar.
+                  <main className="flex h-full min-w-0 flex-1 flex-col">
+                    <ModsRoute
+                      view={view}
+                      onOpenMods={() => setView("mods")}
+                      onOpenSettings={() => setShowSettings(true)}
+                    />
+                  </main>
+                ) : (
                   <main className="flex h-full flex-1 flex-col">
                     {chat.error && (
                       <Callout variant="strip" size="md" className="font-ui">

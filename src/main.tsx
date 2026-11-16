@@ -5,6 +5,7 @@ import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import { ThemeProvider, UserTimeProvider } from "./theme";
 import { CapabilityProvider } from "./lib/capabilities";
+import { ModRowsProvider } from "./lib/modRowsProvider";
 import { ContextMenuHost, ErrorBoundary, TitleBar } from "./components/ui";
 import { LinkNotice } from "./components/LinkNotice";
 import { PopoverRoot } from "./PopoverRoot";
@@ -50,7 +51,16 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
                     never sees. */}
                 <ErrorBoundary what={isCalendarWindow ? "The calendar" : "Personal Manager"}>
                   <Suspense fallback={null}>
-                    <App />
+                    {/* The installed mods, read once for the sidebar, Ctrl K and the mod tabs.
+                        Main window only: every Mods command refuses the pop-out Calendar, which
+                        draws no mod tabs. */}
+                    {isCalendarWindow ? (
+                      <App />
+                    ) : (
+                      <ModRowsProvider>
+                        <App />
+                      </ModRowsProvider>
+                    )}
                   </Suspense>
                 </ErrorBoundary>
               </div>

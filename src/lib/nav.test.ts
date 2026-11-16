@@ -14,6 +14,7 @@ import { HELP } from "./help";
 import {
   adoptLegacy,
   CORE_NAV,
+  forgetNavTab,
   hideEntry,
   isActiveEntry,
   isNavIdShape,
@@ -21,6 +22,10 @@ import {
   learningToolsShown,
   LEGACY_MAP_KEY,
   LEGACY_TEACH_KEY,
+  modNavEntries,
+  modTabLabel,
+  MOD_TAB_HELP_ID,
+  MOD_TAB_LABEL_MAX,
   NAV_PLACEMENT_KEY,
   navMenuItems,
   navPlacementIsDefault,
@@ -44,8 +49,19 @@ const ids = (list: readonly NavEntryDef[]) => list.map((e) => e.id);
 const shown = (p: NavPlacement, ctx: NavContext = STANDARD) =>
   ids(resolveNav(CORE_NAV, p, ctx).shown);
 
-// The hand-written sidebar this replaced, in its order, with its gates.
-const BEFORE = ["focus", "chat", "calendar", "documents", "review", "teach", "graph", "pinboard"];
+// The hand-written sidebar this replaced, in its order, with its gates, then the Mods tab (spec
+// §1.13), which sits after Pinboard and before Dev.
+const BEFORE = [
+  "focus",
+  "chat",
+  "calendar",
+  "documents",
+  "review",
+  "teach",
+  "graph",
+  "pinboard",
+  "mods",
+];
 
 describe("resolveNav: the default", () => {
   it("is the sidebar as it was, for Standard and Power", () => {
@@ -55,7 +71,7 @@ describe("resolveNav: the default", () => {
 
   it("leaves the learning tools and the Map out on Minimal, as teachVisible/mapVisible did", () => {
     const r = resolveNav(CORE_NAV, NONE, MINIMAL);
-    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "pinboard"]);
+    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
     expect(ids(r.dormant)).toEqual(["review", "teach", "graph"]);
     expect(r.hidden).toEqual([]);
   });
@@ -77,12 +93,21 @@ describe("resolveNav: placement", () => {
       "review",
       "teach",
       "graph",
+      "mods",
     ]);
   });
 
   it("drops hidden entries from the sidebar but keeps them to offer", () => {
     const r = resolveNav(CORE_NAV, { hidden: ["graph", "chat"], pinned: [] }, STANDARD);
-    expect(ids(r.shown)).toEqual(["focus", "calendar", "documents", "review", "teach", "pinboard"]);
+    expect(ids(r.shown)).toEqual([
+      "focus",
+      "calendar",
+      "documents",
+      "review",
+      "teach",
+      "pinboard",
+      "mods",
+    ]);
     expect(ids(r.hidden)).toEqual(["chat", "graph"]);
   });
 
@@ -207,6 +232,98 @@ describe("isReachable and isActiveEntry", () => {
   });
 });
 
+describe("the Mods tab", () => {
+  it("is always shown: at every Depth, whatever is stored, and it can't be hidden", () => {
+    expect(shown(NONE)).toContain("mods");
+    expect(shown(NONE, MINIMAL)).toContain("mods");
+    expect(shown({ hidden: ["mods"], pinned: [] })).toContain("mods");
+    expect(CORE_NAV.find((e) => e.id === "mods")?.hideable).toBe(false);
+    expect(hideEntry(NONE, "mods", CORE_NAV)).toEqual(NONE);
+  });
+
+  it("can be pinned, like any tab", () => {
+    expect(shown({ hidden: [], pinned: ["mods"] })[0]).toBe("mods");
+  });
+});
+
+describe("mods' own tabs", () => {
+  const row = (id: string, navTab: string | null, name = "A Mod") => ({ id, name, navTab });
+
+  it("gives each installed mod that names a tab an entry, after PM's own", () => {
+    const entries = modNavEntries([row("acme.tool", "Acme Tool"), row("acme.quiet", null)]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "mod:acme.tool",
+      label: "Acme Tool",
+      source: "mod",
+      hideable: true,
+    });
+    expect(entries[0].defaultShown("min")).toBe(true);
+    expect(ids(resolveNav([...CORE_NAV, ...entries], NONE, STANDARD).shown)).toEqual([
+      ...BEFORE,
+      "mod:acme.tool",
+    ]);
+  });
+
+  it("points every one at the one help entry that exists", () => {
+    for (const entry of modNavEntries([row("acme.a", "A"), row("acme.b", "B")])) {
+      expect(entry.helpId).toBe(MOD_TAB_HELP_ID);
+      expect(HELP[entry.helpId]).toBeDefined();
+    }
+  });
+
+  it("keeps a steady order (by label, then id) and one entry per mod", () => {
+    const entries = modNavEntries([
+      row("acme.zed", "Beta"),
+      row("acme.one", "Alpha"),
+      row("acme.dup", "Alpha"),
+      row("acme.dup", "Other"),
+    ]);
+    expect(ids(entries)).toEqual(["mod:acme.dup", "mod:acme.one", "mod:acme.zed"]);
+  });
+
+  it("leaves out an id the grammar wouldn't allow, which couldn't be pinned or hidden", () => {
+    expect(modNavEntries([row("../x", "X"), row("Acme.Tool", "X"), row("nodot", "X")])).toEqual([]);
+  });
+
+  it("cleans the name a mod chose: control and format characters go, spaces collapse", () => {
+    expect(modTabLabel("  Acme‮  Tool\n\t2 ", "x")).toBe("Acme Tool 2");
+    expect(modTabLabel("​\u0007", "Fallback Name")).toBe("Fallback Name");
+    expect(modTabLabel(null, "  Only name ")).toBe("Only name");
+    expect(modTabLabel("​", "‮")).toBe("Mod");
+  });
+
+  it("holds the name to one line's length, by characters rather than code units", () => {
+    const long = "x".repeat(MOD_TAB_LABEL_MAX + 10);
+    const cut = modTabLabel(long, "n");
+    expect(Array.from(cut)).toHaveLength(MOD_TAB_LABEL_MAX);
+    expect(cut.endsWith("…")).toBe(true);
+    // A name exactly at the limit is untouched, and an emoji counts as one character.
+    expect(modTabLabel("y".repeat(MOD_TAB_LABEL_MAX), "n")).toBe("y".repeat(MOD_TAB_LABEL_MAX));
+    const emoji = "😀".repeat(MOD_TAB_LABEL_MAX);
+    expect(modTabLabel(emoji, "n")).toBe(emoji);
+  });
+
+  it("keeps a hidden mod tab reachable, and drops one that is gone", () => {
+    const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
+    const hidden = resolveNav(entries, { hidden: ["mod:acme.tool"], pinned: [] }, STANDARD);
+    expect(ids(hidden.hidden)).toEqual(["mod:acme.tool"]);
+    expect(isReachable("mod:acme.tool", entries, hidden)).toBe(true);
+    // Uninstalled (no row, so no entry): back to Focus.
+    const gone = resolveNav(CORE_NAV, NONE, STANDARD);
+    expect(isReachable("mod:acme.tool", CORE_NAV, gone)).toBe(false);
+  });
+
+  it("pins, hides and shows like a core tab", () => {
+    const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
+    const pinned = pinEntry(NONE, "mod:acme.tool", entries);
+    expect(pinned.pinned).toEqual(["mod:acme.tool"]);
+    const hidden = hideEntry(pinned, "mod:acme.tool", entries);
+    expect(hidden).toEqual({ hidden: ["mod:acme.tool"], pinned: [] });
+    expect(showEntry(hidden, "mod:acme.tool", entries, MINIMAL)).toEqual(NONE);
+  });
+});
+
 describe("navMenuItems", () => {
   const labels = (items: MenuItem[]) =>
     items.map((i) => (i.kind === "separator" ? "—" : "label" in i ? i.label : "?"));
@@ -275,6 +392,26 @@ describe("stored placement", () => {
     expect(
       parsePlacement('{"hidden":["graph",3,"project","nope","graph"],"pinned":["mod:atlas.map"]}'),
     ).toEqual({ hidden: ["graph"], pinned: ["mod:atlas.map"] });
+  });
+
+  it("forgets an uninstalled mod's tab, and nothing else", () => {
+    writeNavPlacement({
+      hidden: ["graph", "mod:acme.tool"],
+      pinned: ["mod:acme.tool", "mod:acme.other", "pinboard"],
+    });
+    forgetNavTab("mod:acme.tool");
+    expect(readNavPlacement("standard")).toEqual({
+      hidden: ["graph"],
+      pinned: ["mod:acme.other", "pinboard"],
+    });
+    // Nothing stored, or nothing about it: nothing is written.
+    localStorage.clear();
+    forgetNavTab("mod:acme.tool");
+    expect(localStorage.getItem(NAV_PLACEMENT_KEY)).toBeNull();
+    writeNavPlacement({ hidden: ["graph"], pinned: [] });
+    const before = localStorage.getItem(NAV_PLACEMENT_KEY);
+    forgetNavTab("mod:acme.tool");
+    expect(localStorage.getItem(NAV_PLACEMENT_KEY)).toBe(before);
   });
 
   it("keeps only strings that could name a tab", () => {

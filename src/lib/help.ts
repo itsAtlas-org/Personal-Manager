@@ -52,6 +52,26 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Dev",
     body: "Developer mode's inspection tab: read-only views of PM's internal state — raw tables, row counts, the corrections log, and system & build info. For debugging and watching how PM works; nothing here changes your data. Turn it on or off under Settings → Developer.",
   },
+  "nav-mods": {
+    title: "Mods",
+    body: "Mods are small add-ons made by other people. This is where you see which ones are installed, turn one off and on again, remove one, or add another. A mod that has a screen of its own gets its own tab in this list. The Mods tab is always here and can't be hidden.",
+  },
+  "nav-mod-tab": {
+    title: "A mod's tab",
+    body: "A tab an installed mod added, marked 'mod' because the mod chose its name. What's inside is the mod's own page, running in a sealed box: it can only use what you allowed it. Right-click it to pin it to the top or hide it. A hidden mod tab is still reachable with Ctrl K and from the Mods tab.",
+  },
+  "mods-view": {
+    title: "Mods",
+    body: "Mods are small add-ons made by people, not part of PM itself. PM checks that a mod is the one its maker published and keeps it in a sealed box, but it can't check that a mod is good. The sections here show what's installed, what's on offer, and how to install a file.",
+  },
+  "mod-tab-status": {
+    title: "A mod that isn't running",
+    body: "This mod's tab can't show the mod right now. PM says why in plain words and, where there's something you can do about it, offers it here. Whatever the mod saved stays put while it's off. The Mods tab has the full picture and can remove the mod.",
+  },
+  "mod-first-open": {
+    title: "Turning on a mod for the first time",
+    body: "PM installed this mod for you, so it asks before the mod runs. The screen says what mods are, lists what this one wants to do, and lets you say yes or no to each thing it asks to do. Nothing of the mod runs until you press Turn on. Pressing it also counts as accepting the Mods notice on this computer.",
+  },
   "conversations-list": {
     title: "Projects & Global chats",
     body: "Two foldable lists. 'Projects' is every project PM knows about, with how many chats each one holds — click through to open that project, where its files sit beside a chat that searches only it. 'Global chats' is your chats that belong to no project, which search everything; click one to reopen it, or '+ New' to start another. Moving a chat into a project with the 📁 button takes it out of this list and into that project's own history.",

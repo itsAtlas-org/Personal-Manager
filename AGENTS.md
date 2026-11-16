@@ -193,7 +193,12 @@ release remain the open post-v1 work.
     is per device, only Rust reads it (`devmode.rs`, `ledger/dev_switch.rs`, INVARIANTS.md I-34),
     and the page's `useDevMode` shows the backend's answer; the user's own pause, resume and "Turn
     on" are `ledger/user.rs`, and every change
-    to the rows or the registry ends in one `mods://changed` (`refresh::emit_changed`). `tests/sealed-frame/` is a regression app that never ships: it includes
+    to the rows or the registry ends in one `mods://changed` (`refresh::emit_changed`). In the page
+    the installed mods are read once (`lib/modRowsProvider.tsx`, context in `lib/modRows.ts`) and
+    shared: `lib/nav.ts` turns the rows into the sidebar's mod tabs (`mod:<id>`, the one literal
+    help id `nav-mod-tab`), and `components/mods/ModTab.tsx` draws a mod's tab (the frame when the
+    row says it runs; PM's own panel for first open (D17), installing, paused, removed or missing).
+    `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
 - **Sidecar** — `sidecar/pm_sidecar.py` + `requirements.txt` (committed code). A managed venv

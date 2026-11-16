@@ -29,6 +29,8 @@ import { useMemo, useSyncExternalStore } from "react";
 import { useTheme, type Depth } from "../theme";
 import { useDevMode } from "./capabilities";
 import type { MenuItem } from "./contextMenu";
+import { useModRows } from "./modRows";
+import type { ModInfo } from "./modsTypes";
 import { isTearingDown } from "./teardown";
 
 /** PM's own views. "project" is a view with no sidebar entry: it's reached from Focus (and the
@@ -43,10 +45,12 @@ export type CoreView =
   | "teach"
   | "graph"
   | "pinboard"
+  | "mods"
   | "dev";
 
-/** A mod's own tab, `mod:<mod id>`. Nothing contributes one yet: a later slice registers them (and
- *  renders them through ModFrame); until then App sends any such view back to Focus. */
+/** A mod's own tab, `mod:<mod id>`. An installed mod that names a tab contributes one
+ *  (`modNavEntries`, from the rows `lib/modRows` reads); App draws it through ModTab, which puts
+ *  the mod's frame in it when the mod can run and PM's own panel when it can't. */
 export type ModView = `mod:${string}`;
 
 export type View = CoreView | ModView;
@@ -63,7 +67,8 @@ export interface NavEntryDef {
    *  computed from its id. */
   helpId: string;
   /** Whether the user may hide it. Focus can't (it's home, and where every fallback lands), nor can
-   *  Dev (developer mode is its switch), nor, later, the Mods tab (spec §1.13). */
+   *  Dev (developer mode is its switch), nor the Mods tab (spec §1.13: it is where a mod is paused,
+   *  removed or shown again, so it must always be there). */
   hideable: boolean;
   /** Shown at this Depth when the user has said nothing. */
   defaultShown: (depth: Depth) => boolean;
@@ -173,8 +178,16 @@ export const CORE_NAV: readonly NavEntryDef[] = [
     hideable: true,
     defaultShown: always,
   },
-  // The Mods tab joins here (spec §1.13): a core entry with `hideable: false` and `always`. Mods'
-  // own tabs are not listed here; the caller appends them (`source: "mod"`, `id: "mod:<id>"`).
+  // The Mods tab (spec §1.13): a core entry, never hideable, shown at every Depth. Mods' own tabs
+  // are not listed here; `useNav` appends them (`source: "mod"`, `id: "mod:<id>"`).
+  {
+    id: "mods",
+    label: "Mods",
+    source: "core",
+    helpId: "nav-mods",
+    hideable: false,
+    defaultShown: always,
+  },
   {
     id: "dev",
     label: "Dev",
@@ -185,6 +198,63 @@ export const CORE_NAV: readonly NavEntryDef[] = [
     requires: "devMode",
   },
 ];
+
+// --- mods' own tabs (pure) -----------------------------------------------------------------------
+
+/** The most characters a mod's tab name shows: a sidebar row, a menu line and a palette row are all
+ *  one line, and the name is the mod's to choose, so PM holds it to a length and a kind of text. */
+export const MOD_TAB_LABEL_MAX = 40;
+
+/** One literal help id for every mod's tab: help mode can't see inside a frame, and an id computed
+ *  from the mod's id would point at no entry (the registry is static). */
+export const MOD_TAB_HELP_ID = "nav-mod-tab";
+
+/** What a mod's tab is called in PM's own chrome. The mod chose the words, so they are treated as
+ *  untrusted text: control and format characters go (a right-to-left override could reorder the
+ *  whole row), whitespace collapses, and the length is capped. A name that comes out empty falls
+ *  back to the mod's own name, cleaned the same way, then to "Mod". */
+export function modTabLabel(navTab: string | null, name: string): string {
+  for (const raw of [navTab, name]) {
+    if (raw === null) continue;
+    const clean = raw
+      .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (clean === "") continue;
+    const chars = Array.from(clean);
+    return chars.length > MOD_TAB_LABEL_MAX
+      ? `${chars.slice(0, MOD_TAB_LABEL_MAX - 1).join("")}…`
+      : clean;
+  }
+  return "Mod";
+}
+
+/** The tabs installed mods contribute, in a steady order (by label, then id), after PM's own. A mod
+ *  that names no tab contributes none. Every installed mod with a tab has one, whatever its
+ *  standing: a paused or waiting mod's tab says so and offers the way back (ModTab). */
+export function modNavEntries(
+  rows: readonly Pick<ModInfo, "id" | "name" | "navTab">[],
+): NavEntryDef[] {
+  const seen = new Set<string>();
+  const out: NavEntryDef[] = [];
+  for (const row of rows) {
+    // An id the grammar wouldn't allow can't be pinned or hidden (the placement drops it), so it
+    // gets no tab at all rather than one that behaves differently from every other.
+    if (row.navTab === null || !MOD_ID.test(row.id) || seen.has(row.id)) continue;
+    seen.add(row.id);
+    out.push({
+      id: `mod:${row.id}`,
+      label: modTabLabel(row.navTab, row.name),
+      source: "mod",
+      helpId: MOD_TAB_HELP_ID,
+      hideable: true,
+      defaultShown: always,
+    });
+  }
+  return out.sort(
+    (a, b) => a.label.localeCompare(b.label) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
 
 // --- the resolver (pure) -------------------------------------------------------------------------
 
@@ -240,6 +310,12 @@ export function isReachable(
 
 export function isModView(view: View): view is ModView {
   return view.startsWith("mod:");
+}
+
+/** Whether `view` is drawn by the mods' code: the Mods tab or a mod's own tab. App sends exactly
+ *  these to ModsRoute, so a `mod:` view can't fall through to a branch that draws something else. */
+export function isModsRoute(view: string): boolean {
+  return view === "mods" || view.startsWith("mod:");
 }
 
 /** Whether the learning tools show: what `teachVisible` meant. It also governs the review controls
@@ -540,15 +616,59 @@ export function useNavPlacement(): NavPlacement {
   return useSyncExternalStore(subscribe, () => readNavPlacement(depth));
 }
 
-/** The navigation as this user has it. `entries` defaults to PM's own; the slice that adds mods
- *  passes CORE_NAV plus their tabs, and every reader follows. */
-export function useNav(entries: readonly NavEntryDef[] = CORE_NAV) {
+/** The navigation as this user has it: PM's own entries, then the tabs installed mods contribute
+ *  (from `lib/modRows`'s provider; with none above it, PM's own alone). The sidebar, Ctrl K and App's
+ *  fallback all call this, so a mod's tab appears in all three together. `entries` replaces the
+ *  list outright (the tests). */
+export function useNav(entries?: readonly NavEntryDef[]) {
   const { depth } = useTheme();
   const { devMode } = useDevMode();
   const placement = useNavPlacement();
+  const { rows } = useModRows();
+  const all = useMemo(() => entries ?? [...CORE_NAV, ...modNavEntries(rows)], [entries, rows]);
   const ctx = useMemo<NavContext>(() => ({ depth, devMode }), [depth, devMode]);
-  const resolved = useMemo(() => resolveNav(entries, placement, ctx), [entries, placement, ctx]);
-  return { entries, placement, ctx, resolved };
+  const resolved = useMemo(() => resolveNav(all, placement, ctx), [all, placement, ctx]);
+  return { entries: all, placement, ctx, resolved };
+}
+
+/** Where one mod's tab stands on this device, and the two things the Mods tab's row can do about it:
+ *  `show` is the "Show tab" a hidden mod tab's row offers, `hide` its opposite (both are the
+ *  right-click menu's own changes, so the two can't disagree). A mod that names no tab has none to
+ *  show or hide, and both do nothing. */
+export function useModTab(modId: string): {
+  state: "shown" | "hidden" | "none";
+  show: () => void;
+  hide: () => void;
+} {
+  const { entries, placement, ctx, resolved } = useNav();
+  const id = `mod:${modId}`;
+  const state = resolved.shown.some((e) => e.id === id)
+    ? "shown"
+    : resolved.hidden.some((e) => e.id === id)
+      ? "hidden"
+      : "none";
+  return {
+    state,
+    show: () => {
+      if (state !== "none") writeNavPlacement(showEntry(placement, id, entries, ctx));
+    },
+    hide: () => {
+      if (state !== "none") writeNavPlacement(hideEntry(placement, id, entries));
+    },
+  };
+}
+
+/** After an uninstall: forget `tab` (a `mod:<id>`) in this device's placement, so a mod installed
+ *  again later starts as the shipped sidebar would have it, not as it was left. */
+export function forgetNavTab(tab: string): void {
+  const raw = lsGet(NAV_PLACEMENT_KEY);
+  if (raw === null) return;
+  const placement = parsePlacement(raw);
+  if (!placement.hidden.includes(tab) && !placement.pinned.includes(tab)) return;
+  writeNavPlacement({
+    hidden: placement.hidden.filter((x) => x !== tab),
+    pinned: placement.pinned.filter((x) => x !== tab),
+  });
 }
 
 /** `learningToolsShown` for a component that needs nothing else, and no developer mode: neither

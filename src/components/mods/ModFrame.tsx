@@ -40,8 +40,11 @@
 //   style string or markup.
 //
 // - While mounted it keeps the frozen-page watchdog's heartbeat going (`modWatchdog.ts`).
-//
-// Nothing renders this yet; the Mods tab (spec §8, PR-1 part 6) will.
+// - ModTab (the mod's tab) mounts it, and only while the mod's row says it can run. The frame's
+//   session ends when the frame unmounts (a tab switch, the lock, a pause that changes the row) and
+//   when the backend says `session.closed`: the owner is told through `onClosed` and decides what
+//   replaces the frame. A store that closes under a mounted frame sends no goodbye, so the owner
+//   unmounts it (ModTab does, on the vault fault).
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -51,7 +54,7 @@ import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
-import { toneSurface } from "../ui/tone";
+import { TierBadge } from "./TierBadge";
 import {
   EventPump,
   FloodGate,
@@ -74,18 +77,16 @@ import { themeSnapshot, type ModThemeAxes } from "./modTheme";
 /** A mod's trust tier (spec §1.1), as the backend names it. */
 export type ModTier = "first" | "second" | "third";
 
-const TIER_LABEL: Record<ModTier, string> = {
-  first: "First party",
-  second: "Second party",
-  third: "Third party",
-};
-
 export interface ModFrameProps {
   /** The installed mod's id, from PM's own list. */
   modId: string;
   /** The mod's name, shown in the band as text. */
   name: string;
   tier: ModTier;
+  /** The backend ended this frame's session (`session.closed`), with its reason (`paused`,
+   *  `uninstalled`, `replaced`, or null when it sent none PM reads). Called once the goodbye has
+   *  been forwarded to the frame; the frame stays on screen until the owner replaces it. */
+  onClosed?: (reason: string | null) => void;
 }
 
 export function ModFrame(props: ModFrameProps) {
@@ -227,8 +228,19 @@ function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageCont
   }
 }
 
-function SealedFrame({ modId, name, tier }: ModFrameProps) {
+/** The reason a `session.closed` carries, as a short string; null for anything else. The backend
+ *  writes it, but it crossed IPC as JSON, so it is read as untrusted. */
+function closeReason(payload: unknown): string | null {
+  const reason = (payload as { reason?: unknown } | null)?.reason;
+  return typeof reason === "string" && reason.length <= 32 ? reason : null;
+}
+
+function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
   const [phase, setPhase] = useState<Phase>({ kind: "opening" });
+  const onClosedRef = useRef(onClosed);
+  useLayoutEffect(() => {
+    onClosedRef.current = onClosed;
+  });
   const [height, setHeight] = useState<number | null>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const liveRef = useRef<Live | null>(null);
@@ -259,8 +271,10 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
       if (!mine) return;
       // Forwarded first, so the frame hears its goodbye; then nothing more is performed for it.
       mine.events.push(message);
-      const name = readEvent(message)?.event;
+      const event = readEvent(message);
+      const name = event?.event;
       if (name === "mod.paused" || name === "session.closed") mine.over = true;
+      if (name === "session.closed") onClosedRef.current?.(closeReason(event?.payload));
     }).then(
       (opened) => {
         if (cancelled) {
@@ -441,24 +455,13 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
 
 /** The band above every mod frame: PM's own drawing, never the mod's. */
 function ModBand({ name, tier }: { name: string; tier: ModTier }) {
-  // A tier PM doesn't know is shown as the least trusted one.
-  const known = Object.prototype.hasOwnProperty.call(TIER_LABEL, tier);
-  const shown: ModTier = known ? tier : "third";
   return (
     <div className="flex min-w-0 flex-none items-center gap-2 border-b border-rule bg-panel px-3 py-1.5 text-xs">
       <span className="flex-none text-ink3">Mod</span>
       <span className="min-w-0 truncate font-medium text-ink" title={name}>
         {name}
       </span>
-      <span
-        className={cn(
-          "flex-none rounded-full border px-2 py-px",
-          shown === "third" ? undefined : "border-border2 text-ink2",
-        )}
-        style={shown === "third" ? toneSurface("warning") : undefined}
-      >
-        {TIER_LABEL[shown]}
-      </span>
+      <TierBadge tier={tier} />
     </div>
   );
 }
