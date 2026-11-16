@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.175.5-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Two security fixes, and some under-the-hood tidying. SQLCipher, which encrypts PM's database on your computer, moves to version 4.20, fixing a flaw where a specially made pair of database files could make PM read back leftover bytes from its own memory. The part of PM's document engine that reads web pages and other HTML files gets a fix for pages built to keep it busy for minutes. And two of the building blocks underneath the document engine are updated. The first time PM starts after this update it sets up its document engine again by itself, along with photo text recognition and the map's extra layout if you've added them. Your data stays encrypted exactly as before, and nothing changes in how you use PM.",
+    ],
+  },
+  {
     version: "3.175.4-alpha",
     date: "2026-11-06",
     highlights: [
