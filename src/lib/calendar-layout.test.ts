@@ -332,6 +332,15 @@ describe("the new event's ghost (C10c)", () => {
     expect(spokenName(null, "Dentist, 09:00")).toBe("Dentist, 09:00");
   });
 
+  // The quick box's Task side draws its ghost on the Tasks calendar: it says "task", not "event".
+  it("draftNote says task for a ghost on the Tasks calendar", () => {
+    const at = (state: Parameters<typeof draftEvent>[2]) =>
+      draftNote(draftEvent(fields, TASK_CALENDAR_ID, state)!);
+    expect(at("unsaved")).toBe("New task, not saved yet");
+    expect(at("saving")).toBe("New task, saving");
+    expect(draftNote(draftEvent(fields, "c", "unsaved")!)).toBe("New event, not saved yet");
+  });
+
   // A saved quick create's ghost waits for its row: a read begun after the save brings it, and the
   // ghost goes; one begun before may not have it, and the ghost stays.
   it("ghostAfterRead keeps the ghost until a read that started after the save lands", () => {

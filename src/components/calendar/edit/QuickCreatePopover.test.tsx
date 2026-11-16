@@ -26,6 +26,7 @@ import type {
   CalendarAccount,
   CalendarOverview,
   NewEventDraft,
+  TaskInput,
   RepeatPreset,
   RepeatRule,
   RepeatStart,
@@ -42,6 +43,7 @@ const createEvent =
   vi.fn<
     (calendarId: string, draft: NewEventDraft, token: string | null) => Promise<WriteOutcome>
   >();
+const addTask = vi.fn<(input: TaskInput) => Promise<number>>();
 const noteCreateResult = vi.fn();
 const noteHeldCreate = vi.fn();
 const recurrencePresets = vi.fn<(day: string) => Promise<RepeatPreset[]>>();
@@ -51,6 +53,7 @@ let deviceZone: string | null = "Europe/London";
 // The repeat menu's two reads, answered as the test says.
 vi.mock("../../../lib/ipc", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  addTask: (input: TaskInput) => addTask(input),
   recurrencePresets: (day: string) => recurrencePresets(day),
   describeRecurrence: (rule: RepeatRule, start: RepeatStart) => describeRecurrence(rule, start),
 }));
@@ -265,6 +268,7 @@ function open(
   const shown = over.overview ?? overview;
   const onClose = vi.fn();
   const onMore = vi.fn();
+  const onTaskMore = vi.fn();
   const onDraft = vi.fn();
   const onLeave = vi.fn();
   const header = createRef<HTMLButtonElement>();
@@ -308,13 +312,23 @@ function open(
         resume={over.resume}
         onDraft={onDraft}
         onMore={onMore}
+        onTaskMore={onTaskMore}
         onClose={onClose}
         onLeave={onLeave}
       />
     </>
   );
   const view = render(over.strict ? <StrictMode>{page}</StrictMode> : page);
-  return { onClose, onMore, onDraft, onLeave, header, focusRef, unmount: view.unmount };
+  return {
+    onClose,
+    onMore,
+    onTaskMore,
+    onDraft,
+    onLeave,
+    header,
+    focusRef,
+    unmount: view.unmount,
+  };
 }
 
 /** Unmount, and let what the box leaves as it really goes (after StrictMode's rehearsal of an
@@ -1110,6 +1124,7 @@ describe("QuickCreatePopover", () => {
     expect(onLeave.mock.calls).toEqual([
       [
         {
+          kind: "event",
           seed,
           draft: {
             ...seed,
@@ -1558,5 +1573,488 @@ describe("QuickCreatePopover video call (C18b)", () => {
     fireEvent.keyDown(title(), { key: "Enter" });
     await waitFor(() => expect(onClose).toHaveBeenCalledWith(true));
     expect(createEvent.mock.calls[0][1].meet).toBe(false);
+  });
+});
+
+// --- Event | Task: the same draft, read as a PM task ---
+
+describe("QuickCreatePopover Event | Task", () => {
+  const eventSeg = () => screen.getByRole<HTMLButtonElement>("button", { name: "Event" });
+  const taskSeg = () => screen.getByRole<HTMLButtonElement>("button", { name: "Task" });
+  const goTask = () => fireEvent.click(taskSeg(), { detail: 0 });
+  const goEvent = () => fireEvent.click(eventSeg(), { detail: 0 });
+  const saveButton = () => screen.getByRole<HTMLButtonElement>("button", { name: "Save" });
+  /** A titled draft the tab handed back, on the kind it was making. */
+  const left = (over: Partial<LeftDraft> = {}, draft: Partial<EditorFields> = {}): LeftDraft => ({
+    seed,
+    draft: { ...seed, summary: "Pay rent", ...draft },
+    calendarId: PERSONAL,
+    timeTouched: false,
+    length: null,
+    meetTouched: false,
+    badDate: null,
+    ...over,
+  });
+  /** A task save still out, answered when the test chooses. */
+  function laterTask() {
+    let answer: (id: number) => void = () => {};
+    let fail: (e: unknown) => void = () => {};
+    const promise = new Promise<number>((resolve, reject) => {
+      answer = resolve;
+      fail = reject;
+    });
+    return { promise, answer, fail };
+  }
+
+  it("opens on Event, with a switch named Create and the dialog named for the kind", () => {
+    open();
+    const group = screen.getByRole("group", { name: "Create" });
+    expect(
+      within(group)
+        .getAllByRole("button")
+        .map((b) => b.textContent),
+    ).toEqual(["Event", "Task"]);
+    expect(eventSeg().getAttribute("aria-pressed")).toBe("true");
+    expect(taskSeg().getAttribute("aria-pressed")).toBe("false");
+    // Help mode: the switch explains a task, the box around it an event.
+    expect(group.parentElement!.getAttribute("data-help")).toBe("calendar-new-task");
+    expect(box().getAttribute("data-help")).toBe("calendar-new-event");
+    goTask();
+    expect(taskSeg().getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "New event" })).toBeNull();
+    // The dialog's own help follows the kind: help on the Title or Save of a task explains a task.
+    expect(screen.getByRole("dialog").getAttribute("data-help")).toBe("calendar-new-task");
+    goEvent();
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+    expect(screen.getByRole("dialog").getAttribute("data-help")).toBe("calendar-new-event");
+  });
+
+  it("a box always opens on Event, even right after a task was made", async () => {
+    addTask.mockResolvedValue(7);
+    const first = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(first.onClose).toHaveBeenCalledWith(true, "task"));
+    cleanup();
+    open();
+    expect(eventSeg().getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+    // A handed-back event draft (made before a kind was kept) is an event too.
+    cleanup();
+    open({ resume: left() });
+    expect(eventSeg().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("Task keeps the title and the day, and hides what is the event's", () => {
+    open({ overview: meetOverview });
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    expect(screen.getByLabelText("Start time")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "All day" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Calendar: Personal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Google Meet/ })).toBeTruthy();
+    goTask();
+    expect(title().value).toBe("Pay rent");
+    expect(screen.getByLabelText<HTMLInputElement>("Day").value).toBe("12-10-2026");
+    expect(screen.queryByLabelText("Date")).toBeNull();
+    expect(screen.queryByLabelText("Start time")).toBeNull();
+    expect(screen.queryByLabelText("End time")).toBeNull();
+    expect(screen.queryByRole("switch", { name: "All day" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Repeat/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Calendar: Personal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Google Meet/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "More options" })).toBeTruthy();
+    expect(saveButton().disabled).toBe(false);
+  });
+
+  it("back on Event restores the time and length; a day changed on Task moves the event", () => {
+    const { onDraft } = open();
+    fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "11:00" } });
+    goTask();
+    goEvent();
+    expect(screen.getByLabelText<HTMLSelectElement>("Start time").value).toBe("11:00");
+    expect(screen.getByLabelText<HTMLSelectElement>("End time").value).toBe("12:00");
+    // A day picked on Task is the event's day when it goes back, at its time.
+    goTask();
+    fireEvent.click(screen.getByLabelText("Day"));
+    fireEvent.click(screen.getByRole("button", { name: /\b14-10(-2026)?$/ }));
+    goEvent();
+    expect(screen.getByLabelText<HTMLInputElement>("Date").value).toBe("14-10-2026");
+    expect(onDraft.mock.lastCall![0].time).toMatchObject({
+      start_date: "2026-10-14",
+      start_time: "11:00",
+      end_date: "2026-10-14",
+      end_time: "12:00",
+    });
+  });
+
+  it("a pointer press on the switch hands focus back to the title; a key press leaves it", () => {
+    open();
+    taskSeg().focus();
+    fireEvent.click(taskSeg(), { detail: 1 });
+    expect(document.activeElement).toBe(title());
+    eventSeg().focus();
+    fireEvent.click(eventSeg(), { detail: 0 });
+    expect(document.activeElement).toBe(eventSeg());
+  });
+
+  it("switching clears an event's error banner", async () => {
+    createEvent.mockRejectedValueOnce(new Error("The channel failed."));
+    open();
+    fireEvent.change(title(), { target: { value: "Dentist" } });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    expect(await screen.findByText("The channel failed.")).toBeTruthy();
+    goTask();
+    expect(screen.queryByText("The channel failed.")).toBeNull();
+  });
+
+  it("the switch is busy while a task saves, and does nothing then", async () => {
+    const out = laterTask();
+    addTask.mockReturnValueOnce(out.promise);
+    const { onClose } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await act(async () => {});
+    expect(eventSeg().getAttribute("aria-disabled")).toBe("true");
+    expect(taskSeg().getAttribute("aria-disabled")).toBe("true");
+    goEvent();
+    expect(taskSeg().getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
+    out.answer(3);
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+  });
+
+  it("the switch is disabled while an event save is held, and after one went unproven", async () => {
+    createEvent.mockResolvedValueOnce(ambiguous).mockResolvedValueOnce(lost);
+    open();
+    fireEvent.change(title(), { target: { value: "Dentist" } });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("button", { name: "Check again" }));
+    await screen.findByRole("button", { name: "Save" });
+    // The token ended without Google showing the event: PM may have made it, so it can't be a task.
+    expect(eventSeg().disabled).toBe(true);
+    expect(taskSeg().disabled).toBe(true);
+    goTask();
+    expect(eventSeg().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("the switch is disabled while Check again is offered", async () => {
+    createEvent.mockResolvedValueOnce(ambiguous);
+    open();
+    fireEvent.change(title(), { target: { value: "Dentist" } });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await screen.findByRole("button", { name: "Check again" });
+    expect(taskSeg().disabled).toBe(true);
+  });
+
+  it("a Repeat the backend refused stops an event's save but not a task's", async () => {
+    describeRecurrence.mockResolvedValue({ outcome: "refused", message: "No such day." });
+    addTask.mockResolvedValue(1);
+    const { onClose } = open({
+      resume: left({}, { recurrence: { kind: "rule", rule: weeklyOn("mon") } }),
+    });
+    await act(async () => {});
+    expect(saveButton().disabled).toBe(true);
+    goTask();
+    expect(saveButton().disabled).toBe(false);
+    // No Repeat words, and the refusal's line is the event's: not shown on a task.
+    expect(screen.queryByText("No such day.")).toBeNull();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(addTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Repeat still being asked about doesn't stop a task's save either", async () => {
+    describeRecurrence.mockReturnValue(new Promise<RepeatView>(() => {}));
+    addTask.mockResolvedValue(1);
+    const { onClose } = open({
+      resume: left({}, { recurrence: { kind: "rule", rule: weeklyOn("mon") } }),
+    });
+    expect(saveButton().disabled).toBe(true);
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+  });
+
+  it("with no device time zone, a task's day is editable and Save works", async () => {
+    deviceZone = null;
+    addTask.mockResolvedValue(1);
+    const { onClose } = open();
+    expect(saveButton().disabled).toBe(true);
+    goTask();
+    expect(screen.getByLabelText<HTMLInputElement>("Day").disabled).toBe(false);
+    // The event's words about the zone are none of a task's.
+    expect(screen.queryByText(/time zone/)).toBeNull();
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+    expect(addTask).toHaveBeenCalledTimes(1);
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  it("Enter on Task makes a task on the day, with no time, and closes as a task", async () => {
+    addTask.mockResolvedValue(1);
+    const { onClose, header } = open();
+    fireEvent.change(title(), { target: { value: "  Pay rent " } });
+    goTask();
+    title().focus();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+    expect(addTask.mock.calls).toEqual([
+      [
+        {
+          title: "Pay rent",
+          why: null,
+          project: null,
+          milestoneId: null,
+          eventUid: null,
+          doStart: "2026-10-12",
+          doEnd: null,
+          deadline: null,
+          deadlineKind: "hard",
+          deadlineFrom: "date",
+          lane: "foreground",
+          stackId: null,
+          parked: false,
+        },
+      ],
+    ]);
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(noteCreateResult).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(header.current);
+  });
+
+  it("Save does the same as Enter, and a dragged stretch in Month is the planned span", async () => {
+    addTask.mockResolvedValue(1);
+    const range: EditorFields = {
+      ...seed,
+      time: { kind: "all_day", first_day: "2026-10-12", last_day: "2026-10-14" },
+    };
+    const { onClose } = open({ resume: left({ seed: range }, { time: range.time }) });
+    goTask();
+    expect(screen.getByText(/^to 14-10(-2026)?$/)).toBeTruthy();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+    expect(addTask.mock.calls[0][0]).toMatchObject({
+      doStart: "2026-10-12",
+      doEnd: "2026-10-14",
+    });
+  });
+
+  it("an empty title refuses, says why and focuses the title", async () => {
+    open();
+    goTask();
+    taskSeg().focus();
+    fireEvent.click(saveButton());
+    await act(async () => {});
+    expect(addTask).not.toHaveBeenCalled();
+    expect(screen.getByText("A task needs a title.")).toBeTruthy();
+    expect(document.activeElement).toBe(title());
+    // A title typed and saved clears it.
+    addTask.mockResolvedValue(1);
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(addTask).toHaveBeenCalledTimes(1));
+  });
+
+  it("a date it can't read refuses Save and More options, and focuses the date", async () => {
+    const { onTaskMore } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    const day = screen.getByLabelText<HTMLInputElement>("Day");
+    day.focus();
+    fireEvent.change(day, { target: { value: "99-99-2026" } });
+    act(() => title().focus());
+    expect(screen.getByText(/^Day: “99-99-2026” isn't a date PM can read/)).toBeTruthy();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await act(async () => {});
+    expect(addTask).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(day);
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    expect(onTaskMore).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(day);
+  });
+
+  it("a task that couldn't be saved shows why and keeps the box", async () => {
+    addTask.mockRejectedValueOnce("The task list is locked.");
+    const { onClose } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    expect(await screen.findByText("The task list is locked.")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(title().value).toBe("Pay rent");
+    expect(document.activeElement).toBe(saveButton());
+    // Again: it goes through, and the banner goes.
+    addTask.mockResolvedValueOnce(2);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
+  });
+
+  it("a task that fails once the box has gone is handed back to reopen on Task", async () => {
+    const out = laterTask();
+    addTask.mockReturnValueOnce(out.promise);
+    const { onLeave, onClose, unmount } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await act(async () => {});
+    // A tab switch mid-save hands nothing back yet: the save is out.
+    await leave(unmount);
+    expect(onLeave).not.toHaveBeenCalled();
+    await act(async () => out.fail("The task list is locked."));
+    expect(onLeave).toHaveBeenCalledTimes(1);
+    expect(onLeave.mock.calls[0][0]).toMatchObject({
+      kind: "task",
+      draft: { summary: "Pay rent" },
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a task that is made once the box has gone hands nothing back", async () => {
+    const out = laterTask();
+    addTask.mockReturnValueOnce(out.promise);
+    const { onLeave, unmount } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await act(async () => {});
+    await leave(unmount);
+    await act(async () => out.answer(5));
+    expect(onLeave).not.toHaveBeenCalled();
+  });
+
+  it("More options on Task opens the task editor on the title and day, saving nothing", () => {
+    const { onTaskMore, onMore, onClose, onLeave, unmount } = open();
+    fireEvent.change(title(), { target: { value: " Pay rent " } });
+    goTask();
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    expect(onTaskMore).toHaveBeenCalledWith({
+      title: "Pay rent",
+      doStart: "2026-10-12",
+      doEnd: null,
+    });
+    expect(onMore).not.toHaveBeenCalled();
+    expect(addTask).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    // The editor speaks for the draft now: nothing is handed back as the box goes.
+    return leave(unmount).then(() => expect(onLeave).not.toHaveBeenCalled());
+  });
+
+  it("a titled task draft that goes with the tab comes back on Task; an untitled one doesn't", async () => {
+    const { onLeave, unmount } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    await leave(unmount);
+    expect(onLeave.mock.calls).toEqual([
+      [
+        {
+          kind: "task",
+          seed,
+          draft: { ...seed, summary: "Pay rent" },
+          calendarId: PERSONAL,
+          timeTouched: false,
+          length: null,
+          meetTouched: false,
+          badDate: null,
+        },
+      ],
+    ]);
+    cleanup();
+    const again = open({ resume: onLeave.mock.calls[0][0] as LeftDraft });
+    expect(taskSeg().getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy();
+    expect(title().value).toBe("Pay rent");
+    expect(again.onDraft).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        time: { kind: "all_day", first_day: "2026-10-12", last_day: "2026-10-12" },
+      }),
+      "pm:tasks",
+      "unsaved",
+    );
+    // …and goes back to an event with the draft whole.
+    goEvent();
+    expect(screen.getByLabelText<HTMLSelectElement>("Start time").value).toBe("09:00");
+  });
+
+  it("the ghost is a one-day all-day chip on the Tasks calendar, and says how far it has got", async () => {
+    const out = laterTask();
+    addTask.mockReturnValueOnce(out.promise);
+    const { onDraft } = open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    expect(onDraft).toHaveBeenLastCalledWith(
+      {
+        ...seed,
+        summary: "Pay rent",
+        time: { kind: "all_day", first_day: "2026-10-12", last_day: "2026-10-12" },
+      },
+      "pm:tasks",
+      "unsaved",
+    );
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await act(async () => {});
+    expect(onDraft.mock.lastCall![2]).toBe("saving");
+    out.answer(1);
+    await act(async () => {});
+    // Back on Event, the draft is the event's again, on its own calendar.
+    cleanup();
+    const { onDraft: next } = open();
+    goTask();
+    goEvent();
+    expect(next).toHaveBeenLastCalledWith(seed, PERSONAL, "unsaved");
+  });
+
+  it("says when Tasks is hidden, and when the day has passed", () => {
+    const view = open();
+    goTask();
+    // The seed's day is long gone.
+    expect(
+      screen.getByText("That day has passed, so the task shows on today until it's done."),
+    ).toBeTruthy();
+    // The event's notes aren't a task's.
+    expect(screen.queryByText(/is hidden in your calendar list, so the new event/)).toBeNull();
+    view.unmount();
+    cleanup();
+    render(
+      <QuickCreatePopover
+        anchor={rect()}
+        seed={seed}
+        targets={createTargets(overview)}
+        calendarId={PERSONAL}
+        overview={overview}
+        hidden={new Set(["pm:tasks"])}
+        colorOf={() => "var(--accent)"}
+        shapeOf={() => undefined}
+        returnFocusTo={createRef<HTMLButtonElement>()}
+        onDraft={vi.fn()}
+        onMore={vi.fn()}
+        onTaskMore={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    goTask();
+    expect(
+      screen.getByText(
+        "Tasks are hidden in your calendar list, so the new task won't show until you show Tasks again.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("no past-day note for today or a later day", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(2026, 9, 12, 8, 0));
+      open();
+      goTask();
+      expect(screen.queryByText(/That day has passed/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
