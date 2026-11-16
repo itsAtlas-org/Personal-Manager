@@ -1438,7 +1438,7 @@ impl SidecarManager {
         // Tear down a venv we can't trust — a previous attempt that died before
         // stamping the marker, or one whose interpreter is now too old (e.g. it
         // was first built against macOS's system 3.9, or on a 3.10 from before
-        // the floor rose to 3.11). This is what removes the manual "delete the
+        // the floor rose to 3.11, or on a 3.11 from before it rose to 3.12). This is what removes the manual "delete the
         // venv and retry".
         let venv_python_exists = self.paths.venv_python().exists();
         let detected = venv_python_exists
@@ -1710,7 +1710,7 @@ impl SidecarManager {
             return Ok(false);
         }
         // The lock can be unchanged yet the venv's interpreter be too old
-        // (built against macOS system 3.9, then the user installed 3.11+). Don't
+        // (built against macOS system 3.9, then the user installed 3.12+). Don't
         // report Ready in that case — let provision() rebuild it. This probe runs
         // only here, in the otherwise-ready branch, not on every status() poll.
         Ok(detect_python_version(&self.paths.venv_python()).is_some_and(meets_min))
@@ -3278,7 +3278,7 @@ fn request_timeout(method: &str) -> std::time::Duration {
 /// package's own `setup.py` or build backend, which can start a pip of its own (build isolation
 /// installs the build requirements that way), and that pip has neither [`PIP_SHIM`] nor PM's flags.
 /// It costs nothing today: every version in the three locks publishes a wheel for CPython
-/// 3.11 to 3.14 on win_amd64, macOS arm64 and manylinux x86_64 (checked against PyPI in the
+/// 3.12 to 3.14 on win_amd64, macOS arm64 and manylinux x86_64 (checked against PyPI in the
 /// 2026-11-06 refresh), so pip never had a reason to build. (An Intel Mac could not install the
 /// base lock with or without it: onnxruntime publishes no macOS x86_64 wheel, and no source.) A
 /// future pin without a wheel fails to install instead of building, and the refresh that brings it
@@ -3291,14 +3291,14 @@ const LOCK_INSTALL_FLAGS: [&str; 5] = [
     "--only-binary=:all:",
 ];
 
-/// pillow 13 (pinned in requirements.txt: the first release with the decoder fixes
-/// published from 2026-10-17) needs Python >= 3.11, so the venv's base interpreter
-/// must too. It was 3.10, markitdown's floor, until then; 3.10 reaches end of life
-/// in October 2026. Every installer already provides 3.12 (bundled on Windows and
-/// Linux, downloaded on macOS when the machine has nothing new enough), so a venv
-/// left on 3.10 is rebuilt once on the next launch. `just lock-regen` reads this
-/// value as the floor the locks resolve from.
-const MIN_PYTHON: (u32, u32) = (3, 11);
+/// The oldest Python the document engine runs on, and the floor the locks resolve from
+/// (`just lock-regen` reads this value). It was 3.10, markitdown's floor, until pillow 13 needed
+/// 3.11; it is 3.12 now because every installer already provides 3.12 (bundled on Windows and
+/// Linux, downloaded on macOS when the machine has nothing new enough), CI only ever tests 3.12,
+/// and a 3.11 floor made the locks fork two packages (soupsieve, numpy) for an interpreter nobody
+/// ships. A venv left on 3.11 or older is rebuilt once on the next launch, and on a Mac whose only
+/// Python is 3.11 the probe finds nothing in range, so PM downloads the pinned 3.12.
+const MIN_PYTHON: (u32, u32) = (3, 12);
 
 /// The newest Python the locks install on. markitdown 0.1.9 declares `Requires-Python <3.15` and
 /// onnxruntime ships no cp315 wheels, so a 3.15 venv fails its base install; before this ceiling the
@@ -3400,6 +3400,15 @@ fn consider_candidate(path: &Path, saw_too_old: &mut bool) -> Option<PathBuf> {
     }
 }
 
+/// The versioned executable names probed on PATH, newest-first: `python3.14` down to the floor's
+/// own minor, so an interpreter below [`MIN_PYTHON`] is never even looked up by name.
+fn versioned_python_names() -> Vec<String> {
+    (MIN_PYTHON.1..=MAX_PROBE_MINOR)
+        .rev()
+        .map(|minor| format!("python{}.{}", MIN_PYTHON.0, minor))
+        .collect()
+}
+
 /// Find a base Python that meets [`MIN_PYTHON`]. Probes, first acceptable wins:
 /// `PM_PYTHON`, then versioned names newest-first, then `python3`/`python`, then
 /// common macOS install locations. The macOS absolute paths matter because a
@@ -3414,10 +3423,7 @@ fn probe_base_candidates() -> BaseProbe {
         }
     }
 
-    let mut names: Vec<String> = (MIN_PYTHON.1..=MAX_PROBE_MINOR)
-        .rev()
-        .map(|minor| format!("python{}.{}", MIN_PYTHON.0, minor))
-        .collect();
+    let mut names = versioned_python_names();
     names.push("python3".into());
     names.push("python".into());
     for name in &names {
@@ -3448,11 +3454,8 @@ fn macos_python_candidates() -> Vec<PathBuf> {
     }
     let mut out = Vec::new();
     for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
-        for minor in (MIN_PYTHON.1..=MAX_PROBE_MINOR).rev() {
-            out.push(PathBuf::from(format!(
-                "{dir}/python{}.{}",
-                MIN_PYTHON.0, minor
-            )));
+        for name in versioned_python_names() {
+            out.push(PathBuf::from(format!("{dir}/{name}")));
         }
         out.push(PathBuf::from(format!("{dir}/python3")));
     }
@@ -3522,17 +3525,20 @@ fn classify_pip_failure(msg: &str) -> SidecarErrorKind {
 // a version PM then refuses.
 fn missing_message() -> String {
     let (major, minor) = MIN_PYTHON;
+    let max_minor = MAX_PYTHON.1;
     format!(
-        "No Python interpreter was found. PM's document engine needs Python {major}.{minor} or \
-         newer — install it and make sure it's on your PATH, or set PM_PYTHON to its full path."
+        "No Python interpreter was found. PM's document engine needs Python {major}.{minor} to \
+         {major}.{max_minor} — install it and make sure it's on your PATH, or set PM_PYTHON to \
+         its full path."
     )
 }
 
 fn too_old_message() -> String {
     let (major, minor) = MIN_PYTHON;
+    let max_minor = MAX_PYTHON.1;
     let mut m = format!(
         "The Python that was found is older than {major}.{minor}, which PM's document engine \
-         requires. Install Python {major}.{minor} or newer, then retry."
+         requires. Install Python {major}.{minor} to {major}.{max_minor}, then retry."
     );
     if std::env::var_os("PM_PYTHON").is_some() {
         m.push_str(" (PM_PYTHON points to an interpreter that is too old.)");
@@ -6299,9 +6305,15 @@ done
 
     #[test]
     fn enforces_the_supported_python_range() {
-        assert!(meets_min((3, 11)));
+        assert_eq!(MIN_PYTHON, (3, 12));
         assert!(meets_min((3, 12)));
+        assert!(meets_min((3, 13)));
         assert!(meets_min((3, 14)));
+        // 3.11 was the floor until the 3.12 raise: it is refused, and counts as "too old" (not
+        // "too new"), so a Mac whose only Python is 3.11 gets the pinned 3.12 download.
+        assert!(!meets_min((3, 11)));
+        assert!((3, 11) < MIN_PYTHON);
+        assert!((3, 12) >= MIN_PYTHON);
         // pillow 13 has no 3.10 wheels and no 3.10 in its Requires-Python.
         assert!(!meets_min((3, 10)));
         assert!(!meets_min((3, 9)));
@@ -6314,6 +6326,42 @@ done
         assert!(!should_rebuild_venv(true, true, Some((3, 12))));
     }
 
+    /// The patch level and a pre-release tag do not change the verdict: only major.minor counts,
+    /// so a 3.11.x of any patch is refused and a 3.12.x of any patch is accepted.
+    #[test]
+    fn the_floor_is_judged_on_major_minor_whatever_the_patch() {
+        let verdict = |s: &str| parse_python_version(s).is_some_and(meets_min);
+        assert!(!verdict("Python 3.11.0rc1"));
+        assert!(!verdict("Python 3.11.9"));
+        assert!(!verdict("Python 3.11.14"));
+        assert!(verdict("Python 3.12.0"));
+        assert!(verdict("Python 3.12.13"));
+        assert!(verdict("Python 3.14.1"));
+    }
+
+    /// PATH is searched by versioned name from the ceiling down to the floor and no lower, so a
+    /// `python3.11` is never looked up (a 3.11 behind a plain `python3` is still found by the
+    /// version check, which refuses it).
+    #[test]
+    fn versioned_names_run_from_the_ceiling_down_to_the_floor() {
+        assert_eq!(
+            versioned_python_names(),
+            vec!["python3.14", "python3.13", "python3.12"]
+        );
+    }
+
+    /// A venv an earlier PM built on 3.11 is rebuilt on the next launch, and it is rebuilt even
+    /// with its ready marker in place (the lock hash and marker are otherwise current): the
+    /// interpreter alone decides. The rebuild is also what sends a Mac with only a 3.11 to the
+    /// pinned 3.12 download, since `resolve_base_python` runs before the teardown and a 3.11 no
+    /// longer satisfies the probe.
+    #[test]
+    fn a_venv_on_python_3_11_is_rebuilt_once() {
+        assert!(should_rebuild_venv(true, true, Some((3, 11))));
+        // The rebuilt venv is on 3.12 (the bundled or downloaded interpreter): left alone.
+        assert!(!should_rebuild_venv(true, true, Some((3, 12))));
+    }
+
     /// The framework versions a Mac lists are filtered to the supported range, newest first.
     #[test]
     fn framework_versions_skip_unsupported_interpreters() {
@@ -6321,10 +6369,7 @@ done
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(
-            pick_framework_versions(&names),
-            vec![(3, 14), (3, 12), (3, 11)]
-        );
+        assert_eq!(pick_framework_versions(&names), vec![(3, 14), (3, 12)]);
     }
 
     #[test]
@@ -6341,10 +6386,10 @@ done
     fn python_guidance_names_the_floor_pm_enforces() {
         // The messages used to spell the version out, so raising MIN_PYTHON would have left them
         // asking for a Python that PM then turns down.
-        assert!(missing_message().contains("needs Python 3.11 or newer"));
+        assert!(missing_message().contains("needs Python 3.12 to 3.14"));
         let too_old = too_old_message();
-        assert!(too_old.contains("older than 3.11"));
-        assert!(too_old.contains("Install Python 3.11 or newer"));
+        assert!(too_old.contains("older than 3.12"));
+        assert!(too_old.contains("Install Python 3.12 to 3.14"));
     }
 
     #[test]
@@ -6360,8 +6405,9 @@ done
         assert!(should_rebuild_venv(true, true, None));
         // A venv an older PM built on 3.10, which the floor accepted until pillow 13: rebuilt once.
         assert!(should_rebuild_venv(true, true, Some((3, 10))));
+        // A venv built on 3.11 while that was the floor: rebuilt once.
+        assert!(should_rebuild_venv(true, true, Some((3, 11))));
         // Venv + marker + new enough → keep it.
-        assert!(!should_rebuild_venv(true, true, Some((3, 11))));
         assert!(!should_rebuild_venv(true, true, Some((3, 12))));
     }
 
@@ -6520,8 +6566,8 @@ done
             "Current".to_string(),
             "3.10".to_string(),
         ];
-        // 3.10 is listed and dropped: it is below the floor now, like 3.9.
-        assert_eq!(pick_framework_versions(&names), vec![(3, 12), (3, 11)]);
+        // 3.10 and 3.11 are listed and dropped: they are below the floor now, like 3.9.
+        assert_eq!(pick_framework_versions(&names), vec![(3, 12)]);
 
         let empty: Vec<String> = Vec::new();
         assert!(pick_framework_versions(&empty).is_empty());

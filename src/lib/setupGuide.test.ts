@@ -37,6 +37,19 @@ describe("guideFor", () => {
     expect(guideFor("python_missing", "mac").steps[0]).toContain("brew");
   });
 
+  it("asks for the Python 3.12 floor everywhere and never points at a Python PM refuses", () => {
+    for (const platform of ["linux", "mac", "windows"] as const) {
+      for (const mode of ["python_missing", "python_too_old"] as const) {
+        const text = JSON.stringify(guideFor(mode, platform));
+        expect(text, `${platform}/${mode}`).toContain("Python 3.12");
+        // 3.11 was the floor until the 3.12 raise, and Ubuntu 22.04's python3.11 is refused.
+        expect(text, `${platform}/${mode}`).not.toMatch(/3\.11/);
+      }
+    }
+    // The Fedora package is the versioned one: its plain python3 can be newer than PM supports.
+    expect(guideFor("python_missing", "linux").steps[0]).toContain("dnf install python3.12");
+  });
+
   it("never tells a Linux or Mac user about python.exe", () => {
     for (const platform of ["linux", "mac"] as const) {
       const g = guideFor("python_missing", platform);

@@ -9,7 +9,7 @@
 // Needs `uv` on PATH. uv rather than pip-tools for one reason that decided the whole shape of
 // this: `--universal` resolves across every platform AND every Python version at once, emitting
 // environment markers where the resolution forks. One file therefore covers Windows, macOS and
-// Linux and every CPython from MIN_PYTHON upwards — which matters because MIN_PYTHON is 3.11 and
+// Linux and every CPython from MIN_PYTHON upwards — which matters because MIN_PYTHON is 3.12 and
 // macOS prefers a system interpreter over PM's downloaded 3.12, so the real deployed range is
 // much wider than "the version we ship".
 //
