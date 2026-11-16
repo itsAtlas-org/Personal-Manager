@@ -929,10 +929,12 @@ pub fn adopt_shared_vault(
     }
     let runtime = vault_runtime_for(&resolved, &meta, key.expose())?;
     // The join's one write to the shared store, and it comes before the attach: a store with no
-    // per-device developer-mode record and an old vault-wide "on" would hand that "on" to this
-    // device the first time the writer's open looks (the attach's engage), so it is switched off
-    // for everyone first. A store that has a record, or nothing to inherit, is not written. If it
-    // can't be written the join is refused: attaching anyway could give this device the "on".
+    // per-device developer-mode record could hand an old vault-wide "on" to this device the first
+    // time the writer's open looks (the attach's engage), whether the old row says "true" now or
+    // only later. So it gets the empty record and its old row turned off, whatever the old row
+    // says, and everyone's switch is off until each device turns it on again. A store that has a
+    // record is neither written nor locked. If it can't be written the join is refused:
+    // attaching anyway could give this device the "on".
     crate::backup::adopt_mods::joiner_inherits_no_dev_mode(&conn).map_err(|e| {
         Error::Other(format!(
             "PM couldn't make sure developer mode starts off on this computer ({e}), so it \

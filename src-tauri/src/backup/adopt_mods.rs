@@ -22,9 +22,11 @@
 //! connected apps there would do it for them. Dev mode is per device (a joiner's device has no
 //! entry, so it reads off), and the connected apps have a seam where PR C makes that true
 //! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The one
-//! write is [`joiner_inherits_no_dev_mode`]: a store with no per-device record yet and an old
-//! vault-wide "on" would hand that "on" to the joiner's device when it first looks, so the join
-//! switches everyone off first, before the store is attached.
+//! write is [`joiner_inherits_no_dev_mode`]: a store with no per-device record yet could hand an old
+//! vault-wide "on" to the joiner's device when it first looks (whether the old row says "true"
+//! now or only later), so the join gives that store the empty record and turns the old row off,
+//! whatever the old row says, before the store is attached. A store that has a record is neither
+//! written nor locked.
 //!
 //! **The report** ([`describe`]) is one row per mod the restored store lists, in the words the
 //! restore card shows. It is pending until the open and the same-machine recovery have run (a
@@ -458,28 +460,41 @@ mod tests {
         assert!(!devmode::is_on(&conn, A).unwrap());
     }
 
-    /// Production code of a source file: everything before its test MODULE, less comment lines.
-    /// The cut is at a column-0 `#[cfg(test)]` whose item (past any further attributes) is a
-    /// `mod`, never at the first `#[cfg(test)]` of any kind: a file with an early test-only
-    /// function or `use` (`#[cfg(test)] pub fn installed_root`) would otherwise count everything
-    /// after it as test code and never be scanned.
+    /// Production code of a source file: every line outside a test MODULE, less comment lines.
+    /// Each column-0 `#[cfg(test)]` whose item (past any further attributes) is a `mod` is cut out
+    /// by itself (a `mod x;` line, a one-line `mod x { .. }`, or a block up to its column-0 `}`),
+    /// and the scan goes on after it. Cutting the file at the first test module instead would
+    /// never scan the production code that follows an EARLY one (`mods/api/mod.rs` declares
+    /// `mod tests;` at line 55, with production code to line 416); cutting at the first
+    /// `#[cfg(test)]` of any kind would hide everything after an early test-only fn or `use`.
     fn production(source: &str) -> String {
         let lines: Vec<&str> = source.lines().collect();
-        let cut = (0..lines.len())
-            .find(|&i| {
-                lines[i] == "#[cfg(test)]"
-                    && lines[i + 1..]
-                        .iter()
-                        .find(|l| !l.starts_with("#["))
-                        .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "))
-            })
-            .unwrap_or(lines.len());
-        lines[..cut]
-            .iter()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n")
+        let is_mod = |l: &str| l.starts_with("mod ") || l.starts_with("pub mod ");
+        let mut kept = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i] == "#[cfg(test)]" {
+                let item = (i + 1..lines.len()).find(|&j| !lines[j].starts_with("#["));
+                if let Some(j) = item.filter(|&j| is_mod(lines[j])) {
+                    let head = lines[j].trim_end();
+                    let one_line =
+                        head.ends_with(';') || (head.contains('{') && head.ends_with('}'));
+                    i = if one_line {
+                        j + 1
+                    } else {
+                        (j + 1..lines.len())
+                            .find(|&k| lines[k] == "}")
+                            .map_or(lines.len(), |k| k + 1)
+                    };
+                    continue;
+                }
+            }
+            if !lines[i].trim_start().starts_with("//") {
+                kept.push(lines[i]);
+            }
+            i += 1;
+        }
+        kept.join("\n")
     }
 
     #[test]
@@ -614,6 +629,28 @@ mod tests {
             "#[cfg(test)]\npub fn helper() {}\n\nfn f() { get(\"dev_mode\"); }\n\n#[cfg(test)]\n#[allow(clippy::x)]\nmod tests {}\n".into(),
         ));
         assert_eq!(readers_of_the_old_row(&files), ["mods/policy.rs"]);
+        files.pop();
+        // An early test MODULE (a `mod tests;` line, or a block) must not hide the production code
+        // after it either: `mods/api/mod.rs`, `paths.rs` and `mods/retag.rs` all have one.
+        for early in [
+            "#[cfg(test)]\nmod test_support;\n#[cfg(test)]\nmod tests;\n\nfn f() { get(\"dev_mode\"); }\n",
+            "#[cfg(test)]\nmod a {\n    fn t() {}\n}\n\nfn f() { read(devmode::LEGACY_ROW); }\n",
+            "#[cfg(test)]\nmod a {}\nfn f() { get(\"dev_mode\"); }\n",
+        ] {
+            files.push(("mods/policy.rs".into(), early.into()));
+            assert_eq!(
+                readers_of_the_old_row(&files),
+                ["mods/policy.rs"],
+                "{early}"
+            );
+            files.pop();
+        }
+        // ...and the test module is still cut out when production code follows it.
+        files.push((
+            "mods/policy.rs".into(),
+            "#[cfg(test)]\nmod a {\n    const K: &str = \"dev_mode\";\n}\n\nfn f() {}\n".into(),
+        ));
+        assert!(readers_of_the_old_row(&files).is_empty());
         files.pop();
         // ...and a read inside the test module itself is still not production.
         files.push((
