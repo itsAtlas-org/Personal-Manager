@@ -32,6 +32,7 @@ use super::stage::Staged;
 use super::unsigned::{self, UnsignedEnv};
 use crate::mods::api::Host;
 use crate::mods::devmode;
+use crate::mods::folder_watch;
 use crate::mods::ledger::{self, DevSwitch, Mint};
 use crate::mods::refresh;
 use crate::AppState;
@@ -54,7 +55,7 @@ pub struct DevModeState {
     pub problem: Option<String>,
 }
 
-fn this_device(app: &AppHandle) -> Result<String> {
+pub(super) fn this_device(app: &AppHandle) -> Result<String> {
     let data_dir = crate::paths::data_dir(app).map_err(ModsError::internal)?;
     device::device_id(&data_dir).map_err(ModsError::internal)
 }
@@ -69,7 +70,7 @@ pub fn dev_mode_off() -> ModsError {
 }
 
 /// Developer mode on for `device` in the open store, or the typed refusal. Reads the store's record.
-fn require_dev_mode(app: &AppHandle, device: &str) -> Result<()> {
+pub(super) fn require_dev_mode(app: &AppHandle, device: &str) -> Result<()> {
     let state = app.state::<AppState>();
     let conn = state.conn().map_err(|_| ModsError::no_store())?;
     if devmode::is_on(&conn, device).map_err(ModsError::internal)? {
@@ -116,6 +117,8 @@ pub async fn dev_mode_switch(webview: Webview, on: bool) -> Result<DevSwitch> {
     blocking(&webview, move |app| {
         let view = View::read(app)?;
         let done = ledger::set_dev_mode_for_this_device(app, on, view.index())?;
+        // Off unloaded every test folder: nothing is left to watch.
+        folder_watch::resync(app);
         refresh::emit_changed(app, refresh::CHANGED_DEV_MODE);
         if let Err(e) = app.emit(DEV_MODE_EVENT, DevModeChanged { on: done.on }) {
             eprintln!("mods: a developer-mode notice wasn't delivered ({e})");

@@ -70,12 +70,18 @@ mod user;
 // The unsigned file install, and developer mode's switch for this device (slice 6, part 3).
 mod dev_switch;
 mod unsigned;
+// A developer's unpacked test folder: loaded for the session, never persisted (slice 6, part 4).
+mod folder;
 #[allow(unused_imports)]
 pub use blacklist::{
     clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
     Waiting, WaitingKind,
 };
 pub use dev_switch::{set_dev_mode_for_this_device, DevSwitch};
+pub use folder::{
+    list_test_mods, reload_test_mod, unload_test_mod, FolderLoad, Reloaded, TestModStatus,
+    ALLOW_ATLAS_FOLDERS,
+};
 pub use unsigned::{UnsignedInstall, UnsignedOptions};
 #[allow(unused_imports)]
 pub use updates::{Landed, Pass, RepairTarget};
@@ -434,6 +440,8 @@ struct Row {
     package_sha256: Option<String>,
     /// Whether an Atlas key signed it; an unsigned row is served only while developer mode is on.
     signed: bool,
+    /// `mods.installed_from`: a `folder` row is a test folder, served only through its session.
+    installed_from: String,
     state: String,
     reason: Option<String>,
     consented: bool,
@@ -442,6 +450,12 @@ struct Row {
 }
 
 impl Row {
+    /// Whether this is a developer's loaded test folder (`ledger/folder.rs`): its files are not in
+    /// this store's mods folder, so nothing here may look for them, recover them or sweep for them.
+    fn folder(&self) -> bool {
+        self.installed_from == store::FROM_FOLDER
+    }
+
     /// Whether the signed list removed this mod (`store::REASON_BLACKLIST_REMOVED`).
     fn removed(&self) -> bool {
         self.reason.as_deref() == Some(store::REASON_BLACKLIST_REMOVED)
@@ -646,7 +660,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             source_commit: &m.publisher.commit,
             signed: true,
             installed_from: opts.source.stored(),
-            package_sha256,
+            package_sha256: Some(package_sha256),
             manifest: &manifest_text,
             files: file_records_json(pkg)?,
             project_refs: project_refs_json(m),
@@ -721,6 +735,21 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
     /// back from being served (slice 5's blacklist).
     pub fn startup(&self, now: DateTime<Utc>, check: &dyn ServeCheck) -> StartupReport {
         let _ledger = self.runtime.ledger_lock();
+        // A test folder lives for the session that loaded it: whatever a crash or a closed store
+        // left of one is gone before anything is read, so no folder row is ever loaded or swept for
+        // (`ledger/folder.rs`). A failure is logged and harmless: a folder row with no session is
+        // never served ([`Ledger::load`]), and the next open tries again.
+        self.runtime.folders().forget_all();
+        match self.with_conn(folder::purge_rows) {
+            Ok(gone) if !gone.is_empty() => {
+                eprintln!(
+                    "mods: unloaded {} test mod(s) from a closed session",
+                    gone.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("mods: leftover test mods couldn't be cleared ({e})"),
+        }
         let rows = match self.with_conn(|c| Ok(read_rows(c)?)) {
             Ok(rows) => rows,
             Err(e) => {
@@ -737,7 +766,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         // quarantined like any other with no row.
         let known = rows
             .iter()
-            .filter(|row| !row.removed())
+            .filter(|row| !row.removed() && !row.folder())
             .map(|row| (row.id.clone(), VersionName::parse(&row.version).ok()))
             .collect();
         report.sweep = disk::sweep(self.layout, &known, now);
@@ -773,8 +802,9 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         let mut recovered = Vec::new();
         let mut unrecovered = Vec::new();
         for row in &rows {
-            // Never copy a removed mod's files back from another store of the vault.
-            if row.removed() {
+            // Never copy a removed mod's files back from another store of the vault, and a test
+            // folder has no files in any store: they are the developer's own.
+            if row.removed() || row.folder() {
                 continue;
             }
             let Ok(ok) = read_row(self.layout, row) else {
@@ -827,7 +857,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
     ) -> Result<StartupReport, LedgerError> {
         let report = self.recover_held(now, check)?;
         let rows = self.with_conn(|c| Ok(read_rows(c)?))?;
-        let all_looked_for = rows.iter().all(|row| {
+        let all_looked_for = rows.iter().filter(|row| !row.folder()).all(|row| {
             read_row(self.layout, row)
                 .is_ok_and(|ok| check_files(&ok) != Err(store::REASON_FILES_CHANGED))
         });
@@ -850,6 +880,17 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
             // Removed by the safety list: no files to look for or put back, nothing to serve. The
             // row waits, paused, for the uninstall dialog (I-16).
             if row.removed() {
+                continue;
+            }
+            // A test folder is served from its session or not at all: its files are the
+            // developer's own, so the load neither checks them against this store's folder, parks
+            // the row for them, nor writes anything about it (a row with no session is a crash's
+            // leftover, cleared at the next writer open).
+            if row.folder() {
+                if let Some(m) = self.folder_served(row, check) {
+                    report.loaded.push(row.id.clone());
+                    serve.push(m);
+                }
                 continue;
             }
             let checked = read_row(self.layout, row).and_then(|ok| {
@@ -1023,7 +1064,8 @@ struct RowWrite<'a> {
     /// Whether an Atlas key signed it (an unsigned file's row says no: policy reads it).
     signed: bool,
     installed_from: &'a str,
-    package_sha256: &'a str,
+    /// The `.pmmod`'s own hash; `None` only for a test folder (v60's CHECK), which has no package.
+    package_sha256: Option<&'a str>,
     manifest: &'a str,
     files: String,
     project_refs: String,
@@ -1077,7 +1119,7 @@ fn read_granted(conn: &Connection, id: &ModId) -> rusqlite::Result<BTreeSet<Stri
 fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT id, version, package_sha256, state, state_reason, consented_at IS NOT NULL, \
-                manifest, files, signed \
+                manifest, files, signed, installed_from \
          FROM mods ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1091,6 +1133,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
             manifest: r.get(6)?,
             files: r.get(7)?,
             signed: r.get(8)?,
+            installed_from: r.get(9)?,
         })
     })?;
     rows.collect()
@@ -1398,6 +1441,8 @@ pub fn after_writer_open(app: &AppHandle) {
     // The registry was just made from the rows (or, when they couldn't be read, emptied): a Mods
     // tab that is already up reads them again.
     super::refresh::emit_changed(app, super::refresh::CHANGED_LOADED);
+    // The startup forgot every test folder's session (and deleted their rows): so go their watches.
+    super::folder_watch::resync(app);
     if report.skipped.is_some() {
         return;
     }
@@ -1512,6 +1557,9 @@ pub fn after_settle(app: &AppHandle, writes: impl FnOnce() -> bool) {
     if settle_registry(runtime.inner(), writes) {
         after_writer_open(app);
     }
+    // Either way the sessions of test folders are gone (a close forgot them, a writer's open
+    // deleted their rows): so are their watches.
+    super::folder_watch::resync(app);
 }
 
 /// [`after_settle`]'s registry half: `writes` is asked, and a `false` acted on, under the ledger
@@ -1530,8 +1578,12 @@ fn settle_registry(runtime: &ModRuntime, writes: impl FnOnce() -> bool) -> bool 
 /// took the connection): serve nothing.
 pub fn on_store_closed(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<ModRuntime>() {
-        let _ledger = runtime.ledger_lock();
-        runtime.clear();
+        {
+            let _ledger = runtime.ledger_lock();
+            runtime.clear();
+        }
+        // `clear` forgot every test folder's session: their watches go with them.
+        super::folder_watch::resync(app);
     }
 }
 
@@ -1541,6 +1593,8 @@ pub fn quiesce(app: &AppHandle) -> Option<MutexGuard<'_, ()>> {
     let runtime: &ModRuntime = app.try_state::<ModRuntime>()?.inner();
     let guard = runtime.ledger_lock();
     runtime.clear();
+    // The watcher takes no ledger lock, so this is safe under the guard.
+    super::folder_watch::resync(app);
     Some(guard)
 }
 
@@ -1563,6 +1617,9 @@ mod tests {
     mod slice6;
     // The unsigned file install, and developer mode as the ledger carries it out (slice 6, part 3).
     mod dev_unsigned;
+    // The folder test-mod loader and the frozen-page watchdog's pause (slice 6, part 4).
+    mod test_folder;
+    mod watchdog_pause;
 
     const VAULT: &str = "11111111-2222-3333-4444-555555555555";
     const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -2176,7 +2233,7 @@ mod tests {
             source_commit: &"0".repeat(40),
             signed: true,
             installed_from: store::FROM_CATALOGUE,
-            package_sha256: &"a".repeat(64),
+            package_sha256: Some(&"a".repeat(64)),
             manifest: "{}",
             files: "[]".into(),
             project_refs: "[]".into(),

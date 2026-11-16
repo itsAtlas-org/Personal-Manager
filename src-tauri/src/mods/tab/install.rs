@@ -281,6 +281,7 @@ pub fn prepare<S: LedgerStore>(
         source,
         trust: Trust::Signed,
         bytes,
+        folder: None,
     };
     Ok((screen, staged))
 }

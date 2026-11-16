@@ -26,6 +26,9 @@ pub enum Kind {
     /// Installed (an auto-installed pilot, D17) but its first-open "Turn on" hasn't happened.
     WaitingForYou,
     PausedByYou,
+    /// Paused by PM because the page stopped responding while this mod's frame was the last one
+    /// active (`mods::watchdog`). Resumed only by the user.
+    PausedFrozen,
     PausedBySafetyList,
     RemovedBySafetyList,
     /// Paused because developer mode is off (an unsigned mod).
@@ -126,6 +129,14 @@ fn words(row: &RowFacts<'_>, index: Option<&Index>) -> (Kind, String, Fix) {
         (store::STATE_PAUSED, Some(store::REASON_USER)) => {
             (Kind::PausedByYou, "Paused by you.".to_owned(), Fix::Resume)
         }
+        (store::STATE_PAUSED, Some(store::REASON_FROZEN)) => (
+            Kind::PausedFrozen,
+            format!(
+                "{name} stopped responding, and PM paused it so the rest of PM keeps working. \
+                 Resume it when you want to try it again."
+            ),
+            Fix::Resume,
+        ),
         (store::STATE_PAUSED, Some(store::REASON_BLACKLIST)) => (
             Kind::PausedBySafetyList,
             paused_by_list(row, index),
@@ -412,6 +423,7 @@ mod tests {
             .chain(store::LEDGER_REASONS.iter().map(|r| Some(*r)))
             .chain([
                 Some(store::REASON_USER),
+                Some(store::REASON_FROZEN),
                 Some(store::REASON_BLACKLIST),
                 Some(store::REASON_BLACKLIST_REMOVED),
                 Some(store::REASON_DEV_MODE),

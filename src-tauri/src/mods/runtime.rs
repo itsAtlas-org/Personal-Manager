@@ -72,6 +72,7 @@ use tauri::Url;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::engine::Platform;
+use super::folder::FolderSessions;
 use super::headers;
 use super::ids::ModId;
 use super::outbox::{Ending, Outbox};
@@ -258,6 +259,10 @@ struct Session {
     store_epoch: u64,
     /// Where this session's events go: the channel its frame's page opened it with.
     outbox: Arc<Outbox>,
+    /// When the frame was asked for, and when it last did anything PM can see (a bridge call began):
+    /// what the frozen-page watchdog reads to name the frame that was last active (`watchdog`).
+    opened: Instant,
+    touched: Instant,
 }
 
 #[derive(Default)]
@@ -400,6 +405,16 @@ pub struct Recipient {
     pub outbox: Arc<Outbox>,
 }
 
+/// A frame that is mounted, as the watchdog reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountedFrame {
+    pub mod_id: ModId,
+    /// When the page asked for it.
+    pub opened: Instant,
+    /// When it last made a bridge call (or `opened`, if it never has).
+    pub touched: Instant,
+}
+
 /// The scheme's state, managed by `setup()` for the life of the process.
 pub struct ModRuntime {
     platform: Platform,
@@ -417,6 +432,9 @@ pub struct ModRuntime {
     /// whenever the store closes, so no path can serve an unsigned mod without developer mode having
     /// been looked up. The record in the store is the truth, this is its in-memory shadow.
     unsigned_allowed: AtomicBool,
+    /// The test folders loaded this session (`folder`): memory only, forgotten with the store, the
+    /// mod or developer mode. A `folder` row with no session here is never served.
+    folders: FolderSessions,
 }
 
 impl ModRuntime {
@@ -428,7 +446,13 @@ impl ModRuntime {
             gate: ServeGate::new(MAX_SERVING, MAX_WAITING),
             ledger: Mutex::new(()),
             unsigned_allowed: AtomicBool::new(false),
+            folders: FolderSessions::default(),
         }
+    }
+
+    /// The loaded test folders (`folder`).
+    pub fn folders(&self) -> &FolderSessions {
+        &self.folders
     }
 
     /// Whether unsigned mods may be served now (developer mode is on for this device in this vault).
@@ -491,6 +515,9 @@ impl ModRuntime {
         // Nothing unsigned is served by a store that hasn't looked developer mode up (the writer's
         // next open sets it again).
         self.set_unsigned_allowed(false);
+        // A test folder is a session of the store that closed: its row goes at the next writer open
+        // (or sooner), and nothing serves it without the session.
+        self.folders.forget_all();
         let mut inner = self.lock();
         inner.installed.clear();
         inner.tickets.clear();
@@ -535,6 +562,9 @@ impl ModRuntime {
     /// Remove a mod, its unused entry URLs and its sessions. Each live frame is told its session
     /// closed (`session.closed`, "uninstalled") on the way out.
     pub fn uninstall(&self, id: &ModId) {
+        // An uninstalled test folder is no longer loaded (its files are the developer's: only the
+        // session is dropped).
+        self.folders.forget(id);
         self.remove(id, Ending::Uninstalled);
     }
 
@@ -578,6 +608,21 @@ impl ModRuntime {
                     store_epoch: s.store_epoch,
                 },
                 outbox: Arc::clone(&s.outbox),
+            })
+            .collect()
+    }
+
+    /// The frames PM has handed out and not closed, live or still loading: what "a mod frame is
+    /// mounted" means to the frozen-page watchdog (`watchdog`). A session is the page asking for a
+    /// frame, so this is PM's own record of mounts, not anything the page reports.
+    pub fn mounted_frames(&self) -> Vec<MountedFrame> {
+        self.lock()
+            .sessions
+            .values()
+            .map(|s| MountedFrame {
+                mod_id: s.mod_id.clone(),
+                opened: s.opened,
+                touched: s.touched,
             })
             .collect()
     }
@@ -688,6 +733,8 @@ impl ModRuntime {
                 generation,
                 store_epoch,
                 outbox,
+                opened: now,
+                touched: now,
             },
         );
         Ok(FrameOpened {
@@ -759,6 +806,10 @@ impl ModRuntime {
     fn begin_call_at(&self, session: &str, now: Instant) -> Result<CallTicket, FrameError> {
         let mut inner = self.lock();
         inner.sweep(now);
+        // A call is the frame being active (the watchdog's "last active").
+        if let Some(s) = inner.sessions.get_mut(session) {
+            s.touched = now;
+        }
         match inner.sessions.get(session) {
             Some(Session {
                 mod_id,
@@ -1229,6 +1280,29 @@ mod tests {
             Err(FrameError::ClosedOrUnknown)
         );
         assert_eq!(rt.session_mod(&two.session), Ok(id("atlas.map")));
+    }
+
+    #[test]
+    fn the_frames_handed_out_are_listed_with_when_each_last_did_anything_for_the_watchdog() {
+        let s = setup(Platform::Linux);
+        let rt = &s.runtime;
+        assert!(rt.mounted_frames().is_empty());
+        let one = rt.open_frame(&id("atlas.map")).unwrap();
+        let two = rt.open_frame(&id("atlas.map")).unwrap();
+        // Handed out, not yet loaded: still mounted as far as the page is concerned.
+        let frames = rt.mounted_frames();
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|f| f.opened == f.touched));
+        // A bridge call is the frame being active: only that session's `touched` moves.
+        let later = Instant::now() + Duration::from_secs(30);
+        let _ = rt.session_mod_at(&one.session, later);
+        let frames = rt.mounted_frames();
+        assert_eq!(frames.iter().filter(|f| f.touched >= later).count(), 1);
+        assert_eq!(frames.iter().filter(|f| f.touched < later).count(), 1);
+        // A closed session is no longer mounted.
+        rt.close(&one.session);
+        rt.close(&two.session);
+        assert!(rt.mounted_frames().is_empty());
     }
 
     #[test]

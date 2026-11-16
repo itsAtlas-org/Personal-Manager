@@ -224,6 +224,31 @@ pub fn unsigned_check(
     Ok(())
 }
 
+/// The check for a developer's test folder (the folder loader): like [`unsigned_check`] but a folder
+/// has no package, so the blacklist is read by id and version only (an entry by sha256 can't name
+/// it). `dev_atlas` is set only for an `atlas.` folder in a development build: such a folder is the
+/// catalogue mod's own source under test, so the catalogue's claim on its id doesn't refuse it (the
+/// blacklist still does).
+pub fn folder_check(
+    index: Option<&Index>,
+    id: &str,
+    version: &str,
+    dev_atlas: bool,
+) -> Result<(), String> {
+    let Some(index) = index else {
+        return Ok(());
+    };
+    if let Some(entry) = index.blacklisted(id, version, None) {
+        return Err(blacklist_words(entry));
+    }
+    if !dev_atlas && index.entry(id).is_some() {
+        return Err(
+            "its id belongs to a mod in the catalogue; only that signed mod may use it".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 // ---- Applying the blacklist to an installed row (pure) -------------------------------------------
 
 /// What the plan reads of a row.
@@ -658,6 +683,32 @@ pub(crate) mod tests {
         assert!(unsigned_check(Some(&index), "acme.notes", "1.2.0", &"d".repeat(64)).is_ok());
         assert!(unsigned_check(Some(&index), "my.thing", "1.0.0", &"d".repeat(64)).is_ok());
         assert!(unsigned_check(None, "atlas.map", "1.0.0", SHA).is_ok());
+    }
+
+    #[test]
+    fn a_test_folder_is_checked_by_id_and_version_and_a_dev_atlas_one_may_use_a_catalogue_id() {
+        let (pkg, sha) = verified("1.2.0");
+        let index = index_listing(
+            entry_for(&pkg, &sha),
+            json!([
+                {"id": "acme.notes", "versions": "<1.2.0", "action": "paused", "reason": "Loses notes.", "fixedIn": "1.2.0"},
+                {"sha256": SHA, "action": "removed", "reason": "Sends your documents elsewhere."}
+            ]),
+        );
+        // A catalogue id is refused for an ordinary folder.
+        let err = folder_check(Some(&index), "atlas.map", "9.9.9", false).unwrap_err();
+        assert!(err.contains("catalogue"), "{err}");
+        // ... and allowed for a development build's atlas. folder.
+        assert!(folder_check(Some(&index), "atlas.map", "9.9.9", true).is_ok());
+        // The blacklist by id and version refuses either way.
+        for dev_atlas in [false, true] {
+            let err = folder_check(Some(&index), "acme.notes", "1.0.0", dev_atlas).unwrap_err();
+            assert!(err.contains("Loses notes."), "{err}");
+        }
+        // An entry by sha256 can't name a folder, which has no package hash.
+        assert!(folder_check(Some(&index), "my.thing", "1.0.0", false).is_ok());
+        assert!(folder_check(Some(&index), "acme.notes", "1.2.0", false).is_ok());
+        assert!(folder_check(None, "atlas.map", "1.0.0", false).is_ok());
     }
 
     // ---- ServeCheck ----------------------------------------------------------------------------

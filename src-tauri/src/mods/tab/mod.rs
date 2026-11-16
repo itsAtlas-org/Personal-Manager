@@ -20,6 +20,8 @@
 //! - [`commands`]: the Tauri commands, over all of it.
 //! - [`unsigned`], [`dev_commands`]: the unsigned file install (developer mode, the stark screen, D3
 //!   judged before consent) and developer mode's commands (part 3 of slice 6).
+//! - [`folder`]: a developer's test folder, loaded for the session through the same stark screen
+//!   (part 4 of slice 6).
 //!
 //! The user's own pause, resume and first-open "Turn on" are the ledger's (`ledger/user.rs`): they
 //! change rows and the registry, so they live beside the other writers of both.
@@ -31,6 +33,7 @@ pub mod dev_commands;
 pub mod device;
 pub mod disclaimer;
 pub mod error;
+pub mod folder;
 pub mod icon;
 pub mod install;
 pub mod listing;

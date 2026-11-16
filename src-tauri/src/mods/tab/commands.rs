@@ -112,7 +112,7 @@ pub(super) async fn blocking<T: Send + 'static>(
     .map_err(ModsError::internal)?
 }
 
-fn parse_id(id: &str) -> Result<ModId> {
+pub(super) fn parse_id(id: &str) -> Result<ModId> {
     ModId::parse(id).map_err(|e| ModsError::bad_request(e.to_string()))
 }
 
@@ -303,6 +303,9 @@ pub async fn install_mod_consented(
                 &decisions,
                 confirm_id.as_deref(),
             )?,
+            Trust::Folder => {
+                super::folder::finish_folder(app, &view, staged, &decisions, confirm_id.as_deref())?
+            }
         };
         announce(app, &finished.told);
         refresh::emit_changed(app, refresh::CHANGED_INSTALLED);

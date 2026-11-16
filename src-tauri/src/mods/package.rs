@@ -122,7 +122,7 @@ impl Limits {
     };
 }
 
-const MANIFEST_CAP: usize = 256 << 10;
+pub(super) const MANIFEST_CAP: usize = 256 << 10;
 const CHECKSUMS_CAP: usize = 1 << 20;
 const SIGNATURE_CAP: usize = 4 << 10;
 const PATH_CAP: usize = 200;
@@ -546,6 +546,61 @@ pub fn verify_unsigned_with(
     })
 }
 
+/// Verify a developer's unpacked test folder (spec §1.15, the folder test-mod loader), whose files
+/// `mods::folder::scan` has already read: only regular files under the package layout, each name
+/// through [`check_path`], the caps applied while reading. There is no archive, no checksum list and
+/// no signature, so there is nothing to vouch for the files but the user's own choice of folder: the
+/// loader around this is the stark install (typed id, developer mode, D3 across the unsigned mods).
+///
+/// What is checked is what [`verify_unsigned`] checks of the content: the manifest's every field and
+/// that its paths are files of the folder, the licence text, the id's tier. The manifest must say
+/// third party, so no `atlas.` id passes, **except** `allow_atlas`, which the caller sets only in a
+/// development build (`cfg!(debug_assertions)`): there a folder may be an `atlas.` mod whose manifest
+/// says first party, so the Atlas mods' own source folders can be exercised before they are signed
+/// (L6 and L14). The loader stores the row as third party and unsigned either way.
+pub fn verify_folder(
+    files: BTreeMap<String, VerifiedFile>,
+    allow_atlas: bool,
+) -> Result<VerifiedPackage, PackageError> {
+    let manifest_bytes = &files
+        .get(MANIFEST)
+        .ok_or_else(|| refuse(Refusal::Missing, format!("it has no {MANIFEST}")))?
+        .bytes;
+    let manifest = parse_manifest(manifest_bytes, &files)?;
+    let tier = manifest.publisher.tier;
+    let reserved = manifest.id.is_reserved();
+    match (reserved, tier) {
+        (false, Tier::Third) => {}
+        (true, Tier::First) if allow_atlas => {}
+        (true, _) if allow_atlas => {
+            return Err(refuse(
+                Refusal::Manifest,
+                "an atlas. id must say it is first party (publisher.tier \"first\")",
+            ));
+        }
+        (true, _) => {
+            return Err(refuse(
+                Refusal::Id,
+                "an atlas. id belongs to Atlas: a test folder may use one only in a development \
+                 build of PM",
+            ));
+        }
+        (false, _) => {
+            return Err(refuse(
+                Refusal::Manifest,
+                "a test folder must say it is third party (publisher.tier \"third\")",
+            ));
+        }
+    }
+    check_licence_text(&files)?;
+    Ok(VerifiedPackage {
+        manifest,
+        files,
+        signer: None,
+        trusted_comment: None,
+    })
+}
+
 /// What the signed and the unsigned verifier share once the checksums are in hand: the zip holds
 /// exactly the listed files (plus `pmmod/checksums.json`, and the signature when `signed`), each
 /// one's sha256 matches, the manifest parses and its paths are among the files, and the licence is
@@ -808,7 +863,7 @@ pub fn check_path(path: &str) -> Result<(), PackageError> {
 
 /// No two entries the same after ASCII case-folding (NTFS and APFS fold case), and no file whose
 /// folded name is also a folder another entry sits in.
-fn check_case_collisions(names: &[String]) -> Result<(), PackageError> {
+pub(super) fn check_case_collisions(names: &[String]) -> Result<(), PackageError> {
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
     for name in names {
         if let Some(other) = folded.insert(name.to_ascii_lowercase(), name) {

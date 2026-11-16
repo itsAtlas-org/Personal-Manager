@@ -5,9 +5,8 @@
 //! Every writer takes its strings from here, and a pin test in `db/migrations.rs` reads each set
 //! back out of v60's CHECKs, so the two can't drift. `mods.tier` is owned by [`super::ids::Tier`].
 //!
-//! The ledger (`ledger.rs`: install, update, uninstall, the startup load), the Mods tab's commands
-//! and the dispatcher are the writers. The folder test-mod loader (slice 6, part 4) is the one
-//! writer still to come: `FROM_FOLDER` and the pieces only it uses carry their own allowances.
+//! The ledger (`ledger.rs`: install, update, uninstall, the startup load, and the folder test-mod
+//! loader in `ledger/folder.rs`), the Mods tab's commands and the dispatcher are the writers.
 
 use super::package::DataClass;
 
@@ -47,6 +46,12 @@ pub fn is_ledger_reason(reason: &str) -> bool {
 /// it: the blacklist leaves such a row alone ([`super::safety::plan_row`]) and the ledger keeps it
 /// through an update ([`super::policy::state_after_install`]).
 pub const REASON_USER: &str = "user";
+/// `mods.state_reason` of a mod the frozen-page watchdog paused (`mods::watchdog`): PM's page stopped
+/// answering while this mod's frame was the last one active. Like [`REASON_USER`] it is lifted only
+/// by the user's own resume (the safety list and the ledger's loads leave it alone), and never by a
+/// restart or by dev mode: a mod that froze the page once must be turned back on by someone who
+/// knows.
+pub const REASON_FROZEN: &str = "frozen";
 /// `mods.state_reason` of an unsigned mod paused because developer mode is off (spec §1.15), until
 /// it is on again. Written by the ledger's load (`policy::dev_mode_state`), which pauses an active
 /// unsigned row while developer mode is off for this device and resumes exactly these rows when it
@@ -98,8 +103,9 @@ pub const SETTING_DEV_MODE_LEGACY: &str = "dev_mode";
 pub const INSTALLED_FROM: [&str; 3] = [FROM_CATALOGUE, FROM_FILE, FROM_FOLDER];
 pub const FROM_CATALOGUE: &str = "catalogue";
 pub const FROM_FILE: &str = "file";
-/// Written by the folder test-mod loader (slice 6, part 4), which doesn't exist yet.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Written by the folder test-mod loader (`ledger/folder.rs`): a session-only row whose files are
+/// the developer's own folder, never copied. No startup serves one, every writer open deletes any a
+/// crash left, and a backup strips them (spec §1.15; plan decision 8).
 pub const FROM_FOLDER: &str = "folder";
 
 /// `mod_grants.decision`. No row means the permission hasn't been asked yet (a first-use grant).

@@ -167,6 +167,17 @@ pub enum Refusal {
     /// An unsigned file whose id is held by an installed mod that didn't come from an unsigned file
     /// (a signed mod, or a test folder): only its own kind of install can replace it.
     OtherInstallHoldsId,
+    /// A signed install, or any other install that goes by a package, over an id a loaded test
+    /// folder holds: a folder row has no package to pin (its sha256 is NULL), so nothing about it
+    /// can be an update or a repair. The developer unloads the folder first.
+    TestFolderHoldsId,
+    /// A test folder's reload whose manifest now asks for more than the user approved (a permission,
+    /// an internet host, a secret slot or a contribution it didn't have): the old one keeps
+    /// running, and loading the folder again shows the user the new screen.
+    ReloadWidens(Vec<Widening>),
+    /// A test folder's reload whose manifest names another mod, author or repository: that is a
+    /// different mod (or maker) than the one the user saw, so it is loaded as one.
+    ReloadChangedId,
 }
 
 impl fmt::Display for Refusal {
@@ -209,6 +220,36 @@ impl fmt::Display for Refusal {
                 "a mod with this id is installed that didn't come from an unsigned file: uninstall \
                  it first",
             ),
+            Self::TestFolderHoldsId => f.write_str(
+                "a test folder with this id is loaded, and a loaded folder has no package to \
+                 update: unload it first",
+            ),
+            Self::ReloadWidens(wider) => write!(
+                f,
+                "its manifest now asks for more than you approved ({}): load the folder again to \
+                 see what it asks",
+                wider
+                    .iter()
+                    .map(Widening::words)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::ReloadChangedId => f.write_str(
+                "its manifest names another mod, or another author or repository, than the one \
+                 that was loaded: load the folder again",
+            ),
+        }
+    }
+}
+
+impl Widening {
+    /// What the widening is, for a sentence.
+    pub fn words(&self) -> String {
+        match self {
+            Self::Permission(p) => format!("permission {p}"),
+            Self::Host(h) => format!("host {h}"),
+            Self::Secret(s) => format!("secret {s}"),
+            Self::Contribution(c) => format!("contribution {c}"),
         }
     }
 }
@@ -237,6 +278,50 @@ pub fn decide_unsigned(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal>
     }
     // An earlier unsigned file's row: the install over it is a fresh one.
     Ok(InstallKind::Fresh)
+}
+
+/// A test folder against the row that holds its id (module doc of `ledger/folder.rs`): a fresh load
+/// when nothing holds the id, and again over an earlier loaded folder of the same id (a developer
+/// loads the mod they are working on again: a fresh install id, grants and secrets reset, stored data
+/// kept for the session). Anything else is refused, so a folder can't take over a mod another source
+/// installed. Pure.
+pub fn decide_folder(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal> {
+    let Some(h) = held else {
+        return Ok(InstallKind::Fresh);
+    };
+    if h.reason == Some(store::REASON_BLACKLIST_REMOVED) {
+        return Err(Refusal::RemovedPending);
+    }
+    if h.signed || h.installed_from != store::FROM_FOLDER {
+        return Err(Refusal::OtherInstallHoldsId);
+    }
+    Ok(InstallKind::Fresh)
+}
+
+/// Whether a loaded test folder's files, read again after a change, may replace what is running
+/// (pure): the same mod from the same maker (the author and repository the stored row shows, which
+/// the user saw on the screen), asking for nothing the user hasn't seen. `old_manifest` is the stored
+/// manifest verbatim, `granted` the permissions the user granted.
+pub fn decide_reload(
+    id: &str,
+    author: &str,
+    source_repo: &str,
+    old_manifest: &str,
+    new: &Manifest,
+    granted: &BTreeSet<String>,
+) -> Result<(), Refusal> {
+    if new.id.as_str() != id
+        || new.publisher.author != author
+        || new.publisher.source_repo != source_repo
+    {
+        return Err(Refusal::ReloadChangedId);
+    }
+    let wider = widening(old_manifest, new, granted);
+    if wider.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::ReloadWidens(wider))
+    }
 }
 
 /// What the load does to a row about developer mode (pure): `None` leaves it. `allowed` is whether
@@ -277,6 +362,13 @@ pub fn decide(
     let Some(p) = pinned else {
         return Ok(InstallKind::Fresh);
     };
+    // A NULL pin is a loaded test folder (v60: only `folder` rows have no package sha256). It has
+    // no package to be repaired from and no release line to be updated along, so no package, signed
+    // or not, may install over it, whatever its version and publisher say: an `atlas.*` folder in a
+    // development build must not be turned into a "real" Map by the catalogue's.
+    if p.package_sha256.is_none() {
+        return Err(Refusal::TestFolderHoldsId);
+    }
     if p.tier != publisher.tier.as_str()
         || p.author != publisher.author
         || p.source_repo != publisher.source_repo
@@ -509,9 +601,10 @@ mod tests {
             package_sha256: None,
             ..p.clone()
         };
+        // A NULL pin is a loaded test folder: never a repair, never an update, whatever the file.
         assert_eq!(
             decide(Some(&unsigned_pin), &v("1.2.0"), "aa", &atlas),
-            Err(Refusal::SameVersionDifferentFile),
+            Err(Refusal::TestFolderHoldsId),
             "no pinned file is never a repair"
         );
         let garbled = Pinned {
@@ -859,5 +952,152 @@ mod tests {
             dev_mode_state(true, true, STATE_PAUSED, Some(REASON_DEV_MODE)),
             None
         );
+    }
+
+    #[test]
+    fn a_loaded_test_folder_has_a_null_pin_and_no_package_ever_installs_over_it() {
+        // v60: only a folder row has no package sha256. It is neither an update's base nor a repair's.
+        let folder = Pinned {
+            package_sha256: None,
+            ..pinned("1.2.0", "aa")
+        };
+        let atlas = publisher(Tier::First, "Atlas", "itsAtlas-org/pm-mods");
+        for (version, sha) in [
+            ("1.3.0", "bb"),
+            ("1.2.0", "aa"),
+            ("1.2.0", ""),
+            ("1.0.0", "aa"),
+        ] {
+            assert_eq!(
+                decide(Some(&folder), &v(version), sha, &atlas),
+                Err(Refusal::TestFolderHoldsId),
+                "{version} {sha}"
+            );
+        }
+        // Even another publisher's file gets the same, plainer answer: the id is a folder's.
+        let other = publisher(Tier::Third, "Someone", "someone/else");
+        assert_eq!(
+            decide(Some(&folder), &v("9.0.0"), "aa", &other),
+            Err(Refusal::TestFolderHoldsId)
+        );
+        // A real pin is untouched by the rule.
+        assert_eq!(
+            decide(Some(&pinned("1.2.0", "aa")), &v("1.3.0"), "bb", &atlas),
+            Ok(InstallKind::Update)
+        );
+    }
+
+    #[test]
+    fn a_test_folder_loads_fresh_and_only_over_its_own_kind_of_row() {
+        let held = |signed, installed_from, reason| {
+            decide_folder(Some(HeldBy {
+                signed,
+                installed_from,
+                reason,
+            }))
+        };
+        assert_eq!(decide_folder(None), Ok(InstallKind::Fresh));
+        // Over an earlier loaded folder, in any state: a fresh load again.
+        for reason in [None, Some("user"), Some("frozen"), Some("blacklist")] {
+            assert_eq!(held(false, "folder", reason), Ok(InstallKind::Fresh));
+        }
+        // Never over a mod another source installed, signed or not.
+        for (signed, from) in [
+            (true, "catalogue"),
+            (true, "file"),
+            (false, "file"),
+            (false, "catalogue"),
+        ] {
+            assert_eq!(
+                held(signed, from, None),
+                Err(Refusal::OtherInstallHoldsId),
+                "{signed} {from}"
+            );
+        }
+        assert_eq!(
+            held(false, "folder", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+    }
+
+    #[test]
+    fn a_reload_replaces_only_the_same_mod_asking_for_nothing_new() {
+        let same = manifest(|_| {});
+        let reload = |id: &str, m: &Manifest| {
+            decide_reload(
+                id,
+                "Atlas",
+                "itsAtlas-org/pm-mods",
+                OLD,
+                m,
+                &BTreeSet::new(),
+            )
+        };
+        assert_eq!(reload("atlas.map", &same), Ok(()));
+        // Asking for less is fine.
+        let fewer = manifest(|m| {
+            m.permissions.pop();
+            m.internet_hosts.clear();
+        });
+        assert_eq!(reload("atlas.map", &fewer), Ok(()));
+        // Another id, author or repository is another mod or maker than the one the user saw.
+        assert_eq!(reload("acme.tool", &same), Err(Refusal::ReloadChangedId));
+        let other_author = manifest(|m| m.publisher.author = "Someone".into());
+        assert_eq!(
+            reload("atlas.map", &other_author),
+            Err(Refusal::ReloadChangedId)
+        );
+        let other_repo = manifest(|m| m.publisher.source_repo = "someone/else".into());
+        assert_eq!(
+            reload("atlas.map", &other_repo),
+            Err(Refusal::ReloadChangedId)
+        );
+        // A permission the user already granted is not a widening, though the old manifest lacked it.
+        let granted: BTreeSet<String> = ["documents.text".to_owned()].into();
+        let grown = manifest(|m| {
+            m.permissions.push(Permission {
+                id: "documents.text".into(),
+                why: String::new(),
+            })
+        });
+        assert_eq!(
+            decide_reload(
+                "atlas.map",
+                "Atlas",
+                "itsAtlas-org/pm-mods",
+                OLD,
+                &grown,
+                &granted
+            ),
+            Ok(())
+        );
+        // Each kind of widening stops it, naming what it is.
+        for (change, word) in [
+            (
+                Box::new(|m: &mut Manifest| {
+                    m.permissions.push(Permission {
+                        id: "documents.text".into(),
+                        why: String::new(),
+                    })
+                }) as Box<dyn FnOnce(&mut Manifest)>,
+                "permission documents.text",
+            ),
+            (
+                Box::new(|m| m.internet_hosts.push("evil.example.com".into())),
+                "host evil.example.com",
+            ),
+            (
+                Box::new(|m| m.secrets[0].host = "evil.example.com".into()),
+                "secret token",
+            ),
+            (
+                Box::new(|m| m.contributions.calendar_overlay = Some("Cal".into())),
+                "contribution calendar.overlay",
+            ),
+        ] {
+            let e = reload("atlas.map", &manifest(change)).unwrap_err();
+            assert!(matches!(e, Refusal::ReloadWidens(_)), "{word}: {e:?}");
+            assert!(e.to_string().contains(word), "{word}: {e}");
+        }
     }
 }

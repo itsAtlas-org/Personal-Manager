@@ -51,7 +51,7 @@ function mount() {
 
 const shown = () => screen.getByTestId("dev").textContent;
 const state = (on: boolean): DevModeState => ({ on, problem: null });
-const sw = (on: boolean): DevSwitch => ({ on, paused: [], resumed: [] });
+const sw = (on: boolean): DevSwitch => ({ on, paused: [], resumed: [], unloaded: [] });
 
 beforeEach(() => {
   localStorage.clear();
@@ -186,7 +186,7 @@ describe("the toggle awaits the backend and reverts on failure", () => {
     expect(shown()).toBe("off");
     expect(settled).toBe(false);
     await act(async () => {
-      done({ on: true, paused: [], resumed: ["acme.tool"] });
+      done({ on: true, paused: [], resumed: ["acme.tool"], unloaded: [] });
       await pending;
     });
     expect(settled).toBe(true);

@@ -484,6 +484,10 @@ pub const CHANGED_LOADED: &str = "loaded";
 pub const CHANGED_DECIDED: &str = "decided";
 /// Developer mode was switched for this device: unsigned mods were paused or resumed with it.
 pub const CHANGED_DEV_MODE: &str = "dev-mode";
+/// A developer's test folder was loaded, reloaded (a change on disk, or the Reload button) or
+/// unloaded. A frame of it that was open has ended (`replaced` or `uninstalled`): the page mounts it
+/// again if its tab is showing.
+pub const CHANGED_TEST_MOD: &str = "test-mod";
 
 /// What `mods://changed` carries.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -859,6 +863,7 @@ mod tests {
             CHANGED_LOADED,
             CHANGED_DECIDED,
             CHANGED_DEV_MODE,
+            CHANGED_TEST_MOD,
         ];
         let source = include_str!("refresh.rs");
         let declared = source

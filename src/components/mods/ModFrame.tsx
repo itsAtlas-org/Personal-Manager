@@ -39,11 +39,14 @@
 // - A height request is a number PM clamps. Nothing a mod sends ever becomes an attribute, a class, a
 //   style string or markup.
 //
+// - While mounted it keeps the frozen-page watchdog's heartbeat going (`modWatchdog.ts`).
+//
 // Nothing renders this yet; the Mods tab (spec §8, PR-1 part 6) will.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { modCall, modEventsAck, modFrameClose, modFrameOpen, modThemeChanged } from "../../lib/ipc";
+import { frameMounted } from "../../lib/modWatchdog";
 import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
@@ -239,6 +242,11 @@ function SealedFrame({ modId, name, tier }: ModFrameProps) {
   useLayoutEffect(() => {
     pageRef.current = { theme, openDocument: openReaderById };
   });
+
+  // While this frame is mounted the page proves to PM that it is alive (the frozen-page watchdog: a
+  // mod that starves this page's thread is paused, and the page reloaded). From the mount, before the
+  // session exists, so PM's clock starts with a real heartbeat.
+  useEffect(() => frameMounted(), []);
 
   // One session per mount. Under StrictMode's mount-unmount-mount the first open may resolve after its
   // cleanup ran; that session is closed the moment it arrives.

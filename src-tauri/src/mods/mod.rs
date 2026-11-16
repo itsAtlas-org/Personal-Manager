@@ -54,6 +54,8 @@ pub mod devmode;
 pub mod disk;
 pub mod engine;
 pub mod fetch;
+pub mod folder;
+pub mod folder_watch;
 pub mod headers;
 pub mod ids;
 pub mod index;
@@ -69,6 +71,7 @@ pub mod safety;
 pub mod store;
 pub mod tab;
 pub mod updater;
+pub mod watchdog;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

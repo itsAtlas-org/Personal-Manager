@@ -63,6 +63,7 @@ export type ModStandingKind =
   | "running"
   | "waiting-for-you"
   | "paused-by-you"
+  | "paused-frozen"
   | "paused-by-safety-list"
   | "removed-by-safety-list"
   | "paused-dev-mode"
@@ -196,7 +197,9 @@ export interface ConsentScreen {
   tier: "first" | "second" | "third";
   kind: "fresh" | "update" | "repair";
   installedVersion: string | null;
-  from: "file" | "catalogue";
+  /** `folder` is a developer's test folder (`loadTestMod`): `unsigned` is set, and `tier` is `third`
+   *  whatever the manifest says. */
+  from: "file" | "catalogue" | "folder";
   sha256: string;
   permissions: ConsentPermission[];
   internetHosts: string[];
@@ -227,6 +230,10 @@ export interface UnsignedScreen {
     /** Which side another unsigned mod already holds, if any. */
     heldByOthers: "read" | "internet" | null;
   } | null;
+  /** Set when this is a developer's test folder and not a file: the folder, as a path to show. The
+   *  screen then says the mod, and what it stores, last until PM restarts, and that the folder is
+   *  read in place and never copied or changed. */
+  testFolder: string | null;
 }
 
 /** What `devModeState` answers: developer mode for THIS device in this vault. */
@@ -236,11 +243,31 @@ export interface DevModeState {
   problem: string | null;
 }
 
-/** What `devModeSwitch` did: developer mode now, and which unsigned mods it paused or resumed. */
+/** What `devModeSwitch` did: developer mode now, and which unsigned mods it paused or resumed, and
+ *  which test folders it unloaded (switching off ends every one: they last only for the session). */
 export interface DevSwitch {
   on: boolean;
   paused: string[];
   resumed: string[];
+  unloaded: string[];
+}
+
+/** A loaded test folder (`listTestMods`). The mod's own row, in `listMods`, says its name and state. */
+export interface TestModStatus {
+  id: string;
+  /** The folder, as a path to show. */
+  folder: string;
+  /** Why the last reload didn't take, in words, until one does. The old files keep running. */
+  problem: string | null;
+  /** PM is watching the folder, so a save reloads it. Otherwise the Reload button is the way. */
+  watching: boolean;
+}
+
+/** What `reloadTestMod` did. */
+export interface Reloaded {
+  /** What was read differs from what was running (a scan that matches restarts no frame). */
+  changed: boolean;
+  version: string;
 }
 
 export interface InstallResult {
@@ -396,7 +423,8 @@ export type ModsChangedCause =
   | "updated"
   | "loaded"
   | "decided"
-  | "dev-mode";
+  | "dev-mode"
+  | "test-mod";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

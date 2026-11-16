@@ -88,7 +88,11 @@ pub fn pause_decision(state: &str, reason: Option<&str>, consented: bool) -> Pau
     if reason == Some(store::REASON_BLACKLIST_REMOVED) {
         return PauseDecision::Refuse(ChangeRefusal::Removed);
     }
-    if state == store::STATE_PAUSED && reason == Some(store::REASON_USER) {
+    // Paused by the user or by the watchdog already: nothing to write, and the reason stays whose it
+    // is (a second verdict for the same freeze, or a second click, is not an error).
+    if state == store::STATE_PAUSED
+        && matches!(reason, Some(store::REASON_USER | store::REASON_FROZEN))
+    {
         return PauseDecision::Already;
     }
     if state == store::STATE_ACTIVE && consented {
@@ -109,7 +113,11 @@ pub fn resume_decision(
     if reason == Some(store::REASON_BLACKLIST_REMOVED) {
         return Err(ChangeRefusal::Removed);
     }
-    if state != store::STATE_PAUSED || reason != Some(store::REASON_USER) {
+    // The user's own pause, and the watchdog's: a mod that froze PM's page is turned back on only by
+    // a person's resume, so the one button lifts both (`store::REASON_FROZEN`).
+    if state != store::STATE_PAUSED
+        || !matches!(reason, Some(store::REASON_USER | store::REASON_FROZEN))
+    {
         return Err(ChangeRefusal::NotYourPause {
             reason: reason.map(str::to_owned),
         });
@@ -173,6 +181,23 @@ fn read_seen(conn: &Connection, id: &ModId) -> Result<Seen, LedgerError> {
 impl<S: LedgerStore> Ledger<'_, S> {
     /// Pause `id` for the user. Idempotent for a mod the user already paused.
     pub fn pause_by_user(&self, id: &ModId, now: DateTime<Utc>) -> Result<(), LedgerError> {
+        self.pause_with(id, store::REASON_USER, now).map(|_| ())
+    }
+
+    /// Pause `id` because PM's page stopped answering while its frame was the last one active
+    /// (`mods::watchdog`): the same write as the user's own pause under the reason
+    /// [`store::REASON_FROZEN`], which only the user's resume lifts. `true` when this wrote the
+    /// pause; a mod that is already paused (by anyone) or isn't running is left as it is.
+    pub fn pause_frozen(&self, id: &ModId, now: DateTime<Utc>) -> Result<bool, LedgerError> {
+        self.pause_with(id, store::REASON_FROZEN, now)
+    }
+
+    fn pause_with(
+        &self,
+        id: &ModId,
+        reason: &'static str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, LedgerError> {
         let _ledger = self.runtime.ledger_lock();
         let at = time_text(now);
         let wrote = self.with_conn(|conn| {
@@ -188,7 +213,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
                         params![
                             id.as_str(),
                             store::STATE_PAUSED,
-                            store::REASON_USER,
+                            reason,
                             at,
                             store::STATE_ACTIVE
                         ],
@@ -205,7 +230,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
             // The row says paused; now end the sessions, so a call in flight commits nothing.
             self.runtime.pause(id);
         }
-        Ok(())
+        Ok(wrote)
     }
 
     /// Turn the user's own pause off. `check` is the cached safety list's serve check: a mod it
@@ -231,7 +256,8 @@ impl<S: LedgerStore> Ledger<'_, S> {
                     store::STATE_ACTIVE,
                     at,
                     store::STATE_PAUSED,
-                    store::REASON_USER
+                    // The reason the decision just accepted: the user's, or the watchdog's.
+                    seen.reason
                 ],
             )?;
             if n == 1 {
@@ -304,6 +330,8 @@ mod tests {
         use PauseDecision::*;
         assert_eq!(pause_decision("active", None, true), Pause);
         assert_eq!(pause_decision("paused", Some("user"), true), Already);
+        // The watchdog's pause is paused already too: a second verdict for one freeze is no error.
+        assert_eq!(pause_decision("paused", Some("frozen"), true), Already);
         let refused = |state: &str, reason: Option<&str>, consented| {
             matches!(pause_decision(state, reason, consented), Refuse(_))
         };
@@ -322,7 +350,15 @@ mod tests {
     #[test]
     fn a_resume_lifts_only_the_users_own_pause_and_never_past_the_safety_list() {
         assert_eq!(resume_decision("paused", Some("user"), None), Ok(()));
+        // ... and the watchdog's, which only a person's resume lifts.
+        assert_eq!(resume_decision("paused", Some("frozen"), None), Ok(()));
+        assert_eq!(
+            resume_decision("paused", Some("frozen"), Some("listed".into())),
+            Err(ChangeRefusal::Listed("listed".into()))
+        );
         for (state, reason) in [
+            ("active", Some("frozen")),
+            ("parked", Some("frozen")),
             ("active", None),
             ("paused", Some("blacklist")),
             ("paused", Some("dev-mode")),

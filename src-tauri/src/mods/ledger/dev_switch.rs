@@ -45,6 +45,8 @@ pub struct DevSwitch {
     pub paused: Vec<String>,
     /// Unsigned mods the switch resumed (on).
     pub resumed: Vec<String>,
+    /// Test folders the switch unloaded (off): session-only, so nothing of them outlives the switch.
+    pub unloaded: Vec<String>,
 }
 
 impl<S: LedgerStore> Ledger<'_, S> {
@@ -62,12 +64,25 @@ impl<S: LedgerStore> Ledger<'_, S> {
         // The record first: a write that fails changes nothing.
         let now_on = self.with_conn(|c| Ok(devmode::write(c, device, on)?))?;
         self.runtime.set_unsigned_allowed(now_on);
+        // Off: a test folder is not paused, it is unloaded (plan decision 8: session only, nothing
+        // left behind), so the rows are gone before the load reads them. A failure here is not
+        // fatal to the switch: the sessions are forgotten regardless, so the load serves none of
+        // them, and the next writer's open deletes the rows.
+        let unloaded = if now_on {
+            Vec::new()
+        } else {
+            self.unload_folders_held().unwrap_or_else(|e| {
+                eprintln!("mods: test mods couldn't be unloaded ({e})");
+                Vec::new()
+            })
+        };
         let rows = self.with_conn(|c| Ok(read_rows(c)?))?;
         let report = self.load(&rows, now, check);
         Ok(DevSwitch {
             on: now_on,
             paused: report.dev_paused,
             resumed: report.dev_resumed,
+            unloaded,
         })
     }
 }
@@ -130,5 +145,6 @@ pub fn set_dev_mode_for_this_device(
         on: now_on,
         paused: Vec::new(),
         resumed: Vec::new(),
+        unloaded: Vec::new(),
     })
 }

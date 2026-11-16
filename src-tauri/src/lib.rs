@@ -1337,7 +1337,13 @@ pub fn run() {
         std::env::set_var("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1");
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS: a content process that died (a mod's frame can take it down) gets the frozen page's
+    // recovery: the mod last active is paused, and the page reloads (`mods::watchdog`). Not
+    // compiled on Linux; the one line of it that is here is this.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(mods::watchdog::on_renderer_terminated);
+    builder
         // Must be registered first. One instance only: a second launch (e.g. a
         // double-click or an updater relaunch overlap) focuses the running window
         // and exits, so two processes can't race to create the encrypted store
@@ -1374,6 +1380,12 @@ pub fn run() {
             mods::api::events::install_notes(handle.clone());
             // The consent screens waiting for their answer (`mods::tab::stage`).
             app.manage(mods::tab::stage::Stage::default());
+            // The reload-on-change watcher for developer test folders (no thread until one loads)
+            // and the frozen-page watchdog (spec §1.4, plan decision 5): a heartbeat from the page
+            // while a mod frame is mounted, a tick here every second.
+            app.manage(mods::folder_watch::FolderWatch::default());
+            app.manage(mods::watchdog::Watchdog::default());
+            mods::watchdog::spawn(handle.clone());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;
@@ -2129,6 +2141,14 @@ pub fn run() {
             mods::tab::dev_commands::dev_mode_state,
             mods::tab::dev_commands::dev_mode_switch,
             mods::tab::dev_commands::install_unsigned_file,
+            // Developer test folders (Mods slice 6, part 4): load (the stark screen's first step;
+            // the second is `install_mod_consented`), reload, unload, and what is loaded.
+            mods::tab::folder::load_test_mod,
+            mods::tab::folder::reload_test_mod,
+            mods::tab::folder::unload_test_mod,
+            mods::tab::folder::list_test_mods,
+            // The frozen-page watchdog's heartbeat, from the page while a mod frame is mounted.
+            mods::watchdog::mods_heartbeat,
             // Developer mode (issue #78) — read-only inspection. Always registered (the
             // commands are harmless reads); only the UI is gated by the runtime `devMode`.
             commands_dev::dev_system_info,

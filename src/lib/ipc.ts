@@ -21,7 +21,9 @@ import type {
   ModsDisclaimerState,
   ModsResetResult,
   ModsSafetyStatus,
+  Reloaded,
   Repaired,
+  TestModStatus,
   UninstallPreview,
 } from "./modsTypes";
 import type {
@@ -2298,6 +2300,33 @@ export const devModeState = () => invoke<DevModeState>("dev_mode_state");
 /** Switch developer mode for this device and wait for the write. Off pauses every unsigned mod, on
  *  resumes exactly those it paused. The answer is what it is now; a rejection means nothing changed. */
 export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch", { on });
+
+/** Read the developer's unpacked folder at `path` (an absolute path) and return the stark screen,
+ *  loading nothing: the same screen as `installUnsignedFile`'s, with `from: "folder"`, `tier: "third"`
+ *  and `unsigned.testFolder` set. Rejects `dev-mode-off` while developer mode is off for this device
+ *  (PM reads that itself, before it reads the folder). Then `installModConsented` with the typed id:
+ *  it reads the folder again and loads it only if its manifest is still the one the screen showed
+ *  (otherwise `consent-expired`). A loaded folder is read in place (never copied, never written to)
+ *  and lasts until PM restarts, the store closes, or developer mode goes off. */
+export const loadTestMod = (path: string) => invoke<ConsentScreen>("load_test_mod", { path });
+
+/** Read a loaded test folder again and replace what it serves: the Reload button. The mod's grants,
+ *  install id and storage are kept, but only for a manifest that is the same mod from the same maker
+ *  asking for nothing more than the user approved; otherwise it rejects, the old files keep running
+ *  and the reason is on `listTestMods`'s entry (load the folder again to see the new screen). */
+export const reloadTestMod = (id: string) => invoke<Reloaded>("reload_test_mod", { id });
+
+/** End a loaded folder's session now: its row and what it stored go. Its files are never touched. */
+export const unloadTestMod = (id: string) => invoke<void>("unload_test_mod", { id });
+
+/** The folders loaded now, with why the last reload failed (if it did) and whether a save reloads. */
+export const listTestMods = () => invoke<TestModStatus[]>("list_test_mods");
+
+/** The page is alive: sent every 2 s while a mod frame is mounted, and at once when the page's
+ *  visibility changes (`modWatchdog.ts`). `visible` is whether the page is on screen. About 10 s
+ *  of silence with a frame mounted and the window shown makes PM pause the mod last active and
+ *  reload the page. */
+export const modsHeartbeat = (visible: boolean) => invoke<void>("mods_heartbeat", { visible });
 
 /** Subscribe to `mods://dev-mode`: developer mode was switched for this device, from any window. */
 export const onDevMode = (handler: (e: { on: boolean }) => void): Promise<UnlistenFn> =>

@@ -37,6 +37,9 @@ pub const MAX_STAGED: usize = 2;
 pub enum Trust {
     Signed,
     Unsigned,
+    /// A developer's test folder (`tab::folder`): the stark screen's rules, and nothing staged but
+    /// the folder's path and the manifest the screen was made from.
+    Folder,
 }
 
 /// What one screen is about.
@@ -44,11 +47,17 @@ pub enum Trust {
 pub struct Staged {
     pub id: ModId,
     pub version: String,
-    /// The `.pmmod`'s sha256, lowercase hex, as the screen showed it.
+    /// The `.pmmod`'s sha256, lowercase hex, as the screen showed it. For a test folder, the
+    /// sha256 of its `manifest.json`: the thing the user's answers are about.
     pub sha256: String,
     pub source: Source,
     pub trust: Trust,
+    /// The package's bytes. For a test folder, its `manifest.json` (hashed by `sha256`, so the
+    /// token's integrity check covers it): the files themselves are the developer's and are read
+    /// again at the load, which refuses a manifest that is no longer this one.
     pub bytes: Vec<u8>,
+    /// A test folder's canonical root; `None` for a package.
+    pub folder: Option<std::path::PathBuf>,
 }
 
 struct Entry {
@@ -135,6 +144,7 @@ mod tests {
             source: Source::File,
             trust: Trust::Signed,
             bytes,
+            folder: None,
         }
     }
 

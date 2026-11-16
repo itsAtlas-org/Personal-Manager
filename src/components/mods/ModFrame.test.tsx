@@ -31,8 +31,10 @@ const modFrameClose = vi.fn();
 const modCall = vi.fn();
 const modEventsAck = vi.fn();
 const modThemeChanged = vi.fn();
+const modsHeartbeat = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
+  modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
@@ -80,6 +82,7 @@ beforeEach(() => {
   modCall.mockResolvedValue({ kind: "value", value: { answer: 42 } });
   modEventsAck.mockResolvedValue(undefined);
   modThemeChanged.mockResolvedValue(undefined);
+  modsHeartbeat.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -606,6 +609,42 @@ describe("ModFrame", () => {
       "PM couldn't start this mod: That mod isn't installed.",
     );
     expect(document.querySelector("iframe")).toBeNull();
+  });
+});
+
+describe("ModFrame and the frozen-page watchdog", () => {
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  afterEach(() => vi.useRealTimers());
+
+  it("starts PM's heartbeat when it mounts, keeps it going, and stops it when it unmounts", async () => {
+    const { unmount } = mount();
+    // At once, before its session even exists.
+    expect(modsHeartbeat).toHaveBeenCalledTimes(1);
+    expect(modsHeartbeat).toHaveBeenLastCalledWith(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4100);
+    });
+    expect(modsHeartbeat.mock.calls.length).toBeGreaterThanOrEqual(3);
+    unmount();
+    const after = modsHeartbeat.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(modsHeartbeat).toHaveBeenCalledTimes(after);
+  });
+
+  it("under StrictMode beats on one timer, not two", async () => {
+    render(
+      <StrictMode>
+        <ModFrame modId="acme.tool" name="Acme Tool" tier="first" />
+      </StrictMode>,
+    );
+    modsHeartbeat.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    // One beat in two seconds, from one interval.
+    expect(modsHeartbeat).toHaveBeenCalledTimes(1);
   });
 });
 

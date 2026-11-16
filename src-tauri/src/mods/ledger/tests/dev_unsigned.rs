@@ -964,7 +964,8 @@ fn switching_off_pauses_every_unsigned_mod_and_only_those_and_ends_their_session
         DevSwitch {
             on: false,
             paused: vec!["acme.tool".into()],
-            resumed: vec![]
+            resumed: vec![],
+            unloaded: vec![],
         }
     );
     assert_eq!(state_of(&w, "acme.tool"), "paused:dev-mode");

@@ -80,12 +80,12 @@ struct UChecked {
 }
 
 /// The facts about the row that holds an id that an unsigned file reads.
-struct Origin {
+pub(super) struct Origin {
     signed: bool,
     installed_from: String,
 }
 
-fn read_origin(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Origin>> {
+pub(super) fn read_origin(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Origin>> {
     conn.query_row(
         "SELECT signed, installed_from FROM mods WHERE id = ?1",
         [id.as_str()],
@@ -99,7 +99,7 @@ fn read_origin(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Origin>
     .optional()
 }
 
-fn held<'a>(origin: &'a Origin, current: &'a Current) -> HeldBy<'a> {
+pub(super) fn held<'a>(origin: &'a Origin, current: &'a Current) -> HeldBy<'a> {
     HeldBy {
         signed: origin.signed,
         installed_from: &origin.installed_from,
@@ -204,7 +204,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
             source_commit: &m.publisher.commit,
             signed: false,
             installed_from: store::FROM_FILE,
-            package_sha256,
+            package_sha256: Some(package_sha256),
             manifest: &manifest_text,
             files: file_records_json(pkg)?,
             project_refs: project_refs_json(m),
@@ -283,7 +283,11 @@ pub(super) fn commit_unsigned(
 
 /// An unsigned file over an earlier unsigned install of the same id: a fresh install id, no grants,
 /// no secrets, and everything else the row holds (storage, document data, spend) kept.
-fn reinstall(tx: &Connection, w: &RowWrite<'_>, cur: &Current) -> Result<Committed, LedgerError> {
+pub(super) fn reinstall(
+    tx: &Connection,
+    w: &RowWrite<'_>,
+    cur: &Current,
+) -> Result<Committed, LedgerError> {
     // Developer mode is on (the caller just read it), so a pause that developer mode being off
     // made is over; any other owner's pause stays.
     let (state, reason) = if cur.reason.as_deref() == Some(store::REASON_DEV_MODE) {

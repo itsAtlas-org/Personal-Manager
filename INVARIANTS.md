@@ -690,6 +690,37 @@ switch that must not be carried in by a restore, written by a page, or left half
 vault-wide boolean the webview could write would make "dev mode" mean whatever the last backup or
 the page said.
 
+### I-35 · A developer's test folder is a session of the store that loaded it: read in place, never copied, never kept — **Held**
+
+A folder loaded through `load_test_mod` (developer mode on for this device, the unsigned install's
+stark screen and typed id, D3 across the unsigned set) lives in two places only: a `mods` row
+(`installed_from = 'folder'`, `package_sha256` NULL, `signed = 0`, tier `third` whatever its manifest
+says) and a session in memory (`ModRuntime::folders`). The dispatcher reads the row on every call
+and grants reference it, so the row exists for the session, but **the row alone never serves**: the
+ledger's load serves a folder row only through its session. The session is forgotten whenever the
+store closes (`ModRuntime::clear`), the mod is uninstalled or unloaded, or developer mode goes off,
+and every writer's open deletes every folder row (and what cascades from it) before it reads any
+(`ledger::folder::purge_rows`), so a crash's leftover is never served and is gone at the next open.
+PM only reads the folder: nothing is copied into PM's mods folder, written to the folder or deleted
+from it, only the package layout (`manifest.json`, `LICENCE.txt`, `NOTICE.txt`, `app/`) is opened,
+and a link, device or FIFO anywhere in it refuses the folder (`folder::scan`). Served files are
+hashed as scanned, so one edited since is refused until the reload reads it. A reload keeps the
+grants only for the same mod from the same maker asking for nothing more than the user approved
+(`policy::decide_reload`); anything else leaves the old one running. No package, signed or not,
+installs over a folder's id (`policy::decide` on the NULL pin), a folder never replaces a mod any
+other source installed, and the updater, the sweep, the recovery and the repair all skip a folder
+row. An `atlas.` folder loads only where `cfg!(debug_assertions)`.
+
+**Why.** A test mod is code nobody has checked, loaded from a path the user typed. If its row
+survived a restart, rode a backup to another machine, or could be told apart from a real install
+only by the page, "developer mode" would stop being the thing that stands between that code and the
+user's data.
+
+**Co-signers.** The backup's strip (`.pmmod` list, snapshot and export) deletes `folder` rows from
+its copy, with foreign keys on so what cascades from them goes too; a restore's commit goes through
+the writer's open, which purges any that remain. A new place that copies the `mods` table out of
+the live database either strips them or says why it can't carry one.
+
 ---
 
 ## 6. Build tooling and dependencies

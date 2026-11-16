@@ -52,7 +52,7 @@ pub struct UnsignedEnv<'a> {
 }
 
 impl<'a> UnsignedEnv<'a> {
-    fn options(&self) -> UnsignedOptions<'a> {
+    pub(super) fn options(&self) -> UnsignedOptions<'a> {
         UnsignedOptions {
             device: self.device,
             index: self.index,
@@ -74,6 +74,9 @@ pub struct UnsignedScreen {
     /// Present when the manifest asks for both reading the user's data and reaching outside PM:
     /// the user may allow one side, never both (D3).
     pub read_or_internet: Option<ReadOrInternet>,
+    /// Present when this is a developer's test folder (`tab::folder`) and not a file: the folder,
+    /// as a path to show. The screen then says the mod and what it stores last until PM restarts.
+    pub test_folder: Option<String>,
 }
 
 /// D3's choice on the stark screen.
@@ -177,6 +180,7 @@ pub fn screen(
             reinstall,
             engine_sealed,
             read_or_internet,
+            test_folder: None,
         }),
     }
 }
@@ -206,12 +210,12 @@ pub fn plan_error(e: PlanError) -> ModsError {
     }
 }
 
-fn declared_of(m: &Manifest) -> std::collections::BTreeSet<String> {
+pub(super) fn declared_of(m: &Manifest) -> std::collections::BTreeSet<String> {
     m.permissions.iter().map(|p| p.id.clone()).collect()
 }
 
 /// What the other unsigned mods hold, as D3 judges this one against it: every grant but this id's.
-fn held_by_others<S: LedgerStore>(
+pub(super) fn held_by_others<S: LedgerStore>(
     ledger: &Ledger<'_, S>,
     id: &ModId,
 ) -> Result<Vec<(PolicyTier, Class)>> {
@@ -248,6 +252,7 @@ pub fn prepare<S: LedgerStore>(
         source: Source::File,
         trust: Trust::Unsigned,
         bytes,
+        folder: None,
     };
     Ok((screen, staged))
 }
