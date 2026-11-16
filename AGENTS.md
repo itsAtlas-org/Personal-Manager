@@ -198,6 +198,11 @@ release remain the open post-v1 work.
     shared: `lib/nav.ts` turns the rows into the sidebar's mod tabs (`mod:<id>`, the one literal
     help id `nav-mod-tab`), and `components/mods/ModTab.tsx` draws a mod's tab (the frame when the
     row says it runs; PM's own panel for first open (D17), installing, paused, removed or missing).
+    The Mods tab itself is `components/mods/ModsView.tsx` (disclaimer gate, the safety list's
+    strips, one `ModRow` per mod, the uninstall and update dialogs): what is in flight (a pause,
+    an uninstall, a staged update screen) lives in `lib/modActions.ts`, not in the view, because
+    the tab router unmounts the view and the backend's work keeps going; every word a mod
+    supplied goes through `modText` first.
     `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).

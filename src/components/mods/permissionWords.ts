@@ -7,7 +7,45 @@
 // never shows the user a dotted name. The maker's reason is shown beside these, as the maker's.
 // `permissionWords.test.ts` pins the list to the backend's table.
 
-import type { PermissionClass } from "../../lib/modsTypes";
+import type { ModPermission, PermissionClass } from "../../lib/modsTypes";
+import { modText } from "./modText";
+
+/** What a screen says about a permission that has no checkbox of its own (one asked at install gets
+ *  a checkbox instead). */
+export function standingLine(p: Pick<ModPermission, "when" | "offBecause">): string {
+  switch (p.when) {
+    case "auto":
+      return "Always on.";
+    case "first-use":
+    case "install-then-first-use":
+      return "PM asks you the first time the mod needs this.";
+    default:
+      // "ask" (a mod nobody has checked, one permission at a time) and anything PM doesn't know:
+      // off until it is turned on from the Mods tab.
+      return p.offBecause ?? "Off until you turn it on in the Mods tab.";
+  }
+}
+
+/** A widening an update asks for, in words (`permission:<id>`, `host:<site>`, `secret:<name>`,
+ *  `contribution:<what>`, as the backend lists them). One PM doesn't know is shown as it is. */
+export function wideningWords(w: string): string {
+  const at = w.indexOf(":");
+  const kind = at < 0 ? "" : w.slice(0, at);
+  const rest = at < 0 ? w : w.slice(at + 1);
+  switch (kind) {
+    case "permission":
+      return permissionWords(rest);
+    // The site, key name and contribution are the mod's own words: one plain line each.
+    case "host":
+      return `Reach ${modText(rest)} on the internet`;
+    case "secret":
+      return `Keep a saved key called “${modText(rest)}”`;
+    case "contribution":
+      return `Add something of its own to PM: ${modText(rest)}`;
+    default:
+      return modText(w);
+  }
+}
 
 const WORDS: Record<string, string> = {
   storage: "Keep its own saved data inside PM",

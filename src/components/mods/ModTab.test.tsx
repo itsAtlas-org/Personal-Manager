@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HELP } from "../../lib/help";
 import { ModRowsContext, type ModRows } from "../../lib/modRows";
 import type { ModInfo, ModPermission, ModStanding, ModsChanged } from "../../lib/modsTypes";
+import { LRI, RLO } from "./modFixtures";
 
 const modFrameOpen = vi.fn();
 const modFrameClose = vi.fn();
@@ -158,7 +159,7 @@ describe("a mod that can run", () => {
     await waitFor(() => expect(iframe()).not.toBeNull());
     expect(modFrameOpen).toHaveBeenCalledWith("acme.tool", expect.any(Function));
     expect(screen.getByLabelText("Mod: Acme Tool")).toBeTruthy();
-    expect(screen.getByText("Second party")).toBeTruthy();
+    expect(screen.getByText("Reviewed by Atlas")).toBeTruthy();
   });
 
   it("ends the frame's session when the tab goes away (a tab switch unmounts it)", async () => {
@@ -626,6 +627,32 @@ describe("what a mod supplied is plain text", () => {
     expect(
       screen.getAllByText(new RegExp(hostile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("loses direction-changing characters and line breaks on the first-open screen", () => {
+    render(
+      <Tab
+        rows={[
+          mod({
+            name: `Ac${RLO}me`,
+            description: "one\nPM says: fine",
+            author: `Mal${LRI}lory`,
+            consented: false,
+            state: { ...RUNNING, kind: "waiting-for-you", fix: "turn-on", running: false },
+            permissions: [perm("tasks.read", { why: `to\nmap${RLO}` })],
+            internetHosts: [`h${RLO}.example`],
+          }),
+        ]}
+      />,
+    );
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Turn on Ac me?");
+    expect(text).toContain("one PM says: fine");
+    expect(text).toContain("Made by Mal lory");
+    expect(text).toContain("The maker says: “to map”");
+    expect(text).toContain("Sites it may reach: h .example");
+    expect(text).not.toContain(RLO);
+    expect(text).not.toContain(LRI);
   });
 
   it("never becomes markup on a status panel", () => {

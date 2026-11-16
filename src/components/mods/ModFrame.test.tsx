@@ -148,7 +148,7 @@ describe("ModFrame", () => {
     expect(frame.getAttribute("allow")).toBe("");
     expect(frame.hasAttribute("srcdoc")).toBe(false);
     const band = screen.getByText("Acme Tool", { selector: "span" }).parentElement!;
-    expect(band.textContent).toBe("ModAcme ToolSecond party");
+    expect(band.textContent).toBe("ModAcme ToolReviewed by Atlas");
     // The band is PM's, outside the frame, and offers nothing to click.
     expect(frame.contains(band)).toBe(false);
     expect(band.querySelector("a, button, input")).toBeNull();

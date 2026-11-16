@@ -8,9 +8,12 @@
 import { cn } from "../ui/cn";
 import { toneSurface } from "../ui/tone";
 
+// "Second party" says nothing to someone who hasn't read the spec; what it means for them is that the
+// Atlas team looked the mod over and signed it, so that is the word (the Mods tab, the frame's band
+// and the first-open screen all wear this one badge).
 const TIER_LABEL = {
   first: "First party",
-  second: "Second party",
+  second: "Reviewed by Atlas",
   third: "Third party",
 } as const;
 

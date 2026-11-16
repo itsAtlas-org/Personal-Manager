@@ -18,34 +18,23 @@
 
 import { useState } from "react";
 import { consentMod } from "../../lib/ipc";
-import { failureText, type ModInfo, type ModPermission } from "../../lib/modsTypes";
+import { failureText, type ModInfo } from "../../lib/modsTypes";
 import { Button, Callout, Card } from "../ui";
+import { modText } from "./modText";
 import { ModsDisclaimer } from "./ModsDisclaimer";
-import { classWords, permissionWords } from "./permissionWords";
+import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
-
-/** What the screen says about a permission that has no checkbox. */
-function standingLine(p: ModPermission): string {
-  switch (p.when) {
-    case "auto":
-      return "Always on.";
-    case "first-use":
-    case "install-then-first-use":
-      return "PM asks you the first time the mod needs this.";
-    default:
-      // "ask" (a mod nobody has checked, one permission at a time) and anything PM doesn't know:
-      // off until it is turned on from the Mods tab.
-      return p.offBecause ?? "Off until you turn it on in the Mods tab.";
-  }
-}
 
 export function ModFirstOpen({
   mod,
   onTurnedOn,
+  titleId,
 }: {
   mod: ModInfo;
   /** The mod's row changed: read the rows again. Resolves when they are read. */
   onTurnedOn: () => Promise<void>;
+  /** Set when the screen sits in a dialog: the heading's id for the dialog's name. */
+  titleId?: string;
 }) {
   const asked = mod.permissions.filter((p) => p.when === "install");
   const [answers, setAnswers] = useState<Record<string, boolean>>(() =>
@@ -70,21 +59,25 @@ export function ModFirstOpen({
     await onTurnedOn();
   }
 
+  // Embedded (the Mods tab's row offers the same screen in a dialog, for a mod that has no tab of its
+  // own to open): the dialog supplies the scrolling and the width, and names itself by this heading.
+  const Heading = titleId ? "h2" : "h1";
   return (
-    <div className="h-full overflow-y-auto" data-help="mod-first-open">
-      <div className="mx-auto max-w-2xl space-y-5 px-6 py-6">
+    <div className={titleId ? undefined : "h-full overflow-y-auto"} data-help="mod-first-open">
+      <div className={titleId ? "space-y-5" : "mx-auto max-w-2xl space-y-5 px-6 py-6"}>
         <header className="space-y-1">
-          <h1 className="break-words font-head text-lg font-semibold text-ink">
-            Turn on {mod.name}?
-          </h1>
+          <Heading id={titleId} className="break-words font-head text-lg font-semibold text-ink">
+            Turn on {modText(mod.name)}?
+          </Heading>
           <p className="flex flex-wrap items-center gap-2 text-xs text-ink3">
             <TierBadge tier={mod.tier} />
             <span className="break-words">
-              {mod.author ? `Made by ${mod.author}` : "Maker not named"} · version {mod.version}
+              {mod.author ? `Made by ${modText(mod.author)}` : "Maker not named"} · version{" "}
+              {mod.version}
             </span>
           </p>
           {mod.description && (
-            <p className="break-words pt-1 text-sm text-ink2">{mod.description}</p>
+            <p className="break-words pt-1 text-sm text-ink2">{modText(mod.description)}</p>
           )}
         </header>
 
@@ -120,7 +113,7 @@ export function ModFirstOpen({
                       </div>
                       {p.why && (
                         <p className="break-words text-xs text-ink3">
-                          The maker says: &ldquo;{p.why}&rdquo;
+                          The maker says: &ldquo;{modText(p.why)}&rdquo;
                         </p>
                       )}
                       {isAsked ? (
@@ -148,7 +141,7 @@ export function ModFirstOpen({
           )}
           {mod.internetHosts.length > 0 && (
             <p className="break-words text-xs text-ink3">
-              Sites it may reach: {mod.internetHosts.join(", ")}
+              Sites it may reach: {mod.internetHosts.map(modText).join(", ")}
             </p>
           )}
         </section>

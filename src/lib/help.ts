@@ -72,6 +72,38 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Turning on a mod for the first time",
     body: "PM installed this mod for you, so it asks before the mod runs. The screen says what mods are, lists what this one wants to do, and lets you say yes or no to each thing it asks to do. Nothing of the mod runs until you press Turn on. Pressing it also counts as accepting the Mods notice on this computer.",
   },
+  "mods-disclaimer": {
+    title: "Before you use mods",
+    body: "A short notice you read once on this computer in this vault. Mods are made by people, PM checks what it can (the signature, the safety list, the sealed box) and can't check whether a mod is any good. 'I understand' saves that you've read it; a new computer, or a vault you join, asks again.",
+  },
+  "mods-safety": {
+    title: "The safety list",
+    body: "PM keeps a list of known problems with mods and can pause or remove a mod on it. A paused mod keeps its data and turns back on by itself when the fix arrives; a removed one is switched off and its files go, and what it saved and made waits for you to uninstall it. This area also says when PM hasn't been able to check the list for over 30 days, or when its record of the list on this computer is damaged: 'Reset the safety list' clears that record and downloads the list again.",
+  },
+  "mods-reset-safety": {
+    title: "Reset the safety list",
+    body: "Clears PM's record on this computer of the newest safety list it accepted and of any signing keys that list cancelled, then downloads the list again. Until that finishes PM can't tell an old list from a new one, which is why it asks first. Your mods and their data are not touched.",
+  },
+  "mods-installed": {
+    title: "Installed mods",
+    body: "Every mod on this computer, with whether it's on, paused or waiting for you, and who made it. Open Details to see what it may do, allow or turn off each thing one at a time, or uninstall it.",
+  },
+  "mods-installed-row": {
+    title: "An installed mod",
+    body: "The badge says who vouches for it: first party (the Atlas team), reviewed by Atlas, or third party (nobody has checked it). 'Test' marks a mod loaded from a developer's folder, which goes away when PM restarts. The sentence beside it says why it isn't running if it isn't, with the one button that fixes it. Pause stops it and keeps what it saved. Everything the mod says about itself, its name, description and reasons, is the mod's own words.",
+  },
+  "mods-permissions": {
+    title: "What a mod can do",
+    body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. PM asks again the first time a mod uses something sensitive.",
+  },
+  "mods-consent": {
+    title: "Approve an update",
+    body: "An update waits for you when it asks for something you hadn't allowed, such as a new permission or a new site. This lists everything it asks for, with what's new marked, and nothing changes until you press Update. The old version keeps running meanwhile.",
+  },
+  "mods-uninstall": {
+    title: "Uninstall a mod",
+    body: "Shows what goes (what the mod saved, its files, its tab) and what stays (the tasks, milestones and notes it made, which are yours). 'Also delete what it made' is off unless you turn it on, and can't be undone. What the mod saved is removed either way and can't be brought back.",
+  },
   "conversations-list": {
     title: "Projects & Global chats",
     body: "Two foldable lists. 'Projects' is every project PM knows about, with how many chats each one holds — click through to open that project, where its files sit beside a chat that searches only it. 'Global chats' is your chats that belong to no project, which search everything; click one to reopen it, or '+ New' to start another. Moving a chat into a project with the 📁 button takes it out of this list and into that project's own history.",

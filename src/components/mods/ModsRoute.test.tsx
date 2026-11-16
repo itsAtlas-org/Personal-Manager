@@ -17,11 +17,26 @@ import type { ModInfo } from "../../lib/modsTypes";
 vi.mock("../../lib/ipc", () => ({
   onVaultFault: () => Promise.resolve(() => {}),
   onModsChanged: () => Promise.resolve(() => {}),
+  onModsNotice: () => Promise.resolve(() => {}),
   consentMod: () => Promise.resolve(),
+  // The Mods tab's own reads: the disclaimer was accepted and there is nothing on the safety list.
+  modsDisclaimerState: () => Promise.resolve({ accepted: true, problem: null }),
+  modsSafetyStatus: () =>
+    Promise.resolve({
+      checked: { kind: "checked", at: null, text: null },
+      record: null,
+      index: null,
+      notices: [],
+    }),
 }));
 vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
+}));
+
+vi.mock("../../lib/capabilities", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useDevMode: () => ({ devMode: false, setDevMode: () => {} }),
 }));
 
 import { ModsRoute } from "./ModsRoute";
@@ -75,10 +90,10 @@ describe("isModsRoute", () => {
 });
 
 describe("ModsRoute", () => {
-  it("draws the Mods tab for 'mods'", () => {
+  it("draws the Mods tab for 'mods'", async () => {
     route("mods");
     expect(screen.getByRole("heading", { name: "Mods", level: 1 })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Installed" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Installed" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Install from file" })).toBeTruthy();
   });
