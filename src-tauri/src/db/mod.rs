@@ -428,6 +428,19 @@ pub(crate) fn open_at_version(path: &Path, key: &str, n: usize) -> Result<Connec
 /// authentic old-version store from the real migration SQL and drive the full ladder
 /// over real data, rather than tearing the current schema back down.
 fn open_keyed(path: &Path, key: &str) -> Result<Connection> {
+    open_keyed_as(path, key, true)
+}
+
+/// Open a SNAPSHOT of the store (a `VACUUM INTO` copy about to leave this machine) to edit it:
+/// keyed and with foreign keys on like any connection, but with no migration (the copy stays at the
+/// version it was taken at) and without asking for WAL. A snapshot left in WAL would keep part of
+/// its content in a `-wal` file the archive never carries, and the strip's `VACUUM` has to land in
+/// the one file that is packed (`backup::strip`).
+pub(crate) fn open_snapshot(path: &Path, key: &str) -> Result<Connection> {
+    open_keyed_as(path, key, false)
+}
+
+fn open_keyed_as(path: &Path, key: &str, wal: bool) -> Result<Connection> {
     register_sqlite_vec();
     let conn = Connection::open(path)?;
 
@@ -475,7 +488,9 @@ fn open_keyed(path: &Path, key: &str) -> Result<Connection> {
         })?;
 
     // journal_mode returns a row, so consume it via query rather than execute.
-    conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    if wal {
+        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    }
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     register_functions(&conn)?;
 

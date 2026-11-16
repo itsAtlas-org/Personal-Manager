@@ -88,8 +88,9 @@ pub use updates::{Landed, Pass, RepairTarget};
 pub use user::{ChangeRefusal, Standing};
 
 /// The `settings` key of the calendar's view prefs, whose `hidden` set names a mod's overlay by
-/// [`overlay_source`] (SYNC-SET.md). An uninstall takes the mod out of it.
-const CALENDAR_UI_KEY: &str = "calendar_ui";
+/// [`overlay_source`] (SYNC-SET.md). An uninstall takes the mod out of it, and so does a backup's
+/// strip for a folder mod (`backup::strip`).
+pub(crate) const CALENDAR_UI_KEY: &str = "calendar_ui";
 /// How a mod's calendar overlay is named among calendar sources: `mod:<id>`, the sidebar
 /// placement's form, except where [`LEGACY_OVERLAY_SOURCES`] keeps an older name.
 pub const OVERLAY_SOURCE_PREFIX: &str = "mod:";
@@ -1226,8 +1227,9 @@ fn write_row(
 }
 
 /// Take the mod's overlay ([`overlay_source`]) out of the calendar's hidden set, leaving the blob
-/// otherwise as it was. A blob that isn't the shape the calendar writes is left alone.
-fn prune_calendar_hidden(conn: &Connection, id: &ModId) -> rusqlite::Result<()> {
+/// otherwise as it was. A blob that isn't the shape the calendar writes is left alone. The
+/// uninstall's, and a backup's strip of a folder mod's (`backup::strip`).
+pub(crate) fn prune_calendar_hidden(conn: &Connection, id: &ModId) -> rusqlite::Result<()> {
     let blob: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",
@@ -1456,7 +1458,14 @@ pub fn after_writer_open(app: &AppHandle) {
         let ledger = Ledger::new(&layout, state.inner(), runtime.inner());
         let check = SafetyCheck::serve(cached.as_ref());
         match ledger.recover_missing(Utc::now(), &check) {
-            Ok(report) => log_recovery(&report),
+            Ok(report) => {
+                log_recovery(&report);
+                // This pass lands after the open that started it has returned, so a page that
+                // already read the rows saw these mods parked: tell it they are back.
+                if !report.recovered.is_empty() {
+                    super::refresh::emit_changed(&app, super::refresh::CHANGED_RECOVERED);
+                }
+            }
             Err(e) => eprintln!("mods: other stores of this vault not looked in ({e})"),
         }
         match ledger.expire(Utc::now()) {
@@ -1465,6 +1474,34 @@ pub fn after_writer_open(app: &AppHandle) {
             Err(e) => eprintln!("mods: boot sweep's clean-up skipped ({e})"),
         }
     });
+}
+
+/// Finish, now and in the caller's thread, the recovery [`after_writer_open`] only starts: copy in
+/// what the vault's other stores hold for rows whose files are missing, and reload when any came
+/// back. `switch_to_vault` runs it so its answer about the restored mods is the settled one, not
+/// the state at the instant the open returned (spec §1.11). It waits for the ledger lock the
+/// background pass holds, and is a no-op for what that pass already did. Returns whether any mod's
+/// files came back. Blocking: call from `spawn_blocking`, never on the async runtime.
+pub fn recover_now(app: &AppHandle) -> bool {
+    let cached = super::refresh::cached_index(app);
+    let check = SafetyCheck::serve(cached.as_ref());
+    let recovered = with_active_ledger(app, Mint::IfRows, |ledger| {
+        match ledger.recover_missing(Utc::now(), &check) {
+            Ok(report) => {
+                log_recovery(&report);
+                !report.recovered.is_empty()
+            }
+            Err(e) => {
+                eprintln!("mods: other stores of this vault not looked in ({e})");
+                false
+            }
+        }
+    })
+    .unwrap_or(false);
+    if recovered {
+        super::refresh::emit_changed(app, super::refresh::CHANGED_RECOVERED);
+    }
+    recovered
 }
 
 /// Remove the mod files of a store PM has just deleted: the pristine home a restore re-homed over

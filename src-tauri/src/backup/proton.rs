@@ -440,8 +440,18 @@ fn check_transfer(stdout: &str) -> Result<()> {
         .map_err(|e| Error::Other(format!("could not parse Proton Drive transfer result: {e}")))?;
     let failed = summary.failed_items.max(summary.failures.len() as u64);
     if failed > 0 {
+        // The CLI reports a per-file failure (a download into a full disk included) in this array
+        // with exit 0, so its reason is only here. Quoting it keeps the OS's own wording where
+        // `strip::is_disk_full` can see it, and tells the user why instead of only how many. Capped:
+        // it is the CLI's text, shown in a message.
+        let reason = summary
+            .failures
+            .iter()
+            .find_map(|f| f.get("error").and_then(|e| e.as_str()))
+            .map(|e| format!(": {}", e.chars().take(300).collect::<String>()))
+            .unwrap_or_default();
         return Err(Error::Other(format!(
-            "{failed} item(s) failed to transfer to/from Proton Drive"
+            "{failed} item(s) failed to transfer to/from Proton Drive{reason}"
         )));
     }
     // We always transfer exactly one archive, so zero transferred means it silently didn't
@@ -901,6 +911,35 @@ mod tests {
         .is_err());
         // Nothing transferred, no failures reported — still not a successful backup.
         assert!(check_transfer(r#"{"transferredItems":0,"failedItems":0,"failures":[]}"#).is_err());
+    }
+
+    #[test]
+    fn a_full_disk_in_the_failures_list_is_said_as_one() {
+        // The CLI's real shape (exit 0): the OS's wording is only inside `failures[].error`.
+        let summary = r#"{"transferredItems":0,"failedItems":1,"failures":[{"name":"x.pmbackup","nodeUid":"n","error":"x.pmbackup: Error: ENOSPC: no space left on device, write"}]}"#;
+        let e = check_transfer(summary).unwrap_err();
+        assert!(e.to_string().contains("1 item(s) failed"), "{e}");
+        let said = crate::backup::strip::say_if_disk_full(e, crate::backup::strip::Job::Restore);
+        assert!(
+            said.to_string().starts_with("nothing was restored"),
+            "{said}"
+        );
+        // Another reason is quoted but is not a full disk; a failure without text keeps the count.
+        let other = check_transfer(
+            r#"{"transferredItems":0,"failedItems":1,"failures":[{"error":"permission denied"}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::backup::strip::say_if_disk_full(other, crate::backup::strip::Job::Restore)
+                .to_string(),
+            "1 item(s) failed to transfer to/from Proton Drive: permission denied"
+        );
+        let bare = check_transfer(r#"{"transferredItems":0,"failedItems":1,"failures":[{}]}"#)
+            .unwrap_err();
+        assert_eq!(
+            bare.to_string(),
+            "1 item(s) failed to transfer to/from Proton Drive"
+        );
     }
 
     #[test]

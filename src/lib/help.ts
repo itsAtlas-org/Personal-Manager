@@ -525,6 +525,10 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Encrypted backup",
     body: "Beyond a one-off backup, PM can run them on a schedule and keep the last few for you. Scheduled backups only fire when it's safe and unobtrusive — PM unlocked and idle for a few minutes, a passphrase set, and nothing else syncing. Point it at more than one place (say a folder plus Google Drive) and each backup is packed once and copied to all of them; a destination that can't be reached right then is simply retried next run. Older backups beyond the number you keep are pruned automatically.",
   },
+  "settings-backup-mod-data": {
+    title: "Mods in your backups",
+    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
+  },
   "settings-license": {
     title: "License",
     body: "PM is free and open-source software under the GNU AGPL v3 — you're free to use, study, share, and modify it, and any networked version must offer its source. The link opens the full project source on GitHub.",

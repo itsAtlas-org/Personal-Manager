@@ -37,6 +37,14 @@ pub const MAX_DEVICES: usize = 32;
 
 const FORMAT: u32 = 1;
 
+/// The pre-per-device boolean row (`"true"`/`"false"`), once webview-written. Read once, to carry an
+/// old "on" over to the device that first reads it; never an authority after that
+/// ([`store::SETTING_DEV_DEVICES`] exists), and a restore turns it off too. **This is the only
+/// place in Rust that names it** (besides the webview allow-list's and the Dev tab's key lists), so
+/// nothing can gate on a vault-wide switch by accident; `adopt_mods`'s tripwire test fails on a
+/// reader anywhere else.
+pub(crate) const LEGACY_ROW: &str = "dev_mode";
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -79,7 +87,6 @@ pub fn migrated(legacy: Option<&str>, device: &str) -> String {
 }
 
 /// The record that switches every device off.
-#[cfg_attr(not(test), allow(dead_code))] // [`all_devices_off`]'s, see there
 fn nobody() -> String {
     with_device(None, "", false)
 }
@@ -98,7 +105,7 @@ fn ensure(conn: &Connection, device: &str) -> rusqlite::Result<()> {
     if read(conn, store::SETTING_DEV_DEVICES)?.is_some() {
         return Ok(());
     }
-    let legacy = read(conn, store::SETTING_DEV_MODE_LEGACY)?;
+    let legacy = read(conn, LEGACY_ROW)?;
     conn.execute(
         "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)",
         params![
@@ -142,12 +149,11 @@ pub fn write(conn: &mut Connection, device: &str, on: bool) -> rusqlite::Result<
 /// Switch developer mode off for every device in this vault (the restore reset: §1.11 says a restore
 /// never enables unsigned installs on another machine). Writes an empty record, so an old "on" row
 /// can't be carried over afterwards, and turns the old row off if it is there. The mods it affects
-/// are paused by the load that follows the store's open.
+/// are paused by the load that follows the store's open (nothing is paused here: the load reads the
+/// record first and pauses an active unsigned row with the reason `dev-mode`).
 ///
-/// Nothing on this branch calls it: it is the restore commit's (track B's
-/// `backup::adopt_mods::reset_for_adopt`, which writes the old row off today), wired when the two
-/// branches merge.
-#[cfg_attr(not(test), allow(dead_code))] // the restore reset's, at the merge with track B
+/// Called by the restore commit (`backup::adopt_mods::reset_for_adopt`, inside its transaction) and
+/// by a join that would inherit an old "on" ([`drop_inherited_on_at_join`]).
 pub fn all_devices_off(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO settings(key, value) VALUES (?1, ?2) \
@@ -156,9 +162,31 @@ pub fn all_devices_off(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     conn.execute(
         "UPDATE settings SET value = 'false' WHERE key = ?1",
-        [store::SETTING_DEV_MODE_LEGACY],
+        [LEGACY_ROW],
     )?;
     Ok(())
+}
+
+/// A shared-vault join's one write (§1.15, decided 2026-11-12): when the joined store has no record
+/// yet and its old row says `"true"`, the carry-over in [`ensure`] would hand that "on" to the
+/// joiner's device, which never chose it, so everyone is switched off first ([`all_devices_off`];
+/// the owner's device switches it on again, which is the fail-safe direction). Any other store is
+/// left exactly as it is: with a record, the old row is never read and the joiner has no entry;
+/// with no record and no old "on", the carry-over gives nobody anything. Check and write are one
+/// immediate transaction, so a record another machine writes meanwhile is never overwritten.
+/// Says whether it wrote.
+///
+/// Must run on the joined store before anything on the joiner reads developer mode (the writer's
+/// open: [`is_on`] is what writes the record).
+pub fn drop_inherited_on_at_join(conn: &Connection) -> rusqlite::Result<bool> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let inherited = read(&tx, store::SETTING_DEV_DEVICES)?.is_none()
+        && read(&tx, LEGACY_ROW)?.as_deref() == Some("true");
+    if inherited {
+        all_devices_off(&tx)?;
+    }
+    tx.commit()?;
+    Ok(inherited)
 }
 
 #[cfg(test)]
@@ -247,14 +275,14 @@ mod tests {
     #[test]
     fn the_first_read_writes_the_record_and_the_old_row_is_never_read_again() {
         let conn = store();
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         assert!(is_on(&conn, A).unwrap());
         // The old row said "on", and it is still "true": no other device inherits it.
         assert!(!is_on(&conn, B).unwrap());
         // Flipping the old row afterwards (the webview could once write it) changes nothing.
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "false");
+        set_raw(&conn, LEGACY_ROW, "false");
         assert!(is_on(&conn, A).unwrap());
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         assert!(!is_on(&conn, B).unwrap());
     }
 
@@ -269,7 +297,7 @@ mod tests {
     #[test]
     fn a_junk_record_is_off_and_is_not_migrated_over() {
         let conn = store();
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         set_raw(&conn, store::SETTING_DEV_DEVICES, "garbage");
         assert!(!is_on(&conn, A).unwrap());
     }
@@ -289,7 +317,7 @@ mod tests {
     #[test]
     fn a_write_into_a_vault_with_an_old_on_row_keeps_that_devices_on_until_it_switches_off() {
         let mut conn = store();
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         // B switches on first: A (who never asked) is not turned on by the old row afterwards,
         // since the record now exists and was made for B.
         assert!(write(&mut conn, B, true).unwrap());
@@ -299,31 +327,71 @@ mod tests {
     #[test]
     fn the_restore_reset_turns_every_device_and_the_old_row_off_and_stays_off() {
         let mut conn = store();
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         write(&mut conn, A, true).unwrap();
         write(&mut conn, B, true).unwrap();
         all_devices_off(&conn).unwrap();
         assert!(!is_on(&conn, A).unwrap() && !is_on(&conn, B).unwrap());
-        assert_eq!(
-            read(&conn, store::SETTING_DEV_MODE_LEGACY)
-                .unwrap()
-                .as_deref(),
-            Some("false")
-        );
+        assert_eq!(read(&conn, LEGACY_ROW).unwrap().as_deref(), Some("false"));
         // Nothing to carry over afterwards, even if an old "true" comes back.
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         assert!(!is_on(&conn, A).unwrap());
+    }
+
+    #[test]
+    fn a_join_of_a_store_with_no_record_and_an_old_on_switches_everyone_off_first() {
+        let conn = store();
+        set_raw(&conn, LEGACY_ROW, "true");
+        assert!(drop_inherited_on_at_join(&conn).unwrap());
+        // The joiner's device is off, and so is every other: the owner switches theirs on again.
+        assert!(!is_on(&conn, A).unwrap() && !is_on(&conn, B).unwrap());
+        // The record was written, empty, so the old row is never read again.
+        let stored = read(&conn, store::SETTING_DEV_DEVICES).unwrap();
+        assert_eq!(devices_of(stored.as_deref().unwrap()).unwrap().len(), 0);
+        set_raw(&conn, LEGACY_ROW, "true");
+        assert!(!is_on(&conn, A).unwrap());
+    }
+
+    #[test]
+    fn a_join_of_a_store_that_already_has_a_record_writes_nothing() {
+        let mut conn = store();
+        set_raw(&conn, LEGACY_ROW, "true");
+        write(&mut conn, B, true).unwrap();
+        let before = read(&conn, store::SETTING_DEV_DEVICES).unwrap();
+        let legacy_before = read(&conn, LEGACY_ROW).unwrap();
+        assert!(!drop_inherited_on_at_join(&conn).unwrap());
+        assert_eq!(read(&conn, store::SETTING_DEV_DEVICES).unwrap(), before);
+        assert_eq!(read(&conn, LEGACY_ROW).unwrap(), legacy_before);
+        // The owner's device keeps its switch; the joiner never had one.
+        assert!(is_on(&conn, B).unwrap() && !is_on(&conn, A).unwrap());
+    }
+
+    #[test]
+    fn a_join_of_a_store_with_nothing_to_inherit_writes_nothing() {
+        for legacy in [None, Some("false"), Some("TRUE"), Some("")] {
+            let conn = store();
+            if let Some(v) = legacy {
+                set_raw(&conn, LEGACY_ROW, v);
+            }
+            assert!(!drop_inherited_on_at_join(&conn).unwrap(), "{legacy:?}");
+            assert_eq!(
+                read(&conn, store::SETTING_DEV_DEVICES).unwrap(),
+                None,
+                "{legacy:?}: no record is invented"
+            );
+            assert_eq!(read(&conn, LEGACY_ROW).unwrap().as_deref(), legacy);
+        }
     }
 
     #[test]
     fn the_restore_reset_on_a_vault_with_no_record_leaves_no_old_on_to_migrate() {
         let conn = store();
-        set_raw(&conn, store::SETTING_DEV_MODE_LEGACY, "true");
+        set_raw(&conn, LEGACY_ROW, "true");
         all_devices_off(&conn).unwrap();
         assert!(!is_on(&conn, A).unwrap());
         // And it didn't invent an old row where there was none.
         let bare = store();
         all_devices_off(&bare).unwrap();
-        assert_eq!(read(&bare, store::SETTING_DEV_MODE_LEGACY).unwrap(), None);
+        assert_eq!(read(&bare, LEGACY_ROW).unwrap(), None);
     }
 }

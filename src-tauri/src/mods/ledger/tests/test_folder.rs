@@ -1199,3 +1199,130 @@ fn a_folder_row_is_never_filled_from_another_stores_files() {
         "nothing was copied into the folder row's place"
     );
 }
+
+// ---- a copy of the store that leaves (backup and export) ------------------------------------------
+
+#[test]
+fn a_real_folder_row_and_everything_hanging_off_it_stay_out_of_a_copy_that_leaves() {
+    // The backup's strip (`backup::strip`, D4) keys on `installed_from = 'folder'`; this loads the
+    // folder through the ledger, so the row is the one this code writes and not a hand-built look-alike.
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir();
+    load(&w, dir.path(), None).unwrap();
+    give_it_things(&w);
+    // A signed mod beside it, with its own content, which must travel.
+    w.install(&pkg("1.0.0", |_| {}), Approval::Approved)
+        .unwrap();
+    w.exec(
+        "INSERT INTO mod_kv(mod_id, key, class, value) VALUES ('atlas.map','board','content','\"mine\"');
+         INSERT INTO mod_overlay(mod_id, id, date, label) VALUES
+             ('acme.tool','e1','2026-12-01','test overlay'), ('atlas.map','e1','2026-12-02','kept');
+         INSERT INTO tasks(title) VALUES ('made by the test mod');
+         INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, task_id)
+             VALUES ('acme.tool','Acme Tool','third','Acme','acme/tool',0,'fedcba9876543210',last_insert_rowid());
+         INSERT INTO usage_log(model, kind, mod_id) VALUES ('m','background','acme.tool');",
+    );
+    assert_eq!(
+        w.sql::<String>("SELECT installed_from FROM mods WHERE id = 'acme.tool'"),
+        crate::mods::store::FROM_FOLDER,
+        "the ledger writes the value the strip looks for"
+    );
+
+    // The copy a backup makes: a VACUUM INTO of the live store, then the strip.
+    let work = w.dir.path().join("work.sqlite");
+    let out = w.dir.path().join("leaves.sqlite");
+    crate::vault::migrate::vacuum_into(&w.store.conn.lock().unwrap(), &work).unwrap();
+    let listed = crate::backup::strip::strip_snapshot(&work, &out, DB_KEY, true).unwrap();
+
+    // The .pmbackup's mod list never names it; the signed mod is there.
+    let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["atlas.map"]);
+    let c = crate::db::open_snapshot(&out, DB_KEY).unwrap();
+    let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT count(*) FROM mods WHERE id = 'acme.tool'"), 0);
+    for table in ["mod_grants", "mod_kv", "mod_secrets", "mod_overlay"] {
+        assert_eq!(
+            count(&format!(
+                "SELECT count(*) FROM {table} WHERE mod_id = 'acme.tool'"
+            )),
+            0,
+            "{table} rows of the folder mod went with it"
+        );
+    }
+    // The signed mod's own content stays, and its overlay.
+    assert_eq!(
+        count("SELECT count(*) FROM mod_kv WHERE mod_id = 'atlas.map'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM mod_overlay WHERE mod_id = 'atlas.map'"),
+        1
+    );
+    // Its gift stays the user's, made by "a test mod"; its spend stays as PM's own; its overlay is
+    // out of the calendar's hidden set.
+    assert_eq!(
+        c.query_row(
+            "SELECT mod_name || '|' || mod_id || '|' || author FROM mod_ledger",
+            [],
+            |r| { r.get::<_, String>(0) }
+        )
+        .unwrap(),
+        format!("{}||", crate::backup::strip::STRIPPED_MOD_NAME)
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM usage_log WHERE mod_id = 'acme.tool'"),
+        0
+    );
+    assert_eq!(count("SELECT count(*) FROM usage_log"), 1);
+    assert_eq!(
+        c.query_row(
+            "SELECT value FROM settings WHERE key = 'calendar_ui'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        r#"{"hidden":["google:me"]}"#
+    );
+    // And the live store is exactly as it was: the session goes on.
+    assert!(loaded(&w) && w.rows() == 2);
+}
+
+#[test]
+fn a_restore_swapping_the_store_under_a_loaded_folder_ends_it_and_serves_none_of_the_restored_rows()
+{
+    // `switch_to_vault` swaps the store (`open_session`) and then engages: the writer's open
+    // (`after_writer_open`) forgets every session, deletes every folder row of the store it opened
+    // and loads, and the load ends the old frames. Here the "restored" store still holds a folder
+    // row (a backup that left before the strip existed could carry one), and the reset runs on it
+    // first, as the restore's commit does.
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir();
+    load(&w, dir.path(), None).unwrap();
+    give_it_things(&w);
+    let frame = live_frame(&w, "acme.tool");
+    {
+        let c = w.store.conn.lock().unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(&c).unwrap();
+    }
+    // The open that follows looks developer mode up (off for everyone after the reset) and loads.
+    w.runtime.set_unsigned_allowed({
+        let c = w.store.conn.lock().unwrap();
+        devmode::is_on(&c, DEVICE).unwrap()
+    });
+    let report = w.ledger().startup(now(), &serve_all);
+    assert!(report.skipped.is_none());
+    assert_eq!(w.rows(), 0, "the folder row went at the open");
+    assert!(!serving(&w) && !loaded(&w));
+    assert_eq!(things_left(&w), 0, "and what cascades from it");
+    assert_eq!(frame.names(), [SESSION_CLOSED]);
+    // The same store closed first (the curtain, a lock hand-off): the frames end silently.
+    let w = world();
+    dev_on(&w);
+    load(&w, dir.path(), None).unwrap();
+    let frame = live_frame(&w, "acme.tool");
+    w.runtime.clear();
+    assert!(frame.names().is_empty(), "a closed store tells no frame");
+    assert!(!serving(&w) && !loaded(&w));
+}

@@ -21,7 +21,7 @@
 //!   behind is never served and is gone at the next open. The store's close itself can't delete
 //!   (the connection is already shut), so the guarantee is "gone at the next open, never served
 //!   before"; the folders' sessions are forgotten with the store ([`ModRuntime::clear`]);
-//! - **a backup** strips folder rows from its copy (`backup/strip.rs`, track B) and nothing else
+//! - **a backup** strips folder rows from its copy (`backup/strip.rs`, which keys on `installed_from = 'folder'`, the value this loader writes) and nothing else
 //!   carries one out: no file of a test mod is ever inside PM's mods folder (they are the
 //!   developer's own, never copied), so the vault's folders, the sweep, the other stores' recovery
 //!   and a restore's copying all have nothing of it; the row's `files` and `manifest` columns are in

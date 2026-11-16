@@ -928,6 +928,17 @@ pub fn adopt_shared_vault(
         ));
     }
     let runtime = vault_runtime_for(&resolved, &meta, key.expose())?;
+    // The join's one write to the shared store, and it comes before the attach: a store with no
+    // per-device developer-mode record and an old vault-wide "on" would hand that "on" to this
+    // device the first time the writer's open looks (the attach's engage), so it is switched off
+    // for everyone first. A store that has a record, or nothing to inherit, is not written. If it
+    // can't be written the join is refused: attaching anyway could give this device the "on".
+    crate::backup::adopt_mods::joiner_inherits_no_dev_mode(&conn).map_err(|e| {
+        Error::Other(format!(
+            "PM couldn't make sure developer mode starts off on this computer ({e}), so it \
+             didn't join the vault. Try again in a moment."
+        ))
+    })?;
     // attach_profile_here → open_session clears any carried "vault unreachable" fault.
     attach_profile_here(&app, &state, root.clone(), conn, runtime)?;
     // A completed rejoin retires the breadcrumb: if this folder is the one the profile
@@ -940,6 +951,10 @@ pub fn adopt_shared_vault(
     }
     // M-3: if the meta was repaired on open, tell the user (non-blocking).
     emit_vault_meta_warning(&app, &state, &meta_report);
+    // Unlike a restore's commit, joining resets nothing else about mods in the store: it is the
+    // vault's, in use by its other accounts and machines, and connected apps are per device. The
+    // seam takes no store, so it cannot write one (`backup::adopt_mods`).
+    crate::backup::adopt_mods::joiner_accepts_only_its_own_clients();
     Ok(AdoptOutcome {
         active_writer: lock_session::status(&app).active,
         warnings,

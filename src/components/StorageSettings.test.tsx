@@ -50,6 +50,7 @@ const row = (over: Partial<StorageComponent>): StorageComponent => ({
 const report = (...components: StorageComponent[]): StorageReport => ({
   total_bytes: components.reduce((n, c) => n + c.size_bytes, 0),
   components,
+  mods: [],
 });
 
 const tsne = row({

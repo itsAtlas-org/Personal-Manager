@@ -91,10 +91,8 @@ pub const SETTING_DISCLAIMER: &str = "mods_disclaimer";
 /// switching it never reaches another machine using the same vault. Not in the webview's pref
 /// allow-list: only Rust reads or writes it, and unsigned installs trust nothing else.
 pub const SETTING_DEV_DEVICES: &str = "mods_dev_devices";
-/// The pre-per-device boolean row (`"true"`/`"false"`), once webview-written. Read once, to carry an
-/// old "on" over to the device that first reads it; never an authority after that
-/// ([`SETTING_DEV_DEVICES`] exists), and a restore turns it off too.
-pub const SETTING_DEV_MODE_LEGACY: &str = "dev_mode";
+// The pre-per-device boolean row (`dev_mode`) is named in `mods::devmode` alone, so that nothing
+// else in Rust can read it by accident (`devmode::LEGACY_ROW`).
 
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from
 /// file"), or a developer's unpacked test folder, which has no package sha256 and is left out of

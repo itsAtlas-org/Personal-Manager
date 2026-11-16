@@ -630,6 +630,92 @@ folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index
 it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its
 blacklist.
 
+### I-32 · A copy of the store leaves the computer only through the strip, and a restored store is reset before it serves — **Held** (one gate: `backup::strip`'s site scan)
+
+Every file that carries the database off the live store (the typed `.pmbackup`, the scheduled and
+cloud backups that share `run_backup`, and the export zip) takes its snapshot through
+`backup::strip::snapshot_for_leaving`: a `VACUUM INTO` copy, then, on the COPY's own connection,
+`secure_delete` on, the deletes of D4 (`mod_secrets`, `mcp_clients`, `mod_doc_data`, cache-class
+`mod_kv`, every `installed_from = 'folder'` mod and the rows hanging off it, and content-class
+`mod_kv` when "Also save mod data in my backups" is off), a folder mod's name taken out of what
+outlives its row (its gifts' `mod_ledger` attribution blanked to "a test mod", its
+`usage_log.mod_id` set to NULL, its overlay out of the calendar's hidden set), then a `VACUUM INTO`
+the file that leaves (no temporary database: the bundled SQLCipher keeps those in RAM) and a check
+of each step on that file, so nothing is left in a page or a free page. A snapshot whose strip
+fails is deleted and the backup fails, with an error; no archive that might hold a secret is
+written. The copies are made under `data_dir/copies-in-progress/` (`strip::WORK_DIR`), on disk,
+never the OS temp dir (tmpfs, RAM, on many Linux desktops); a run's folder goes when it ends, and
+the boot sweep and the wipe take what a crash left. A run creates only that one folder, never the
+data folder itself (a wiped PM creates nothing), and refuses before the first copy when the volume
+has less than twice the store free, plus, for a scheduled or cloud backup (which packs its archive
+into that same folder), the vault's Markdown and sidecars (`pack::beside_db_bytes`); a typed
+backup packs into the destination the user chose and an export zips there, so they count the
+store only. The check is an estimate taken once, before the copy: a pack that still hits a full
+disk says so (`strip::say_if_disk_full`, also for the last zstd frame and the rename, which keep
+the OS error's kind) rather than failing with a raw I/O error. A Proton or Drive restore downloads
+its archive into a folder of the same place (`restore_scratch_dir`), for the same reason (not out
+of RAM); that download is NOT space-checked, its size isn't known to the command, and neither is
+the unpacking nor the export zip's write, so a full disk in any of them fails the run, said as a
+full disk (`Job::Restore`, `Job::Export`; the Proton CLI's own stderr is recognised by the OS's
+wording of it). The copy is opened with the key the live store
+was opened with, read from the open session under the same DB guard as the copy, never re-resolved
+from the keychain. A new place that copies the store out calls the same function;
+`every_site_that_copies_the_store_out_goes_through_the_strip` fails on any other `vacuum_into` in
+the app outside `vault/migrate.rs` (its rollback copy never leaves the vault folder) and the test
+fixtures. The test reads every page of the stripped file decrypted (free pages included), so a
+value left in the file is found where grepping the encrypted bytes could not. A restore's commit
+(`switch_to_vault`) runs `backup::adopt_mods::reset_for_adopt`: developer mode off for EVERY device
+(`devmode::all_devices_off`: an empty per-device record, so the old row cannot be carried over
+afterwards, and the old row off), `mcp_clients` cleared, MCP off (PR C's switch), all in one
+transaction, before the store is attached, so before the first load of its mods; that load pauses
+each active unsigned mod with the reason `dev-mode` (I-34), the same state switching developer mode
+off leaves. A reset that fails refuses the switch. Joining a shared vault (`adopt_shared_vault`)
+resets nothing: developer mode is per device (I-34), so the joiner's device has no entry in the
+record and reads as off while the vault's other devices keep theirs, and the connected apps are per
+device too; the store is the vault's, in use by its other accounts and machines. The join's one
+write is `adopt_mods::joiner_inherits_no_dev_mode`, run before the store is attached (so before
+the writer's open, which is where the first device to look would be handed the old row's "on"): a
+store with NO per-device record whose old `dev_mode` row says `"true"` is switched off for everyone
+(`devmode::drop_inherited_on_at_join`; the owner's device switches it on again), and any other
+store is not written; a failure refuses the join. **Only `mods/devmode.rs` names the old row**
+(besides `settings.rs`'s and `commands_dev.rs`'s key lists): `only_devmode_names_the_old_dev_mode_row`
+fails the moment any other Rust code reads it. The copy is refused when the open store isn't the store the caller
+read its metadata and Markdown folder from (`snapshot_for_leaving`'s `Origin`: the vault id AND the
+vault folder, because a restore keeps the vault id and its copy sits beside the original as a
+second store of one vault; vault switching doesn't take the backup run's busy flag), so an archive
+never pairs one store's metadata and notes with another's database.
+
+**Held to the limit of what the store records.** What names a mod outside the `mods` cascade is
+blanked for every folder mod AND for every unsigned mod whose row is already gone (an uninstalled
+test mod keeps its ledger rows and spend, I-29, and the ledger has no column for how a mod was
+installed, so an unsigned mod is treated as one: it is not in the catalogue, so its name, author
+and repository are unpublished work). A gift of an uninstalled unsigned file mod therefore also
+reads "a test mod" in a copy that leaves, and a restore of that copy can't match it to a
+reinstall. The same holds for spend alone: a `usage_log.mod_id` with no `mods` row and no signed
+ledger row (a mod that spent and never made a gift) is blanked too, so an uninstalled signed mod's
+spend with no signed gift also reads as PM's own in a copy that leaves. Recording the origin at
+install would need a migration and would lift this limit.
+
+**Why.** A backup is portable and carries the database key, so whatever is in `pm.sqlite` is as
+readable as the passphrase is guessable, and a plain `DELETE` leaves a row's bytes in the page.
+Mod secrets are the user's typed credentials and the connected apps' tokens belong to the device
+that issued them; neither may travel. A restored store arrives with the other place's developer-mode
+record, which would otherwise let unsigned installs run where nobody chose them. A joined store is
+not another place's copy but the same store its other users are using: resetting it at a join would
+switch dev mode off for them and disconnect their apps, which is why the join writes only the one
+case where the old vault-wide "on" would otherwise land on the joiner's device.
+
+**Co-signers.** A change to the mod tables adds the new table to `strip` (the child-table guard
+test fails on a table that references `mods` and isn't listed) or says why it is safe; a new place
+that names a mod outside the `mods` cascade (mod-made documents' `source_id`, for one) blanks a
+folder mod's name there too. The strip doesn't touch `documents.source_id` (`mod:<id>:<key>`) or a
+mod-made note's file name (`mod-<id>-<key>.md`) today because nothing writes them yet: the Host
+API change that does decides, in that same change, whether a folder mod's id is rewritten there
+(it is a rebuild key and in the vault's front-matter, so a rewrite must reach both) or held as a
+limit here, and adds the column to `leftover` either way. PR C adds the MCP switch's off value to `adopt_mods::switch_mcp_off`
+and makes `adopt_mods::joiner_accepts_only_its_own_clients` true (clients bound to a device). A
+change that needs developer mode asks `mods::devmode` (I-34), never the old row.
+
 ### I-33 · A signed mod installs only the bytes its consent screen showed, and only on its user's answer — **Held**
 
 A signed install from the Mods tab (a picked file, a catalogue download, an approved update) is two
@@ -670,7 +756,8 @@ switch, so a restore onto another machine, a joined shared vault or a copied dat
 or writes it: the old webview-written `dev_mode` row is out of the page's allow-list, read once to
 carry an old "on" over to the first device that asks (and no other), and turned off by the restore
 reset (`devmode::all_devices_off`, which also writes an empty record so nothing is carried over
-afterwards). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+afterwards) and by a shared-vault join that would otherwise hand that old "on" to the joiner's
+device (I-32: the join's one write). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row
@@ -718,7 +805,12 @@ user's data.
 
 **Co-signers.** The backup's strip (`.pmmod` list, snapshot and export) deletes `folder` rows from
 its copy, with foreign keys on so what cascades from them goes too; a restore's commit goes through
-the writer's open, which purges any that remain. A new place that copies the `mods` table out of
+the writer's open, which purges any that remain. A restore swaps the store under the registry
+without closing it first (`open_session`, then the engage): every frame of the old store still ends,
+because the engage reaches either `ModRuntime::clear` (not the writer: silent) or the writer's open
+(`startup` forgets every session, deletes the new store's folder rows, and the load that follows
+ends the frames of whatever it no longer serves). A new path that swaps the store engages the same
+way, or forgets the sessions and calls `ledger::folder::purge_rows` itself. A new place that copies the `mods` table out of
 the live database either strips them or says why it can't carry one.
 
 ---

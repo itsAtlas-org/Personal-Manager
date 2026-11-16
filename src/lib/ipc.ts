@@ -141,6 +141,7 @@ import type {
   ReviewEvent,
   TagProposalRow,
   RestoreSummary,
+  SwitchOutcome,
   SemanticLayout,
   Settings,
   SharedDrive,
@@ -1892,9 +1893,19 @@ export const restoreLocalBackup = (srcPath: string, passphrase: string) =>
 /** Point this profile at a restored vault folder and open it (uses the key seeded during restore). On a
  *  fresh machine the vault is adopted into the profile's home location; a restored passphrase
  *  ("shareable") vault is made private on this device when `makePrivate`, else kept passphrase-protected
- *  (ignored for a device-mode restore). */
+ *  (ignored for a device-mode restore). Resolves with what the reconcile couldn't do cleanly (warnings)
+ *  and where each restored mod ended up, read after the same-machine recovery has run. Developer mode
+ *  and connected apps are reset on the restored store before it opens (spec §1.11). */
 export const switchToVault = (folder: string, makePrivate: boolean) =>
-  invoke<void>("switch_to_vault", { folder, makePrivate });
+  invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+
+/** Whether backups also carry the mods' own saved data ("Also save mod data in my backups"). On
+ *  unless turned off. Mod secrets and connected apps never leave in any backup or export. */
+export const getBackupModData = () => invoke<boolean>("get_backup_mod_data");
+
+/** Turn "Also save mod data in my backups" on or off; applies to the next backup, every destination. */
+export const saveBackupModData = (enabled: boolean) =>
+  invoke<void>("save_backup_mod_data", { enabled });
 
 /** The current backup/restore snapshot — restores the progress UI on return + shows the last result. */
 export const backupStatus = () => invoke<BackupState>("backup_status");

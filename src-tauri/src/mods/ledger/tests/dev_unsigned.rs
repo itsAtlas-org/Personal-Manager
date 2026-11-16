@@ -1158,27 +1158,46 @@ fn a_user_resume_of_an_unsigned_mod_does_not_serve_it_while_developer_mode_is_of
 }
 
 #[test]
-fn a_restore_that_turns_every_device_off_pauses_the_unsigned_mods_at_the_next_open() {
+fn a_restore_of_a_store_whose_record_names_this_device_leaves_it_off_and_pauses_the_unsigned_mods()
+{
+    // The real restore reset (`backup::adopt_mods::reset_for_adopt`, run on the restored store
+    // before it is attached), not just the devmode function it calls. The restored store's record
+    // names this device (a backup of this very machine's vault, say) and its old row says "true".
     let w = world();
     dev_on(&w);
     dev(&w, OTHER_DEVICE, true);
+    w.exec("INSERT INTO settings(key, value) VALUES ('dev_mode', 'true')");
     install_file(&w, &plain(), None).unwrap();
-    // The restore reset writes the record on its connection...
+    assert_eq!(state_of(&w, "acme.tool"), "active:");
     {
         let c = w.store.conn.lock().unwrap();
-        devmode::all_devices_off(&c).unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(&c).unwrap();
         assert!(!devmode::is_on(&c, DEVICE).unwrap());
         assert!(!devmode::is_on(&c, OTHER_DEVICE).unwrap());
     }
-    // ...and the open that follows reads it before the load.
-    let on = {
-        let c = w.store.conn.lock().unwrap();
-        devmode::is_on(&c, DEVICE).unwrap()
-    };
-    w.runtime.set_unsigned_allowed(on);
-    w.ledger().startup(now(), &serve_all());
-    assert_eq!(state_of(&w, "acme.tool"), "paused:dev-mode");
-    assert!(!serving(&w));
+    // The reset pauses nothing itself: the row is still active until the open's load runs.
+    assert_eq!(state_of(&w, "acme.tool"), "active:");
+
+    // The store re-opens: the same file through a new connection, the registry emptied by the
+    // close, developer mode looked up from the record, then the load.
+    for round in 0..2 {
+        *w.store.conn.lock().unwrap() =
+            crate::db::open(&w.dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        w.runtime.clear();
+        let on = {
+            let c = w.store.conn.lock().unwrap();
+            devmode::is_on(&c, DEVICE).unwrap()
+        };
+        assert!(!on, "still off after the store re-opened (open {round})");
+        w.runtime.set_unsigned_allowed(on);
+        let report = w.ledger().startup(now(), &serve_all());
+        if round == 0 {
+            assert_eq!(report.dev_paused, ["acme.tool"]);
+        }
+        // Paused for the same reason switching developer mode off gives, and not served.
+        assert_eq!(state_of(&w, "acme.tool"), "paused:dev-mode");
+        assert!(!serving(&w));
+    }
 }
 
 #[test]

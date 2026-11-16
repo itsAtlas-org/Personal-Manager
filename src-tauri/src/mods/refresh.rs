@@ -475,9 +475,9 @@ pub fn emit_notices(app: &AppHandle, notices: &[ModNotice]) {
 /// the rows on mount anyway: this is a convenience, not the record.
 pub const CHANGED_EVENT: &str = "mods://changed";
 /// [`ModsChanged::cause`] for mods whose files were copied back from another store of the vault
-/// after a same-machine restore (track B's `after_writer_open` emit, routed through here when the
-/// two branches merge).
-#[allow(dead_code)]
+/// after a same-machine restore: the recovery that `ledger::after_writer_open` starts in the
+/// background, or `ledger::recover_now` finishes for `switch_to_vault`, whichever copies them in (the
+/// other finds nothing left, so one recovery sends one notice).
 pub const CHANGED_RECOVERED: &str = "recovered";
 /// A mod was installed, updated or repaired from the Mods tab.
 pub const CHANGED_INSTALLED: &str = "installed";
