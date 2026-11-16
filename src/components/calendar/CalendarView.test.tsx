@@ -2707,6 +2707,16 @@ describe("CalendarView: Event | Task in quick create", () => {
   const title = () => within(quick()).getByLabelText<HTMLInputElement>("Title");
   const taskSeg = () => within(quick()).getByRole("button", { name: "Task" });
   const said = () => document.querySelector('[role="status"]')?.textContent ?? "";
+  // Noon today in London, the zone this file gives the device. The box opens on London's today,
+  // and from 23:30 there on tomorrow (the next half hour is 00:00, as Google's does), while `today`
+  // is this machine's date: at 23:35 UTC on 2026-11-16 CI's box opened on the 17th and two tests
+  // failed. Noon UTC is still today here on any machine from UTC-12 to UTC+11. Only Date is faked,
+  // so waitFor's timers still run. newEventSeed's own tests cover the 23:30 rollover.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(`${today}T12:00:00Z`));
+  });
+  afterEach(() => vi.useRealTimers());
 
   it("Shift+C's box has the switch, on Event", async () => {
     await mount();
