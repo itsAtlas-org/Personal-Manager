@@ -32,6 +32,7 @@ import { addDays, dayKey, startOfDay, startOfWeek } from "../../lib/calendar-lay
 import { A11_NOTE } from "../../lib/calendarEdit/editReasons";
 import { COPY_CALL_OFF_NOTE } from "../../lib/calendarEdit/eventDraft";
 import { isoToDisplay } from "../../lib/dateField";
+import { resetKeyboardPrefs, writeCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { formatDateLocal, formatDateOnly, pad2 } from "../../lib/format";
 import { BOARD_VERSION, PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
 
@@ -1988,6 +1989,47 @@ describe("CalendarView: the paging keys", () => {
     press("k");
     expect(label()).toContain(monthName(1));
     press("p");
+    expect(label()).toContain(monthName(0));
+  });
+
+  // WCAG 2.2 SC 2.1.4: Settings → Accessibility → Keyboard turns the single-letter shortcuts off. The
+  // switch is read at the press, so it takes effect without a remount, and the arrows stay.
+  it("with single-key shortcuts off, t c Shift+C j k n p do nothing and the arrows still page", async () => {
+    await mountIn("month");
+    act(() => writeCharacterShortcuts(false));
+    press("ArrowRight");
+    expect(label()).toContain(monthName(1));
+    for (const key of ["j", "n", "k", "p", "t", "c"]) {
+      // Not taken: a press that does something is `preventDefault`ed (`t` is the one that isn't).
+      expect(fireEvent.keyDown(document.body, { key }), key).toBe(true);
+      expect(label(), key).toContain(monthName(1));
+    }
+    expect(fireEvent.keyDown(document.body, { key: "C", shiftKey: true })).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    press("ArrowLeft");
+    expect(label()).toContain(monthName(0));
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    // Turned back on, the letters work again with no remount.
+    act(() => resetKeyboardPrefs());
+    press("t");
+    expect(label()).toContain(monthName(0));
+    press("j");
+    expect(label()).toContain(monthName(1));
+    press("c");
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+  });
+
+  it("with single-key shortcuts off, the buttons say no letters, and still work", async () => {
+    await mountIn("month");
+    act(() => writeCharacterShortcuts(false));
+    const today = screen.getByRole("button", { name: "Today" });
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(today.hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(next.getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown");
+    fireEvent.click(next);
+    expect(label()).toContain(monthName(1));
+    fireEvent.click(today);
     expect(label()).toContain(monthName(0));
   });
 

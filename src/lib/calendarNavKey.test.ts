@@ -5,7 +5,9 @@ import { describe, it, expect } from "vitest";
 import {
   calendarNavKey,
   calendarUndoKey,
+  createKeyHint,
   pageKeyHint,
+  todayKeyHint,
   type NavKeyEvent,
   type UndoKeyEvent,
 } from "./calendarNavKey";
@@ -161,6 +163,80 @@ describe("pageKeyHint", () => {
         const { shortcuts } = pageKeyHint(nav, vertical);
         for (const k of shortcuts.split(" ")) {
           expect(calendarNavKey(key(k), false, vertical)).toBe(nav);
+        }
+      }
+    }
+  });
+});
+
+// WCAG 2.2 SC 2.1.4: with single-key shortcuts turned off (Settings → Accessibility → Keyboard) every
+// character-key shortcut does nothing, and the arrows, which are named keys, still page.
+describe("calendarNavKey with single-key shortcuts off", () => {
+  it("ignores t, c, Shift+C, j, k, n and p, in either case", () => {
+    for (const vertical of [false, true]) {
+      for (const k of ["t", "T", "c", "C", "j", "J", "k", "K", "n", "N", "p", "P"]) {
+        expect(calendarNavKey(key(k), false, vertical, false), k).toBeNull();
+        expect(calendarNavKey(key(k, { shiftKey: true }), false, vertical, false), k).toBeNull();
+      }
+    }
+  });
+
+  it("still pages with the arrows, and with ↑ and ↓ where the periods run down the screen", () => {
+    expect(calendarNavKey(key("ArrowLeft"), false, false, false)).toBe("prev");
+    expect(calendarNavKey(key("ArrowRight"), false, false, false)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false, true, false)).toBe("prev");
+    expect(calendarNavKey(key("ArrowDown"), false, true, false)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false, false, false)).toBeNull();
+    expect(calendarNavKey(key("ArrowDown"), false, false, false)).toBeNull();
+  });
+
+  it("is on unless told otherwise", () => {
+    expect(calendarNavKey(key("t"), false, false)).toBe("today");
+    expect(calendarNavKey(key("j"), false, true)).toBe("next");
+    expect(calendarNavKey(key("t"), false, false, true)).toBe("today");
+    expect(calendarNavKey(key("C", { shiftKey: true }), false, false, true)).toBe("quick-create");
+  });
+});
+
+describe("what Today and + New event say of their keys", () => {
+  it("names the letters while they are on", () => {
+    expect(todayKeyHint()).toEqual({ tip: "Jump to today · t", shortcuts: "t" });
+    expect(createKeyHint()).toEqual({
+      tip: "New event · c, or Shift+C for a quick event or task",
+      shortcuts: "c",
+    });
+  });
+
+  it("names nothing while they are off", () => {
+    expect(todayKeyHint(false)).toEqual({ tip: "Jump to today", shortcuts: undefined });
+    expect(createKeyHint(false)).toEqual({ tip: "New event", shortcuts: undefined });
+  });
+
+  it("only names a key that does something", () => {
+    expect(calendarNavKey(key(todayKeyHint().shortcuts!), false)).toBe("today");
+    expect(calendarNavKey(key(createKeyHint().shortcuts!), false)).toBe("create");
+  });
+});
+
+describe("pageKeyHint with single-key shortcuts off", () => {
+  it("names the arrows only", () => {
+    expect(pageKeyHint("prev", false, false)).toEqual({ glyphs: "←", shortcuts: "ArrowLeft" });
+    expect(pageKeyHint("next", false, false)).toEqual({ glyphs: "→", shortcuts: "ArrowRight" });
+    expect(pageKeyHint("prev", true, false)).toEqual({
+      glyphs: "← or ↑",
+      shortcuts: "ArrowLeft ArrowUp",
+    });
+    expect(pageKeyHint("next", true, false)).toEqual({
+      glyphs: "→ or ↓",
+      shortcuts: "ArrowRight ArrowDown",
+    });
+  });
+
+  it("only names keys that page", () => {
+    for (const vertical of [false, true]) {
+      for (const nav of ["prev", "next"] as const) {
+        for (const k of pageKeyHint(nav, vertical, false).shortcuts.split(" ")) {
+          expect(calendarNavKey(key(k), false, vertical, false)).toBe(nav);
         }
       }
     }
