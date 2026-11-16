@@ -675,9 +675,10 @@ record and reads as off while the vault's other devices keep theirs, and the con
 device too; the store is the vault's, in use by its other accounts and machines. The join's one
 write is `adopt_mods::joiner_inherits_no_dev_mode`, run before the store is attached (so before
 the writer's open, which is where the first device to look would be handed the old row's "on"): a
-store with NO per-device record whose old `dev_mode` row says `"true"` is switched off for everyone
-(`devmode::drop_inherited_on_at_join`; the owner's device switches it on again), and any other
-store is not written; a failure refuses the join. **Only `mods/devmode.rs` names the old row**
+store with NO per-device record gets the empty one and its old `dev_mode` row turned off
+(`devmode::drop_inherited_on_at_join`; sealing it also closes a carry-over for an old row that only
+turns `"true"` later; the owner's device switches it on again), and a store that has a record is
+neither written nor locked (a plain read decides); a failure refuses the join. **Only `mods/devmode.rs` names the old row**
 (besides `settings.rs`'s and `commands_dev.rs`'s key lists): `only_devmode_names_the_old_dev_mode_row`
 fails the moment any other Rust code reads it. The copy is refused when the open store isn't the store the caller
 read its metadata and Markdown folder from (`snapshot_for_leaving`'s `Origin`: the vault id AND the
@@ -750,8 +751,12 @@ mods); it doesn't borrow this one's.
 ### I-34 · An unsigned mod installs and runs only while developer mode is on for this device, and only Rust says whether it is — **Held**
 
 Developer mode is "on for this device in this vault" (`mods::devmode`: the `mods_dev_devices`
-settings record, a list of device ids named by `data_dir/mods-device-id`), never a vault-wide
-switch, so a restore onto another machine, a joined shared vault or a copied database carries no
+settings record, a list of one-way `credential`s of the device ids named by
+`data_dir/mods-device-id`: **no raw device id is stored in any database row**, because anyone who
+can write the store, such as a hostile member of a shared vault, can read every row and would
+otherwise copy an id from one record (the Mods disclaimer's) into this one; the disclaimer's list
+holds a differently-separated value, `tab::device::credential`, and a record in the old raw form
+reads as off), never a vault-wide switch, so a restore onto another machine, a joined shared vault or a copied database carries no
 "on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
 or writes it: the old webview-written `dev_mode` row is out of the page's allow-list, read once to
 carry an old "on" over to the first device that asks (and no other), and turned off by the restore

@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The Mods disclaimer's record (spec §1.13, plan decision 7): accepted once, but per device AND per
-//! vault. The vault half is a `settings` row listing the device ids that accepted it in this vault
+//! vault. The vault half is a `settings` row listing the devices that accepted it in this vault
 //! ([`store::SETTING_DISCLAIMER`]); the device half is [`super::device::device_id`]. A person is
-//! asked again on a new machine (its id isn't in the list, even when the database was restored
+//! asked again on a new machine (it isn't in the list, even when the database was restored
 //! there), and again in a vault they join or restore (its list has never heard of this device).
+//!
+//! **The list holds [`credential`]s, not device ids**: the raw id is kept out of every row (see
+//! `device.rs`), so a reader of a shared store can't lift it from here and write a "developer mode
+//! on" entry for that device. This record's value is made under its own domain, so one copied
+//! from developer mode's record isn't an acceptance either. A record in the old raw form names
+//! nobody (people are asked again).
 //!
 //! The first-open "Turn on" of an auto-installed pilot counts as accepting (D17): its consent
 //! writes the same record in the same transaction ([`record`]).
@@ -17,12 +23,21 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use super::device;
 use crate::mods::store;
 
 /// Most devices one vault remembers.
 pub const MAX_DEVICES: usize = 32;
 
 const FORMAT: u32 = 1;
+
+/// The domain this record's [`credential`]s are made under (developer mode's differs).
+const CREDENTIAL_DOMAIN: &str = "pm-mods-disclaimer-v1";
+
+/// What the record holds for `device` in place of its id (module doc).
+pub fn credential(device: &str) -> String {
+    device::credential(CREDENTIAL_DOMAIN, device)
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,17 +55,17 @@ fn devices_of(stored: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether `device` accepted, by the stored record (pure).
-pub fn accepted(stored: Option<&str>, device: &str) -> bool {
-    devices_of(stored).iter().any(|d| d == device)
+/// Whether the device whose [`credential`] this is accepted, by the stored record (pure).
+pub fn accepted(stored: Option<&str>, credential: &str) -> bool {
+    devices_of(stored).iter().any(|d| d == credential)
 }
 
-/// The record with `device` added: at the end (newest last), once, and no longer than
-/// [`MAX_DEVICES`] (pure).
-pub fn with_device(stored: Option<&str>, device: &str) -> String {
+/// The record with the device whose [`credential`] this is added: at the end (newest last), once,
+/// and no longer than [`MAX_DEVICES`] (pure).
+pub fn with_device(stored: Option<&str>, credential: &str) -> String {
     let mut devices = devices_of(stored);
-    devices.retain(|d| d != device);
-    devices.push(device.to_owned());
+    devices.retain(|d| d != credential);
+    devices.push(credential.to_owned());
     let over = devices.len().saturating_sub(MAX_DEVICES);
     devices.drain(..over);
     serde_json::to_string(&Record { v: FORMAT, devices }).unwrap_or_default()
@@ -67,14 +82,14 @@ fn read(conn: &Connection) -> rusqlite::Result<Option<String>> {
 
 /// Whether `device` has accepted the disclaimer in this vault.
 pub fn is_accepted(conn: &Connection, device: &str) -> rusqlite::Result<bool> {
-    Ok(accepted(read(conn)?.as_deref(), device))
+    Ok(accepted(read(conn)?.as_deref(), &credential(device)))
 }
 
 /// Record that `device` accepted, in this vault. Read and written in the caller's step (a
 /// transaction, for the consent that counts as accepting), so two devices of a shared vault
 /// accepting together don't lose one another's answer.
 pub fn record(conn: &Connection, device: &str) -> rusqlite::Result<()> {
-    let next = with_device(read(conn)?.as_deref(), device);
+    let next = with_device(read(conn)?.as_deref(), &credential(device));
     conn.execute(
         "INSERT INTO settings(key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -141,6 +156,34 @@ mod tests {
         assert_eq!(kept.first(), Some(&ids[3]));
         assert_eq!(kept.last(), ids.last());
         assert!(!accepted(stored.as_deref(), &ids[0]));
+    }
+
+    #[test]
+    fn the_record_holds_a_credential_so_neither_the_raw_id_nor_developer_modes_value_accepts() {
+        let conn = store();
+        record(&conn, A).unwrap();
+        let stored = read(&conn).unwrap().unwrap();
+        assert!(
+            !stored.contains(A),
+            "the raw id is not in the row: {stored}"
+        );
+        assert!(stored.contains(&credential(A)));
+        for lookalike in [A.to_owned(), crate::mods::devmode::credential(A)] {
+            let forged = format!(r#"{{"v":1,"devices":["{lookalike}"]}}"#);
+            assert!(!accepted(Some(&forged), &credential(A)), "{lookalike}");
+        }
+        // And through the store: a record naming the raw id is nobody's acceptance.
+        let other = store();
+        other
+            .execute(
+                "INSERT INTO settings(key, value) VALUES (?1, ?2)",
+                params![
+                    store::SETTING_DISCLAIMER,
+                    format!(r#"{{"v":1,"devices":["{A}"]}}"#)
+                ],
+            )
+            .unwrap();
+        assert!(!is_accepted(&other, A).unwrap());
     }
 
     #[test]

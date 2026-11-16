@@ -8,8 +8,11 @@
 //! So this is a random 128-bit id in `data_dir/mods-device-id`, minted by the first call and kept
 //! for the life of the data folder. It is outside the database on purpose, so that nothing which
 //! copies the database (a backup, a restore, a shared vault) can carry one machine's answer to
-//! another. A "Remove PM completely" takes it with the folder; "Remove PM data" for one vault
-//! leaves it, since the device is still the same device.
+//! another. **It never goes into a row either**: the per-device records (the disclaimer's,
+//! developer mode's) hold a [`credential`] of it, a different one-way value for each, so reading
+//! one record gives nothing that works in another, and never the id itself. A "Remove PM
+//! completely" takes it with the folder; "Remove PM data" for one vault leaves it, since the
+//! device is still the same device.
 //!
 //! **Fails toward asking.** A file that is missing or isn't the shape PM writes (a hand edit, a
 //! half-written copy) is replaced with a fresh id, so the device then reads as a new one: the
@@ -21,6 +24,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use sha2::{Digest, Sha256};
+
 use crate::mods::disk;
 
 /// The file's name in `data_dir`.
@@ -28,6 +33,21 @@ pub const DEVICE_FILE: &str = "mods-device-id";
 
 /// An id is 32 lowercase hex digits: 128 random bits.
 const ID_LEN: usize = 32;
+
+/// What a database row may hold in place of this device's id: the hex SHA-256 of
+/// `domain || 0x00 || device`. The raw id never goes into any row, because a shared vault's other
+/// members (and anything that writes a crafted copy of the store) can read every row: with the raw
+/// id in one, they could write it into another row that means something else (a developer-mode
+/// entry from a disclaimer's list). Each record uses its own `domain`, so a value read from one
+/// can't be replayed into another, and 128 random bits can't be recovered from the hash. A record
+/// written in the old raw form just doesn't match, which is the fail-toward-asking direction.
+pub fn credential(domain: &str, device: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(domain.as_bytes());
+    h.update([0u8]);
+    h.update(device.as_bytes());
+    hex::encode(h.finalize())
+}
 
 /// Reading, minting and replacing the file are one step at a time.
 static LOCK: Mutex<()> = Mutex::new(());
@@ -121,6 +141,23 @@ mod tests {
         ] {
             assert!(!is_device_id(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_credential_is_one_way_stable_and_different_for_each_record_and_device() {
+        let id = "ab".repeat(16);
+        let c = credential("pm-test-v1", &id);
+        assert_eq!(c.len(), 64);
+        assert!(!c.contains(&id), "the raw id is not in it");
+        assert_eq!(c, credential("pm-test-v1", &id));
+        assert_ne!(
+            c,
+            credential("pm-test-v2", &id),
+            "a record's value is its own"
+        );
+        assert_ne!(c, credential("pm-test-v1", &"cd".repeat(16)));
+        // The separator keeps `a || bc` and `ab || c` apart.
+        assert_ne!(credential("a", "bc"), credential("ab", "c"));
     }
 
     #[test]

@@ -71,11 +71,13 @@ fn switch_mcp_off(_conn: &Connection) -> Result<()> {
 
 /// A joiner's dev mode is off: it is per device (`mods::devmode`), so the device that has just
 /// joined has no entry in the shared store's record and reads as off, while the vault's other
-/// devices keep theirs. The one case that would break that is a store with no record yet whose old
-/// vault-wide row says `"true"`: the first device to look gets that "on" (`devmode::ensure`), and
-/// the joiner's device would be it. Then (and only then) this switches everyone off
-/// ([`devmode::drop_inherited_on_at_join`]; the owner's device switches it on again). Says whether
-/// it wrote. Every other store is not written at all.
+/// devices keep theirs. The one thing that would break that is a store with no record yet: the
+/// first device to look gets the old vault-wide row's "on" (`devmode::ensure`), and the joiner's
+/// device would be it, whether the old row says `"true"` now or only turns so later (a member on an
+/// earlier build writes it). So a store with no record gets the empty one, and the old row is
+/// turned off ([`devmode::drop_inherited_on_at_join`]; the owner's device switches it on again).
+/// Says whether it wrote. A store that has a record is not written at all, and no write lock is
+/// taken for it.
 ///
 /// Called by `commands::vaults::adopt_shared_vault` on the opened store BEFORE it is attached, so
 /// before the writer's open (`ledger::after_writer_open`) looks developer mode up. A failure
@@ -263,6 +265,16 @@ fn paused_note(reason: Option<&str>) -> Option<String> {
     match reason {
         Some(store::REASON_BLACKLIST) => Some("Paused by the safety list".into()),
         Some(store::REASON_BLACKLIST_REMOVED) => Some("Removed by the safety list".into()),
+        // Every restored unsigned mod that was running ends here (the restore turns developer mode
+        // off), so the card has to say what brings it back: the switch is Settings > Developer.
+        Some(store::REASON_DEV_MODE) => Some(
+            "Paused because developer mode is off on this computer. Switch it on in Settings, under Developer, to use it again"
+                .into(),
+        ),
+        Some(store::REASON_FROZEN) => Some(
+            "Paused because it stopped responding. Resume it from the Mods tab when you want to try it again"
+                .into(),
+        ),
         _ => None,
     }
 }
@@ -446,14 +458,26 @@ mod tests {
         assert!(!devmode::is_on(&conn, A).unwrap());
     }
 
-    /// Production code of a source file: everything before its test module, less comment lines.
+    /// Production code of a source file: everything before its test MODULE, less comment lines.
+    /// The cut is at a column-0 `#[cfg(test)]` whose item (past any further attributes) is a
+    /// `mod`, never at the first `#[cfg(test)]` of any kind: a file with an early test-only
+    /// function or `use` (`#[cfg(test)] pub fn installed_root`) would otherwise count everything
+    /// after it as test code and never be scanned.
     fn production(source: &str) -> String {
-        source
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap()
-            .lines()
+        let lines: Vec<&str> = source.lines().collect();
+        let cut = (0..lines.len())
+            .find(|&i| {
+                lines[i] == "#[cfg(test)]"
+                    && lines[i + 1..]
+                        .iter()
+                        .find(|l| !l.starts_with("#["))
+                        .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod "))
+            })
+            .unwrap_or(lines.len());
+        lines[..cut]
+            .iter()
             .filter(|l| !l.trim_start().starts_with("//"))
+            .copied()
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -583,6 +607,20 @@ mod tests {
             "// \"dev_mode\" is the old row\nfn f() {}\n#[cfg(test)]\nmod t { const K: &str = \"dev_mode\"; }".into(),
         ));
         assert!(readers_of_the_old_row(&files).is_empty());
+        // An early test-only item must not hide the production code after it (the first
+        // `#[cfg(test)]` of many files is a helper, not the test module).
+        files.push((
+            "mods/policy.rs".into(),
+            "#[cfg(test)]\npub fn helper() {}\n\nfn f() { get(\"dev_mode\"); }\n\n#[cfg(test)]\n#[allow(clippy::x)]\nmod tests {}\n".into(),
+        ));
+        assert_eq!(readers_of_the_old_row(&files), ["mods/policy.rs"]);
+        files.pop();
+        // ...and a read inside the test module itself is still not production.
+        files.push((
+            "mods/policy.rs".into(),
+            "#[cfg(test)]\nuse x::y;\nfn f() {}\n#[cfg(test)]\nmod tests { const K: &str = \"dev_mode\"; }\n".into(),
+        ));
+        assert!(readers_of_the_old_row(&files).is_empty());
     }
 
     fn row(signed: bool, state: &str, reason: Option<&str>) -> ModRow {
@@ -668,6 +706,24 @@ mod tests {
         assert_eq!(
             note("paused", Some("blacklist-removed")).note.as_deref(),
             Some("Removed by the safety list")
+        );
+        // An unsigned mod the restore left paused (it turns developer mode off), and one the
+        // frozen-page watchdog paused: each says what brings it back, not just "is paused".
+        let unsigned = describe(
+            &row(false, "paused", Some(store::REASON_DEV_MODE)),
+            Some(&not_loaded()),
+        );
+        assert_eq!(unsigned.standing, Standing::Paused);
+        let words = unsigned.note.unwrap();
+        assert!(words.contains("developer mode is off"), "{words}");
+        assert!(
+            words.contains("Settings") && words.contains("Developer"),
+            "{words}"
+        );
+        let frozen = note("paused", Some(store::REASON_FROZEN)).note.unwrap();
+        assert!(
+            frozen.contains("stopped responding") && frozen.contains("Resume"),
+            "{frozen}"
         );
         assert_eq!(note("installing", None).standing, Standing::Installing);
     }

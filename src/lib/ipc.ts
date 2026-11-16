@@ -322,8 +322,9 @@ export const setTimeZone = (zone: string) => invoke<void>("set_time_zone", { zon
 export const getPref = (key: string) => invoke<string | null>("get_pref", { key });
 
 /** Persist a UI preference blob. The backend only accepts a fixed allowlist of keys
- *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `pinboard`, `dev_mode`, `map`, `project_ui`,
- *  `milestone_ui`, `calendar_ui`, `backup_ui`), so this can't touch schema-critical settings. */
+ *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `pinboard`, `map`, `project_ui`, `milestone_ui`,
+ *  `calendar_ui`, `backup_ui`), so this can't touch schema-critical settings. Developer mode is
+ *  not one of them: it is Rust's alone, per device (`devModeState` / `devModeSwitch`). */
 export const setPref = (key: string, value: string) => invoke<void>("set_pref", { key, value });
 
 /** Ordered preferred chat models (first = primary). */

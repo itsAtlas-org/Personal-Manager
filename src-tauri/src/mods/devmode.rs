@@ -6,8 +6,17 @@
 //! mods (an unsigned file installs only while it is on, and an unsigned mod runs only while it is
 //! on), so it has to be something a restore onto another machine, a joined shared vault or a copied
 //! database can never carry in: the record lists the devices that switched it on
-//! ([`store::SETTING_DEV_DEVICES`]), named by [`super::tab::device::device_id`], and a device that
-//! isn't in the list is off whatever else the database says.
+//! ([`store::SETTING_DEV_DEVICES`]), and a device that isn't in the list is off whatever else the
+//! database says.
+//!
+//! **The list holds [`credential`]s, never device ids.** A device is named by
+//! [`super::tab::device::device_id`], and that id is kept out of every row (the file in `data_dir`
+//! is its only home): the list holds a domain-separated one-way value of it. Anyone who can write
+//! the store (a hostile member of a shared vault, a crafted copy) can read every row, so a raw id
+//! sitting in any of them (the disclaimer's list used to have one) would let them write a
+//! "developer mode on" entry for someone else's device and open the unsigned-install gate. The
+//! disclaimer's list holds a value of a different domain, so nothing read from it works here. A
+//! record in the old raw form names nobody (it reads as off).
 //!
 //! **Only Rust reads it.** The old boolean row (`dev_mode`) was a webview preference, which is why
 //! it can't be believed: it is no longer in the page's allow-list, and the answer the page shows is
@@ -31,11 +40,20 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::store;
+use super::tab::device;
 
 /// Most devices one vault remembers.
 pub const MAX_DEVICES: usize = 32;
 
 const FORMAT: u32 = 1;
+
+/// The domain this record's [`credential`]s are made under (the disclaimer's differs).
+const CREDENTIAL_DOMAIN: &str = "pm-mods-dev-mode-v1";
+
+/// What the record holds for `device` in place of its id (module doc).
+pub fn credential(device: &str) -> String {
+    device::credential(CREDENTIAL_DOMAIN, device)
+}
 
 /// The pre-per-device boolean row (`"true"`/`"false"`), once webview-written. Read once, to carry an
 /// old "on" over to the device that first reads it; never an authority after that
@@ -52,7 +70,7 @@ struct Record {
     devices: Vec<String>,
 }
 
-/// The devices a stored record names, or `None` when it isn't a record PM wrote (pure).
+/// The entries a stored record names, or `None` when it isn't a record PM wrote (pure).
 fn devices_of(stored: &str) -> Option<Vec<String>> {
     serde_json::from_str::<Record>(stored)
         .ok()
@@ -60,20 +78,21 @@ fn devices_of(stored: &str) -> Option<Vec<String>> {
         .map(|r| r.devices)
 }
 
-/// Whether `device` is on, by the stored record (pure). No record, or one that isn't ours, is off.
-pub fn on_by(stored: Option<&str>, device: &str) -> bool {
+/// Whether the device whose [`credential`] this is, is on, by the stored record (pure). No record,
+/// or one that isn't ours, is off.
+pub fn on_by(stored: Option<&str>, credential: &str) -> bool {
     stored
         .and_then(devices_of)
-        .is_some_and(|d| d.iter().any(|x| x == device))
+        .is_some_and(|d| d.iter().any(|x| x == credential))
 }
 
-/// The record with `device` switched on or off (pure): once in the list at most, newest last, no
-/// longer than [`MAX_DEVICES`]. A record that isn't ours is replaced.
-pub fn with_device(stored: Option<&str>, device: &str, on: bool) -> String {
+/// The record with the device whose [`credential`] this is switched on or off (pure): once in the
+/// list at most, newest last, no longer than [`MAX_DEVICES`]. A record that isn't ours is replaced.
+pub fn with_device(stored: Option<&str>, credential: &str, on: bool) -> String {
     let mut devices = stored.and_then(devices_of).unwrap_or_default();
-    devices.retain(|d| d != device);
+    devices.retain(|d| d != credential);
     if on {
-        devices.push(device.to_owned());
+        devices.push(credential.to_owned());
     }
     let over = devices.len().saturating_sub(MAX_DEVICES);
     devices.drain(..over);
@@ -82,8 +101,8 @@ pub fn with_device(stored: Option<&str>, device: &str, on: bool) -> String {
 
 /// The record a vault with none gets when its first device asks, from the old boolean row (pure):
 /// that device alone is on when the old row said `"true"`, and nobody is otherwise.
-pub fn migrated(legacy: Option<&str>, device: &str) -> String {
-    with_device(None, device, legacy == Some("true"))
+pub fn migrated(legacy: Option<&str>, credential: &str) -> String {
+    with_device(None, credential, legacy == Some("true"))
 }
 
 /// The record that switches every device off.
@@ -101,7 +120,7 @@ fn read(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
 /// Make sure the vault has its record, carrying the old row's meaning over to `device` when it has
 /// none (module doc). One statement, so two devices asking together can't both write: the first
 /// record stands, and each then reads it.
-fn ensure(conn: &Connection, device: &str) -> rusqlite::Result<()> {
+fn ensure(conn: &Connection, credential: &str) -> rusqlite::Result<()> {
     if read(conn, store::SETTING_DEV_DEVICES)?.is_some() {
         return Ok(());
     }
@@ -110,19 +129,20 @@ fn ensure(conn: &Connection, device: &str) -> rusqlite::Result<()> {
         "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)",
         params![
             store::SETTING_DEV_DEVICES,
-            migrated(legacy.as_deref(), device)
+            migrated(legacy.as_deref(), credential)
         ],
     )?;
     Ok(())
 }
 
-/// Whether developer mode is on for `device` in this vault. The first read of a vault with no
-/// record writes it ([`ensure`]).
+/// Whether developer mode is on for `device` (its id, from [`super::tab::device::device_id`]) in
+/// this vault. The first read of a vault with no record writes it ([`ensure`]).
 pub fn is_on(conn: &Connection, device: &str) -> rusqlite::Result<bool> {
-    ensure(conn, device)?;
+    let credential = credential(device);
+    ensure(conn, &credential)?;
     Ok(on_by(
         read(conn, store::SETTING_DEV_DEVICES)?.as_deref(),
-        device,
+        &credential,
     ))
 }
 
@@ -130,11 +150,12 @@ pub fn is_on(conn: &Connection, device: &str) -> rusqlite::Result<bool> {
 /// is now. Other devices' entries are untouched. This writes the record only: the ledger's
 /// `set_dev_mode_for_device` is the one function that also pauses or resumes the unsigned mods.
 pub fn write(conn: &mut Connection, device: &str, on: bool) -> rusqlite::Result<bool> {
+    let credential = credential(device);
     let tx = conn.transaction()?;
-    ensure(&tx, device)?;
+    ensure(&tx, &credential)?;
     let next = with_device(
         read(&tx, store::SETTING_DEV_DEVICES)?.as_deref(),
-        device,
+        &credential,
         on,
     );
     tx.execute(
@@ -143,7 +164,7 @@ pub fn write(conn: &mut Connection, device: &str, on: bool) -> rusqlite::Result<
         params![store::SETTING_DEV_DEVICES, next],
     )?;
     tx.commit()?;
-    Ok(on_by(Some(&next), device))
+    Ok(on_by(Some(&next), &credential))
 }
 
 /// Switch developer mode off for every device in this vault (the restore reset: §1.11 says a restore
@@ -153,7 +174,7 @@ pub fn write(conn: &mut Connection, device: &str, on: bool) -> rusqlite::Result<
 /// record first and pauses an active unsigned row with the reason `dev-mode`).
 ///
 /// Called by the restore commit (`backup::adopt_mods::reset_for_adopt`, inside its transaction) and
-/// by a join that would inherit an old "on" ([`drop_inherited_on_at_join`]).
+/// by a join of a store with no record ([`drop_inherited_on_at_join`]).
 pub fn all_devices_off(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO settings(key, value) VALUES (?1, ?2) \
@@ -167,26 +188,31 @@ pub fn all_devices_off(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// A shared-vault join's one write (§1.15, decided 2026-11-12): when the joined store has no record
-/// yet and its old row says `"true"`, the carry-over in [`ensure`] would hand that "on" to the
-/// joiner's device, which never chose it, so everyone is switched off first ([`all_devices_off`];
-/// the owner's device switches it on again, which is the fail-safe direction). Any other store is
-/// left exactly as it is: with a record, the old row is never read and the joiner has no entry;
-/// with no record and no old "on", the carry-over gives nobody anything. Check and write are one
-/// immediate transaction, so a record another machine writes meanwhile is never overwritten.
+/// A shared-vault join's one write (§1.15, decided 2026-11-12): a joined store with no record gets
+/// the empty one (nobody on) and its old row turned off if it says `"true"`. Without that, the
+/// carry-over in [`ensure`] would hand an old "on" to the joiner's device, which never chose it, and
+/// would stay armed for a store whose old row only turns `"true"` later (a member on an earlier
+/// build writing it) once this device takes over as the writer. Sealing the record closes the
+/// carry-over for good; the owner's device switches theirs on again, which is the fail-safe
+/// direction. A store that already has a record is never touched: the old row is never read, the
+/// joiner has no entry, and **no write lock is taken** (a plain read decides), so a busy writer
+/// can't make the join fail. Only a store with no record opens the immediate transaction, and
+/// re-checks inside it, so a record another machine writes meanwhile is never overwritten.
 /// Says whether it wrote.
 ///
 /// Must run on the joined store before anything on the joiner reads developer mode (the writer's
 /// open: [`is_on`] is what writes the record).
 pub fn drop_inherited_on_at_join(conn: &Connection) -> rusqlite::Result<bool> {
+    if read(conn, store::SETTING_DEV_DEVICES)?.is_some() {
+        return Ok(false);
+    }
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let inherited = read(&tx, store::SETTING_DEV_DEVICES)?.is_none()
-        && read(&tx, LEGACY_ROW)?.as_deref() == Some("true");
-    if inherited {
+    let sealed = read(&tx, store::SETTING_DEV_DEVICES)?.is_none();
+    if sealed {
         all_devices_off(&tx)?;
     }
     tx.commit()?;
-    Ok(inherited)
+    Ok(sealed)
 }
 
 #[cfg(test)]
@@ -367,20 +393,89 @@ mod tests {
     }
 
     #[test]
-    fn a_join_of_a_store_with_nothing_to_inherit_writes_nothing() {
+    fn a_join_of_a_store_with_no_record_and_no_old_on_still_seals_an_empty_record() {
+        // Sealed, not left armed: an old row that only turns "true" later (a member on an earlier
+        // build writes it) must not be carried to the joiner's device when it becomes the writer.
         for legacy in [None, Some("false"), Some("TRUE"), Some("")] {
             let conn = store();
             if let Some(v) = legacy {
                 set_raw(&conn, LEGACY_ROW, v);
             }
-            assert!(!drop_inherited_on_at_join(&conn).unwrap(), "{legacy:?}");
+            assert!(drop_inherited_on_at_join(&conn).unwrap(), "{legacy:?}");
+            let stored = read(&conn, store::SETTING_DEV_DEVICES).unwrap();
             assert_eq!(
-                read(&conn, store::SETTING_DEV_DEVICES).unwrap(),
-                None,
-                "{legacy:?}: no record is invented"
+                devices_of(stored.as_deref().expect("the empty record")).unwrap(),
+                Vec::<String>::new(),
+                "{legacy:?}"
             );
-            assert_eq!(read(&conn, LEGACY_ROW).unwrap().as_deref(), legacy);
+            // An old row that was absent is not invented.
+            if legacy.is_none() {
+                assert_eq!(read(&conn, LEGACY_ROW).unwrap(), None);
+            }
+            // Nobody is on, and the late old "true" is never read.
+            set_raw(&conn, LEGACY_ROW, "true");
+            assert!(!is_on(&conn, A).unwrap(), "{legacy:?}");
         }
+    }
+
+    #[test]
+    fn a_join_of_a_store_that_has_a_record_never_waits_for_the_writers_lock() {
+        // One file, two connections: the active writer is mid-transaction, holding the write lock.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pm.sqlite");
+        let key = "00".repeat(32);
+        let mut writer = crate::db::open(&path, &key).unwrap();
+        write(&mut writer, B, true).unwrap();
+        let joiner = crate::db::open(&path, &key).unwrap();
+        joiner
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // A plain read decides: nothing to write, so the lock is never asked for.
+        assert!(!drop_inherited_on_at_join(&joiner).unwrap());
+        writer.execute_batch("COMMIT").unwrap();
+        assert!(is_on(&joiner, B).unwrap() && !is_on(&joiner, A).unwrap());
+    }
+
+    #[test]
+    fn a_device_id_in_either_record_in_its_raw_form_is_not_a_switch() {
+        // What a hostile member can do: read the id from the disclaimer's list and write it into
+        // the developer-mode record. Both records name the RAW id here.
+        let conn = store();
+        let raw = format!(r#"{{"v":1,"devices":["{A}"]}}"#);
+        set_raw(&conn, store::SETTING_DISCLAIMER, &raw);
+        set_raw(&conn, store::SETTING_DEV_DEVICES, &raw);
+        assert!(!is_on(&conn, A).unwrap());
+        assert!(!crate::mods::tab::disclaimer::is_accepted(&conn, A).unwrap());
+    }
+
+    #[test]
+    fn no_row_of_the_store_holds_the_raw_device_id_and_one_records_value_is_not_anothers() {
+        let mut conn = store();
+        crate::mods::tab::disclaimer::record(&conn, A).unwrap();
+        assert!(write(&mut conn, A, true).unwrap());
+        let rows: Vec<String> = conn
+            .prepare("SELECT key || '=' || value FROM settings")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(rows.iter().any(|r| r.contains(store::SETTING_DISCLAIMER)));
+        assert!(
+            rows.iter().all(|r| !r.contains(A)),
+            "the raw id is in a row: {rows:?}"
+        );
+        // The value the disclaimer keeps for this device, written into the developer-mode record
+        // for another device's switch, switches nothing on.
+        let theirs = read(&conn, store::SETTING_DISCLAIMER).unwrap().unwrap();
+        assert_ne!(
+            theirs,
+            read(&conn, store::SETTING_DEV_DEVICES).unwrap().unwrap()
+        );
+        let fresh = store();
+        set_raw(&fresh, store::SETTING_DEV_DEVICES, &theirs);
+        assert!(!is_on(&fresh, A).unwrap());
     }
 
     #[test]
