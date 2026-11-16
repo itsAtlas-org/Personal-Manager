@@ -112,7 +112,6 @@ pub enum Delivery {
 
 /// An outbox's counters: what the Developer tab (slice 6) shows per session, and what tests read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(not(test), allow(dead_code))] // the Developer tab (slice 6)
 pub struct Stats {
     pub sent: u64,
     pub acked: u64,
@@ -209,7 +208,6 @@ impl Outbox {
         self.lock().sink = None;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // the Developer tab (slice 6)
     pub fn stats(&self) -> Stats {
         let state = self.lock();
         Stats {

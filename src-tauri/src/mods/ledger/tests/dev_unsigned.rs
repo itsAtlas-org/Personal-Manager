@@ -447,6 +447,37 @@ fn a_reinstall_keeps_what_the_mod_stored() {
     assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 2);
 }
 
+/// Another author or repository claiming the id would be served the first one's stored data: the
+/// install is refused before anything is written, in the preview and in the install.
+#[test]
+fn a_reinstall_from_another_maker_is_refused_and_inherits_nothing() {
+    for (field, value) in [("author", "Mallory"), ("sourceRepo", "mallory/tool")] {
+        let w = world();
+        dev_on(&w);
+        install_file(&w, &plain(), None).unwrap();
+        seed_what_an_install_made(&w);
+        let first_id = install_id(&w);
+        let hostile = file(|m, _| m["publisher"][field] = json!(value));
+        let pkg = package::verify_unsigned(&hostile).unwrap();
+        let preview = w
+            .ledger()
+            .preview_unsigned(&pkg, &sha(&hostile), &uopts(None));
+        assert!(
+            matches!(preview, Err(LedgerError::Refused(Refusal::MakerChanged))),
+            "{field}: {preview:?}"
+        );
+        assert_eq!(
+            refusal(install_file(&w, &hostile, None)),
+            Refusal::MakerChanged,
+            "{field}"
+        );
+        assert_eq!(install_id(&w), first_id, "{field}: the row is as it was");
+        assert_eq!(w.sql::<String>("SELECT author FROM mods"), "Acme");
+        assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 2, "{field}");
+        assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_secrets"), 1);
+    }
+}
+
 #[test]
 fn a_reinstall_serves_the_new_files_and_tells_the_old_frame_to_reload() {
     let (w, _, rec, changed) = reinstalled();
@@ -862,8 +893,8 @@ fn a_token_made_for_one_kind_of_file_never_finishes_as_the_other() {
     let stage = Stage::default();
     let t = Instant::now();
     let (_, unsigned_staged) = prepare(&w, plain(), true).unwrap();
-    let token = stage.put(unsigned_staged, t).unwrap();
-    let back = stage.take(&token, t).unwrap();
+    let token = stage.put(unsigned_staged, t, 0).unwrap();
+    let back = stage.take(&token, t, 0).unwrap();
     assert_eq!(back.trust, Trust::Unsigned);
     // The signed finish refuses it.
     let (_, key) = pkg("1.0.0", |_| {});

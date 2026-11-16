@@ -293,7 +293,7 @@ pub fn icon_path(icon: Option<&str>, files_json: &str) -> Option<String> {
     (listed["size"].as_u64()? <= ICON_CAP).then(|| icon.to_owned())
 }
 
-fn class_word(c: Class) -> &'static str {
+pub(super) fn class_word(c: Class) -> &'static str {
     match c {
         Class::Local => "local",
         Class::Read => "read",

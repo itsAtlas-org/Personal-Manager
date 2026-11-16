@@ -243,6 +243,66 @@ export interface DevModeState {
   problem: string | null;
 }
 
+/** One row of the dispatch table, as `devKitInfo` lists it. */
+export interface KitEndpoint {
+  name: string;
+  /** A frame asks (`call`) or PM tells a frame (`event`). */
+  kind: "call" | "event";
+  /** The permission it needs; null for what any session has. */
+  permission: string | null;
+  class: PermissionClass;
+  /** `M.m` the API version it arrived in, was deprecated in, or was removed in. */
+  added: string;
+  deprecated: string | null;
+  removed: string | null;
+  /** Outside the API freeze (D13): may change in a minor. */
+  experimental: boolean;
+}
+
+/** The build-time limits, in the units their names say. */
+export interface KitLimits {
+  callsPerSecond: number;
+  callBurst: number;
+  maxInFlight: number;
+  maxArgsBytes: number;
+  maxResultBytes: number;
+  maxBinaryResultBytes: number;
+  maxDocsPerCall: number;
+  storageQuotaBytes: number;
+  storageGrowthPerSecond: number;
+  storageGrowthBurst: number;
+  eventWindow: number;
+  maxEventBytes: number;
+  maxIdsPerEvent: number;
+  eventCoalesceMs: number;
+  maxPendingIds: number;
+}
+
+/** What `devKitInfo` answers: the Developer kit's rail sections. */
+export interface DevKitInfo {
+  api: {
+    /** `M.m`, the mod API this PM serves. */
+    version: string;
+    /** The oldest major still served: the deprecation window's far end. */
+    oldestMajor: number;
+    /** The window, in words. */
+    window: string;
+    /** Names of the methods and events outside the API freeze. */
+    experimental: string[];
+  };
+  endpoints: KitEndpoint[];
+  limits: KitLimits;
+  engine: {
+    sealed: boolean;
+    /** Why it isn't sealed, one sentence each. */
+    unsealedReasons: string[];
+    /** Connections that reached the sinkhole since launch. */
+    sinkholeAttempts: number;
+  };
+  /** Each mounted frame's event counters. */
+  sessions: { modId: string; sent: number; acked: number; dropped: number; closed: boolean }[];
+}
+
 /** What `devModeSwitch` did: developer mode now, and which unsigned mods it paused or resumed, and
  *  which test folders it unloaded (switching off ends every one: they last only for the session). */
 export interface DevSwitch {

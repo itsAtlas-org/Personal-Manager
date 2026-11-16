@@ -79,7 +79,7 @@ pub const GRANTS_CHANGED: &str = "grants.changed";
 
 /// Every event this PM sends: a table row each (a test holds the two together), and the names the
 /// page lets through to a frame (`modBridge.ts`'s `MOD_EVENTS`, pinned by a test).
-#[cfg_attr(not(test), allow(dead_code))] // the coverage tests, and the Developer tab (slice 6)
+#[cfg_attr(not(test), allow(dead_code))] // the coverage tests (the Developer tab reads the table's rows, not this list)
 pub const EVENTS: &[&str] = &[
     DOCUMENTS_ADDED,
     DOCUMENTS_DELETED,

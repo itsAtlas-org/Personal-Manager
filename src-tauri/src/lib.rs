@@ -2141,6 +2141,8 @@ pub fn run() {
             mods::tab::dev_commands::dev_mode_state,
             mods::tab::dev_commands::dev_mode_switch,
             mods::tab::dev_commands::install_unsigned_file,
+            // The Developer kit's readouts (API version, endpoints, limits, engine seal): read-only.
+            mods::tab::kit::dev_kit_info,
             // Developer test folders (Mods slice 6, part 4): load (the stark screen's first step;
             // the second is `install_mod_consented`), reload, unload, and what is loaded.
             mods::tab::folder::load_test_mod,

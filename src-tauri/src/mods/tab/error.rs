@@ -257,6 +257,7 @@ pub(crate) mod tests {
             Refusal::RemovedPending,
             Refusal::NothingToUpdate,
             Refusal::OtherInstallHoldsId,
+            Refusal::MakerChanged,
             Refusal::Tier("nope".into()),
             Refusal::Path(PathRefusal::Version("x".into())),
         ] {

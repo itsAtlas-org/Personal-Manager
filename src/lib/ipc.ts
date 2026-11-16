@@ -9,6 +9,7 @@ import type { RepairOutcome, VaultFault } from "./types";
 import type {
   Catalogue,
   ConsentScreen,
+  DevKitInfo,
   DevModeState,
   DevSwitch,
   InstallResult,
@@ -2300,6 +2301,12 @@ export const devModeState = () => invoke<DevModeState>("dev_mode_state");
 /** Switch developer mode for this device and wait for the write. Off pauses every unsigned mod, on
  *  resumes exactly those it paused. The answer is what it is now; a rejection means nothing changed. */
 export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch", { on });
+
+/** The Developer kit's readouts, all from Rust so the page keeps no copy that could drift: the API
+ *  version and its deprecation window, every row of the dispatch table, the build-time limits, the
+ *  web engine's seal, and each mounted frame's event counters. Read-only. Rejects `dev-mode-off`
+ *  while developer mode is off for this device. (The Test keys fields ship with `secrets.set`.) */
+export const devKitInfo = () => invoke<DevKitInfo>("dev_kit_info");
 
 /** Read the developer's unpacked folder at `path` (an absolute path) and return the stark screen,
  *  loading nothing: the same screen as `installUnsignedFile`'s, with `from: "folder"`, `tier: "third"`

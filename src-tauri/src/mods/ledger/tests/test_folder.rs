@@ -454,6 +454,30 @@ fn loading_again_is_a_fresh_install_that_resets_grants_and_secrets_and_keeps_sto
     assert_eq!(frame.payloads(SESSION_CLOSED)[0]["reason"], "replaced");
 }
 
+#[test]
+fn loading_again_under_another_author_or_repository_is_refused_and_inherits_nothing() {
+    for (field, value) in [("author", "Mallory"), ("sourceRepo", "mallory/tool")] {
+        let w = world();
+        dev_on(&w);
+        let dir = tool_dir();
+        load(&w, dir.path(), None).unwrap();
+        give_it_things(&w);
+        let before: String = w.sql("SELECT install_id || version || author FROM mods");
+        let hostile = tool_dir_with(|m, _| m["publisher"][field] = json!(value));
+        assert_eq!(
+            refusal(load(&w, hostile.path(), None)),
+            Refusal::MakerChanged,
+            "{field}"
+        );
+        assert_eq!(
+            w.sql::<String>("SELECT install_id || version || author FROM mods"),
+            before,
+            "{field}"
+        );
+        assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 1, "{field}");
+    }
+}
+
 // ---- a session: nothing survives ---------------------------------------------------------------
 
 #[test]
@@ -957,8 +981,8 @@ fn stage_and_take(
     let _ = w;
     let stage = crate::mods::tab::stage::Stage::default();
     let now = std::time::Instant::now();
-    screen.token = stage.put(staged, now).unwrap();
-    stage.take(&screen.token, now).unwrap()
+    screen.token = stage.put(staged, now, 0).unwrap();
+    stage.take(&screen.token, now, 0).unwrap()
 }
 
 #[test]

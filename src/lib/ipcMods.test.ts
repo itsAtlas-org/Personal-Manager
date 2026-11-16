@@ -61,6 +61,7 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
   ],
   ["devModeState", () => ipc.devModeState(), "dev_mode_state", undefined],
   ["devModeSwitch", () => ipc.devModeSwitch(true), "dev_mode_switch", { on: true }],
+  ["devKitInfo", () => ipc.devKitInfo(), "dev_kit_info", undefined],
   [
     "installFromCatalogue",
     () => ipc.installFromCatalogue("atlas.map"),

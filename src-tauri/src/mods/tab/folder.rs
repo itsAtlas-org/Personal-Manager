@@ -202,6 +202,8 @@ pub(super) fn finish_folder(
     decisions: &Answers,
     confirm_id: Option<&str>,
 ) -> Result<Finished> {
+    // Again, as at the screen: the index may have gone since (a reset of the record).
+    view.for_unsigned()?;
     let device = this_device(app)?;
     let env = UnsignedEnv {
         now: Utc::now(),
@@ -236,7 +238,7 @@ pub async fn load_test_mod(webview: Webview, path: String) -> Result<ConsentScre
             pathguard::sanitize_source(&path).map_err(|e| ModsError::bad_request(e.to_string()))?;
         let scan = folder::scan(&root, ALLOW_ATLAS_FOLDERS)?;
         let view = View::read(app)?;
-        view.for_install()?;
+        view.for_unsigned()?;
         let env = UnsignedEnv {
             now: Utc::now(),
             index: view.index(),

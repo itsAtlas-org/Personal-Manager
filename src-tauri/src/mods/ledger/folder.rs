@@ -161,9 +161,13 @@ impl<S: LedgerStore> Ledger<'_, S> {
         let manifest_text = manifest_text(scan)?;
         let (current, origin) =
             self.with_conn(|c| Ok((read_current(c, &m.id)?, read_origin(c, &m.id)?)))?;
+        let maker = (
+            m.publisher.author.as_str(),
+            m.publisher.source_repo.as_str(),
+        );
         match (&current, &origin) {
-            (Some(c), Some(o)) => policy::decide_folder(Some(held(o, c)))?,
-            _ => policy::decide_folder(None)?,
+            (Some(c), Some(o)) => policy::decide_folder(Some(held(o, c)), maker)?,
+            _ => policy::decide_folder(None, maker)?,
         };
         Ok(FChecked {
             manifest_text,
@@ -443,7 +447,7 @@ fn commit_folder(
         None => write_row(&tx, w, InstallKind::Fresh, None)?,
         Some(cur) => {
             let origin = read_origin(&tx, &id)?.ok_or(Refusal::Changed)?;
-            policy::decide_folder(Some(held(&origin, cur)))?;
+            policy::decide_folder(Some(held(&origin, cur)), (w.author, w.source_repo))?;
             // A fresh install id, grants and secrets reset, storage kept: the same as an unsigned
             // file over an earlier unsigned file, whose writer this is.
             reinstall(&tx, w, cur)?

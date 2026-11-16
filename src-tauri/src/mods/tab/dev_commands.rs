@@ -141,7 +141,7 @@ pub async fn install_unsigned_file(webview: Webview, path: String) -> Result<Con
         require_dev_mode(app, &device)?;
         let bytes = install::read_file(Path::new(&path))?;
         let view = View::read(app)?;
-        view.for_install()?;
+        view.for_unsigned()?;
         let env = UnsignedEnv {
             now: Utc::now(),
             index: view.index(),
@@ -165,6 +165,8 @@ pub(super) fn finish_unsigned(
     decisions: &Answers,
     confirm_id: Option<&str>,
 ) -> Result<Finished> {
+    // Again, as at the screen: the index may have gone since (a reset of the record).
+    view.for_unsigned()?;
     let device = this_device(app)?;
     let env = UnsignedEnv {
         now: Utc::now(),

@@ -234,13 +234,11 @@ impl EngineState {
     }
 
     /// Why the engine isn't sealed; empty when it is.
-    #[allow(dead_code)] // read by the Developer tab (Mods PR-1, part 6); the tests read it today
     pub fn unsealed_reasons(&self) -> Vec<String> {
         self.verdict().reasons
     }
 
     /// Connections that reached the sinkhole since launch.
-    #[allow(dead_code)] // read by the Developer tab (Mods PR-1, part 6); the tests read it today
     pub fn sinkhole_attempts(&self) -> u64 {
         self.sinkhole.as_ref().map_or(0, Sinkhole::attempts)
     }

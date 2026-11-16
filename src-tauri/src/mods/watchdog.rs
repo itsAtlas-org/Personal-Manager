@@ -135,6 +135,38 @@ impl Watch {
     }
 }
 
+/// How many times the page may be brought back after its renderer ended, within [`REVIVAL_WINDOW`].
+pub const MAX_REVIVALS: usize = 3;
+pub const REVIVAL_WINDOW: Duration = Duration::from_secs(60);
+
+/// A limit on bringing a dead renderer's page back (pure). A renderer that is killed again and again
+/// (memory pressure, a crashing GPU process) is not a mod's doing, `recover` blames nobody, and
+/// reloading it each time would loop for as long as the cause lasts. After [`MAX_REVIVALS`] within
+/// [`REVIVAL_WINDOW`] the dead page is left for the user. A refusal is not recorded, so it doesn't
+/// extend the window: one more try is allowed once the window has passed.
+#[derive(Debug, Default)]
+pub struct Revivals {
+    at: std::collections::VecDeque<Duration>,
+}
+
+impl Revivals {
+    /// Whether a reload may happen at `now` (a monotonic time), recording it if so.
+    pub fn allow(&mut self, now: Duration) -> bool {
+        while self
+            .at
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) >= REVIVAL_WINDOW)
+        {
+            self.at.pop_front();
+        }
+        if self.at.len() >= MAX_REVIVALS {
+            return false;
+        }
+        self.at.push_back(now);
+        true
+    }
+}
+
 /// The frame to blame (pure): the one that was last active (its last bridge call, or its opening),
 /// the most recently opened of those, then the smallest id, so the answer never depends on the order
 /// the registry lists them in. `None` when no frame is mounted.
@@ -157,6 +189,7 @@ pub fn culprit(frames: &[MountedFrame]) -> Option<ModId> {
 pub struct Watchdog {
     start: Instant,
     watch: Mutex<Watch>,
+    revivals: Mutex<Revivals>,
 }
 
 impl Default for Watchdog {
@@ -169,6 +202,7 @@ impl Default for Watchdog {
                 mono: Duration::ZERO,
                 wall,
             })),
+            revivals: Mutex::new(Revivals::default()),
         }
     }
 }
@@ -195,6 +229,16 @@ impl Watchdog {
     pub fn beat(&self, visible: bool) {
         let now = self.clock();
         self.lock().beat(now, visible);
+    }
+
+    /// Whether a dead renderer's page may be brought back now (see [`Revivals`]).
+    #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+    fn allow_revival(&self) -> bool {
+        let now = self.start.elapsed();
+        self.revivals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .allow(now)
     }
 
     fn tick(&self, mounted: bool, shown: bool, focused: bool) -> Verdict {
@@ -302,6 +346,14 @@ pub fn on_renderer_terminated(webview: &tauri::Webview) {
         return;
     }
     let app = webview.app_handle().clone();
+    // A limit, so a renderer that keeps dying is not reloaded in a loop (see [`Revivals`]).
+    if !app
+        .try_state::<Watchdog>()
+        .is_some_and(|d| d.allow_revival())
+    {
+        eprintln!("mods: the page's renderer ended again and again; the page is left for you");
+        return;
+    }
     tauri::async_runtime::spawn_blocking(move || recover(&app, "the page's renderer ended"));
 }
 
@@ -467,6 +519,44 @@ mod tests {
             assert_eq!(w.tick(at(s), true, true), Verdict::Fine, "{s}");
         }
         assert_eq!(w.tick(at(20), true, true), Verdict::Frozen);
+    }
+
+    #[test]
+    fn a_renderer_that_keeps_dying_is_revived_a_few_times_and_then_left_to_the_user() {
+        let s = Duration::from_secs;
+        let mut r = Revivals::default();
+        for i in 0..MAX_REVIVALS as u64 {
+            assert!(r.allow(s(i)), "revival {i}");
+        }
+        // The next death inside the window is not answered, however many come.
+        for t in 3..60 {
+            assert!(!r.allow(s(t)), "{t}");
+        }
+        // Refusals didn't extend the window: the first revival (at 0) has aged out at 60.
+        assert!(r.allow(s(60)));
+        assert!(r.allow(s(61)));
+        assert!(r.allow(s(62)));
+        assert!(!r.allow(s(63)));
+        // A burst long after another starts a fresh budget.
+        let mut r = Revivals::default();
+        for i in 0..MAX_REVIVALS as u64 {
+            assert!(r.allow(s(i)));
+        }
+        for i in 0..MAX_REVIVALS as u64 {
+            assert!(r.allow(s(1000 + i)), "{i}");
+        }
+        assert!(!r.allow(s(1003)));
+    }
+
+    #[test]
+    fn the_renderer_ended_handler_asks_the_limit_before_it_recovers() {
+        let source = include_str!("watchdog.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let body = production
+            .split("pub fn on_renderer_terminated")
+            .nth(1)
+            .unwrap();
+        assert!(body.find("allow_revival()").unwrap() < body.find("recover(").unwrap());
     }
 
     fn frame(id: &str, base: Instant, opened: u64, touched: u64) -> MountedFrame {

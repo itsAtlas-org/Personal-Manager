@@ -627,6 +627,24 @@ impl ModRuntime {
             .collect()
     }
 
+    /// Each live or loading session's event counters, by mod and then by what was sent (the
+    /// Developer tab's readout). The registry's lock is released before any outbox is asked, so the
+    /// two locks are never held together.
+    pub fn outbox_stats(&self) -> Vec<(ModId, super::outbox::Stats)> {
+        let outboxes: Vec<(ModId, Arc<Outbox>)> = self
+            .lock()
+            .sessions
+            .values()
+            .map(|s| (s.mod_id.clone(), Arc::clone(&s.outbox)))
+            .collect();
+        let mut stats: Vec<_> = outboxes
+            .into_iter()
+            .map(|(id, outbox)| (id, outbox.stats()))
+            .collect();
+        stats.sort_by(|a, b| (a.0.as_str(), a.1.sent).cmp(&(b.0.as_str(), b.1.sent)));
+        stats
+    }
+
     /// Whether any frame is live: the cheap question an emitter asks before it holds anything for one.
     pub fn any_live(&self) -> bool {
         self.lock()

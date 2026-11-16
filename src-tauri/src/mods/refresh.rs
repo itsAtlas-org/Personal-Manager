@@ -444,6 +444,18 @@ pub fn report_applied(app: &AppHandle, report: &ApplyReport) {
     if !report.notices.is_empty() {
         emit_changed(app, CHANGED_SAFETY);
     }
+    // A removed mod's runtime session is forgotten, which for a loaded test folder is the only
+    // thing that says its file watches (a hard inotify budget) are no longer wanted.
+    if removed_any(&report.notices) {
+        super::folder_watch::resync(app);
+    }
+}
+
+/// Whether a pass removed a mod (pure).
+fn removed_any(notices: &[ModNotice]) -> bool {
+    notices
+        .iter()
+        .any(|n| matches!(n, ModNotice::Removed { .. }))
 }
 
 /// Send the notices to the main window, the only one that draws strips.
@@ -578,6 +590,46 @@ mod tests {
     use std::sync::Mutex;
 
     const NOW: &str = "2027-01-15T00:00:00Z";
+
+    #[test]
+    fn only_a_removal_asks_for_the_test_folder_watches_to_be_brought_up_to_date() {
+        let notice = |removed| {
+            let (id, name, version, reason) =
+                ("acme.x".into(), "X".into(), "1.0.0".into(), "r".into());
+            if removed {
+                ModNotice::Removed {
+                    id,
+                    name,
+                    version,
+                    reason,
+                }
+            } else {
+                ModNotice::Paused {
+                    id,
+                    name,
+                    version,
+                    reason,
+                    fixed_in: None,
+                }
+            }
+        };
+        assert!(!removed_any(&[]));
+        assert!(!removed_any(&[notice(false)]));
+        assert!(removed_any(&[notice(false), notice(true)]));
+    }
+
+    #[test]
+    fn the_report_that_follows_a_blacklist_pass_resyncs_the_folder_watches_on_a_removal() {
+        // The call can't run without an app handle; the removal's resync is pinned in the source.
+        let src = include_str!("refresh.rs");
+        let body = src
+            .split("pub fn report_applied")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap();
+        assert!(body.contains("removed_any(&report.notices)"));
+        assert!(body.contains("folder_watch::resync(app)"));
+    }
 
     // ---- The schedule ---------------------------------------------------------------------------
 

@@ -22,6 +22,8 @@
 //!   judged before consent) and developer mode's commands (part 3 of slice 6).
 //! - [`folder`]: a developer's test folder, loaded for the session through the same stark screen
 //!   (part 4 of slice 6).
+//! - [`kit`]: the Developer kit's readouts (API version, endpoints from the dispatch table, limits,
+//!   the engine seal, the sessions' counters), one read-only command.
 //!
 //! The user's own pause, resume and first-open "Turn on" are the ledger's (`ledger/user.rs`): they
 //! change rows and the registry, so they live beside the other writers of both.
@@ -36,6 +38,7 @@ pub mod error;
 pub mod folder;
 pub mod icon;
 pub mod install;
+pub mod kit;
 pub mod listing;
 pub mod stage;
 pub mod status;

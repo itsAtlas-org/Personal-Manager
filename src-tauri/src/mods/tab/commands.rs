@@ -45,6 +45,7 @@ use crate::mods::api::events as mod_events;
 use crate::mods::api::grants;
 use crate::mods::api::Host;
 use crate::mods::fetch::{Endpoints, ReqwestTransport};
+use crate::mods::folder_watch;
 use crate::mods::ids::ModId;
 use crate::mods::index::Index;
 use crate::mods::index_state::{self, Loaded};
@@ -142,6 +143,14 @@ impl View {
         install_gate(&self.loaded)
     }
 
+    /// An unsigned file or a test folder needs the signed index itself, not only a record that isn't
+    /// broken: the catalogue's ids are the one thing that keeps such a file from squatting on a
+    /// second-party mod's id, and with no cached index nothing says which ids those are (and nothing
+    /// later re-judges the row once one arrives).
+    pub(super) fn for_unsigned(&self) -> Result<()> {
+        unsigned_gate(&self.loaded)
+    }
+
     fn env<'a>(&'a self, app: &AppHandle) -> Env<'a> {
         Env {
             now: Utc::now(),
@@ -162,6 +171,21 @@ pub fn install_gate(loaded: &Loaded) -> Result<()> {
             format!("PM can't install anything until its safety list record is mended: {why}."),
         )),
     }
+}
+
+/// Whether an unsigned file or a test folder may be prepared or finished on `loaded`'s record (pure):
+/// the signed install's gate, and a cached index to check the id and the blacklist against.
+pub fn unsigned_gate(loaded: &Loaded) -> Result<()> {
+    install_gate(loaded)?;
+    if loaded.index.is_none() {
+        return Err(ModsError::new(
+            Code::SafetyList,
+            "PM hasn't loaded its safety list on this computer yet, and it checks an unsigned mod's \
+             id against it. Try again once PM has fetched it (it does so on its own when you are \
+             online).",
+        ));
+    }
+    Ok(())
 }
 
 /// A ledger over the open store for a change to mods: the store folder is minted when `mint` says.
@@ -245,7 +269,11 @@ pub(super) fn with_token(
 ) -> Result<ConsentScreen> {
     let stage = app.state::<Stage>();
     screen.token = stage
-        .put(staged, Instant::now())
+        .put(
+            staged,
+            Instant::now(),
+            app.state::<AppState>().store_epoch(),
+        )
         .ok_or_else(|| ModsError::internal("no randomness for a consent token"))?;
     Ok(screen)
 }
@@ -285,7 +313,11 @@ pub async fn install_mod_consented(
     blocking(&webview, move |app| {
         let staged = app
             .state::<Stage>()
-            .take(&token, Instant::now())
+            .take(
+                &token,
+                Instant::now(),
+                app.state::<AppState>().store_epoch(),
+            )
             .ok_or_else(ModsError::consent_expired)?;
         let view = View::read(app)?;
         view.for_install()?;
@@ -481,6 +513,9 @@ pub async fn uninstall_mod(
     let id = parse_id(&mod_id)?;
     blocking(&webview, move |app| {
         let done = with_existing(app, |ledger| uninstall::run(ledger, &id, also_delete_gifts))?;
+        // A loaded test folder's session went with the row; its file watches (a hard inotify
+        // budget, `folder_watch`) are dropped here, since only a resync drops one.
+        folder_watch::resync(app);
         // The ledger pruned the mod's overlay out of the calendar's stored blob; every window's cache
         // would write it back with its next calendar write, so each is told to re-read it, under a
         // sender id no window owns (build log, slice 3 finding 7).
@@ -826,6 +861,54 @@ mod tests {
             let e = install_gate(&broken).unwrap_err();
             assert_eq!(e.code, Code::SafetyList);
             assert!(e.message.contains("record"), "{}", e.message);
+        }
+    }
+
+    #[test]
+    fn an_unsigned_file_or_folder_needs_the_cached_index_and_a_whole_record() {
+        use crate::mods::index::tests::{good_index, verified_by, Keys};
+        // A first run, or a machine that never fetched: the signed gate lets it through, this one
+        // doesn't, since no catalogue id is known to refuse.
+        assert!(install_gate(&Loaded::default()).is_ok());
+        let e = unsigned_gate(&Loaded::default()).unwrap_err();
+        assert_eq!(e.code, Code::SafetyList);
+        assert!(e.message.contains("safety list"), "{}", e.message);
+        // A broken record is refused as before.
+        let broken = Loaded {
+            fault: true,
+            problem: Some("is damaged".into()),
+            ..Loaded::default()
+        };
+        assert_eq!(unsigned_gate(&broken).unwrap_err().code, Code::SafetyList);
+        // With the index, it goes ahead.
+        let keys = Keys::new();
+        let with_index = Loaded {
+            index: Some(verified_by(&good_index(5), &keys.main, &keys)),
+            ..Loaded::default()
+        };
+        assert!(unsigned_gate(&with_index).is_ok());
+    }
+
+    #[test]
+    fn uninstalling_from_the_mods_tab_drops_a_test_folders_file_watches() {
+        let (_, body) = command_bodies()
+            .into_iter()
+            .find(|(name, _)| name == "uninstall_mod")
+            .unwrap();
+        assert!(body.contains("folder_watch::resync(app)"));
+        // After the ledger's uninstall, not before: the session is what the resync reads.
+        assert!(body.find("uninstall::run").unwrap() < body.find("folder_watch::resync").unwrap());
+    }
+
+    #[test]
+    fn the_unsigned_and_folder_paths_use_the_index_gate_not_the_signed_one() {
+        for (name, src) in [
+            ("dev_commands", include_str!("dev_commands.rs")),
+            ("folder", include_str!("folder.rs")),
+        ] {
+            let production = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+            assert!(production.contains("view.for_unsigned()?"), "{name}");
+            assert!(!production.contains("view.for_install()?"), "{name}");
         }
     }
 

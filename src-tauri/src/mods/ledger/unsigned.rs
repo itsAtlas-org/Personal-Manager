@@ -26,7 +26,10 @@
 //! `policy::made_it`), resets the grants and the secrets (the user re-approves on the stark screen
 //! again), and keeps the mod's own storage, its content included (I-16: never delete what the user
 //! kept without their say-so). The old version's folder is pruned after the row commits; the same
-//! version's folder is quarantined and put back if the install then fails.
+//! version's folder is quarantined and put back if the install then fails. Only from the SAME maker
+//! (the author and repository the stored row shows): the kept storage is the first maker's, and a
+//! file naming another author or repository would be served it, so that is refused
+//! ([`Refusal::MakerChanged`]) and the developer uninstalls first, choosing what happens to the data.
 //!
 //! D3 across the unsigned set is judged BEFORE the consent screen is offered and again before the
 //! install (`tab::unsigned`, `tab::consent::plan_unsigned`); this file is the ledger half.
@@ -83,16 +86,20 @@ struct UChecked {
 pub(super) struct Origin {
     signed: bool,
     installed_from: String,
+    author: String,
+    source_repo: String,
 }
 
 pub(super) fn read_origin(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Origin>> {
     conn.query_row(
-        "SELECT signed, installed_from FROM mods WHERE id = ?1",
+        "SELECT signed, installed_from, author, source_repo FROM mods WHERE id = ?1",
         [id.as_str()],
         |r| {
             Ok(Origin {
                 signed: r.get(0)?,
                 installed_from: r.get(1)?,
+                author: r.get(2)?,
+                source_repo: r.get(3)?,
             })
         },
     )
@@ -104,6 +111,8 @@ pub(super) fn held<'a>(origin: &'a Origin, current: &'a Current) -> HeldBy<'a> {
         signed: origin.signed,
         installed_from: &origin.installed_from,
         reason: current.reason.as_deref(),
+        author: &origin.author,
+        source_repo: &origin.source_repo,
     }
 }
 
@@ -167,9 +176,13 @@ impl<S: LedgerStore> Ledger<'_, S> {
             })?;
         let (current, origin) =
             self.with_conn(|c| Ok((read_current(c, &m.id)?, read_origin(c, &m.id)?)))?;
+        let maker = (
+            m.publisher.author.as_str(),
+            m.publisher.source_repo.as_str(),
+        );
         match (&current, &origin) {
-            (Some(c), Some(o)) => policy::decide_unsigned(Some(held(o, c)))?,
-            _ => policy::decide_unsigned(None)?,
+            (Some(c), Some(o)) => policy::decide_unsigned(Some(held(o, c)), maker)?,
+            _ => policy::decide_unsigned(None, maker)?,
         };
         Ok(UChecked {
             version,
@@ -272,7 +285,7 @@ pub(super) fn commit_unsigned(
         None => write_row(&tx, w, InstallKind::Fresh, None)?,
         Some(cur) => {
             let origin = read_origin(&tx, &id)?.ok_or(Refusal::Changed)?;
-            policy::decide_unsigned(Some(held(&origin, cur)))?;
+            policy::decide_unsigned(Some(held(&origin, cur)), (w.author, w.source_repo))?;
             reinstall(&tx, w, cur)?
         }
     };

@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use super::error::Result;
@@ -33,6 +33,7 @@ use super::listing;
 use crate::error::Error as AppError;
 use crate::mods::ids::ModId;
 use crate::mods::ledger::{Ledger, LedgerError, LedgerStore};
+use crate::mods::policy::{self, Maker};
 use crate::mods::store;
 
 /// Entries a folder walk looks at before it stops counting: a size for a dialog, never a hang.
@@ -114,11 +115,6 @@ pub fn document_prefix(id: &ModId) -> String {
     format!("mod:{id}:")
 }
 
-fn count(conn: &Connection, sql: &str, id: &str) -> rusqlite::Result<u64> {
-    conn.query_row(sql, [id], |r| r.get::<_, i64>(0))
-        .map(|n| n.max(0) as u64)
-}
-
 fn bytes(conn: &Connection, sql: &str, args: impl rusqlite::Params) -> rusqlite::Result<u64> {
     conn.query_row(sql, args, |r| r.get::<_, i64>(0))
         .map(|n| n.max(0) as u64)
@@ -164,23 +160,15 @@ fn read(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Stored>> {
         nav_tab: view.nav_tab,
         calendar_overlay: view.calendar_overlay,
     };
-    let prefix = document_prefix(id);
+    // The same selection the deletion makes, so the dialog's count is what "also delete" removes.
+    let gifts = match read_current(conn, id)? {
+        Some(current) => read_gifts(conn, id, &current)?,
+        None => Gifts::default(),
+    };
     let stays = Stays {
-        tasks: count(
-            conn,
-            "SELECT count(*) FROM mod_ledger WHERE mod_id = ?1 AND task_id IS NOT NULL",
-            id.as_str(),
-        )?,
-        milestones: count(
-            conn,
-            "SELECT count(*) FROM mod_ledger WHERE mod_id = ?1 AND milestone_id IS NOT NULL",
-            id.as_str(),
-        )?,
-        documents: bytes(
-            conn,
-            "SELECT count(*) FROM documents WHERE substr(source_id, 1, length(?1)) = ?1",
-            [prefix],
-        )?,
+        tasks: gifts.tasks.len() as u64,
+        milestones: gifts.milestones.len() as u64,
+        documents: gifts.documents.len() as u64,
     };
     Ok(Some(Stored {
         name,
@@ -252,33 +240,87 @@ pub struct Uninstalled {
     pub prune: Prune,
 }
 
-/// The ids of what `id` made, from the ledger that outlives its row.
+/// The ids of what the installed `id` made, from the ledger that outlives its row.
+#[derive(Default)]
 struct Gifts {
     tasks: Vec<i64>,
     milestones: Vec<i64>,
     documents: Vec<i64>,
 }
 
-fn read_gifts(conn: &Connection, id: &ModId) -> rusqlite::Result<Gifts> {
-    let ids = |sql: &str, arg: String| -> rusqlite::Result<Vec<i64>> {
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map([arg], |r| r.get::<_, i64>(0))?;
-        rows.collect()
-    };
-    Ok(Gifts {
-        tasks: ids(
-            "SELECT task_id FROM mod_ledger WHERE mod_id = ?1 AND task_id IS NOT NULL",
-            id.as_str().to_owned(),
-        )?,
-        milestones: ids(
-            "SELECT milestone_id FROM mod_ledger WHERE mod_id = ?1 AND milestone_id IS NOT NULL",
-            id.as_str().to_owned(),
-        )?,
-        documents: ids(
-            "SELECT id FROM documents WHERE substr(source_id, 1, length(?1)) = ?1",
-            document_prefix(id),
-        )?,
-    })
+/// The installed row as gifts are judged against it: who it is, and when the row was made.
+struct Current {
+    maker: Maker,
+    installed_at: String,
+}
+
+fn read_current(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Current>> {
+    conn.query_row(
+        "SELECT signed, tier, author, source_repo, install_id, installed_at FROM mods WHERE id = ?1",
+        [id.as_str()],
+        |r| {
+            Ok(Current {
+                maker: Maker {
+                    mod_id: id.as_str().to_owned(),
+                    signed: r.get(0)?,
+                    tier: r.get(1)?,
+                    author: r.get(2)?,
+                    source_repo: r.get(3)?,
+                    install_id: r.get(4)?,
+                },
+                installed_at: r.get(5)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// What `current` made, and not what an earlier, different mod that held the same id made and the
+/// user kept (I-16: "also delete what it made" is the say-so for THIS mod's things, not for
+/// everything that ever carried the id).
+/// - Tasks and milestones: the ledger rows `policy::made_it` says this install made (it names a
+///   maker by tier, author and repository for a signed mod, by install id for an unsigned one).
+/// - Documents carry no maker, only the `mod:<id>:` prefix, so they are bounded by when this row was
+///   made: a document ingested before it belongs to an earlier install of the id and stays. (A mod
+///   uninstalled and installed again therefore leaves its first life's documents for the user to
+///   delete by hand, the safe side of the doubt.)
+fn read_gifts(conn: &Connection, id: &ModId, current: &Current) -> rusqlite::Result<Gifts> {
+    let mut gifts = Gifts::default();
+    let mut stmt = conn.prepare(
+        "SELECT task_id, milestone_id, signed, tier, author, source_repo, install_id \
+         FROM mod_ledger WHERE mod_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([id.as_str()], |r| {
+        Ok((
+            r.get::<_, Option<i64>>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            Maker {
+                mod_id: id.as_str().to_owned(),
+                signed: r.get(2)?,
+                tier: r.get(3)?,
+                author: r.get(4)?,
+                source_repo: r.get(5)?,
+                install_id: r.get(6)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (task, milestone, maker) = row?;
+        if !policy::made_it(&maker, &current.maker) {
+            continue;
+        }
+        gifts.tasks.extend(task);
+        gifts.milestones.extend(milestone);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id FROM documents \
+         WHERE substr(source_id, 1, length(?1)) = ?1 AND ingested_at >= ?2 ORDER BY id",
+    )?;
+    let docs = stmt.query_map(params![document_prefix(id), current.installed_at], |r| {
+        r.get::<_, i64>(0)
+    })?;
+    gifts.documents = docs.collect::<rusqlite::Result<_>>()?;
+    Ok(gifts)
 }
 
 /// Delete one task the way the delete command does: the row, then a touch of its project.
@@ -308,11 +350,14 @@ fn delete_milestone(conn: &Connection, milestone: i64) -> crate::error::Result<(
     Ok(())
 }
 
-/// Delete the mod's gifts through PM's delete paths, one at a time, collecting how many went and
-/// the first failure. Blocking, on the store through the ledger's binding.
-fn delete_gifts<S: LedgerStore>(ledger: &Ledger<'_, S>, id: &ModId) -> GiftsDeleted {
+/// Delete the gifts read before the uninstall through PM's delete paths, one at a time, collecting
+/// how many went and the first failure. Blocking, on the store through the ledger's binding.
+fn delete_gifts<S: LedgerStore>(
+    ledger: &Ledger<'_, S>,
+    gifts: std::result::Result<Gifts, LedgerError>,
+) -> GiftsDeleted {
     let mut out = GiftsDeleted::default();
-    let gifts = match ledger.with_conn(|c| Ok(read_gifts(c, id)?)) {
+    let gifts = match gifts {
         Ok(g) => g,
         Err(e) => {
             out.problem = Some(e.to_string());
@@ -361,8 +406,18 @@ pub fn run<S: LedgerStore>(
     id: &ModId,
     also_delete_gifts: bool,
 ) -> Result<Uninstalled> {
+    // Read first: the row says whose gifts these are, and it is gone after the uninstall. A failed
+    // read is reported after the uninstall, which still goes ahead.
+    let gifts = also_delete_gifts.then(|| {
+        ledger.with_conn(|c| {
+            Ok(match read_current(c, id)? {
+                Some(current) => read_gifts(c, id, &current)?,
+                None => Gifts::default(),
+            })
+        })
+    });
     let done = ledger.uninstall(id)?;
-    let gifts_deleted = also_delete_gifts.then(|| delete_gifts(ledger, id));
+    let gifts_deleted = gifts.map(|g| delete_gifts(ledger, g));
     Ok(Uninstalled {
         id: id.as_str().to_owned(),
         files_removed: done.files_removed,

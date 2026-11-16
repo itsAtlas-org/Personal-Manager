@@ -588,9 +588,9 @@ fn the_catalogues_own_file_passes_decision_11_and_another_versions_listing_says_
 fn stage_and_take(staged: Staged) -> Staged {
     let stage = Stage::default();
     let t = Instant::now();
-    let token = stage.put(staged, t).unwrap();
+    let token = stage.put(staged, t, 0).unwrap();
     assert_eq!(token.len(), 32);
-    stage.take(&token, t).unwrap()
+    stage.take(&token, t, 0).unwrap()
 }
 
 #[test]
@@ -889,7 +889,13 @@ fn install_with_data(w: &World) {
          INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, milestone_id)
             SELECT 'atlas.map', 'Map', 'first', 'Atlas', 'r', 1, '0123456789abcdef', id FROM project_milestones;
          INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, task_id)
-            SELECT 'acme.other', 'Other', 'second', 'Acme', 'r', 1, '0123456789abcdef', id FROM tasks WHERE title = 'mine';",
+            SELECT 'acme.other', 'Other', 'second', 'Acme', 'r', 1, '0123456789abcdef', id FROM tasks WHERE title = 'mine';
+         -- The mod's own gifts name the installed row as their maker (a signed mod: its tier, author
+         -- and repository; the install id is unused for a signed maker but kept true).
+         UPDATE mod_ledger
+            SET source_repo = (SELECT source_repo FROM mods WHERE id = 'atlas.map'),
+                install_id = (SELECT install_id FROM mods WHERE id = 'atlas.map')
+          WHERE mod_id = 'atlas.map';",
     );
 }
 
@@ -1017,6 +1023,55 @@ fn an_uninstall_of_a_mod_that_is_not_installed_deletes_nothing_even_when_asked()
     assert_eq!(r.unwrap_err().code, Code::NotInstalled);
     assert_eq!(count(&w, "tasks"), 3);
     assert_eq!(w.rows(), 1);
+}
+
+/// What an earlier, different mod that held the same id made and the user kept is not this mod's:
+/// neither the dialog's count nor "also delete" reaches it (I-16).
+#[test]
+fn an_earlier_makers_gifts_under_the_same_id_are_neither_counted_nor_deleted() {
+    let w = world();
+    install_with_data(&w);
+    w.exec(
+        "INSERT INTO tasks(title, project_name) VALUES ('old maker task', 'Atlas'), ('old install task', 'Atlas'), ('other repo task', 'Atlas');
+         INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, task_id)
+            SELECT 'atlas.map', 'Map', 'first', 'Someone Else', 'itsAtlas-org/Personal-Manager', 1, '0123456789abcdef', id FROM tasks WHERE title = 'old maker task';
+         INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, task_id)
+            SELECT 'atlas.map', 'Map', 'first', 'Atlas', 'itsAtlas-org/Personal-Manager', 0, '0123456789abcdef', id FROM tasks WHERE title = 'old install task';
+         INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, install_id, task_id)
+            SELECT 'atlas.map', 'Map', 'first', 'Atlas', 'another/repo', 1, '0123456789abcdef', id FROM tasks WHERE title = 'other repo task';
+         INSERT INTO documents(vault_path, title, content_hash, source_id, ingested_at) VALUES
+            ('old.md', 'Old', 'h9', 'mod:atlas.map:old', '2000-01-01T00:00:00.000Z');",
+    );
+    let p = uninstall::preview(&w.ledger(), &id("atlas.map")).unwrap();
+    assert_eq!(
+        (p.stays.tasks, p.stays.milestones, p.stays.documents),
+        (2, 1, 2),
+        "an earlier maker's tasks and an earlier install's document don't count"
+    );
+    let done = uninstall::run(&w.ledger(), &id("atlas.map"), true).unwrap();
+    let gone = done.gifts_deleted.unwrap();
+    assert_eq!((gone.tasks, gone.milestones, gone.documents), (2, 1, 2));
+    let titles: Vec<String> = {
+        let c = w.store.conn.lock().unwrap();
+        let mut stmt = c.prepare("SELECT title FROM tasks ORDER BY title").unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        titles,
+        [
+            "mine",
+            "old install task",
+            "old maker task",
+            "other repo task"
+        ]
+    );
+    assert_eq!(
+        w.sql::<i64>("SELECT count(*) FROM documents WHERE source_id = 'mod:atlas.map:old'"),
+        1
+    );
 }
 
 // ---- the icon -----------------------------------------------------------------------------------------------------------

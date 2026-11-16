@@ -80,7 +80,6 @@ pub struct Pinned {
 
 /// Who made a gift, as its `mod_ledger` row keeps it, or who an installed mod is, as its `mods` row
 /// has it (v60).
-#[cfg_attr(not(test), allow(dead_code))] // slice 4's "only its own" check reads it
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Maker {
     pub mod_id: String,
@@ -98,7 +97,6 @@ pub struct Maker {
 /// any file can copy, so its gifts are that install's alone: the same install id, which a fresh
 /// install never keeps (§1.1: an unsigned file with the same id is a fresh install, its grants and
 /// secrets reset).
-#[cfg_attr(not(test), allow(dead_code))] // slice 4's "only its own" check calls it
 pub fn made_it(maker: &Maker, current: &Maker) -> bool {
     if maker.mod_id != current.mod_id || maker.signed != current.signed {
         return false;
@@ -178,6 +176,9 @@ pub enum Refusal {
     /// A test folder's reload whose manifest names another mod, author or repository: that is a
     /// different mod (or maker) than the one the user saw, so it is loaded as one.
     ReloadChangedId,
+    /// An unsigned file or test folder over an earlier one of the same id from another author or
+    /// repository: the install would inherit the first one's stored data. Uninstall it first.
+    MakerChanged,
 }
 
 impl fmt::Display for Refusal {
@@ -234,6 +235,10 @@ impl fmt::Display for Refusal {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::MakerChanged => f.write_str(
+                "an installed mod with this id names another author or repository, and it would \
+                 inherit what that mod stored: uninstall the installed one first",
+            ),
             Self::ReloadChangedId => f.write_str(
                 "its manifest names another mod, or another author or repository, than the one \
                  that was loaded: load the folder again",
@@ -260,13 +265,34 @@ pub struct HeldBy<'a> {
     pub signed: bool,
     pub installed_from: &'a str,
     pub reason: Option<&'a str>,
+    /// Who the row says made it (an unsigned file's own claim).
+    pub author: &'a str,
+    pub source_repo: &'a str,
+}
+
+/// Who a file or folder says made it: the author and repository its manifest names.
+pub type Claimed<'a> = (&'a str, &'a str);
+
+/// A reinstall keeps the mod's stored data (I-16), so it may only come from the maker that data
+/// belongs to: another author or repository claiming the id would be served the first one's private
+/// storage. The developer uninstalls first and chooses what happens to the data. Pure.
+fn same_maker(h: &HeldBy<'_>, maker: Claimed<'_>) -> Result<(), Refusal> {
+    if (h.author, h.source_repo) == maker {
+        Ok(())
+    } else {
+        Err(Refusal::MakerChanged)
+    }
 }
 
 /// An unsigned file against the row that holds its id: always a fresh install. With no row it is
-/// plain; over a row left by an earlier unsigned file it is a fresh install again (the caller mints a
-/// new install id and resets the grants and secrets, spec §1.1); over anything else it is refused.
-/// There is no version rule: a developer reinstalls the version they are working on. Pure.
-pub fn decide_unsigned(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal> {
+/// plain; over a row left by an earlier unsigned file of the same maker it is a fresh install again
+/// (the caller mints a new install id and resets the grants and secrets, spec §1.1); over anything
+/// else it is refused. There is no version rule: a developer reinstalls the version they are
+/// working on. Pure.
+pub fn decide_unsigned(
+    held: Option<HeldBy<'_>>,
+    maker: Claimed<'_>,
+) -> Result<InstallKind, Refusal> {
     let Some(h) = held else {
         return Ok(InstallKind::Fresh);
     };
@@ -276,6 +302,7 @@ pub fn decide_unsigned(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal>
     if h.signed || h.installed_from != store::FROM_FILE {
         return Err(Refusal::OtherInstallHoldsId);
     }
+    same_maker(&h, maker)?;
     // An earlier unsigned file's row: the install over it is a fresh one.
     Ok(InstallKind::Fresh)
 }
@@ -285,7 +312,7 @@ pub fn decide_unsigned(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal>
 /// loads the mod they are working on again: a fresh install id, grants and secrets reset, stored data
 /// kept for the session). Anything else is refused, so a folder can't take over a mod another source
 /// installed. Pure.
-pub fn decide_folder(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal> {
+pub fn decide_folder(held: Option<HeldBy<'_>>, maker: Claimed<'_>) -> Result<InstallKind, Refusal> {
     let Some(h) = held else {
         return Ok(InstallKind::Fresh);
     };
@@ -295,6 +322,7 @@ pub fn decide_folder(held: Option<HeldBy<'_>>) -> Result<InstallKind, Refusal> {
     if h.signed || h.installed_from != store::FROM_FOLDER {
         return Err(Refusal::OtherInstallHoldsId);
     }
+    same_maker(&h, maker)?;
     Ok(InstallKind::Fresh)
 }
 
@@ -869,13 +897,38 @@ mod tests {
     #[test]
     fn an_unsigned_file_is_always_a_fresh_install_and_only_over_its_own_kind_of_row() {
         let held = |signed, installed_from, reason| {
-            decide_unsigned(Some(HeldBy {
-                signed,
-                installed_from,
-                reason,
-            }))
+            decide_unsigned(
+                Some(HeldBy {
+                    signed,
+                    installed_from,
+                    reason,
+                    author: "Ann",
+                    source_repo: "ann/tool",
+                }),
+                ("Ann", "ann/tool"),
+            )
         };
-        assert_eq!(decide_unsigned(None), Ok(InstallKind::Fresh));
+        assert_eq!(
+            decide_unsigned(None, ("Ann", "ann/tool")),
+            Ok(InstallKind::Fresh)
+        );
+        // Another author or repository claiming the id would inherit what the first one stored.
+        for maker in [("Bob", "ann/tool"), ("Ann", "bob/tool"), ("", "")] {
+            assert_eq!(
+                decide_unsigned(
+                    Some(HeldBy {
+                        signed: false,
+                        installed_from: "file",
+                        reason: None,
+                        author: "Ann",
+                        source_repo: "ann/tool",
+                    }),
+                    maker
+                ),
+                Err(Refusal::MakerChanged),
+                "{maker:?}"
+            );
+        }
         // Over an earlier unsigned file install, whatever state it is in, and with any version.
         assert_eq!(held(false, "file", None), Ok(InstallKind::Fresh));
         assert_eq!(held(false, "file", Some("user")), Ok(InstallKind::Fresh));
@@ -990,13 +1043,37 @@ mod tests {
     #[test]
     fn a_test_folder_loads_fresh_and_only_over_its_own_kind_of_row() {
         let held = |signed, installed_from, reason| {
-            decide_folder(Some(HeldBy {
-                signed,
-                installed_from,
-                reason,
-            }))
+            decide_folder(
+                Some(HeldBy {
+                    signed,
+                    installed_from,
+                    reason,
+                    author: "Ann",
+                    source_repo: "ann/tool",
+                }),
+                ("Ann", "ann/tool"),
+            )
         };
-        assert_eq!(decide_folder(None), Ok(InstallKind::Fresh));
+        assert_eq!(
+            decide_folder(None, ("Ann", "ann/tool")),
+            Ok(InstallKind::Fresh)
+        );
+        for maker in [("Bob", "ann/tool"), ("Ann", "bob/tool")] {
+            assert_eq!(
+                decide_folder(
+                    Some(HeldBy {
+                        signed: false,
+                        installed_from: "folder",
+                        reason: None,
+                        author: "Ann",
+                        source_repo: "ann/tool",
+                    }),
+                    maker
+                ),
+                Err(Refusal::MakerChanged),
+                "{maker:?}"
+            );
+        }
         // Over an earlier loaded folder, in any state: a fresh load again.
         for reason in [None, Some("user"), Some("frozen"), Some("blacklist")] {
             assert_eq!(held(false, "folder", reason), Ok(InstallKind::Fresh));

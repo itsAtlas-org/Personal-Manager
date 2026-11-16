@@ -12,9 +12,12 @@
 //! once more, which re-checks the signing keys against the safety list's revocations).
 //!
 //! **The token** is 128 random bits, good for one use and ten minutes, bound to the sha256 of the
-//! staged bytes: [`Stage::take`] recomputes the hash before it hands the bytes back. At most
-//! [`MAX_STAGED`] screens wait at once (the oldest is dropped), so the memory held is bounded by
-//! two packages at the verifier's file cap, and an abandoned screen frees itself.
+//! staged bytes ([`Stage::take`] recomputes the hash before it hands the bytes back) and to the
+//! store it was made in (`AppState::store_epoch`, so a vault switch or a lock leaves a stale
+//! dialog's token good for nothing: what the screen showed was judged against that store's
+//! installed mods). At most [`MAX_STAGED`] screens wait at once (the oldest is dropped), so the
+//! memory held is bounded by two packages at the verifier's file cap, and an abandoned screen
+//! frees itself.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -63,6 +66,9 @@ pub struct Staged {
 struct Entry {
     token: String,
     at: Instant,
+    /// The store that was open when the screen was made (`AppState::store_epoch`): what the screen
+    /// showed (an update's widening, the answers' defaults, a reinstall) was judged against it.
+    epoch: u64,
     staged: Staged,
 }
 
@@ -90,7 +96,7 @@ impl Stage {
     /// Hold `staged` and return its token. `None` when no randomness is available (nothing held).
     /// Its sha256 must be the hash of its bytes: a caller that passes otherwise has a bug, and the
     /// screen would then never install (the check in [`Self::take`]).
-    pub fn put(&self, staged: Staged, now: Instant) -> Option<String> {
+    pub fn put(&self, staged: Staged, now: Instant, epoch: u64) -> Option<String> {
         let token = new_token()?;
         let mut entries = self.lock();
         entries.retain(|e| now.saturating_duration_since(e.at) < TTL);
@@ -101,19 +107,22 @@ impl Stage {
         entries.push(Entry {
             token: token.clone(),
             at: now,
+            epoch,
             staged,
         });
         Some(token)
     }
 
     /// The screen for `token`, once: it is removed whether or not it is still good. `None` for an
-    /// unknown, used or expired token, or bytes that no longer hash to what the screen showed.
-    pub fn take(&self, token: &str, now: Instant) -> Option<Staged> {
+    /// unknown, used or expired token, a screen made for another store than the one open now
+    /// (`epoch`: a vault switch or a lock since, so what it showed was judged against a different
+    /// set of installed mods), or bytes that no longer hash to what the screen showed.
+    pub fn take(&self, token: &str, now: Instant, epoch: u64) -> Option<Staged> {
         let mut entries = self.lock();
         let at = entries.iter().position(|e| e.token == token)?;
         let entry = entries.remove(at);
         drop(entries);
-        if now.saturating_duration_since(entry.at) >= TTL {
+        if now.saturating_duration_since(entry.at) >= TTL || entry.epoch != epoch {
             return None;
         }
         (sha_of(&entry.staged.bytes) == entry.staged.sha256).then_some(entry.staged)
@@ -152,11 +161,11 @@ mod tests {
     fn a_token_is_good_once_and_returns_exactly_the_staged_bytes() {
         let stage = Stage::default();
         let now = Instant::now();
-        let token = stage.put(staged(1), now).unwrap();
+        let token = stage.put(staged(1), now, 0).unwrap();
         assert_eq!(token.len(), 32);
-        let got = stage.take(&token, now).unwrap();
+        let got = stage.take(&token, now, 0).unwrap();
         assert_eq!(got.bytes, vec![1u8; 64]);
-        assert!(stage.take(&token, now).is_none(), "single use");
+        assert!(stage.take(&token, now, 0).is_none(), "single use");
         assert_eq!(stage.len(), 0);
     }
 
@@ -164,27 +173,27 @@ mod tests {
     fn tokens_are_distinct_and_an_unknown_one_takes_nothing() {
         let stage = Stage::default();
         let now = Instant::now();
-        let a = stage.put(staged(1), now).unwrap();
-        let b = stage.put(staged(2), now).unwrap();
+        let a = stage.put(staged(1), now, 0).unwrap();
+        let b = stage.put(staged(2), now, 0).unwrap();
         assert_ne!(a, b);
-        assert!(stage.take("0".repeat(32).as_str(), now).is_none());
-        assert!(stage.take("", now).is_none());
+        assert!(stage.take("0".repeat(32).as_str(), now, 0).is_none());
+        assert!(stage.take("", now, 0).is_none());
         // The wrong guess did not disturb the real ones.
-        assert_eq!(stage.take(&b, now).unwrap().bytes[0], 2);
-        assert_eq!(stage.take(&a, now).unwrap().bytes[0], 1);
+        assert_eq!(stage.take(&b, now, 0).unwrap().bytes[0], 2);
+        assert_eq!(stage.take(&a, now, 0).unwrap().bytes[0], 1);
     }
 
     #[test]
     fn a_screen_is_good_for_ten_minutes_and_an_expired_take_still_spends_it() {
         let stage = Stage::default();
         let t0 = Instant::now();
-        let token = stage.put(staged(1), t0).unwrap();
-        assert!(stage.take(&token, t0 + TTL).is_none());
+        let token = stage.put(staged(1), t0, 0).unwrap();
+        assert!(stage.take(&token, t0 + TTL, 0).is_none());
         // Spent by the failed take: a second try inside the window gets nothing either.
-        assert!(stage.take(&token, t0).is_none());
-        let token = stage.put(staged(1), t0).unwrap();
+        assert!(stage.take(&token, t0, 0).is_none());
+        let token = stage.put(staged(1), t0, 0).unwrap();
         assert!(stage
-            .take(&token, t0 + TTL - Duration::from_secs(1))
+            .take(&token, t0 + TTL - Duration::from_secs(1), 0)
             .is_some());
     }
 
@@ -192,29 +201,29 @@ mod tests {
     fn at_most_two_screens_wait_and_the_oldest_makes_room() {
         let stage = Stage::default();
         let now = Instant::now();
-        let a = stage.put(staged(1), now).unwrap();
-        let b = stage.put(staged(2), now).unwrap();
-        let c = stage.put(staged(3), now).unwrap();
+        let a = stage.put(staged(1), now, 0).unwrap();
+        let b = stage.put(staged(2), now, 0).unwrap();
+        let c = stage.put(staged(3), now, 0).unwrap();
         assert_eq!(stage.len(), MAX_STAGED);
-        assert!(stage.take(&a, now).is_none(), "the oldest was dropped");
-        assert!(stage.take(&b, now).is_some());
-        assert!(stage.take(&c, now).is_some());
+        assert!(stage.take(&a, now, 0).is_none(), "the oldest was dropped");
+        assert!(stage.take(&b, now, 0).is_some());
+        assert!(stage.take(&c, now, 0).is_some());
     }
 
     #[test]
     fn expired_screens_free_themselves_when_the_next_arrives() {
         let stage = Stage::default();
         let t0 = Instant::now();
-        stage.put(staged(1), t0).unwrap();
-        stage.put(staged(2), t0).unwrap();
+        stage.put(staged(1), t0, 0).unwrap();
+        stage.put(staged(2), t0, 0).unwrap();
         let later = t0 + TTL + Duration::from_secs(1);
-        let fresh = stage.put(staged(3), later).unwrap();
+        let fresh = stage.put(staged(3), later, 0).unwrap();
         assert_eq!(
             stage.len(),
             1,
             "both expired ones were swept, not just one evicted"
         );
-        assert!(stage.take(&fresh, later).is_some());
+        assert!(stage.take(&fresh, later, 0).is_some());
     }
 
     #[test]
@@ -223,7 +232,26 @@ mod tests {
         let now = Instant::now();
         let mut tampered = staged(1);
         tampered.bytes[0] ^= 1;
-        let token = stage.put(tampered, now).unwrap();
-        assert!(stage.take(&token, now).is_none());
+        let token = stage.put(tampered, now, 0).unwrap();
+        assert!(stage.take(&token, now, 0).is_none());
+    }
+
+    /// A screen is about the store it was made in: after a vault switch or a lock (a new epoch), the
+    /// token that is still in hand finishes nothing, and is spent.
+    #[test]
+    fn a_token_made_in_one_store_does_not_finish_in_another() {
+        let stage = Stage::default();
+        let now = Instant::now();
+        for later_epoch in [8, 6, 0, u64::MAX] {
+            let token = stage.put(staged(1), now, 7).unwrap();
+            assert!(
+                stage.take(&token, now, later_epoch).is_none(),
+                "{later_epoch}"
+            );
+            // Spent by the refusal, and no second try in the right store gets it back.
+            assert!(stage.take(&token, now, 7).is_none(), "{later_epoch}");
+        }
+        let token = stage.put(staged(1), now, 7).unwrap();
+        assert!(stage.take(&token, now, 7).is_some(), "the same store");
     }
 }
