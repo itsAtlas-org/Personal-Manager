@@ -60,10 +60,10 @@ export function writeView(view: CalendarViewMode): void {
  *  last calendar an event was created in, `readLastCreate`, and the Runway's named windows,
  *  `readRunwayWindows`): a Google/Outlook calendar id is routinely the account's email address, and a
  *  window's name is the user's own words ("Lisbon trip"). All three therefore live in the encrypted
- *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other eleven keys here —
+ *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other thirteen keys here —
  *  view, range, roster fold, zones, bounds, day count, openOn, the cursor, the swipe distance, the
- *  agenda layout and the Runway's "Before today" fold — stay in localStorage, which is what they are
- *  for. */
+ *  agenda layout, the Runway's "Before today" fold, its events switch and its other folded columns
+ *  — stay in localStorage, which is what they are for. */
 export function readHidden(): Set<string> {
   const arr = readStored(PREF_KEY).hidden;
   if (Array.isArray(arr)) {
@@ -125,8 +125,14 @@ export function writeLastCreate(calendarId: string): void {
 export type AgendaMode = "runway" | "list";
 
 const AGENDA_MODE_KEY = "pm.calendar.agendaMode";
-const RUNWAY_PAST_OPEN_KEY = "pm.calendar.runwayPastOpen";
+export const RUNWAY_PAST_OPEN_KEY = "pm.calendar.runwayPastOpen";
 const RUNWAY_EVENTS_KEY = "pm.calendar.runwayEvents";
+/** The Runway's other folded columns (every column but "Before today", which has its own key above
+ *  and is folded by default). Exported for the `storage` event that tells the other window. */
+export const RUNWAY_FOLDED_KEY = "pm.calendar.runwayFolded";
+/** How many folded columns are remembered: the newest. Window ids are random and never reused, so
+ *  an old window's fold is dead weight; this keeps the key from growing for ever. */
+const RUNWAY_FOLDED_MAX = 64;
 
 /** The Agenda layout last chosen on this device. Defaults to the Runway. View state, so
  *  localStorage, like the view itself. */
@@ -158,6 +164,32 @@ export function readRunwayPastOpen(): boolean {
 export function writeRunwayPastOpen(open: boolean): void {
   try {
     localStorage.setItem(RUNWAY_PAST_OPEN_KEY, open ? "true" : "false");
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** The Runway's folded columns (`foldKey`s), oldest first. A JSON array of strings; a missing key,
+ *  junk, or entries that aren't strings read as nothing folded, and a repeat counts once. Only the
+ *  newest 64 are kept. View state, so localStorage, which the pop-out shares with the main window. */
+export function readRunwayFolded(): Set<string> {
+  try {
+    const raw = localStorage.getItem(RUNWAY_FOLDED_KEY);
+    if (!raw) return new Set();
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    const keys = arr.filter((x): x is string => typeof x === "string" && x !== "");
+    // Dedupe keeping each key's last place, so "newest" means the most recently folded.
+    const unique = [...new Set(keys.reverse())].reverse();
+    return new Set(unique.slice(-RUNWAY_FOLDED_MAX));
+  } catch {
+    return new Set();
+  }
+}
+
+export function writeRunwayFolded(keys: Iterable<string>): void {
+  try {
+    localStorage.setItem(RUNWAY_FOLDED_KEY, JSON.stringify([...keys].slice(-RUNWAY_FOLDED_MAX)));
   } catch {
     // Best-effort.
   }

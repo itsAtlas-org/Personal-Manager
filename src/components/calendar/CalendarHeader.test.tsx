@@ -44,6 +44,8 @@ interface Over {
   view?: CalendarViewMode;
   agendaMode?: AgendaMode;
   onAgendaModeChange?: (mode: AgendaMode) => void;
+  runwaySlotRef?: (el: HTMLDivElement | null) => void;
+  onCreateTask?: () => void;
   onPopOut?: () => void;
   roster?: ReactNode;
   onRefresh?: () => void;
@@ -204,6 +206,65 @@ describe("CalendarHeader: the Agenda layout", () => {
     expect(screen.getByRole("button", { name: "Previous" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Today" })).toBeTruthy();
     expect(screen.queryByText("From today")).toBeNull();
+  });
+
+  it("the Runway gives the board a slot beside From today, the List none", () => {
+    const slotRef = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      runwaySlotRef: slotRef,
+    });
+    const lastSlot = () =>
+      slotRef.mock.calls[slotRef.mock.calls.length - 1][0] as HTMLElement | null;
+    const slot = lastSlot()!;
+    expect(slot).toBeInstanceOf(HTMLElement);
+    // Next to the label, inside the header's left group, and empty (hidden) until the board draws.
+    expect(slot.previousElementSibling?.textContent).toBe("From today");
+    expect(slot.closest('[data-help="calendar-header"]')).not.toBeNull();
+    expect(screen.getByText("From today")).toBeTruthy();
+    // Back to the List: the slot goes, and the board's ref hears null.
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        runwaySlotRef: slotRef,
+      }),
+    );
+    expect(lastSlot()).toBeNull();
+    expect(screen.queryByText("From today")).toBeNull();
+  });
+
+  it("+ Task shows where onCreateTask is given, just before + New event, and not in List", () => {
+    const onCreateTask = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      onCreate: vi.fn(),
+      onCreateTask,
+    });
+    const task = screen.getByRole("button", { name: "+ Task" });
+    // The Runway's help names it, as it names Hide events and + Window.
+    expect(task.getAttribute("data-help")).toBe("calendar-runway");
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.indexOf(task) + 1]).toBe(
+      screen.getByRole("button", { name: "+ New event" }),
+    );
+    fireEvent.click(task);
+    expect(onCreateTask).toHaveBeenCalledOnce();
+    // CalendarView hands it over only on the Runway.
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        onCreate: vi.fn(),
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
   });
 
   it("offers Pop out where it's given, and not in the pop-out itself", () => {

@@ -44,7 +44,14 @@ import {
   requestCalendarAccess,
   syncCalendar,
 } from "../../lib/ipc";
-import type { CalendarEvent, CalendarOverview, Milestone, Task, TaskStack } from "../../lib/types";
+import type {
+  CalendarEvent,
+  CalendarOverview,
+  Milestone,
+  Task,
+  TaskInput,
+  TaskStack,
+} from "../../lib/types";
 import {
   laterToLoad,
   nextWindow,
@@ -179,6 +186,7 @@ import { overlayShown, sayAgain, useCalendarGesture } from "./useCalendarGesture
 import { AgendaView } from "./views/AgendaView";
 import { RunwayBoard } from "./views/RunwayBoard";
 import { TerminalRunway } from "./terminal/TerminalRunway";
+import { newTaskDefaults, useRunwayModel } from "./views/runwayLogic";
 import { TimeGridView } from "./views/TimeGridView";
 import { MonthView } from "./views/MonthView";
 import { YearView } from "./views/YearView";
@@ -342,8 +350,15 @@ export function CalendarView({
   const [archived, setArchived] = useState<Set<string>>(() => cachedArchived);
   // The Runway's named windows (user content, in the encrypted `calendar_ui` blob).
   const [windows, setWindows] = useState<RunwayWindow[]>(() => readRunwayWindows());
-  // The task open in the editor from the tasks overlay (null = closed).
-  const [taskEditing, setTaskEditing] = useState<Task | null>(null);
+  // The one task editor this tab owns (null = closed): an existing task opened from the tasks
+  // overlay, or a new one with its starting values (+ Task in the Runway's header). The board's own
+  // editor serves only a card's ✎.
+  const [taskEditing, setTaskEditing] = useState<
+    { task: Task } | { defaults: Partial<TaskInput> } | null
+  >(null);
+  // The header's slot for the Runway's readout and buttons (the header holds the element, the board
+  // draws into it). A state setter is a stable ref callback, so it is passed straight in.
+  const [runwaySlot, setRunwaySlot] = useState<HTMLDivElement | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(() => readHidden());
   const [view, setView] = useState<CalendarViewMode>(() => readView(AVAILABLE_VIEWS, DEFAULT_VIEW));
   const [agendaMode, setAgendaMode] = useState<AgendaMode>(() => readAgendaMode());
@@ -676,7 +691,14 @@ export function CalendarView({
   // without a remount. writeHidden announces on the app-wide signal; follow it. A tick in the OTHER
   // window arrives the same way: followStoredPrefs re-reads the shared store and fires it here.
   useEffect(() => {
-    const sync = () => setHidden(readHidden());
+    const sync = () => {
+      setHidden(readHidden());
+      // The Runway's windows follow too (they were re-read on window focus only): a + Window save
+      // from a stale list would write the other window's new window away.
+      // (Kept as the same list when unchanged, so a calendar tick doesn't rebuild the Runway.)
+      const next = readRunwayWindows();
+      setWindows((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
     window.addEventListener("pm:settings-changed", sync);
     return () => window.removeEventListener("pm:settings-changed", sync);
   }, []);
@@ -1314,7 +1336,7 @@ export function CalendarView({
       if (isTaskEvent(ev)) {
         const id = taskIdOfEvent(ev);
         const t = tasks.find((x) => x.id === id);
-        if (t) setTaskEditing(t);
+        if (t) setTaskEditing({ task: t });
         return;
       }
       setEventPopup({ ev, anchor });
@@ -1334,6 +1356,25 @@ export function CalendarView({
   const runwayMilestones = useMemo(
     () => (hidden.has(MILESTONE_CALENDAR_ID) ? [] : milestones),
     [hidden, milestones],
+  );
+  // The Runway's model lives here, not in either board: the header's readout, Hide events and
+  // + Window are drawn from it (by the board, through the header's slot), and the Agenda's filters
+  // read it where the Runway is not mounted. It is cheap (memoised on the lists) and, like the
+  // events switch inside it, always built, so a layout switch loses nothing.
+  const runway = useRunwayModel({
+    tasks,
+    stacks,
+    milestones: runwayMilestones,
+    events: runwayEvents,
+    archived,
+    windows,
+    now,
+  });
+  // + Task: a new task that starts today, the Runway's own default.
+  const runwayToday = runway.today;
+  const openNewTask = useCallback(
+    () => setTaskEditing({ defaults: newTaskDefaults(runwayToday) }),
+    [runwayToday],
   );
 
   // Both day grids are the same thing now — N consecutive days starting at the cursor. Week is
@@ -1590,10 +1631,10 @@ export function CalendarView({
   const runwayProps = {
     tasks,
     stacks,
-    milestones: runwayMilestones,
     events: runwayEvents,
+    runway,
+    chrome: runwaySlot,
     colorOf,
-    archived,
     windows,
     now,
     onWindowsChange,
@@ -1759,6 +1800,8 @@ export function CalendarView({
         createRef={createButtonRef}
         agendaMode={agendaMode}
         onAgendaModeChange={onAgendaModeChange}
+        runwaySlotRef={setRunwaySlot}
+        onCreateTask={runwayShown ? openNewTask : undefined}
         onPopOut={onPopOut}
         roster={
           rosterInHeader && overview ? (
@@ -2039,11 +2082,13 @@ export function CalendarView({
           {gesture.chip}
         </div>
       )}
-      {/* A task opened from the tasks overlay: the same editor every task surface opens. It saves
-          through the task IPC, and the `tasks://changed` that follows redraws the overlay. */}
+      {/* A task opened from the tasks overlay, or a new one from + Task: the same editor every task
+          surface opens. It saves through the task IPC, and the `tasks://changed` that follows
+          redraws the overlay and the Runway. */}
       <TaskEditor
         open={taskEditing !== null}
-        task={taskEditing}
+        task={taskEditing && "task" in taskEditing ? taskEditing.task : null}
+        defaults={taskEditing && "defaults" in taskEditing ? taskEditing.defaults : undefined}
         onClose={() => setTaskEditing(null)}
       />
       <VisuallyHidden role="status" aria-live="polite">

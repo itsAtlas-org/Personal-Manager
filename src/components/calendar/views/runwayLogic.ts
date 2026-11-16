@@ -10,20 +10,31 @@
 // details. The backend fires `tasks://changed` after each write, which CalendarView listens to, so
 // nothing here keeps a copy of a task.
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  readRunwayFolded,
+  readRunwayPastOpen,
   readRunwayShowEvents,
+  readRunwayWindows,
+  RUNWAY_FOLDED_KEY,
+  RUNWAY_PAST_OPEN_KEY,
+  writeRunwayFolded,
+  writeRunwayPastOpen,
   writeRunwayShowEvents,
   type RunwayWindow,
 } from "../../../lib/calendarPrefs";
+import { storedPrefsHydrated } from "../../../lib/storedPrefs";
 import { dayKey, parseLocal, startOfDay } from "../../../lib/calendar-layout";
 import { changeTaskStatus, planTask, reorderTasks } from "../../../lib/ipc";
 import { formatClockIso, formatDateLocal, formatDateOnly } from "../../../lib/format";
 import {
   buildColumns,
+  foldKey,
+  keepLiveWindowFolds,
   placeCards,
   placeEvents,
   samePlan,
+  setFoldKey,
   type RunwayColumn,
   type RunwayEventStrip,
   type RunwayModel,
@@ -41,8 +52,9 @@ import type {
   TaskStatus,
 } from "../../../lib/types";
 
-/** What both Runways are given. */
-export interface RunwayProps {
+/** What the Runway model is built from. CalendarView holds the one model (the Agenda's filters
+ *  read it there, as the board does), so these are its inputs, not the boards'. */
+export interface RunwayModelInput {
   tasks: Task[];
   stacks: TaskStack[];
   milestones: Milestone[];
@@ -50,12 +62,30 @@ export interface RunwayProps {
    *  (those are the board's own cards): the synced events and the pinboard's timeline entries.
    *  The columns' events strips, and what a task's link can point at. */
   events: CalendarEvent[];
+  /** Archived project names: their tasks and milestones stay off the board. */
+  archived: ReadonlySet<string>;
+  windows: RunwayWindow[];
+  now: Date;
+}
+
+/** The Runway model, and the events switch that shapes it: what `useRunwayModel` returns. */
+export type RunwayState = ReturnType<typeof useRunwayModel>;
+
+/** What both Runways are given. */
+export interface RunwayProps {
+  tasks: Task[];
+  stacks: TaskStack[];
+  /** What the calendar shows, as `RunwayModelInput.events`: a task's link can point at one. */
+  events: CalendarEvent[];
+  /** The model CalendarView built from the tasks, milestones and windows (`useRunwayModel`). */
+  runway: RunwayState;
+  /** The header's slot for the readout and the events and window buttons: they are drawn there, by
+   *  the board that owns them, and nowhere in the board. Null until the header has mounted it. */
+  chrome: HTMLElement | null;
   /** A calendar's colour, for the dot beside an event in a strip. */
   colorOf?: (calendarId: string) => string;
   /** Switch the Agenda to its List, where Later's events past the first few are. */
   onShowList?: () => void;
-  /** Archived project names: their tasks and milestones stay off the board. */
-  archived: ReadonlySet<string>;
   windows: RunwayWindow[];
   now: Date;
   onWindowsChange: (windows: RunwayWindow[]) => void;
@@ -77,10 +107,7 @@ export function useRunwayModel({
   archived,
   windows,
   now,
-}: Pick<
-  RunwayProps,
-  "tasks" | "stacks" | "milestones" | "events" | "archived" | "windows" | "now"
->): {
+}: RunwayModelInput): {
   today: Date;
   columns: RunwayColumn[];
   model: RunwayModel;
@@ -108,6 +135,70 @@ export function useRunwayModel({
     [showEvents, events, columns, today],
   );
   return { today, columns, model, strips, showEvents, toggleEvents };
+}
+
+/** Which Runway columns are folded, remembered on this device (view state: localStorage). Both
+ *  Runways use it, so a fold survives a tab switch, the Runway | List switch, a restart and a
+ *  System switch.
+ *
+ *  Before today keeps its own key and its inverted default (folded until opened); every other
+ *  column is a `foldKey` in one set. The pop-out and the main window share that storage, each with
+ *  its own in-memory copy, so a toggle reads the stored set, sets one key to the state the clicked
+ *  column should reach, and writes it back: writing this window's copy would erase a fold the
+ *  other window made since. The copy also
+ *  follows `storage` events, which is how the other window's fold reaches it live where the
+ *  webview delivers them (and at the next mount where it doesn't). Nothing is written on mount. */
+export function useRunwayFolds(): {
+  isFolded: (c: RunwayColumn) => boolean;
+  toggle: (c: RunwayColumn) => void;
+} {
+  const [pastOpen, setPastOpen] = useState(readRunwayPastOpen);
+  const [folded, setFolded] = useState(readRunwayFolded);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      // A null key is storage being cleared.
+      if (e.key !== null && e.key !== RUNWAY_FOLDED_KEY && e.key !== RUNWAY_PAST_OPEN_KEY) return;
+      setFolded(readRunwayFolded());
+      setPastOpen(readRunwayPastOpen());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const isFolded = useCallback(
+    (c: RunwayColumn) => (c.kind === "past" ? !pastOpen : folded.has(foldKey(c))),
+    [pastOpen, folded],
+  );
+
+  // The state to reach comes from what this column shows, not from the stored set: if the other
+  // webview folded it since (no storage event crossed), flipping the stored key would unfold it
+  // and the click would look dead while the other window's fold was erased.
+  const toggle = useCallback(
+    (c: RunwayColumn) => {
+      const fold = !isFolded(c);
+      if (c.kind === "past") {
+        writeRunwayPastOpen(!fold);
+        setPastOpen(!fold);
+        return;
+      }
+      let next = setFoldKey(readRunwayFolded(), foldKey(c), fold);
+      // A deleted window's fold is dead weight: drop it, but only against the windows this device
+      // has loaded (before that they read as none, and every window's fold would look dead). The
+      // module's cache, not a prop: a prop can lag a window made in the other window.
+      if (storedPrefsHydrated()) {
+        next = keepLiveWindowFolds(
+          next,
+          readRunwayWindows().map((w) => w.id),
+        );
+      }
+      writeRunwayFolded(next);
+      setFolded(next);
+    },
+    [isFolded],
+  );
+
+  return { isFolded, toggle };
 }
 
 /** Where a column's events strip says an event is: its clock time in a one-day column (or

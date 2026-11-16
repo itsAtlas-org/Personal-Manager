@@ -24,6 +24,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.178.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "On the Agenda's Runway, the bar across the top of the Calendar now holds everything that used to sit in a row of its own: how many tasks are done (like 3/7), what's next up with its deadline, Hide events and + Window, right beside \"From today\". + Task is up there too, just before + New event. The Runway's columns start right under it, and it no longer scrolls away with them.",
+      'With nothing planned from today, the bar says "Nothing planned" instead of "0/0 done".',
+      "PM now remembers which Runway columns you've folded away: Today, Tomorrow, a window you named, any of them. They stay folded when you switch tabs, flip to List and back, switch looks or restart PM, and a fold made in the pop-out Calendar shows in the main window's Runway the next time it opens. When a window you named splits the rest of the week in two, folding one piece folds both.",
+    ],
+  },
+  {
     version: "3.177.0-alpha",
     date: "2026-11-11",
     highlights: [

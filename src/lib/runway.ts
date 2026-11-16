@@ -251,6 +251,62 @@ export function isDropColumn(column: RunwayColumn): boolean {
   return column.kind !== "past";
 }
 
+// --- remembered folds ------------------------------------------------------------------------------
+
+/** What a column's fold is remembered under. A fold belongs to the column, not to the days it holds
+ *  today: a default split by a named window (`rest`, then `rest:2`) folds together under `rest`,
+ *  and a stored `rest:2` could never fold an unrelated stretch on some later day. A window is
+ *  `window:<id>`, taken whole: its id is the part after the first colon, so splitting on ":" would
+ *  make every window "window". */
+export function foldKey(c: RunwayColumn): string {
+  if (c.kind === "past") return PAST_COLUMN_ID;
+  if (c.kind === "window") return `window:${c.windowId ?? c.id}`;
+  const colon = c.id.indexOf(":");
+  return colon === -1 ? c.id : c.id.slice(0, colon);
+}
+
+/** `folds` with `key` set folded or open, as a new set (a state setter must see a change). It is
+ *  told the state to reach rather than flipping the stored one: a window whose copy is stale (the
+ *  other webview folded this column since) must still do what its click said. */
+export function setFoldKey(folds: ReadonlySet<string>, key: string, folded: boolean): Set<string> {
+  const next = new Set(folds);
+  if (folded) next.add(key);
+  else next.delete(key);
+  return next;
+}
+
+/** `folds` less the folds of named windows that are gone. Only `window:` keys can go stale (a
+ *  window is deleted, or its days pass); a default column's key is always live, so it is kept. */
+export function keepLiveWindowFolds(
+  folds: ReadonlySet<string>,
+  liveWindowIds: readonly string[],
+): Set<string> {
+  const live = new Set(liveWindowIds);
+  const out = new Set<string>();
+  for (const k of folds) {
+    if (k.startsWith("window:") && !live.has(k.slice("window:".length))) continue;
+    out.add(k);
+  }
+  return out;
+}
+
+/** How many cards a column's two lanes hold, counting a stack's tasks (not the stack as one). The
+ *  rail's count on the board and the rule's count in the Terminal both say this. */
+export function cardCount(lanes: RunwayLanes): number {
+  let n = 0;
+  for (const c of [...lanes.foreground, ...lanes.background])
+    n += c.kind === "stack" ? c.tasks.length : 1;
+  return n;
+}
+
+/** The Runway readout's count: "3/7 done", plus " · 1 in progress" while any is started, or
+ *  "Nothing planned" when no task or milestone sits from today on (not "0/0 done", which reads as
+ *  a failure when it means an empty week). */
+export function runwayProgressWords(p: RunwayProgress): string {
+  if (p.total === 0) return "Nothing planned";
+  return `${p.done}/${p.total} done${p.doing > 0 ? ` · ${p.doing} in progress` : ""}`;
+}
+
 // --- cards -----------------------------------------------------------------------------------------
 
 export interface RunwayTaskCard {

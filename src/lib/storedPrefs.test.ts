@@ -22,7 +22,9 @@ import {
   readDayCount,
   readHidden,
   readOpenOn,
+  readRunwayFolded,
   readRunwayPastOpen,
+  readRunwayShowEvents,
   readSwipeDays,
   readRange,
   readRangeBounds,
@@ -221,8 +223,8 @@ describe("the backup dismissal prefix scan", () => {
 });
 
 describe("what deliberately stays in localStorage", () => {
-  it("moves only pm.calendar.hidden — the other eleven calendar keys are untouched", async () => {
-    // calendarPrefs holds twelve localStorage keys and exactly ONE of them is user content (a
+  it("moves only pm.calendar.hidden — the other thirteen calendar keys are untouched", async () => {
+    // calendarPrefs holds fourteen localStorage keys and exactly ONE of them is user content (a
     // calendar id is routinely the account's email). The rest are view state, and dragging them
     // behind an IPC round trip would be against the decision this change implements, not for it.
     // (The other user content, the last calendar created in and the Runway's named windows, was
@@ -242,6 +244,9 @@ describe("what deliberately stays in localStorage", () => {
       // The Agenda's layout and the Runway's "Before today" fold (PA-2).
       "pm.calendar.agendaMode": "list",
       "pm.calendar.runwayPastOpen": "true",
+      // The Runway's events switch, and the rest of its folded columns.
+      "pm.calendar.runwayEvents": "hidden",
+      "pm.calendar.runwayFolded": JSON.stringify(["today", "window:w1"]),
     };
     for (const [k, v] of Object.entries(stays)) localStorage.setItem(k, v);
     localStorage.setItem("pm.calendar.hidden", JSON.stringify(["a@example.com"]));
@@ -264,6 +269,8 @@ describe("what deliberately stays in localStorage", () => {
     expect(readSwipeDays()).toBe("view");
     expect(readAgendaMode()).toBe("list");
     expect(readRunwayPastOpen()).toBe(true);
+    expect(readRunwayShowEvents()).toBe(false);
+    expect([...readRunwayFolded()]).toEqual(["today", "window:w1"]);
     // The one that moved reads from the store instead.
     expect([...readHidden()]).toEqual(["a@example.com"]);
   });
