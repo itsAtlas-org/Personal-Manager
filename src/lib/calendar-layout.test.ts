@@ -224,7 +224,29 @@ describe("isEventPast", () => {
           ...base,
           calendar_id: MILESTONE_CALENDAR_ID,
           summary: `${MILESTONE_MET_MARK}Launch · Atlas`,
+          done: true,
         },
+        later,
+      ),
+    ).toBe(true);
+    // The check mark is display only: a label that itself starts with one is not a met milestone.
+    for (const done of [false, undefined]) {
+      expect(
+        isEventPast(
+          {
+            ...base,
+            calendar_id: MILESTONE_CALENDAR_ID,
+            summary: `${MILESTONE_MET_MARK}Launch · Atlas`,
+            done,
+          },
+          later,
+        ),
+      ).toBe(false);
+    }
+    // And a met one needs no mark to recede.
+    expect(
+      isEventPast(
+        { ...base, calendar_id: MILESTONE_CALENDAR_ID, summary: "Launch · Atlas", done: true },
         later,
       ),
     ).toBe(true);

@@ -30,6 +30,9 @@ import {
   isDraftEvent,
   isMilestoneEvent,
   isTaskEvent,
+  MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
+  milestoneOverlayId,
   parseLocal,
   startOfDay,
   startOfWeek,
@@ -956,6 +959,39 @@ export function taskOverlayEvents(
       all_day: true,
       html_link: null,
       uid: null,
+    });
+  }
+  return out;
+}
+
+/** The milestone overlay on the calendar: one all-day event per dated milestone that isn't already
+ *  drawn as a real event. PM-native (unlinked) ones, plus linked ones whose event is `event_missing`
+ *  (out of the mirror band / deselected / deleted), which nothing else shows; a linked, in-mirror
+ *  milestone is already its real event, so skipping it avoids a double. Dateless milestones have no
+ *  day to sit on. `done` carries "reached" (`milestoneDone`) for `isEventPast`, so a met milestone
+ *  recedes with the past and an unmet one never does, however its label reads. */
+export function milestoneOverlayEvents(milestones: readonly Milestone[]): CalendarEvent[] {
+  const out: CalendarEvent[] = [];
+  for (const m of milestones) {
+    if (!m.due_date) continue;
+    if (!(m.event_uid === null || m.event_missing)) continue;
+    const done = milestoneDone(m);
+    out.push({
+      id: milestoneOverlayId(m.id),
+      calendar_id: MILESTONE_CALENDAR_ID,
+      // Suffix the owning project so two milestones with similar labels in different projects are
+      // distinguishable on the all-day row (a milestone always belongs to exactly one project).
+      // The check mark is only the colour-independent cue that it is met. Nothing reads it back:
+      // `done` is what the logic uses, so a label that itself begins with a check mark means nothing.
+      summary: `${done ? MILESTONE_MET_MARK : ""}${m.label} · ${m.project_name}`,
+      description: null,
+      location: null,
+      start: m.due_date.slice(0, 10),
+      end: null,
+      all_day: true,
+      html_link: null,
+      uid: null,
+      done,
     });
   }
   return out;

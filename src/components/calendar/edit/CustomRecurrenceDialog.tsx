@@ -159,10 +159,10 @@ export function CustomRecurrenceDialog({ rule, startDate, earliestEnd, onDone, o
                     onClick={() => toggle(d.code)}
                     className={cn(
                       "inline-flex h-8 w-8 items-center justify-center rounded-full text-xs transition",
-                      // Off, the edge is `--ink4`: the contrast floor a control's own edge needs.
-                      on
-                        ? "bg-accent font-medium text-accent-ink"
-                        : "text-ink2 shadow-[inset_0_0_0_1px_var(--ink4)] hover:text-ink",
+                      // The edge is `--ink4` both ways: the contrast floor a control's own edge
+                      // needs (a pale accent fill alone is under 3:1 on a light theme).
+                      "shadow-[inset_0_0_0_1px_var(--ink4)]",
+                      on ? "bg-accent font-medium text-accent-ink" : "text-ink2 hover:text-ink",
                     )}
                   >
                     {d.name[0]}

@@ -10,7 +10,13 @@
 
 import { describe, expect, it } from "vitest";
 import type { RunwayWindow } from "./calendarPrefs";
-import { TASK_CALENDAR_ID, weekdayShort } from "./calendar-layout";
+import {
+  isEventPast,
+  MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
+  TASK_CALENDAR_ID,
+  weekdayShort,
+} from "./calendar-layout";
 import { formatDateLocal } from "./format";
 import {
   buildColumns,
@@ -22,6 +28,7 @@ import {
   laneTaskIds,
   LATER_EVENTS,
   linkedEvent,
+  milestoneOverlayEvents,
   orderAfterDrop,
   orderAfterStep,
   placeCards,
@@ -1080,5 +1087,47 @@ describe("the tasks overlay", () => {
       ["task:3", "Due: Missed", "2026-11-03", null],
       ["task:4", "Today", "2026-11-04", null],
     ]);
+  });
+});
+
+describe("the milestones overlay", () => {
+  const dated = (over: Partial<Milestone>) => milestone({ due_date: "2026-08-01", ...over });
+  it("marks a reached milestone done, by state or by status, and no other", () => {
+    const evs = milestoneOverlayEvents([
+      dated({ id: 1, label: "Met", state: "met", status: "not_started" }),
+      dated({ id: 2, label: "Done", state: "unmet", status: "done" }),
+      dated({ id: 3, label: "Open", state: "unmet", status: "in_progress" }),
+    ]);
+    expect(evs.map((e) => [e.id, e.calendar_id, e.done])).toEqual([
+      ["milestone:1", MILESTONE_CALENDAR_ID, true],
+      ["milestone:2", MILESTONE_CALENDAR_ID, true],
+      ["milestone:3", MILESTONE_CALENDAR_ID, false],
+    ]);
+    // The visible check mark is only the colour-independent cue on a reached milestone.
+    expect(evs.map((e) => e.summary.startsWith(MILESTONE_MET_MARK))).toEqual([true, true, false]);
+  });
+
+  it("does not let a label that starts with a check mark pass for a reached milestone", () => {
+    const [ev] = milestoneOverlayEvents([
+      dated({ id: 4, label: `${MILESTONE_MET_MARK}Ship beta`, state: "unmet" }),
+    ]);
+    expect(ev.done).toBe(false);
+    // Long after its date it is still owed, so it keeps its full colour.
+    expect(isEventPast(ev, new Date(2030, 0, 1))).toBe(false);
+  });
+
+  it("draws a reached milestone as past once its day has gone by", () => {
+    const [ev] = milestoneOverlayEvents([dated({ id: 5, state: "met" })]);
+    expect(isEventPast(ev, new Date(2026, 8, 1))).toBe(true);
+  });
+
+  it("skips dateless milestones and linked ones the calendar already shows", () => {
+    const evs = milestoneOverlayEvents([
+      dated({ id: 6, due_date: null }),
+      dated({ id: 7, event_uid: "u7", event_missing: false }),
+      dated({ id: 8, event_uid: "u8", event_missing: true }),
+      dated({ id: 9 }),
+    ]);
+    expect(evs.map((e) => e.id)).toEqual(["milestone:8", "milestone:9"]);
   });
 });

@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.181.1-alpha",
+    date: "2026-11-16",
+    highlights: [
+      'Finished milestones no longer disappear from a project page at Minimal depth. If you had unticked Completed at a higher depth, Minimal kept hiding them with no box to bring them back; now the choice only applies where the Completed box is on screen, and you keep the choice for when you return. If every milestone is finished and Completed is unticked, the list says how many are hidden and that ticking Completed shows them, instead of "No milestones yet".',
+      'A milestone you named starting with a check mark, like "✓ Ship beta", no longer fades as if it were finished once its date passes. A milestone fades only when it is really met. The check mark PM adds to a met milestone is still there.',
+      "In Day, Week, Month and the Agenda's List, Save on Task in the calendar's quick box no longer leaves a blank moment. The new task stays on the calendar as a dashed copy until the real one arrives, and if the day you picked has passed, it appears on today, where the task will land. While the box is open, the dashed copy for a passed day sits on today as well. The Runway, the Year view and the Terminal look don't draw the dashed copy.",
+      "A task you started in the quick box and left the Calendar tab with is no longer lost if you come back and Google editing is off or the calendar is gone: it reopens in the task editor. A half-typed event is kept until a calendar can take events again, and a screen reader is told so. Tasks of an archived project also no longer flash on the calendar for a moment when you first open it.",
+      "For a task planned on a day that has passed, the box and the message after Save now say it shows on today, with today's date, until it's done, and they also cover a task planned over several days that has already started. If Tasks is hidden in your calendar list, they say only that it's hidden.",
+      "Switches and pressed buttons are easier to see. The edge around the switches (Settings pickers, the Calendar's hours, the Map's By project | Semantic, and the Event | Task switch) is darker, and the chosen one has a thin outline, so it stands out even on a light theme with a pale accent. Pressed icon buttons, the Pinboard's list | timeline switch, the Map's Names button and the weekday buttons in a custom repeat get the same treatment.",
+    ],
+  },
+  {
     version: "3.181.0-alpha",
     date: "2026-11-12",
     highlights: [
@@ -93,7 +105,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "3.175.5-alpha",
     date: "2026-11-11",
     highlights: [
-      "Two security fixes, and some under-the-hood tidying. SQLCipher, which encrypts PM's database on your computer, moves to version 4.20, fixing a flaw where a specially made pair of database files could make PM read back leftover bytes from its own memory. The part of PM's document engine that reads web pages and other HTML files gets a fix for pages built to keep it busy for minutes. And two of the building blocks underneath the document engine are updated. The first time PM starts after this update it sets up its document engine again by itself, along with photo text recognition and the map's extra layout if you've added them. Your data stays encrypted exactly as before, and nothing changes in how you use PM.",
+      "Two security fixes, and some under-the-hood tidying. SQLCipher, which encrypts PM's database on your computer, moves to version 4.20, fixing a flaw where a specially made pair of database files could make PM read back leftover bytes from its own memory. A component of the document engine's HTML reader is updated to fix a known flaw in a feature PM doesn't use. And two of the building blocks underneath the document engine are updated. The first time PM starts after this update it sets up its document engine again by itself, along with photo text recognition and the map's extra layout if you've added them. Your data stays encrypted exactly as before, and nothing changes in how you use PM.",
     ],
   },
   {

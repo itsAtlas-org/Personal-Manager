@@ -42,6 +42,9 @@ interface Props {
    *  would persist a wrong `sort_order` (onMove swaps by array index). Defaults to true so callers
    *  that don't sort (e.g. FocusView's project-edit form) keep the arrows. */
   manualOrder?: boolean;
+  /** How many completed milestones the parent's "Completed" checkbox is hiding right now. When the
+   *  list is empty only because of that, say so rather than "No milestones yet". */
+  hiddenCompleted?: number;
 }
 
 /** A project's milestones (multi-deadline, card 7): add / edit / remove / reorder, and mark
@@ -55,6 +58,7 @@ export function MilestoneList({
   onChanged,
   readOnly = false,
   manualOrder = true,
+  hiddenCompleted = 0,
 }: Props) {
   // A single error line for the whole list: any row's failed mutation surfaces here instead
   // of silently no-opping (F3-8). Declared before the read-only early return to keep the hook
@@ -79,8 +83,13 @@ export function MilestoneList({
   return (
     <div className="flex flex-col gap-1.5" data-help="project-milestones">
       {milestones.length === 0 && (
-        <p className="rounded-[var(--radius-sm)] border border-dashed border-border px-3 py-2 text-xs text-ink4">
-          No milestones yet — add a deadline below.
+        <p
+          role={hiddenCompleted > 0 ? "status" : undefined}
+          className="rounded-[var(--radius-sm)] border border-dashed border-border px-3 py-2 text-xs text-ink4"
+        >
+          {hiddenCompleted > 0
+            ? `${hiddenCompleted === 1 ? "1 completed milestone is" : `${hiddenCompleted} completed milestones are`} hidden. Tick Completed to show ${hiddenCompleted === 1 ? "it" : "them"}.`
+            : "No milestones yet — add a deadline below."}
         </p>
       )}
       {milestones.map((m, i) => (

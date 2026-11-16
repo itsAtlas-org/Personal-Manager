@@ -62,7 +62,7 @@ import {
   type MonthWindow,
 } from "../../lib/calendarWindow";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
-import { milestoneDone, taskOverlayEvents } from "../../lib/runway";
+import { milestoneOverlayEvents, taskOverlayEvents } from "../../lib/runway";
 import {
   hideFinished,
   keepAllDay,
@@ -98,7 +98,13 @@ import {
   type EventCopy,
 } from "../../lib/calendarEdit/eventDraft";
 import { slotSeed } from "../../lib/calendarEdit/slotSeed";
-import { taskGhostFields } from "../../lib/calendarEdit/quickTask";
+import {
+  quickTaskDefaults,
+  resumeAction,
+  taskAddedAnnouncement,
+  taskDaysOf,
+  taskGhostFields,
+} from "../../lib/calendarEdit/quickTask";
 import {
   clampDayCount,
   readAgendaHideDone,
@@ -141,7 +147,7 @@ import { useSettledDate } from "../../lib/useSettledDate";
 import { calendarNavKey, calendarUndoKey } from "../../lib/calendarNavKey";
 import { isAnyDialogOpen } from "../../lib/useDialogLayer";
 import { resolveRangeBounds } from "../../lib/calendarGeom";
-import { formatDateLocal, formatDateOnly } from "../../lib/format";
+import { formatDateLocal } from "../../lib/format";
 import {
   addDays,
   dayKey,
@@ -154,8 +160,6 @@ import {
   isPinboardEvent,
   isTaskEvent,
   MILESTONE_CALENDAR_ID,
-  MILESTONE_MET_MARK,
-  milestoneOverlayId,
   occurrenceKey,
   parseLocal,
   PINBOARD_CALENDAR_ID,
@@ -242,7 +246,9 @@ const laterPending = new Set<string>();
 // How far past the visible months the view loads ahead, so scrolling on doesn't wait at each month.
 const LATER_LEAD_MONTHS = 2;
 // A quick-create draft whose box went with the tab, titled and with nothing sent (a click in the
-// sidebar switches tabs, and a titled box stays through a click): it opens again on return.
+// sidebar switches tabs, and a titled box stays through a click): it opens again on return. A task
+// draft that can't open the box reopens in the task editor; an event draft with no calendar to go
+// to stays here (this app session) until one can take events.
 let leftQuick: LeftDraft | null = null;
 const leaveQuick = (left: LeftDraft) => {
   leftQuick = left;
@@ -463,6 +469,9 @@ export function CalendarView({
   // closing and its row arriving (`ghostAfterRead`).
   const [landed, setLanded] = useState<LandedGhost | null>(null);
   const readsStarted = useRef(0);
+  // The same for a saved TASK, kept apart: it is cleared by a tasks read and counted against that
+  // read's own counter (`tasksRead`), never by an events read.
+  const [landedTask, setLandedTask] = useState<LandedGhost | null>(null);
   // The months of the mirror read (#1047): around the cursor, moved once it nears an edge. A ref
   // beside the state, as the read below must stay one function (`useMirrorReads`).
   const [loadWindow, setLoadWindow] = useState<MonthWindow>(
@@ -573,33 +582,34 @@ export function CalendarView({
   // The one global task list (PA-1), its stacks and which projects are archived: the Runway's cards
   // and the tasks overlay. Each keeps its last-good value on a failed read, as the milestones do.
   // Only the newest read applies, so a burst of `tasks://changed` can't land an older list last.
+  // The three are applied TOGETHER once all have landed, so a task of an archived project is never
+  // drawn for a moment before the archived names arrive, and a saved task's ghost gives way (below)
+  // in the very render that brings its chip.
   const tasksRead = useRef(0);
   const loadTasks = useCallback(async () => {
     const n = ++tasksRead.current;
-    await Promise.all([
-      listTasks(null)
-        .then((ts) => {
-          if (!aliveRef.current || n !== tasksRead.current) return;
-          setTasks(ts);
-          cachedTasks = ts;
-        })
-        .catch(() => {}),
-      listTaskStacks()
-        .then((ss) => {
-          if (!aliveRef.current || n !== tasksRead.current) return;
-          setStacks(ss);
-          cachedStacks = ss;
-        })
-        .catch(() => {}),
-      listArchivedProjects()
-        .then((names) => {
-          if (!aliveRef.current || n !== tasksRead.current) return;
-          const set = new Set(names);
-          setArchived(set);
-          cachedArchived = set;
-        })
-        .catch(() => {}),
+    const [ts, ss, names] = await Promise.all([
+      listTasks(null).catch(() => null),
+      listTaskStacks().catch(() => null),
+      listArchivedProjects().catch(() => null),
     ]);
+    if (!aliveRef.current || n !== tasksRead.current) return;
+    if (ts) {
+      setTasks(ts);
+      cachedTasks = ts;
+    }
+    if (ss) {
+      setStacks(ss);
+      cachedStacks = ss;
+    }
+    if (names) {
+      const set = new Set(names);
+      setArchived(set);
+      cachedArchived = set;
+    }
+    // A read that started after the save brings the saved task's chip, so its ghost goes with this
+    // same update; a failed tasks read brings nothing, so the ghost must not wait on it for good.
+    setLandedTask((l) => (ts ? ghostAfterRead(l, n) : null));
   }, []);
 
   const loadOverview = useCallback(async () => {
@@ -911,6 +921,17 @@ export function CalendarView({
   const focusCreateRef = useRef<(() => void) | null>(null);
   // "+ New event": quick create opens under it, and focus goes back to it when that closes.
   const createButtonRef = useRef<HTMLButtonElement>(null);
+  // Where focus goes when a surface that came from quick create closes: "+ New event", or the
+  // header's first button when that isn't there (a resumed task draft reopens with no Google account
+  // left), so focus never falls to the page. A named control with the global focus ring, not the
+  // tab's root: the root has no name, and the unlayered ring rule would draw round the whole tab.
+  const calendarRootRef = useRef<HTMLDivElement>(null);
+  const focusBackToCreate = useCallback(() => {
+    (
+      createButtonRef.current ??
+      calendarRootRef.current?.querySelector<HTMLElement>("header button:not(:disabled)")
+    )?.focus();
+  }, []);
   // Quick create's draft as it's typed, and how far it has got, for the ghost on the grid. The ref is
   // for its close, which turns the last of it into the ghost that waits for the saved row.
   const [quickDraft, setQuickDraft] = useState<{
@@ -951,6 +972,7 @@ export function CalendarView({
       const zone = deviceTimeZoneOrNull() ?? target.calendar.time_zone ?? null;
       // A saved event's ghost still waiting for its row gives way to the new one.
       setLanded(null);
+      setLandedTask(null);
       setCreating({
         seed: newEventSeed(dayKey(startOfDay(day)), now, zone, lengthFor(overview, target)),
         calendarId: target.calendar.id,
@@ -979,20 +1001,23 @@ export function CalendarView({
     (saved: boolean, kind?: "event" | "task") => {
       const last = quickDraftRef.current;
       if (saved && kind === "task") {
-        // A task has no ghost to keep: the overlay's chip arrives with the read that follows (a local
-        // read straight after a local insert; `tasks://changed` does the same), and the box's last
-        // draft says what was made and on which day.
-        const day = last?.draft.time.kind === "all_day" ? last.draft.time.first_day : null;
+        // The task's chip arrives with the read that follows (a local read straight after a local
+        // insert; `tasks://changed` does the same), so the box's last draft stays drawn as a "saved"
+        // ghost until a read that started after this save has applied (`loadTasks`), the way a saved
+        // event's does. A planned day that has passed draws on today until the task is done, so the
+        // ghost goes where the chip will land; with Tasks hidden nothing draws, so no ghost.
+        const todayKey = dayKey(startOfDay(new Date()));
+        const days = last ? taskDaysOf(last.draft.time) : null;
         const title = last?.draft.summary.trim() ?? "";
+        const tasksHidden = hidden.has(TASK_CALENDAR_ID);
+        const ev =
+          last && !tasksHidden
+            ? draftEvent(taskGhostFields(last.draft, todayKey), TASK_CALENDAR_ID, "saved")
+            : null;
+        // Set before the read starts, so the read that follows is the one that counts as after.
+        setLandedTask(ev ? { ev, after: tasksRead.current } : null);
         void loadTasks();
-        // A planned day that has passed draws on today until the task is done (the box said so), so
-        // say where the chip is, not only the day it was planned for.
-        const passed = day !== null && day < dayKey(startOfDay(new Date()));
-        announce(
-          `Task added: ${title}${day ? `, ${formatDateOnly(day)}` : ""}.` +
-            (passed ? " It shows on today." : "") +
-            (hidden.has(TASK_CALENDAR_ID) ? " Tasks are hidden in your calendar list." : ""),
-        );
+        announce(taskAddedAnnouncement(title, days, tasksHidden, todayKey));
         quickDraftRef.current = null;
         setQuickDraft(null);
         setCreating(null);
@@ -1028,12 +1053,34 @@ export function CalendarView({
   // again on that draft, on its calendar while that can still take an event (else the usual one). It
   // opens with what's known at once (the overview kept from before), as the box did; a calendar on
   // offer is a Google account's, so "+ New event" is there to open under.
+  // When the box can't open (editing turned off, the calendar gone, no "+ New event"), a TASK draft
+  // reopens in the task editor, as More options does, since a task needs no calendar; an EVENT draft
+  // stays in `leftQuick` (this app session) until a calendar can take events, and the tab says so
+  // once. `resumeAction` decides.
+  const keptSaid = useRef(false);
   useEffect(() => {
     if (!overview || !targets || leftQuick === null) return;
     const left = leftQuick;
-    leftQuick = null;
     const target = defaultTarget(targets, left.calendarId);
     const anchor = createButtonRef.current?.getBoundingClientRect();
+    const action = resumeAction(left.kind, !!target && !!anchor);
+    if (action === "keep") {
+      if (!keptSaid.current) {
+        keptSaid.current = true;
+        // Only when no calendar can take it is that the wait; with one, "+ New event" is what's missing.
+        announce(
+          target
+            ? "Your unsent event draft is kept."
+            : "Your unsent event draft is kept until a calendar can take events.",
+        );
+      }
+      return;
+    }
+    leftQuick = null;
+    if (action === "task-editor") {
+      setTaskEditing({ defaults: quickTaskDefaults(left.draft), fromQuick: true });
+      return;
+    }
     if (!target || !anchor) return;
     setCreating({
       seed: left.seed,
@@ -1042,7 +1089,7 @@ export function CalendarView({
       anchor,
       resume: left,
     });
-  }, [overview, targets]);
+  }, [overview, targets, announce]);
 
   // One step per swipe, in the direction of travel: a swipe left (positive deltaX) moves forward, by
   // the days Settings chooses (`swipeDays`, read at the swipe). Both gestures move the cursor and
@@ -1126,36 +1173,13 @@ export function CalendarView({
     return (calendarId: string) => slots.get(calendarId);
   }, [overview]);
 
-  // Project milestones as synthetic all-day events — a first-party overlay, not synced. Only draw a
-  // milestone that ISN'T already on the calendar as a real event: PM-native (unlinked) ones, plus
-  // linked ones whose event is `event_missing` (out of the mirror band / deselected / deleted), which
-  // nothing else shows. A linked, in-mirror milestone is already drawn as its real event, so skip it
-  // to avoid a double. (Accepted edge: a linked, in-mirror milestone whose calendar the user hid then
-  // shows nowhere.) Dateless milestones have no day to sit on, so they're excluded.
-  const milestoneEvents = useMemo<CalendarEvent[]>(() => {
-    const out: CalendarEvent[] = [];
-    for (const m of milestones) {
-      if (!m.due_date) continue;
-      if (!(m.event_uid === null || m.event_missing)) continue;
-      out.push({
-        id: milestoneOverlayId(m.id),
-        calendar_id: MILESTONE_CALENDAR_ID,
-        // Suffix the owning project so two milestones with similar labels in different projects are
-        // distinguishable on the all-day row (a milestone always belongs to exactly one project).
-        // The check mark is what `isEventPast` reads to let a met milestone recede and never an
-        // unmet one: the same test the board strikes through with (`milestoneDone`).
-        summary: `${milestoneDone(m) ? MILESTONE_MET_MARK : ""}${m.label} · ${m.project_name}`,
-        description: null,
-        location: null,
-        start: m.due_date.slice(0, 10),
-        end: null,
-        all_day: true,
-        html_link: null,
-        uid: null,
-      });
-    }
-    return out;
-  }, [milestones]);
+  // Project milestones as synthetic all-day events — a first-party overlay, not synced. Only the ones
+  // not already on the calendar as a real event are drawn (see `milestoneOverlayEvents`). (Accepted
+  // edge: a linked, in-mirror milestone whose calendar the user hid then shows nowhere.)
+  const milestoneEvents = useMemo<CalendarEvent[]>(
+    () => milestoneOverlayEvents(milestones),
+    [milestones],
+  );
 
   // Freeform pinboard timeline entries as synthetic all-day events — the second first-party overlay.
   // `pinboardEntries` has already dropped project-bound timelines (their entries are real milestones,
@@ -1283,13 +1307,21 @@ export function CalendarView({
         const first = creating.resume?.draft ?? creating.seed;
         // A task draft the tab handed back opens as the task chip it was.
         return creating.resume?.kind === "task"
-          ? draftEvent(taskGhostFields(first), TASK_CALENDAR_ID)
+          ? draftEvent(taskGhostFields(first, dayKey(new Date())), TASK_CALENDAR_ID)
           : draftEvent(first, creating.calendarId);
       }
-      return draftEvent(quickDraft.draft, quickDraft.calendarId, quickDraft.state);
+      // A task's draft is on its plan day; the chip will be on today once that has passed.
+      return draftEvent(
+        quickDraft.calendarId === TASK_CALENDAR_ID
+          ? taskGhostFields(quickDraft.draft, dayKey(new Date()))
+          : quickDraft.draft,
+        quickDraft.calendarId,
+        quickDraft.state,
+      );
     }
-    return landed?.ev ?? null;
-  }, [creating, quickDraft, landed]);
+    // A saved task's ghost never outlasts Tasks being hidden, when its chip would not be drawn.
+    return landed?.ev ?? (hidden.has(TASK_CALENDAR_ID) ? null : (landedTask?.ev ?? null));
+  }, [creating, quickDraft, landed, landedTask, hidden]);
 
   // A date typed in quick create that the view doesn't show: the view goes to it, as Google's does
   // (C16 critique C2-M9), in Day, Week and Month. Only a change of the draft's day moves it, never
@@ -1381,6 +1413,7 @@ export function CalendarView({
     }
     const linked = row.uid ? milestones.find((m) => m.event_uid === row.uid) : undefined;
     setLanded(null);
+    setLandedTask(null);
     setCreating({
       seed: { ...copy.fields, guests: guestsOnto(copy.fields.guests, target) },
       calendarId: target.calendar.id,
@@ -1699,6 +1732,7 @@ export function CalendarView({
       if (!target || zone === null) return;
       const under = anchor ? null : (createButtonRef.current?.getBoundingClientRect() ?? null);
       setLanded(null);
+      setLandedTask(null);
       setCreating({
         seed: slotSeed(timing, new Date(), zone),
         calendarId: target.calendar.id,
@@ -1979,7 +2013,11 @@ export function CalendarView({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col" data-help="calendar-view">
+    <div
+      ref={calendarRootRef}
+      className="flex h-full min-h-0 flex-1 flex-col"
+      data-help="calendar-view"
+    >
       <CalendarHeader
         view={view}
         availableViews={AVAILABLE_VIEWS}
@@ -2196,7 +2234,7 @@ export function CalendarView({
             const back = copyOpener.current;
             copyOpener.current = null;
             setCreating(null);
-            if (fromQuick) createButtonRef.current?.focus();
+            if (fromQuick) focusBackToCreate();
             else if (copied !== null) {
               // After the editor's own hand-back, which goes to the copying dialog's, now gone.
               requestAnimationFrame(() => {
@@ -2310,7 +2348,7 @@ export function CalendarView({
           // back to "+ New event", as quick create's own close would have sent it.
           const fromQuick = taskEditing !== null && "fromQuick" in taskEditing;
           setTaskEditing(null);
-          if (fromQuick) createButtonRef.current?.focus();
+          if (fromQuick) focusBackToCreate();
         }}
       />
       <VisuallyHidden role="status" aria-live="polite">

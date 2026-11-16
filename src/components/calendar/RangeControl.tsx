@@ -60,7 +60,7 @@ export function RangeControl({
   const items = ranges ? ITEMS.filter((it) => ranges.includes(it.value)) : ITEMS;
   return (
     <div
-      className="inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-border2 p-0.5"
+      className="inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-ink4 p-0.5"
       role="group"
       aria-label="Time-grid hours"
     >
@@ -69,7 +69,10 @@ export function RangeControl({
         return (
           <div
             key={it.value}
-            className={cn("flex items-center rounded-[var(--radius-sm)]", active && "bg-accent")}
+            className={cn(
+              "flex items-center rounded-[var(--radius-sm)]",
+              active && "bg-accent shadow-[inset_0_0_0_1px_var(--ink4)]",
+            )}
           >
             <button
               type="button"

@@ -36,6 +36,8 @@ import type {
 import { CREATE_LOST } from "../../../lib/calendarEdit/editReasons";
 import type { EditorFields } from "../../../lib/calendarEdit/eventDraft";
 import { createTargets } from "../../../lib/calendarEdit/createTargets";
+import { dayKey } from "../../../lib/calendar-layout";
+import { formatDateOnly } from "../../../lib/format";
 import { isAnyDialogOpen } from "../../../lib/useDialogLayer";
 import { Popover } from "../../ui";
 
@@ -2015,7 +2017,9 @@ describe("QuickCreatePopover Event | Task", () => {
     goTask();
     // The seed's day is long gone.
     expect(
-      screen.getByText("That day has passed, so the task shows on today until it's done."),
+      screen.getByText(
+        `That day has passed, so the task shows on today, ${formatDateOnly(dayKey(new Date()))}, until it's done.`,
+      ),
     ).toBeTruthy();
     // The event's notes aren't a task's.
     expect(screen.queryByText(/is hidden in your calendar list, so the new event/)).toBeNull();
@@ -2044,6 +2048,8 @@ describe("QuickCreatePopover Event | Task", () => {
         "Tasks are hidden in your calendar list, so the new task won't show until you show Tasks again.",
       ),
     ).toBeTruthy();
+    // Nothing draws while Tasks is hidden, so there is no "shows on today" to promise.
+    expect(screen.queryByText(/shows on today/)).toBeNull();
   });
 
   it("no past-day note for today or a later day", () => {

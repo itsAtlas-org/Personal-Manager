@@ -1911,7 +1911,9 @@ function TimelineViewToggle({
       aria-label={label}
       title={label}
       className={`flex h-5 w-5 min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] ${
-        value === v ? "bg-accent text-accent-ink" : "text-ink4 hover:bg-surface hover:text-ink2"
+        value === v
+          ? "bg-accent text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)]"
+          : "text-ink4 hover:bg-surface hover:text-ink2"
       }`}
     >
       {icon}

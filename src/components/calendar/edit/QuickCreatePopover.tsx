@@ -778,7 +778,7 @@ export function QuickCreatePopover({
   const lines = [...new Set(check.problems.map(problemText))];
   // A task's own notes replace the event's (the zone, the calendar, Meet are none of its business).
   const notes = isTask
-    ? quickTaskNotes(hidden, taskDaysOf(t)?.doStart ?? null, dayKey(new Date()))
+    ? quickTaskNotes(hidden, taskDaysOf(t), dayKey(new Date()))
     : [
         ...(timeOff ? [NO_ZONE_CREATE] : []),
         ...createNotes(overview, hidden, calendarId),
