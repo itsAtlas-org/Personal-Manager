@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.175.6-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Editing your events now works in the pop-out Calendar. It was promised there, but PM refused every change made in that window. You can now create, move, edit and delete events (with Undo) and reply to invitations in the pop-out, and a change shows in PM's main window too. Turning editing on is still done in Settings → Connectors, in the main window.",
+    ],
+  },
+  {
     version: "3.175.5-alpha",
     date: "2026-11-11",
     highlights: [
