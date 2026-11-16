@@ -33,7 +33,7 @@ export function ZoneSearchList({ exclude = [], onPick, autoFocus }: Props) {
         placeholder="Search continent, country, city or code…"
         aria-label="Filter timezones"
         autoFocus={autoFocus}
-        className="w-full rounded-[var(--radius-sm)] border border-border2 bg-surface px-2 py-1 text-xs text-ink2 focus:border-accent focus:outline-none"
+        className="w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-xs text-ink2 focus:border-accent-text focus:outline-none"
       />
       <ul className="max-h-56 overflow-auto">
         {matches.map((o) => (

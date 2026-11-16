@@ -87,7 +87,7 @@ export function FolderGrid({
             type="button"
             onClick={() => onOpen(f.key)}
             title={f.detail ? `${f.name} · ${f.detail}` : f.name}
-            className="flex w-full items-center gap-2.5 rounded-[var(--radius-sm)] border border-border px-3 py-2 text-left hover:border-border2 hover:bg-surface"
+            className="flex w-full items-center gap-2.5 rounded-[var(--radius-sm)] border border-ink4 px-3 py-2 text-left hover:border-ink2 hover:bg-surface"
           >
             <FolderIcon />
             <span className="min-w-0 flex-1">

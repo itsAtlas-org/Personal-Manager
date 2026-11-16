@@ -987,7 +987,7 @@ export function DocumentsView({ onReviewClick }: Props) {
             aria-label="Add documents"
             data-help="documents-dropzone"
             className={`cursor-pointer rounded-[var(--radius)] border-2 border-dashed p-10 text-center transition-colors ${
-              dragging ? "border-accent bg-surface" : "border-border2 hover:border-border"
+              dragging ? "border-accent-text bg-surface" : "border-ink4 hover:border-ink2"
             }`}
           >
             <p className="text-sm text-ink2">
@@ -1044,14 +1044,14 @@ export function DocumentsView({ onReviewClick }: Props) {
                     value={devTitle}
                     onChange={(e) => setDevTitle(e.target.value)}
                     placeholder="Title"
-                    className="rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+                    className="rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
                   />
                   <textarea
                     value={devBody}
                     onChange={(e) => setDevBody(e.target.value)}
                     placeholder="Body — embedded + summarised, never stored (the index-only pointer)"
                     rows={3}
-                    className="rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+                    className="rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
                   />
                   <div className="flex justify-end">
                     <Button
@@ -1090,7 +1090,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                               key={k}
                               onClick={() => devFire(k, d.source_id!)}
                               disabled={busy}
-                              className="rounded border border-border px-1.5 py-0.5 text-ink3 hover:text-ink disabled:opacity-50"
+                              className="rounded border border-ink4 px-1.5 py-0.5 text-ink3 hover:text-ink disabled:opacity-50"
                             >
                               {k === "source_failure" ? "fail" : k}
                             </button>

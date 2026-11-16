@@ -232,7 +232,7 @@ export function TeachTags() {
             {tags.map((t) => (
               <span
                 key={t.name}
-                className="group inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border2 bg-surface px-2 py-0.5 text-xs text-ink3"
+                className="group inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-0.5 text-xs text-ink3"
               >
                 <button
                   type="button"

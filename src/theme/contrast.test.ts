@@ -264,3 +264,63 @@ describe("segmented controls use the measured edge and rim", () => {
     expect(t).toContain(`px-1.5 text-xs text-ink2 ${RIM}`);
   });
 });
+
+// ===== BEGIN form-control edges (#1105) =====================================================
+// Own block, own describe: other PRs add cases to the file above and below this one.
+//
+// WCAG 1.4.11: an interactive control's edge is its visual boundary when nothing else marks it out,
+// so it owes 3:1 against whatever it sits on. A text field, dropdown, secondary button or chip is
+// exactly that case (`--surface` on `--panel` is 1.03-1.16:1, so the fill adds no boundary). The
+// ramp's "strong edge" `--border2` measures 1.33-1.84:1 at the default Contrast and 2.73-3.29:1
+// even at `high` in a light theme, so it was never an edge a person could see. Every control now
+// uses `--ink4`: 4.73:1 or better on every surface (measured minimum: terminal/light/#7fe0b0 on
+// --surface).
+//
+// The pairs are the ones the sweep found, by class:
+//   rest edge     border-ink4          on --bg / --panel / --surface  (fields sit on all three)
+//   hover edge    border-ink2          never weaker than rest (DocumentFolders, GraphView, RemovePmData)
+//   focus/hover   border-accent-text   not `--accent`: a pale accent in a light theme is 1.4:1
+//   invalid edge  border-st-due        already the text-status colour, so it clears 4.5:1 too
+// Disabled controls drop back to `--border2` on purpose (exempt from 1.4.11, and they should recede).
+// Swept over every accent and BOTH Contrast levels: the accent hue tints the surfaces.
+describe("form-control edges clear 3:1 on every surface (1.4.11)", () => {
+  const SURFACES = ["bg", "panel", "surface"] as const;
+  for (const system of SYSTEMS) {
+    for (const mode of MODES) {
+      it(`${system}/${mode}: rest, hover, focus and invalid edges, both Contrast levels`, () => {
+        for (const contrast of ["aa", "high"] as const) {
+          for (const anyAccent of ACCENTS[system]) {
+            // The invalid edge is --st-due, which the colour-blind axis swaps for its own palette.
+            for (const colorblind of [false, true]) {
+              const v = themeVars(system, mode, anyAccent, colorblind, contrast);
+              for (const against of SURFACES) {
+                for (const role of ["ink4", "ink2", "accent-text", "st-due"]) {
+                  expect(ratioOf(v, role, against)).toBeGreaterThanOrEqual(3);
+                }
+                // Hover is never a step down from rest.
+                expect(ratioOf(v, "ink2", against)).toBeGreaterThanOrEqual(
+                  ratioOf(v, "ink4", against),
+                );
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  it("the old edge really did fail, so this block is measuring something", () => {
+    // If --border2 ever reached 3:1 at the default Contrast this guard would be vacuous: say so.
+    let worst = Infinity;
+    for (const system of SYSTEMS) {
+      for (const mode of MODES) {
+        for (const anyAccent of ACCENTS[system]) {
+          const v = themeVars(system, mode, anyAccent, false, "aa");
+          for (const against of SURFACES) worst = Math.min(worst, ratioOf(v, "border2", against));
+        }
+      }
+    }
+    expect(worst).toBeLessThan(3);
+  });
+});
+// ===== END form-control edges (#1105) =======================================================

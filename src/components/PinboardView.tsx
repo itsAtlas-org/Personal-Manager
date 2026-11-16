@@ -2862,7 +2862,7 @@ function MilestoneRow({ m, onChanged, onError, showPower }: MilestoneItemProps) 
         onChange={(e) => setLabel(e.target.value)}
         onBlur={() => void persist()}
         placeholder="label"
-        className={`min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent focus:outline-none ${
+        className={`min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none ${
           met ? "text-ink4 line-through" : ""
         }`}
       />
@@ -3010,7 +3010,7 @@ function FreeformTimeline({
                 value={it.label ?? ""}
                 onChange={(e) => onUpdateItem(widget.id, it.id, { label: e.target.value })}
                 placeholder="what happens"
-                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent focus:outline-none"
+                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none"
               />
               <button
                 onClick={() => onRemoveItem(widget.id, it.id)}
@@ -3039,7 +3039,7 @@ function FreeformTimeline({
           value={projDraft}
           onChange={(e) => setProjDraft(e.target.value)}
           placeholder="Link a project…"
-          className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border2 bg-surface px-1 py-0.5 text-[0.6875rem] text-ink3 focus:border-accent focus:outline-none"
+          className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-1 py-0.5 text-[0.6875rem] text-ink3 focus:border-accent-text focus:outline-none"
         />
         <datalist id={listId}>
           {projects.map((p) => (

@@ -517,7 +517,7 @@ export function DescriptionEditor({
           // Textarea's look, disabled as aria-disabled, and `pm-desc-box` for the lists and links
           // inside it (index.css). No `white-space` of its own: typed runs of spaces are kept as
           // no-break spaces, as Google's editor keeps them.
-          "pm-desc-box max-h-[16rem] min-h-[6rem] w-full overflow-y-auto rounded-[var(--radius-sm)] border border-border2 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition focus:border-accent aria-disabled:cursor-not-allowed aria-disabled:bg-transparent aria-disabled:text-ink3",
+          "pm-desc-box max-h-[16rem] min-h-[6rem] w-full overflow-y-auto rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition focus:border-accent-text aria-disabled:cursor-not-allowed aria-disabled:border-border2 aria-disabled:bg-transparent aria-disabled:text-ink3",
           system === "terminal" && "font-mono caret-[var(--accent-text)]",
         )}
         onFocus={(e) => {

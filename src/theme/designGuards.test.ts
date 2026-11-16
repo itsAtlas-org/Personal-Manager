@@ -247,3 +247,107 @@ describe("every <label> is associated with a control", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// ===== BEGIN form-control edges (#1105) =====================================================
+// A field, dropdown, secondary button or chip is marked out by its edge, so the edge is `--ink4`
+// (3:1, WCAG 1.4.11; contrast.test.ts measures it), never `--border2` (1.33-1.84:1 at the default
+// Contrast). These files hold controls only (no panels), so a bare `border-border2` in one of them
+// is the regression. `disabled:` / `aria-disabled:` forms are allowed: a disabled control is exempt
+// and recedes on purpose. The list is the controls the 2026-11-16 sweep fixed; a control added
+// later is covered by the same rule but not by this list, so add it here when it lands.
+describe("form-control edges use --ink4, not --border2", () => {
+  const CONTROL_FILES = [
+    "src/components/ui/Input.tsx",
+    "src/components/ui/Textarea.tsx",
+    "src/components/ui/Select.tsx",
+    "src/components/ui/Button.tsx",
+    "src/components/DateField.tsx",
+    "src/components/ModelPicker.tsx",
+    "src/components/DeleteProjectDialog.tsx",
+    "src/components/MergeProjectDialog.tsx",
+    "src/components/QueuedMessages.tsx",
+    "src/components/VaultJoin.tsx",
+    "src/components/RetrievalExplainPanel.tsx",
+    "src/components/ConversationTitle.tsx",
+    "src/components/DocumentFolders.tsx",
+    "src/components/Sidebar.tsx",
+    "src/components/calendar/ZoneSearchList.tsx",
+    "src/components/calendar/edit/CustomRecurrenceDialog.tsx",
+    "src/components/calendar/edit/ReminderList.tsx",
+  ] as const;
+  // A bare utility: not preceded by `-` or a word character, and the only variant prefixes let
+  // through are the disabled ones (`disabled:`, `aria-disabled:`). `hover:border-border2` is flagged.
+  const BARE_BORDER2 = /(?<![\w-])(?<!disabled:)border-border2\b/;
+
+  it("no listed control file carries a bare border-border2", () => {
+    const offenders: string[] = [];
+    for (const path of CONTROL_FILES) {
+      const text = SOURCES.find(([p]) => p === path)?.[1];
+      expect(text, `${path} should exist`).toBeDefined();
+      (text ?? "").split("\n").forEach((line, i) => {
+        // Comments may name the old token.
+        if (/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(line)) return;
+        if (BARE_BORDER2.test(line)) offenders.push(`${path}:${i + 1}`);
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the event description editor's box edges in --ink4 (its read-only view is a container)", () => {
+    const text =
+      SOURCES.find(([p]) => p === "src/components/calendar/edit/DescriptionEditor.tsx")?.[1] ?? "";
+    const box = text.split("\n").find((l) => l.includes("pm-desc-box max-h-")) ?? "";
+    expect(box).toContain("border-ink4");
+    expect(box).not.toMatch(BARE_BORDER2);
+  });
+
+  // Files that mix controls with panels (a bare `border-border2` is right on the panel), so each
+  // fixed control is pinned by a line anchor: every line holding the anchor must carry --ink4.
+  it("the fixed controls in files that also hold panels keep their --ink4 edge", () => {
+    const SITES: Array<[path: string, anchors: string[]]> = [
+      [
+        "src/components/ChatView.tsx",
+        ["px-1.5 py-0.5 text-ink2 transition-colors", "w-14 rounded-[var(--radius-sm)]"],
+      ],
+      [
+        "src/components/DocumentsView.tsx",
+        [
+          "border-accent-text bg-surface",
+          "bg-surface px-2 py-1 text-sm text-ink",
+          "px-1.5 py-0.5 text-ink3 hover:text-ink disabled:opacity-50",
+        ],
+      ],
+      ["src/components/DocumentReader.tsx", ["text-xs text-ink2 hover:bg-surface"]],
+      ["src/components/GraphView.tsx", ["h-7 w-7 items-center justify-center"]],
+      ["src/components/PinboardView.tsx", ["text-[0.6875rem] text-ink3 focus:border-accent-text"]],
+      ["src/components/ProjectPicker.tsx", ["bg-surface text-ink3"]],
+      ["src/components/TeachTags.tsx", ["group inline-flex items-center gap-1"]],
+      ["src/components/calendar/ZoneGutter.tsx", ["zones.length === 0 &&"]],
+      ["src/components/DevView.tsx", ["bg-surface px-2 py-1 text-sm text-ink"]],
+      ["src/components/RemovePmData.tsx", ["cursor-pointer border-"]],
+    ];
+    for (const [path, anchors] of SITES) {
+      const lines = (SOURCES.find(([p]) => p === path)?.[1] ?? "").split("\n");
+      for (const anchor of anchors) {
+        const hits = lines.filter((l) => l.includes(anchor));
+        expect(hits.length, `${path}: no line holds "${anchor}"`).toBeGreaterThan(0);
+        for (const l of hits) expect(l, `${path}: "${anchor}"`).toContain("border-ink4");
+      }
+    }
+    // The locked Remove-data card is the one that recedes, on purpose.
+    const remove = SOURCES.find(([p]) => p === "src/components/RemovePmData.tsx")?.[1] ?? "";
+    expect(remove).toContain("cursor-default border-border2");
+  });
+
+  it("the shared primitives edge in --ink4 and focus in --accent-text", () => {
+    for (const path of ["Input", "Textarea", "Select"]) {
+      const text = SOURCES.find(([p]) => p === `src/components/ui/${path}.tsx`)?.[1] ?? "";
+      expect(text).toContain("border-ink4");
+      expect(text).toContain("focus:border-accent-text");
+      expect(text).not.toMatch(/(?<![\w:-])focus:border-accent\b(?!-)/);
+    }
+    const button = SOURCES.find(([p]) => p === "src/components/ui/Button.tsx")?.[1] ?? "";
+    expect(button).toContain("border border-ink4");
+  });
+});
+// ===== END form-control edges (#1105) =======================================================

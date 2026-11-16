@@ -62,7 +62,7 @@ export function ConversationTitle({ conversationId, title, onRenamed }: Props) {
             setDraft(title);
           }
         }}
-        className="w-full max-w-md rounded-[var(--radius-sm)] border border-rule bg-surface px-2 py-1 font-head text-sm text-ink outline-none focus:border-accent"
+        className="w-full max-w-md rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 font-head text-sm text-ink outline-none focus:border-accent-text"
         aria-label="Conversation title"
       />
     );

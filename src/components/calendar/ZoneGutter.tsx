@@ -70,7 +70,7 @@ export function ZoneGutter({ zones, onChange, at, allowAdd = true, corner }: Pro
               title={title}
               className={cn(
                 "flex min-h-[var(--tap-min,24px)] w-full items-stretch rounded-[var(--radius-sm)] font-mono text-[0.5625rem] uppercase leading-none tracking-tight text-ink4 transition hover:bg-surface hover:text-ink",
-                zones.length === 0 && "justify-center border border-border2",
+                zones.length === 0 && "justify-center border border-ink4",
               )}
             >
               {zones.length === 0 ? (
