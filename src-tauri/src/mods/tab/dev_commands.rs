@@ -23,7 +23,7 @@ use chrono::Utc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Webview};
 
-use super::commands::{blocking, with_ledger, with_token, View};
+use super::commands::{blocking, current_epoch, with_ledger, with_token, View};
 use super::consent::Answers;
 use super::device;
 use super::error::{Code, ModsError, Result};
@@ -135,6 +135,7 @@ pub async fn dev_mode_switch(webview: Webview, on: bool) -> Result<DevSwitch> {
 #[tauri::command]
 pub async fn install_unsigned_file(webview: Webview, path: String) -> Result<ConsentScreen> {
     blocking(&webview, move |app| {
+        let epoch = current_epoch(app);
         let device = this_device(app)?;
         // Before the file is read: a cheap refusal, and a hostile zip isn't parsed while it is off.
         // The ledger reads it again, as the authority.
@@ -151,7 +152,7 @@ pub async fn install_unsigned_file(webview: Webview, path: String) -> Result<Con
         let (screen, staged) = with_ledger(app, Mint::Always, |ledger| {
             unsigned::prepare(ledger, bytes, &env)
         })?;
-        with_token(app, screen, staged)
+        with_token(app, epoch, screen, staged)
     })
     .await
 }

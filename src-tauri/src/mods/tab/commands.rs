@@ -261,19 +261,26 @@ fn installed_versions(app: &AppHandle) -> Result<BTreeMap<String, String>> {
 
 // ---- Installing: the consent screen, then the install ---------------------------------------------
 
-/// Stage `staged` and hand the screen its token.
+/// Which store is open now. A command that builds a consent screen reads this FIRST, before it
+/// reads anything the screen is judged against, and hands it to [`with_token`]: read any later, a
+/// vault switch or lock during the build would stamp store A's screen with store B's epoch, and
+/// `Stage::take` would accept it. Read first, it can only be older than the live epoch, which
+/// `take` refuses (the epoch is never ahead of the store: see `AppState::store_epoch`).
+pub(super) fn current_epoch(app: &AppHandle) -> u64 {
+    app.state::<AppState>().store_epoch()
+}
+
+/// Stage `staged` and hand the screen its token, bound to `epoch`: the store that was open when the
+/// command began (see [`current_epoch`]).
 pub(super) fn with_token(
     app: &AppHandle,
+    epoch: u64,
     mut screen: ConsentScreen,
     staged: Staged,
 ) -> Result<ConsentScreen> {
     let stage = app.state::<Stage>();
     screen.token = stage
-        .put(
-            staged,
-            Instant::now(),
-            app.state::<AppState>().store_epoch(),
-        )
+        .put(staged, Instant::now(), epoch)
         .ok_or_else(|| ModsError::internal("no randomness for a consent token"))?;
     Ok(screen)
 }
@@ -285,6 +292,7 @@ pub(super) fn with_token(
 #[tauri::command]
 pub async fn install_mod_file(webview: Webview, path: String) -> Result<ConsentScreen> {
     blocking(&webview, move |app| {
+        let epoch = current_epoch(app);
         let bytes = install::read_file(std::path::Path::new(&path))?;
         let view = View::read(app)?;
         view.for_install()?;
@@ -292,7 +300,7 @@ pub async fn install_mod_file(webview: Webview, path: String) -> Result<ConsentS
         let (screen, staged) = with_ledger(app, Mint::Always, |ledger| {
             install::prepare(ledger, bytes, Source::File, &env)
         })?;
-        with_token(app, screen, staged)
+        with_token(app, epoch, screen, staged)
     })
     .await
 }
@@ -355,6 +363,9 @@ async fn catalogue_screen(
     let id = parse_id(&mod_id)?;
     // 1. What may be installed, decided from the record, the index and the row.
     let plan = blocking(webview, move |app| {
+        // Taken before the plan is judged: the download below can be long, and a switch during it
+        // must leave the token stale.
+        let epoch = current_epoch(app);
         let view = View::read(app)?;
         view.for_install()?;
         let entry = catalogue::find(view.index(), id.as_str())?.clone();
@@ -384,9 +395,10 @@ async fn catalogue_screen(
                 "This mod was installed from a file, so the catalogue doesn't update it.",
             ));
         }
-        Ok(entry)
+        Ok((entry, epoch))
     })
     .await?;
+    let (plan, epoch) = plan;
     // 2. The download, off every lock, checked against the signed index's sha256.
     let endpoints = Endpoints::machine();
     let transport = ReqwestTransport::new(&endpoints);
@@ -405,7 +417,7 @@ async fn catalogue_screen(
                 "That download isn't the version the catalogue lists.",
             ));
         }
-        with_token(app, screen, staged)
+        with_token(app, epoch, screen, staged)
     })
     .await
 }
@@ -978,6 +990,40 @@ mod tests {
         }
         let registered = lib.matches("mods::tab::commands::").count();
         assert_eq!(registered, command_bodies().len());
+    }
+
+    /// A consent token is bound to the store the screen was judged against, so every function that
+    /// stages one reads the store's epoch before its first read of anything the screen shows. Read
+    /// after, a vault switch during the build stamps store A's screen with store B's epoch and
+    /// `Stage::take` accepts it. (The pure half, that `take` refuses an older epoch, is in stage.rs.)
+    #[test]
+    fn every_consent_screen_takes_its_stores_epoch_before_it_reads_anything() {
+        let mut stagers = 0;
+        for source in [
+            include_str!("commands.rs"),
+            include_str!("dev_commands.rs"),
+            include_str!("folder.rs"),
+        ] {
+            let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+            // Top-level items end with a brace in column 0.
+            for item in production.split("\n}\n") {
+                if !item.contains("with_token(app, epoch, ") || item.contains("fn with_token") {
+                    continue;
+                }
+                stagers += 1;
+                let epoch = item
+                    .find("let epoch = current_epoch(app);")
+                    .unwrap_or_else(|| panic!("no epoch read in:\n{item}"));
+                let first_read = item.find("View::read(app)").unwrap();
+                assert!(
+                    epoch < first_read,
+                    "the epoch is read after the view in:\n{item}"
+                );
+            }
+        }
+        // install_mod_file, catalogue_screen (both catalogue commands), install_unsigned_file and
+        // load_test_mod.
+        assert_eq!(stagers, 4);
     }
 
     #[test]

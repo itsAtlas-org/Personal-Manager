@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use tauri::{AppHandle, Webview};
 
-use super::commands::{blocking, parse_id, with_ledger, with_token, View};
+use super::commands::{blocking, current_epoch, parse_id, with_ledger, with_token, View};
 use super::consent::{self, Answers};
 use super::dev_commands::{require_dev_mode, this_device};
 use super::error::{ModsError, Result};
@@ -230,6 +230,7 @@ pub(super) fn finish_folder(
 #[tauri::command]
 pub async fn load_test_mod(webview: Webview, path: String) -> Result<ConsentScreen> {
     blocking(&webview, move |app| {
+        let epoch = current_epoch(app);
         let device = this_device(app)?;
         // Before the folder is read: a cheap refusal, and a hostile folder isn't scanned while it
         // is off. The ledger reads it again, as the authority.
@@ -247,7 +248,7 @@ pub async fn load_test_mod(webview: Webview, path: String) -> Result<ConsentScre
         };
         let (screen, staged) =
             with_ledger(app, Mint::Always, |ledger| prepare(ledger, scan, &env))?;
-        with_token(app, screen, staged)
+        with_token(app, epoch, screen, staged)
     })
     .await
 }
