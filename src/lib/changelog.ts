@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.176.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "The Month and Year calendars now scroll on without stopping. Before, a fast scroll, or a few flings in a row, ran into a wall a year or two out and you had to press ‹ or › to carry on. Now you can scroll ten years each way in Month and twenty-five in Year, as fast as you like, and a jump further than that (a search result, a date picked in the mini-calendar) lands where you asked.",
+      "↑ and ↓ now page the calendar a month in Month and a year in Year, as ← and → do. j and n go forward and k and p go back, as in Google Calendar, in every view with ‹ and › (Day, Week, Month, Year and the Agenda's List). Holding a key runs through the months smoothly. The keys stand down while you're typing, or while a menu, the date picker or a window is open over the calendar.",
+      "The ‹ and › buttons and Today now say their keys when you hover them or tab to them, and the calendar's help lists them.",
+      "Scrolling fast no longer loads every month you pass, only the ones you stop on, and the week you're looking at stays put when a note about loading appears above the grid or you resize the window.",
+    ],
+  },
+  {
     version: "3.175.6-alpha",
     date: "2026-11-11",
     highlights: [

@@ -113,6 +113,7 @@ import {
   type RunwayWindow,
 } from "../../lib/calendarPrefs";
 import { useHorizontalWheelShift } from "../../lib/useHorizontalWheelShift";
+import { useSettledDate } from "../../lib/useSettledDate";
 import { calendarNavKey, calendarUndoKey } from "../../lib/calendarNavKey";
 import { isAnyDialogOpen } from "../../lib/useDialogLayer";
 import { resolveRangeBounds } from "../../lib/calendarGeom";
@@ -311,6 +312,11 @@ interface CalendarViewProps {
  *  (its months still loading, or a view that draws no piece of it, like the Year view). */
 const REVEAL_WAIT_MS = 1500;
 
+/** How long the cursor holds still before what's keyed on where it has got to (the months read, the
+ *  later months loaded, the range hint) follows it: a fling or a held key makes one load, not one per
+ *  month it passed, and the strips above the grid change at rest, not under the fingers. */
+const CURSOR_SETTLE_MS = 250;
+
 export function CalendarView({
   onOpenProject,
   onOpenPinboard,
@@ -357,6 +363,9 @@ export function CalendarView({
   });
   // How wide the Day view is (1-6). Week is always 7.
   const [dayCount, setDayCount] = useState<number>(readDayCount);
+  // The cursor once it has stopped moving (the first move of a burst at once): what loads, and what
+  // the range hint says, are keyed on this. The header's label and the grids keep the live cursor.
+  const settledCursor = useSettledDate(cursor, CURSOR_SETTLE_MS);
   // Persist the cursor on every MOVE, whatever the openOn setting says — so turning "where I left
   // off" on works from that moment rather than only after the next navigation.
   //
@@ -422,9 +431,11 @@ export function CalendarView({
   // What's on show nearing an edge of the months read moves them, and reads the new stretch. The
   // visible range, not the cursor: a Year view shows months up to eleven away from it.
   useEffect(() => {
-    const visible = visibleRange(view, cursor, dayCount);
-    setLoadWindow((w) => nextWindow(w, visible, cursor, WINDOW_BACK, WINDOW_AHEAD, WINDOW_MARGIN));
-  }, [view, cursor, dayCount]);
+    const visible = visibleRange(view, settledCursor, dayCount);
+    setLoadWindow((w) =>
+      nextWindow(w, visible, settledCursor, WINDOW_BACK, WINDOW_AHEAD, WINDOW_MARGIN),
+    );
+  }, [view, settledCursor, dayCount]);
   useEffect(() => {
     if (windowRef.current === loadWindow) return;
     windowRef.current = loadWindow;
@@ -446,7 +457,7 @@ export function CalendarView({
   const anySelected = overview?.calendars.some((c) => c.selected) ?? false;
   useEffect(() => {
     if (mirrorEnd === null || !anySelected) return;
-    const { start, end } = visibleRange(view, cursor, dayCount);
+    const { start, end } = visibleRange(view, settledCursor, dayCount);
     const lead = new Date(end.getFullYear(), end.getMonth() + LATER_LEAD_MONTHS, 1);
     const known = new Set([...laterLoaded, ...laterPending]);
     const need = laterToLoad({ start, end: lead }, mirrorEnd, known);
@@ -469,7 +480,7 @@ export function CalendarView({
         for (const m of need.months) laterPending.delete(m);
         if (aliveRef.current) setLater(done);
       });
-  }, [mirrorEnd, anySelected, view, cursor, dayCount, laterEpoch]);
+  }, [mirrorEnd, anySelected, view, settledCursor, dayCount, laterEpoch]);
   const loadMilestones = useCallback(async () => {
     try {
       const ms = await listAllMilestones();
@@ -665,6 +676,9 @@ export function CalendarView({
   // The Runway is on screen: Agenda in its board layout. It always runs from today, so paging,
   // the date label and the out-of-range hint have nothing to say there.
   const runwayShown = view === "agenda" && agendaMode === "runway";
+  // Month and Year (Terminal's single-period tables too) run their periods down the screen, so ↑ and
+  // ↓ page them as ← and → do; Week, Day and the Agenda keep ↑ and ↓ for their own scrolling.
+  const pagesVertically = view === "month" || view === "year";
 
   const onWindowsChange = useCallback((next: RunwayWindow[]) => {
     setWindows(next);
@@ -870,11 +884,13 @@ export function CalendarView({
     [gridRef],
   );
 
-  // Keyboard nav while the tab is mounted: ← / → step the period, `t` jumps to today, `c` starts a
-  // new event in the full editor and Shift+C in quick create. Ignored while a field is focused, a
-  // modifier is held (so app shortcuts and text entry are untouched), or a dialog (quick create
-  // included) or the event popover is open over the tab (see `calendarNavKey`). Ctrl/Cmd+Z is the
-  // delete's Undo (`calendarUndoKey`).
+  // Keyboard nav while the tab is mounted: ← / → (and Google's k or p back, j or n forward) step the
+  // period, ↑ / ↓ too in Month and Year, whose periods run down the screen, `t` jumps to today, `c`
+  // starts a new event in the full editor and Shift+C in quick create. Ignored while a field is
+  // focused, a modifier is held (so app shortcuts and text entry are untouched), or anything is open
+  // over the tab that a click on the grid would only close: a dialog (quick create included), the
+  // event popover, or any other popover or the right-click menu, as `overlayShown` says (see
+  // `calendarNavKey`). Ctrl/Cmd+Z is the delete's Undo (`calendarUndoKey`).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Ctrl/Cmd+Z presses the newest Undo on screen (a delete still waiting). Unlike the arrows it
@@ -888,7 +904,7 @@ export function CalendarView({
         }
         return;
       }
-      const nav = calendarNavKey(e, isAnyDialogOpen() || popoverOpenRef.current);
+      const nav = calendarNavKey(e, overlayShown(popoverOpenRef.current), pagesVertically);
       // The Runway runs from today: ←, → and t would move a cursor nothing on screen follows.
       if (runwayShown && (nav === "prev" || nav === "next" || nav === "today")) return;
       if (nav === "prev") {
@@ -909,7 +925,7 @@ export function CalendarView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onPrev, onNext, onToday, startCreate, runwayShown]);
+  }, [onPrev, onNext, onToday, startCreate, runwayShown, pagesVertically]);
 
   const colorOf = useMemo(() => {
     const ids = overview?.calendars.map((c) => c.id) ?? [];
@@ -1491,9 +1507,9 @@ export function CalendarView({
   const rangeHint = useMemo(
     () =>
       overview && !runwayShown
-        ? rangeHintText(overview, visibleRange(view, cursor, dayCount), later)
+        ? rangeHintText(overview, visibleRange(view, settledCursor, dayCount), later)
         : null,
-    [overview, view, cursor, dayCount, runwayShown, later],
+    [overview, view, settledCursor, dayCount, runwayShown, later],
   );
 
   // The count the Terminal chrome strip shows at Power depth. For the bounded grids it's the events

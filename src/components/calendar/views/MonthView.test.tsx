@@ -10,10 +10,10 @@
 // press must never create on, draws the ghost over the days it would land on, and stops snapping
 // while a drag scrolls it; without that, nothing changes.
 
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent } from "../../../lib/types";
-import { DRAFT_EVENT_ID } from "../../../lib/calendar-layout";
+import { dayKey, DRAFT_EVENT_ID } from "../../../lib/calendar-layout";
 import { ghostEvent } from "../../../lib/calendarDrag";
 import { formatClock } from "../../../lib/format";
 import type { MonthInteraction } from "./MonthView";
@@ -94,6 +94,8 @@ const still: MonthInteraction = {
   live: false,
 };
 const stream = () => document.querySelector<HTMLElement>(".overflow-y-auto")!;
+// The stream's one child holds the drawn weeks, each placed at its own row.
+const drawnRows = () => [...stream().firstElementChild!.children] as HTMLElement[];
 
 describe("MonthView", () => {
   it("draws the new event's ghost dashed in its calendar's colour, as a chip or a band", () => {
@@ -235,12 +237,15 @@ describe("MonthView: dragging", () => {
     month(busy, still);
     const s = stream();
     expect(s.dataset.surface).toBe("month");
-    // 20 months before October 2026, from its Monday; a sixth of the 600 px pane a week.
-    expect(s.dataset.gridStart).toBe("2025-01-27");
+    // 120 months before October 2026 (1-10-2016 is a Saturday), from its Monday; a sixth of the
+    // 600 px pane a week.
+    expect(s.dataset.gridStart).toBe("2016-09-26");
     expect(s.dataset.weekH).toBe("100");
-    // One row a week, and the drag knows how many.
-    expect(Number(s.dataset.weeks)).toBe(s.children.length);
-    expect(s.children.length).toBeGreaterThan(170);
+    // One row a week over ten years each side, and the drag knows how many; only the rows near
+    // the viewport are drawn: the six in view and twelve more each side.
+    expect(Number(s.dataset.weeks)).toBeGreaterThan(1000);
+    expect(drawnRows().length).toBeLessThanOrEqual(6 + 2 * 12);
+    expect(drawnRows().length).toBeGreaterThan(12);
     expect(s.className).toContain("select-none");
     expect(document.querySelector("[data-day='2026-10-13']")).not.toBeNull();
     const chip = screen.getByRole("button", { name: `${clock(8)}, One` });
@@ -328,5 +333,294 @@ describe("MonthView: dragging", () => {
     expect(screen.getByRole("button", { name: `${clock(9)}, Two` }).className).toContain(
       "opacity-60",
     );
+  });
+});
+
+// Ten years of weeks each side of an anchor, only the ones near the viewport drawn, so scrolling
+// never reaches an edge: the wall at ~20 months is gone, and a jump past the ten years re-anchors.
+// jsdom lays out nothing, but its scrollTop is a plain field, so a test sets it and fires `scroll`.
+describe("MonthView: the stream has no wall", () => {
+  const WEEK_MS = 7 * 86_400_000;
+  // October 2026's first row: the Monday of the week holding the 1st, 28-9-2026, in a stream that
+  // starts on 26-9-2016, 522 weeks on.
+  const OCT_ROW = Math.round((Date.UTC(2026, 8, 28) - Date.UTC(2016, 8, 26)) / WEEK_MS);
+  const key = (d: Date) => dayKey(d);
+  const rowStart = (row: number) => new Date(2026, 8, 28 + (row - OCT_ROW) * 7);
+
+  function mountAt(cursor: Date, onFocusDate: (d: Date) => void = () => {}) {
+    const view = (c: Date) => (
+      <MonthView
+        cursor={c}
+        events={[]}
+        colorOf={() => "#336699"}
+        onFocusDate={onFocusDate}
+        now={new Date(2026, 9, 20)}
+        interaction={still}
+      />
+    );
+    const utils = render(view(cursor));
+    return { rerender: (c: Date) => utils.rerender(view(c)) };
+  }
+  const settle = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
+
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ["requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout"],
+    });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("opens on the cursor's week", () => {
+    mountAt(new Date(2026, 9, 1));
+    expect(OCT_ROW).toBe(522);
+    expect(document.querySelector(`[data-day='${key(rowStart(OCT_ROW))}']`)).not.toBeNull();
+    // Ten years back is drawn only once it is scrolled to.
+    expect(document.querySelector("[data-day='2016-09-26']")).toBeNull();
+  });
+
+  it("scrolls past the old ±20-month edge: those weeks are drawn, the stream doesn't change, the month is reported", () => {
+    const onFocusDate = vi.fn();
+    mountAt(new Date(2026, 9, 1), onFocusDate);
+    // The opening scroll is PM's own, and mutes the report until it has ended (700 ms at most).
+    settle(700);
+    const s = stream();
+    const weeks = s.dataset.weeks;
+    const start = s.dataset.gridStart;
+    // 150 weeks on: nearly three years, well past where the old stream ended (87 weeks).
+    const row = OCT_ROW + 150;
+    s.scrollTop = row * 100;
+    fireEvent.scroll(s);
+    settle(20);
+    expect(document.querySelector(`[data-day='${key(rowStart(row))}']`)).not.toBeNull();
+    // The old weeks are let go, so the drawn rows stay a few.
+    expect(document.querySelector(`[data-day='${key(rowStart(OCT_ROW))}']`)).toBeNull();
+    expect(drawnRows().length).toBeLessThanOrEqual(6 + 2 * 12);
+    // Scrolling doesn't move the stream: there is no re-anchor to wait for, and no wall.
+    expect(s.dataset.weeks).toBe(weeks);
+    expect(s.dataset.gridStart).toBe(start);
+    // The week 40% down the pane is 152 weeks on; its Thursday's month is the focus.
+    const thursday = new Date(2026, 8, 28 + (152 - 0) * 7 + 3);
+    expect(onFocusDate).toHaveBeenCalledTimes(1);
+    expect(onFocusDate).toHaveBeenCalledWith(
+      new Date(thursday.getFullYear(), thursday.getMonth(), 1),
+    );
+  });
+
+  it("draws the weeks at the very ends of the stream", () => {
+    mountAt(new Date(2026, 9, 1));
+    const s = stream();
+    const rows = Number(s.dataset.weeks);
+    s.scrollTop = (rows - 6) * 100;
+    fireEvent.scroll(s);
+    settle(20);
+    // The last row is drawn, right to the bottom of the full-height stream.
+    const last = drawnRows()[drawnRows().length - 1];
+    expect(last.style.top).toBe(`${(rows - 1) * 100}px`);
+    s.scrollTop = 0;
+    fireEvent.scroll(s);
+    settle(20);
+    expect(drawnRows()[0].style.top).toBe("0px");
+    expect(document.querySelector("[data-day='2016-09-26']")).not.toBeNull();
+  });
+
+  it("places each drawn week at its own row, in a stream of the whole height", () => {
+    mountAt(new Date(2026, 9, 1));
+    const rows = Number(stream().dataset.weeks);
+    const inner = stream().firstElementChild as HTMLElement;
+    expect(inner.style.height).toBe(`${rows * 100}px`);
+    const tops = drawnRows().map((w) => parseInt(w.style.top, 10));
+    expect(tops).toEqual([...tops].sort((a, b) => a - b));
+    expect(tops.every((t) => t % 100 === 0)).toBe(true);
+    expect(drawnRows().every((w) => w.style.height === "100px")).toBe(true);
+    // Row 522 is October's first week, at 52,200 px.
+    expect(tops).toContain(OCT_ROW * 100);
+  });
+
+  it("re-anchors for a jump past the ten years, and draws the cursor's week", () => {
+    const { rerender } = mountAt(new Date(2026, 9, 1));
+    const was = stream().dataset.gridStart;
+    rerender(new Date(2050, 0, 1));
+    const next = stream().dataset.gridStart;
+    expect(next).not.toBe(was);
+    // 120 months before January 2050, from its Monday (the 1st of January 2040 is a Sunday).
+    expect(next).toBe("2039-12-26");
+    expect(document.querySelector("[data-day='2050-01-03']")).not.toBeNull();
+  });
+
+  it("does not re-anchor for a jump inside the ten years, and draws that week", () => {
+    const { rerender } = mountAt(new Date(2026, 9, 1));
+    const was = stream().dataset.gridStart;
+    rerender(new Date(2031, 2, 1));
+    expect(stream().dataset.gridStart).toBe(was);
+    expect(document.querySelector("[data-day='2031-03-05']")).not.toBeNull();
+  });
+
+  describe("PM's own scrolls", () => {
+    let scrollTo: ReturnType<typeof vi.fn>;
+    let kept: PropertyDescriptor | undefined;
+    beforeEach(() => {
+      kept = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTo");
+      scrollTo = vi.fn();
+      Object.defineProperty(Element.prototype, "scrollTo", { configurable: true, value: scrollTo });
+    });
+    afterEach(() => {
+      if (kept) Object.defineProperty(Element.prototype, "scrollTo", kept);
+    });
+
+    it("glides to a month that's near, and jumps to one that's far", () => {
+      const { rerender } = mountAt(new Date(2026, 9, 1));
+      // The first paint is a jump.
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: OCT_ROW * 100, behavior: "auto" });
+      stream().scrollTop = OCT_ROW * 100;
+      // November's first week is 4 rows on.
+      rerender(new Date(2026, 10, 1));
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: (OCT_ROW + 4) * 100, behavior: "smooth" });
+      stream().scrollTop = (OCT_ROW + 4) * 100;
+      // June 2027 is 31 rows on: past a quarter, so no glide to chase.
+      rerender(new Date(2027, 5, 1));
+      expect(scrollTo.mock.lastCall![0].behavior).toBe("auto");
+    });
+
+    // A held key steps faster than a glide ends. The first step's safety timer must not free the
+    // guard under the second: the month the glide is passing would be reported as the user's.
+    it("holds the guard until 700 ms after the latest step, not the first", () => {
+      const onFocusDate = vi.fn();
+      const { rerender } = mountAt(new Date(2026, 9, 1), onFocusDate);
+      const s = stream();
+      s.scrollTop = OCT_ROW * 100;
+      rerender(new Date(2026, 10, 1)); // t = 0
+      settle(300);
+      rerender(new Date(2026, 11, 1)); // t = 300
+      // t = 770: the first step's timer (700) has passed, the second's (1,000) hasn't.
+      settle(470);
+      s.scrollTop = (OCT_ROW + 30) * 100; // a glide passing through February 2027
+      fireEvent.scroll(s);
+      settle(20);
+      expect(onFocusDate).not.toHaveBeenCalled();
+      // t = 1,040: released. The same position now reads as the user's.
+      settle(250);
+      fireEvent.scroll(s);
+      settle(20);
+      expect(onFocusDate).toHaveBeenCalledTimes(1);
+    });
+
+    it("frees the guard when the scroll ends", () => {
+      const onFocusDate = vi.fn();
+      const { rerender } = mountAt(new Date(2026, 9, 1), onFocusDate);
+      const s = stream();
+      s.scrollTop = OCT_ROW * 100;
+      rerender(new Date(2026, 10, 1));
+      s.scrollTop = (OCT_ROW + 30) * 100;
+      fireEvent.scroll(s);
+      settle(20);
+      expect(onFocusDate).not.toHaveBeenCalled();
+      fireEvent(s, new Event("scrollend"));
+      fireEvent.scroll(s);
+      settle(20);
+      expect(onFocusDate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Ten years out, the same few pixels of row height are months of scroll: the week at the top
+  // stays at the top when the rows change height (the strip, a resize, the header wrapping).
+  it("keeps the week at the top when the rows change height", () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const had = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    try {
+      mountAt(new Date(2026, 9, 1));
+      settle(700); // the opening scroll is PM's own, and isn't the user's until it has ended
+      const s = stream();
+      s.scrollTop = 50 * 100;
+      fireEvent.scroll(s);
+      // The pane shrinks to 540 px (a strip appeared above it): 90 px weeks.
+      act(() => {
+        for (const cb of callbacks) {
+          cb([{ contentRect: { height: 540 } } as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
+      expect(s.dataset.weekH).toBe("90");
+      expect(s.scrollTop).toBe(50 * 90);
+      // And back: the same week.
+      act(() => {
+        for (const cb of callbacks) {
+          cb([{ contentRect: { height: 600 } } as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
+      expect(s.dataset.weekH).toBe("100");
+      expect(s.scrollTop).toBe(50 * 100);
+    } finally {
+      (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = had;
+    }
+  });
+
+  it("keeps a half-scrolled week as it was", () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const had = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    try {
+      mountAt(new Date(2026, 9, 1));
+      settle(700);
+      const s = stream();
+      s.scrollTop = 50 * 100 + 50;
+      fireEvent.scroll(s);
+      act(() => {
+        for (const cb of callbacks) {
+          cb([{ contentRect: { height: 540 } } as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
+      expect(s.scrollTop).toBe(50.5 * 90);
+    } finally {
+      (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = had;
+    }
+  });
+
+  // A glide's own scroll events pass through rows between the start and the target; the week to keep
+  // is the target, so a strip appearing mid-glide doesn't stop it between months.
+  it("keeps a glide's target week at the top when the rows change height mid-glide", () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    const had = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    const kept = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTo");
+    Object.defineProperty(Element.prototype, "scrollTo", { configurable: true, value: vi.fn() });
+    try {
+      const { rerender } = mountAt(new Date(2026, 9, 1));
+      settle(700);
+      const s = stream();
+      s.scrollTop = OCT_ROW * 100;
+      rerender(new Date(2026, 10, 1)); // a glide to November's first week, 4 rows on
+      s.scrollTop = (OCT_ROW + 2) * 100; // part-way
+      fireEvent.scroll(s);
+      act(() => {
+        for (const cb of callbacks) {
+          cb([{ contentRect: { height: 540 } } as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
+      expect(s.scrollTop).toBe((OCT_ROW + 4) * 90);
+    } finally {
+      if (kept) Object.defineProperty(Element.prototype, "scrollTo", kept);
+      (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = had;
+    }
   });
 });

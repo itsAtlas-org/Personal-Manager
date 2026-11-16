@@ -198,3 +198,65 @@ describe("CalendarHeader: the Agenda layout", () => {
     expect(screen.queryByRole("button", { name: "Pop out" })).toBeNull();
   });
 });
+
+// The keys that page the calendar are findable: ‹ › and Today say them in the tooltip (the repo's
+// "label · key" form, which shows on focus too) and in aria-keyshortcuts, while their names stay
+// "Previous", "Next" and "Today".
+describe("CalendarHeader: the keys", () => {
+  const prev = () => screen.getByRole("button", { name: "Previous" });
+  const next = () => screen.getByRole("button", { name: "Next" });
+  const today = () => screen.getByRole("button", { name: "Today" });
+
+  it("names the arrows and Google's letters on ‹ › and t on Today", () => {
+    header({ view: "week" });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft k p");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+  });
+
+  it("adds ↑ and ↓ in Month and Year only", () => {
+    for (const view of ["month", "year"] as const) {
+      header({ view });
+      expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft ArrowUp k p");
+      expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown j n");
+      cleanup();
+    }
+    for (const view of ["week", "day", "agenda"] as const) {
+      header({ view });
+      expect(prev().getAttribute("aria-keyshortcuts")).not.toContain("ArrowUp");
+      expect(next().getAttribute("aria-keyshortcuts")).not.toContain("ArrowDown");
+      cleanup();
+    }
+  });
+
+  it("keeps the buttons' names, whatever the tooltip says", () => {
+    header({ view: "month" });
+    expect(prev().getAttribute("aria-label")).toBe("Previous");
+    expect(next().getAttribute("aria-label")).toBe("Next");
+    expect(today().textContent).toBe("Today");
+  });
+
+  // The tooltip is the JS one, which a keyboard user gets on focus as a mouse user does on hover.
+  it("shows the keys in the tooltip on focus", () => {
+    vi.useFakeTimers();
+    try {
+      header({ view: "month" });
+      const shown = (button: HTMLElement) => {
+        fireEvent.focus(button);
+        act(() => void vi.advanceTimersByTime(200));
+        const text = screen.getByRole("tooltip").textContent;
+        fireEvent.blur(button);
+        return text;
+      };
+      expect(shown(prev())).toBe("Previous · ←, ↑, k or p");
+      expect(shown(next())).toBe("Next · →, ↓, j or n");
+      expect(shown(today())).toBe("Jump to today · t");
+      cleanup();
+      header({ view: "week" });
+      expect(shown(prev())).toBe("Previous · ←, k or p");
+      expect(shown(next())).toBe("Next · →, j or n");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

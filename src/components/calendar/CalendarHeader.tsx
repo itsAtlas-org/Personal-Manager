@@ -23,9 +23,10 @@ import {
   type CalendarViewMode,
   type RangeBounds,
 } from "../../lib/calendarPrefs";
+import { pageKeyHint } from "../../lib/calendarNavKey";
 import { formatSyncedShort, formatWhen } from "../../lib/format";
 import { useDepth, useTheme, type Coords } from "../../theme";
-import { Button, SegmentedControl, Select, type SegOption } from "../ui";
+import { Button, SegmentedControl, Select, Tooltip, type SegOption } from "../ui";
 import { MiniCalendarPopover } from "./MiniCalendarPopover";
 import { NewEventButton } from "./NewEventButton";
 import { RangeControl } from "./RangeControl";
@@ -125,6 +126,10 @@ export function CalendarHeader({
   }));
   // The Runway always runs from today, so paging and the date picker have nothing to move there.
   const runway = view === "agenda" && agendaMode === "runway" && !!onAgendaModeChange;
+  // ↑ and ↓ page too where the periods run down the screen (see `calendarNavKey`).
+  const vertical = view === "month" || view === "year";
+  const prevKeys = pageKeyHint("prev", vertical);
+  const nextKeys = pageKeyHint("next", vertical);
 
   return (
     <header
@@ -136,15 +141,33 @@ export function CalendarHeader({
       ) : (
         <>
           <div className="flex items-center gap-1">
-            <Button variant="tertiary" onClick={onPrev} title="Previous" aria-label="Previous">
-              ‹
-            </Button>
-            <Button variant="tertiary" onClick={onToday} title="Jump to today">
-              Today
-            </Button>
-            <Button variant="tertiary" onClick={onNext} title="Next" aria-label="Next">
-              ›
-            </Button>
+            {/* Each says its keys, in the repo's "label · key" form (and aria-keyshortcuts, which a
+                screen reader announces): the keys are the only way to them otherwise. */}
+            <Tooltip label={`Previous · ${prevKeys.glyphs}`}>
+              <Button
+                variant="tertiary"
+                onClick={onPrev}
+                aria-label="Previous"
+                aria-keyshortcuts={prevKeys.shortcuts}
+              >
+                ‹
+              </Button>
+            </Tooltip>
+            <Tooltip label="Jump to today · t">
+              <Button variant="tertiary" onClick={onToday} aria-keyshortcuts="t">
+                Today
+              </Button>
+            </Tooltip>
+            <Tooltip label={`Next · ${nextKeys.glyphs}`}>
+              <Button
+                variant="tertiary"
+                onClick={onNext}
+                aria-label="Next"
+                aria-keyshortcuts={nextKeys.shortcuts}
+              >
+                ›
+              </Button>
+            </Tooltip>
           </div>
 
           <MiniCalendarPopover label={label} cursor={cursor} onPick={onPickDate} />
