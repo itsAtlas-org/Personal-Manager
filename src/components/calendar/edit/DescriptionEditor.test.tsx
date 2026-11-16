@@ -480,6 +480,14 @@ describe("DescriptionEditor", () => {
     vi.useFakeTimers();
     try {
       editor("words");
+      // The tooltip shows on keyboard focus (`:focus-visible`), which jsdom answers its own way.
+      const real = Element.prototype.matches;
+      vi.spyOn(Element.prototype, "matches").mockImplementation(function (
+        this: Element,
+        sel: string,
+      ) {
+        return sel === ":focus-visible" ? true : real.call(this, sel);
+      });
       fireEvent.focus(button("Bulleted list"));
       act(() => {
         vi.advanceTimersByTime(200);

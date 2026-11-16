@@ -17,7 +17,9 @@ import {
   readRunwayPastOpen,
   readRunwayWindows,
   readSwipeDays,
+  rosterCount,
   swipeDays,
+  toggleHiddenId,
   writeAgendaMode,
   writeHidden,
   writeLastCreate,
@@ -26,6 +28,7 @@ import {
   writeSwipeDays,
 } from "./calendarPrefs";
 import { __resetStoredPrefs, hydrateStoredPrefs } from "./storedPrefs";
+import type { Calendar } from "./types";
 
 vi.mock("./ipc", () => ({
   getPref: vi.fn(async () => null),
@@ -181,5 +184,31 @@ describe("the Agenda's layout and the Runway (PA-2)", () => {
     );
     await hydrateStoredPrefs();
     expect(readRunwayWindows()).toEqual([]);
+  });
+});
+
+describe("the calendar list's two helpers, shared by the sidebar and the pop-out's popover", () => {
+  const cal = (id: string, selected: boolean) => ({ id, selected }) as Calendar;
+
+  it("toggleHiddenId hides a shown calendar and shows a hidden one, as a new set", () => {
+    const none = new Set<string>();
+    const one = toggleHiddenId(none, "a");
+    expect([...one]).toEqual(["a"]);
+    // The set passed in is left alone, so a state setter sees a change.
+    expect(one).not.toBe(none);
+    expect(none.size).toBe(0);
+    const back = toggleHiddenId(one, "a");
+    expect(back.size).toBe(0);
+    expect([...one]).toEqual(["a"]);
+    expect([...toggleHiddenId(one, "b")].sort()).toEqual(["a", "b"]);
+  });
+
+  it("rosterCount counts the calendars that sync, and of those the ones not hidden", () => {
+    const calendars = [cal("a", true), cal("b", true), cal("c", false), cal("d", true)];
+    expect(rosterCount(calendars, new Set())).toEqual({ shown: 3, total: 3 });
+    // A hidden selected calendar leaves the shown count; hiding an unselected one (it is never
+    // listed) or an overlay changes nothing.
+    expect(rosterCount(calendars, new Set(["b", "c", "pm:tasks"]))).toEqual({ shown: 2, total: 3 });
+    expect(rosterCount([], new Set())).toEqual({ shown: 0, total: 0 });
   });
 });

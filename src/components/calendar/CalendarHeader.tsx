@@ -2,19 +2,32 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The calendar's shared chrome — one header, no second sidebar. ‹ Today › nav first, at the far left
-// where the eye starts, then the date-range label, the view switcher (active = accent), and
-// Refresh-now. In Agenda, a Runway | List switch sits beside the view switcher; the Runway always
-// runs from today, so with it on, the nav and the date label give way to "From today".
+// where the eye starts, then the date-range label; at the right the view switcher (active = accent)
+// and the window's own controls. In Agenda, a Runway | List switch sits beside the view switcher; the
+// Runway always runs from today, so with it on, the nav and the date label give way to "From today".
+//
+// THE ORDER AT THE RIGHT, set once for every control that joins it: view-specific controls, the view
+// switcher, + New event, then Pop out (main window) or Calendars n/m (the pop-out, which has no
+// sidebar to hold the list), then Refresh in the corner. Refresh always takes the last corner because
+// that is where a hand goes for it (Bobby: "i instinctively click top right for refresh").
+//
+// LAYOUT: a grid, not one wrapping row, because a wrapping row cannot promise the corner. Refresh
+// has its own cell at the first row's right end; the controls group is the part that wraps. Wide
+// (the header at least 56rem across) that group is the middle column, in line with the nav and the
+// date label; narrower (the pop-out's 480 px minimum, a narrow main window) it drops to a full-width
+// second row, right-aligned, and wraps there, while Refresh stays beside the nav on the first row.
+// DOM order stays nav, controls, Refresh, so Tab ends on Refresh in either layout.
 //
 // "+ New event" (#884, C10) is here only in the views without a grid corner to hold it (Month, Year,
 // Agenda, and Terminal's), at the right end beside Refresh; in Week and Day it sits in the grid's
 // top-left corner instead (see `NewEventButton`). It shows once a Google account is connected.
 // Everything else here only changes what you see.
 //
-// The last-synced time rides ON the Refresh button rather than beside it: it is the one fact that
-// tells you whether pressing Refresh is worth it.
+// Refresh is an icon (circular arrows) at every Depth. When it last synced is the one fact that
+// tells you whether pressing it is worth it, so it is in the tooltip (hover and keyboard focus) and
+// in a hidden description a screen reader reads, never in the button's name: see `calendarRefresh`.
 
-import { type Ref } from "react";
+import { useId, type ReactNode, type Ref } from "react";
 import {
   DAY_COUNT_MAX,
   DAY_COUNT_MIN,
@@ -24,9 +37,18 @@ import {
   type RangeBounds,
 } from "../../lib/calendarPrefs";
 import { pageKeyHint } from "../../lib/calendarNavKey";
-import { formatSyncedShort, formatWhen } from "../../lib/format";
-import { useDepth, useTheme, type Coords } from "../../theme";
-import { Button, SegmentedControl, Select, Tooltip, type SegOption } from "../ui";
+import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
+import { useTheme, type Coords } from "../../theme";
+import {
+  Button,
+  PopOutIcon,
+  RefreshIcon,
+  SegmentedControl,
+  Select,
+  Tooltip,
+  VisuallyHidden,
+  type SegOption,
+} from "../ui";
 import { MiniCalendarPopover } from "./MiniCalendarPopover";
 import { NewEventButton } from "./NewEventButton";
 import { RangeControl } from "./RangeControl";
@@ -70,6 +92,9 @@ interface Props {
   /** Open the Calendar in a window of its own (#1039), or bring that window forward. Absent in the
    *  pop-out itself. */
   onPopOut?: () => void;
+  /** The pop-out's "Calendars n/m" button, just before Refresh. Absent in the main window, whose
+   *  sidebar is the one home of that list. */
+  roster?: ReactNode;
 }
 
 const AGENDA_OPTIONS: SegOption<AgendaMode>[] = [
@@ -111,11 +136,13 @@ export function CalendarHeader({
   agendaMode = "list",
   onAgendaModeChange,
   onPopOut,
+  roster,
 }: Props) {
-  const { showMeta } = useDepth();
   const { system } = useTheme();
-  // The last successful sync: clock time if it was today, else the date. Null when unset/unparseable.
-  const synced = lastSync ? formatSyncedShort(lastSync) || null : null;
+  // The Refresh button's description, always mounted (a tooltip exists only while shown, so an
+  // aria-describedby at it would dangle).
+  const syncedId = useId();
+  const now = new Date();
   // The Work/Day/24h scale only drives the pixel time-grid (Slate/Editorial). Terminal renders
   // Week/Day as a mono agenda with no vertical scale, so the control has nothing to act on there.
   const showRange = (view === "week" || view === "day") && system !== "terminal";
@@ -132,128 +159,153 @@ export function CalendarHeader({
   const nextKeys = pageKeyHint("next", vertical);
 
   return (
-    <header
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-rule px-4 py-2"
-      data-help="calendar-header"
-    >
-      {runway ? (
-        <span className="px-1 font-head text-sm text-ink">From today</span>
-      ) : (
-        <>
-          <div className="flex items-center gap-1">
-            {/* Each says its keys, in the repo's "label · key" form (and aria-keyshortcuts, which a
+    <header className="@container border-b border-rule px-4 py-2" data-help="calendar-header">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 @4xl:grid-cols-[auto_minmax(0,1fr)_auto]">
+        <div className="col-start-1 row-start-1 flex flex-wrap items-center gap-x-4 gap-y-2">
+          {runway ? (
+            <span className="px-1 font-head text-sm text-ink">From today</span>
+          ) : (
+            <>
+              <div className="flex items-center gap-1">
+                {/* Each says its keys, in the repo's "label · key" form (and aria-keyshortcuts, which a
                 screen reader announces): the keys are the only way to them otherwise. */}
-            <Tooltip label={`Previous · ${prevKeys.glyphs}`}>
-              <Button
-                variant="tertiary"
-                onClick={onPrev}
-                aria-label="Previous"
-                aria-keyshortcuts={prevKeys.shortcuts}
-              >
-                ‹
-              </Button>
-            </Tooltip>
-            <Tooltip label="Jump to today · t">
-              <Button variant="tertiary" onClick={onToday} aria-keyshortcuts="t">
-                Today
-              </Button>
-            </Tooltip>
-            <Tooltip label={`Next · ${nextKeys.glyphs}`}>
-              <Button
-                variant="tertiary"
-                onClick={onNext}
-                aria-label="Next"
-                aria-keyshortcuts={nextKeys.shortcuts}
-              >
-                ›
-              </Button>
-            </Tooltip>
-          </div>
+                <Tooltip label={`Previous · ${prevKeys.glyphs}`}>
+                  <Button
+                    variant="tertiary"
+                    onClick={onPrev}
+                    aria-label="Previous"
+                    aria-keyshortcuts={prevKeys.shortcuts}
+                  >
+                    ‹
+                  </Button>
+                </Tooltip>
+                <Tooltip label="Jump to today · t">
+                  <Button variant="tertiary" onClick={onToday} aria-keyshortcuts="t">
+                    Today
+                  </Button>
+                </Tooltip>
+                <Tooltip label={`Next · ${nextKeys.glyphs}`}>
+                  <Button
+                    variant="tertiary"
+                    onClick={onNext}
+                    aria-label="Next"
+                    aria-keyshortcuts={nextKeys.shortcuts}
+                  >
+                    ›
+                  </Button>
+                </Tooltip>
+              </div>
 
-          <MiniCalendarPopover label={label} cursor={cursor} onPick={onPickDate} />
-        </>
-      )}
+              <MiniCalendarPopover label={label} cursor={cursor} onPick={onPickDate} />
+            </>
+          )}
+        </div>
 
-      <div className="ml-auto flex flex-wrap items-center gap-3">
-        {view === "agenda" && onAgendaModeChange && (
-          // Agenda only, beside the view switcher: it changes how this one view lays out, so it
-          // sits by what it changes and nowhere else (one control, one home).
-          <SegmentedControl
-            ariaLabel="Agenda layout"
-            options={AGENDA_OPTIONS}
-            value={agendaMode}
-            onChange={onAgendaModeChange}
-          />
-        )}
-        {view === "day" && (
-          // Day only: Week IS the 7-day window, so offering a width control there would be two
-          // controls producing the same picture. Sits with the range control because both answer
-          // "how much am I looking at", one across and one down.
-          <label className="flex items-center gap-1.5 text-xs text-ink3">
-            Days
-            <Select
-              compact
-              value={String(dayCount)}
-              onChange={(e) => onDayCountChange(Number(e.currentTarget.value))}
-              aria-label="How many days to show"
-            >
-              {Array.from({ length: DAY_COUNT_MAX - DAY_COUNT_MIN + 1 }, (_, i) => {
-                const n = DAY_COUNT_MIN + i;
-                return (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                );
-              })}
-            </Select>
-          </label>
-        )}
-        {showRange && (
-          <>
-            <RangeControl
-              range={range}
-              onRangeChange={onRangeChange}
-              customBounds={customBounds}
-              onBoundsChange={onBoundsChange}
-              coords={coords}
-              cursor={cursor}
+        <div className="col-span-2 row-start-2 flex flex-wrap items-center justify-end gap-3 @4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1">
+          {view === "agenda" && onAgendaModeChange && (
+            // Agenda only, beside the view switcher: it changes how this one view lays out, so it
+            // sits by what it changes and nowhere else (one control, one home).
+            <SegmentedControl
+              ariaLabel="Agenda layout"
+              options={AGENDA_OPTIONS}
+              value={agendaMode}
+              onChange={onAgendaModeChange}
             />
-          </>
-        )}
-        {viewOptions.length > 1 && (
-          <SegmentedControl
-            ariaLabel="Calendar view"
-            options={viewOptions}
-            value={view}
-            onChange={onViewChange}
-          />
-        )}
-        {/* The "Calendars x/x" dropdown used to sit here. It now lives in the left sidebar, listing
-            every calendar inline instead of behind a button — one control, one home, so it is NOT
-            mirrored back into the header. */}
-        {onCreate && (
-          <NewEventButton onCreate={onCreate} createReason={createReason} createRef={createRef} />
-        )}
-        <Button
-          variant="secondary"
-          onClick={onRefresh}
-          disabled={syncing}
-          // The exact moment always lives in the tooltip, even at Minimal where the inline stamp is
-          // hidden — so the detail is never unreachable, only quieter.
-          title={lastSync ? `Last synced ${formatWhen(lastSync)}` : "Never synced"}
-        >
-          {syncing ? "Refreshing…" : showMeta && synced ? `Refresh · ${synced}` : "Refresh"}
-        </Button>
-        {onPopOut && (
-          <Button
-            variant="tertiary"
-            onClick={onPopOut}
-            title="Open the calendar in a window of its own, to keep beside PM"
-            data-help="calendar-popout"
-          >
-            Pop out
-          </Button>
-        )}
+          )}
+          {view === "day" && (
+            // Day only: Week IS the 7-day window, so offering a width control there would be two
+            // controls producing the same picture. Sits with the range control because both answer
+            // "how much am I looking at", one across and one down.
+            <label className="flex items-center gap-1.5 text-xs text-ink3">
+              Days
+              <Select
+                compact
+                value={String(dayCount)}
+                onChange={(e) => onDayCountChange(Number(e.currentTarget.value))}
+                aria-label="How many days to show"
+              >
+                {Array.from({ length: DAY_COUNT_MAX - DAY_COUNT_MIN + 1 }, (_, i) => {
+                  const n = DAY_COUNT_MIN + i;
+                  return (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  );
+                })}
+              </Select>
+            </label>
+          )}
+          {showRange && (
+            <>
+              <RangeControl
+                range={range}
+                onRangeChange={onRangeChange}
+                customBounds={customBounds}
+                onBoundsChange={onBoundsChange}
+                coords={coords}
+                cursor={cursor}
+              />
+            </>
+          )}
+          {viewOptions.length > 1 && (
+            <SegmentedControl
+              ariaLabel="Calendar view"
+              options={viewOptions}
+              value={view}
+              onChange={onViewChange}
+            />
+          )}
+          {/* The "Calendars x/x" dropdown used to sit here (#556); it moved to the left sidebar, which
+            lists every calendar inline — one control, one home per window. The main window keeps
+            that and gets no button here. The pop-out has no sidebar, so its home is `roster` below:
+            a stated deviation from Google's sidebar. */}
+          {onCreate && (
+            <NewEventButton onCreate={onCreate} createReason={createReason} createRef={createRef} />
+          )}
+          {onPopOut && (
+            <Tooltip label="Pop out · keep the calendar in a window of its own" placement="below">
+              <Button
+                variant="tertiary"
+                size="sm"
+                onClick={onPopOut}
+                aria-label="Pop out"
+                data-help="calendar-popout"
+              >
+                <PopOutIcon />
+              </Button>
+            </Tooltip>
+          )}
+          {roster}
+        </div>
+
+        {/* Refresh, in the corner: its own grid cell, pinned to the first row's right end, so no
+          amount of wrapping in the controls beside it can move it (the controls group is the one
+          that drops to a second row when the header is narrow). Its name is constant ("Refresh":
+          copy that says "press Refresh" still names a real control, and speech users say it); when
+          it last synced is a description, not part of the name. Syncing is aria-busy and
+          aria-disabled with clicks ignored, NOT `disabled`: a focused button that turns disabled
+          drops keyboard focus. */}
+        <div className="col-start-2 row-start-1 flex items-center @4xl:col-start-3">
+          <Tooltip label={refreshTip(lastSync, syncing, now)} placement="below">
+            <Button
+              variant="tertiary"
+              size="sm"
+              aria-label="Refresh"
+              aria-describedby={syncedId}
+              aria-busy={syncing || undefined}
+              aria-disabled={syncing || undefined}
+              className="aria-busy:cursor-progress"
+              onClick={() => {
+                if (!syncing) onRefresh();
+              }}
+            >
+              <RefreshIcon spinning={syncing} />
+            </Button>
+          </Tooltip>
+          <VisuallyHidden id={syncedId}>
+            {refreshDescription(lastSync, syncing, now)}
+          </VisuallyHidden>
+        </div>
       </div>
     </header>
   );

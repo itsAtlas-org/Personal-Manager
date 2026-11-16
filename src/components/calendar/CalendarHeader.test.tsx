@@ -7,7 +7,7 @@
 // account is connected, and when no calendar can take an event it stays focusable and says why
 // rather than going grey and silent.
 
-import { createRef, type RefObject } from "react";
+import { createRef, type ReactNode, type RefObject } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -18,8 +18,22 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
 
 import { CalendarHeader } from "./CalendarHeader";
 import type { AgendaMode, CalendarViewMode } from "../../lib/calendarPrefs";
+import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
+import { formatClock } from "../../lib/format";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+// The tooltip shows on KEYBOARD focus only (`:focus-visible`: a click's focus doesn't count), and
+// jsdom's idea of that is its own, so a test that Tabs onto a control says so.
+function tabbing() {
+  const real = Element.prototype.matches;
+  vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, sel: string) {
+    return sel === ":focus-visible" ? true : real.call(this, sel);
+  });
+}
 
 const REASON = "None of your calendars can take new events.";
 
@@ -31,6 +45,10 @@ interface Over {
   agendaMode?: AgendaMode;
   onAgendaModeChange?: (mode: AgendaMode) => void;
   onPopOut?: () => void;
+  roster?: ReactNode;
+  onRefresh?: () => void;
+  syncing?: boolean;
+  lastSync?: string | null;
 }
 
 function header(over: Over = {}) {
@@ -197,6 +215,127 @@ describe("CalendarHeader: the Agenda layout", () => {
     header();
     expect(screen.queryByRole("button", { name: "Pop out" })).toBeNull();
   });
+
+  it("Pop out is an icon named Pop out, just before Refresh", () => {
+    header({ onPopOut: vi.fn() });
+    const popOut = screen.getByRole("button", { name: "Pop out" });
+    // An icon: no words on it, and the drawing is hidden from assistive technology.
+    expect(popOut.textContent).toBe("");
+    expect(popOut.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    expect(popOut.getAttribute("data-help")).toBe("calendar-popout");
+    expect(popOut.nextElementSibling).toBeNull();
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.indexOf(popOut) + 1]).toBe(
+      screen.getByRole("button", { name: "Refresh" }),
+    );
+  });
+
+  it("the Calendars slot sits just before Refresh, and only where it is given", () => {
+    header({ roster: <button type="button">Calendars 2/3</button> });
+    const buttons = screen.getAllByRole("button");
+    const at = buttons.indexOf(screen.getByRole("button", { name: "Calendars 2/3" }));
+    expect(buttons[at + 1]).toBe(screen.getByRole("button", { name: "Refresh" }));
+    cleanup();
+    header();
+    expect(screen.queryByRole("button", { name: /Calendars/ })).toBeNull();
+  });
+});
+
+// Refresh is an icon in the header's corner (Bobby: "i instinctively click top right for refresh"),
+// with a constant name and the last sync as a description and a tooltip.
+describe("CalendarHeader: Refresh", () => {
+  const refresh = () => screen.getByRole("button", { name: "Refresh" });
+  const SYNCED = new Date().toISOString();
+
+  it("is the header's last control, named Refresh, and described by the last sync", () => {
+    header({ onCreate: vi.fn(), onPopOut: vi.fn(), lastSync: SYNCED });
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.length - 1]).toBe(refresh());
+    // Icon only, at every Depth: no words on it, and no native title beside the JS tooltip.
+    expect(refresh().textContent).toBe("");
+    expect(refresh().getAttribute("title")).toBeNull();
+    const described = document.getElementById(refresh().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe(refreshDescription(SYNCED, false));
+    expect(described?.textContent).toMatch(/^Last synced /);
+  });
+
+  it("sits in a cell of its own, first row, apart from the controls that wrap", () => {
+    // jsdom has no layout, so this pins the structure that keeps the corner: Refresh's cell is
+    // pinned to row 1 and shares no wrapping container with the view switcher, + New event,
+    // Pop out or Calendars.
+    header({
+      onCreate: vi.fn(),
+      onPopOut: vi.fn(),
+      roster: <button type="button">Calendars 1/2</button>,
+    });
+    const cell = refresh().closest("span")?.parentElement as HTMLElement;
+    expect(cell.className).toContain("row-start-1");
+    expect(within(cell).getAllByRole("button")).toEqual([refresh()]);
+    const controls = screen.getByRole("group", { name: "Calendar view" })
+      .parentElement as HTMLElement;
+    expect(controls.contains(refresh())).toBe(false);
+    expect(controls.className).toContain("flex-wrap");
+  });
+
+  it("keeps its name when it has never synced, and says so as the description", () => {
+    header({ lastSync: null });
+    const described = document.getElementById(refresh().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe("Never synced");
+  });
+
+  it("calls onRefresh when pressed", () => {
+    const onRefresh = vi.fn();
+    header({ onRefresh });
+    fireEvent.click(refresh());
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("while syncing is aria-busy and aria-disabled, stays focused, and ignores clicks", () => {
+    const onRefresh = vi.fn();
+    header({ onRefresh, syncing: true });
+    const button = refresh();
+    button.focus();
+    // Marked, not disabled: a focused button that turns disabled would drop keyboard focus.
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    expect(onRefresh).not.toHaveBeenCalled();
+    // The icon turns, but not under reduced motion; the description still says why.
+    expect(button.querySelector("svg")?.getAttribute("class")).toContain(
+      "motion-reduce:animate-none",
+    );
+    expect(button.querySelector("svg")?.getAttribute("class")).toContain("animate-spin");
+    const described = document.getElementById(button.getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe("Refreshing…");
+  });
+
+  it("is neither busy nor disabled while idle", () => {
+    header({ syncing: false });
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+    expect(refresh().getAttribute("aria-disabled")).toBeNull();
+    expect(refresh().querySelector("svg")?.getAttribute("class")).not.toContain("animate-spin");
+  });
+
+  // The JS tooltip, which a keyboard user gets on focus as a mouse user does on hover.
+  it("shows 'Refresh · last synced …' on focus and 'Refreshing…' while syncing", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = header({ lastSync: SYNCED });
+      tabbing();
+      fireEvent.focus(refresh());
+      act(() => void vi.advanceTimersByTime(200));
+      expect(screen.getByRole("tooltip").textContent).toBe(refreshTip(SYNCED, false));
+      expect(screen.getByRole("tooltip").textContent).toBe(
+        `Refresh · last synced ${formatClock(new Date(SYNCED))}`,
+      );
+      rerender(element({ lastSync: SYNCED, syncing: true }));
+      expect(screen.getByRole("tooltip").textContent).toBe("Refreshing…");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // The keys that page the calendar are findable: ‹ › and Today say them in the tooltip (the repo's
@@ -241,6 +380,7 @@ describe("CalendarHeader: the keys", () => {
     vi.useFakeTimers();
     try {
       header({ view: "month" });
+      tabbing();
       const shown = (button: HTMLElement) => {
         fireEvent.focus(button);
         act(() => void vi.advanceTimersByTime(200));

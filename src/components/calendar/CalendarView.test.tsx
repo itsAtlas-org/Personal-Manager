@@ -81,6 +81,7 @@ const ipc = vi.hoisted(() => ({
 const env = vi.hoisted(() => ({
   system: "slate",
   hidden: new Set<string>(),
+  written: [] as string[][],
   yearEvents: null as CalendarEvent[] | null,
 }));
 
@@ -104,6 +105,13 @@ vi.mock("../../theme/timezones", async (importOriginal) => ({
 vi.mock("../../lib/calendarPrefs", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   readHidden: () => new Set(env.hidden),
+  // What the pop-out's Calendars list writes: kept, and announced as the real one does, so the grid
+  // re-reads it.
+  writeHidden: (hidden: Set<string>) => {
+    env.written.push([...hidden]);
+    env.hidden = new Set(hidden);
+    window.dispatchEvent(new Event("pm:settings-changed"));
+  },
 }));
 
 vi.mock("./views/YearView", () => ({
@@ -233,6 +241,7 @@ beforeEach(() => {
   localStorage.setItem("pm.calendar.agendaMode", "list");
   env.system = "slate";
   env.hidden = new Set();
+  env.written = [];
   env.yearEvents = null;
   reads = [];
   held = false;
@@ -1978,5 +1987,77 @@ describe("CalendarView: loads follow the cursor once it settles", () => {
     );
     expect(hint()).toBeNull();
     expect(await screen.findByText(/older events are still downloading/)).toBeTruthy();
+  });
+});
+
+// Refresh is an icon in the header's corner, so what it does is said in the tab's live region
+// (WCAG 4.1.3): the start and the finish. A failure is said by the alert strip.
+describe("CalendarView: Refresh", () => {
+  const refresh = () => screen.getByRole("button", { name: "Refresh" });
+
+  it("says so in the status region when it starts and when it finishes", async () => {
+    let finish: () => void = () => {};
+    ipc.syncCalendar.mockImplementation(() => new Promise<void>((r) => (finish = r)));
+    await mount();
+    fireEvent.click(refresh());
+    expect(await screen.findByText(/Refreshing your calendars…/)).toBeTruthy();
+    expect(refresh().getAttribute("aria-busy")).toBe("true");
+    // A second press while it runs is ignored.
+    fireEvent.click(refresh());
+    expect(ipc.syncCalendar).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    expect(await screen.findByText(/Calendars refreshed/)).toBeTruthy();
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("still shows a failed sync in the alert strip, and does not say it finished", async () => {
+    ipc.syncCalendar.mockRejectedValue(new Error("Google can't be reached"));
+    await mount();
+    fireEvent.click(refresh());
+    expect((await screen.findByRole("alert")).textContent).toContain("Google can't be reached");
+    expect(screen.queryByText(/Calendars refreshed/)).toBeNull();
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+  });
+});
+
+// The pop-out has no sidebar, so its view holds the calendar list in the header (`rosterInHeader`);
+// the main window keeps the sidebar's and gets no such button.
+describe("CalendarView: the calendar list in the header", () => {
+  async function mountWith(rosterInHeader: boolean) {
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView rosterInHeader={rosterInHeader} />);
+    await screen.findByRole("button", { name: /Standup/ });
+    await act(async () => {});
+  }
+
+  it("offers Calendars with its count in the pop-out, and not in the main window", async () => {
+    await mountWith(true);
+    expect(screen.getByRole("button", { name: "Calendars 2/2" })).toBeTruthy();
+    cleanup();
+    await mountWith(false);
+    expect(screen.queryByRole("button", { name: /^Calendars/ })).toBeNull();
+  });
+
+  it("ticking a calendar hides its events and writes the hidden set", async () => {
+    await mountWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "Calendars 2/2" }));
+    const list = within(screen.getByRole("group", { name: "Calendars to show" }));
+    fireEvent.click(list.getByRole("checkbox", { name: "Personal" }));
+    expect(env.written).toEqual([[PERSONAL]]);
+    expect(screen.queryByRole("button", { name: /Standup/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Calendars 1/2" })).toBeTruthy();
+    // Ticked again: it comes back.
+    fireEvent.click(list.getByRole("checkbox", { name: "Personal" }));
+    expect(env.written).toEqual([[PERSONAL], []]);
+    expect(await screen.findByRole("button", { name: /Standup/ })).toBeTruthy();
+  });
+
+  it("follows a change made in the other window, as the sidebar does", async () => {
+    await mountWith(true);
+    // The other window hid Personal: followStoredPrefs re-reads the store and fires the signal.
+    env.hidden = new Set([PERSONAL]);
+    act(() => void window.dispatchEvent(new Event("pm:settings-changed")));
+    expect(screen.getByRole("button", { name: "Calendars 1/2" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Standup/ })).toBeNull();
   });
 });
