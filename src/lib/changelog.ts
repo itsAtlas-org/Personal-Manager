@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.181.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "The time zones above the hours in Week and Day are readable now. Each column wears a short code, like GMT+5:30 over your extra zone and GMT over your own (or EST and EDT where there is one), worked out for the week you're looking at, so it stays right when the clocks change. Hover over the zone row to see their cities.",
+      "Click the zone row and one menu opens to add or remove a zone: the ones you've added with a Remove beside each, your own computer's zone, and a search for the next. With none added, the button reads + Zone. This replaces the small + and the ✕ that appeared when you hovered a zone. The columns are a little wider, and they grow with your Text size, so nothing is cut off at Large.",
+      '+ New is a single line across the whole corner, instead of squeezing onto two lines over one column. The little "0 events" line under each date is gone in Week and Day, which makes the top of the grid shorter. At Power depth, Month still shows each day\'s count beside its date.',
+      "A time zone you add in the pop-out Calendar now shows up in the main window too, and a change in one window no longer undoes the other's. Hide done and All | All-day follow between the two windows the same way, so Reset in Settings reaches an open pop-out too. Zones that older systems list under an old name, like Calcutta, now read and search as Kolkata.",
+    ],
+  },
+  {
     version: "3.180.0-alpha",
     date: "2026-11-12",
     highlights: [

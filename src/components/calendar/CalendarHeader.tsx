@@ -20,7 +20,8 @@
 // DOM order stays nav, controls, Refresh, so Tab ends on Refresh in either layout.
 //
 // "+ New event" (#884, C10) is here only in the views without a grid corner to hold it (Month, Year,
-// Agenda, and Terminal's), at the right end beside Refresh; in Week and Day it sits in the grid's
+// Agenda, and Terminal's), at the right end of the controls, before Pop out (main window) or
+// Calendars (pop-out) and then Refresh; in Week and Day it sits in the grid's
 // top-left corner instead (see `NewEventButton`). It shows once a Google account is connected.
 //
 // THE RUNWAY'S PIECES (Agenda, Runway layout) join the left group, where the nav sits in the other

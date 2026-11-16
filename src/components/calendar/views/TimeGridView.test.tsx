@@ -13,9 +13,11 @@ import type { CalendarEvent } from "../../../lib/types";
 import { DRAFT_EVENT_ID } from "../../../lib/calendar-layout";
 import type { DragCapability } from "../../../lib/calendarDrag";
 
+// The Depth the mocked theme reports; a test sets it. Hoisted because the mock factory reads it.
+const mockTheme = vi.hoisted(() => ({ depth: "standard" }));
 vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  useTheme: () => ({ system: "slate", depth: "standard" }),
+  useTheme: () => ({ system: "slate", depth: mockTheme.depth }),
 }));
 
 import { TimeGridView, type GridInteraction } from "./TimeGridView";
@@ -30,7 +32,10 @@ beforeAll(() => {
   }
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  mockTheme.depth = "standard";
+});
 
 // Timed values without a zone read as local time.
 const ev = (over: Partial<CalendarEvent>): CalendarEvent => ({
@@ -88,6 +93,85 @@ describe("TimeGridView", () => {
     ]);
     expect(screen.getByText("all-day")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Holiday" })).toHaveLength(1);
+  });
+
+  // The "N events" line under each date is gone at every Depth: it said little the day's own cards
+  // don't, and it cost a line of header height. (It used to print at Power, "1 events" included.)
+  it.each(["min", "standard", "power"])(
+    "has no per-day event count under the dates at %s depth",
+    (depth) => {
+      mockTheme.depth = depth;
+      const { container } = render(
+        <TimeGridView
+          days={[new Date(2026, 9, 12), new Date(2026, 9, 13)]}
+          events={[
+            ev({
+              id: "a",
+              summary: "One",
+              start: "2026-10-12T09:00:00",
+              end: "2026-10-12T10:00:00",
+            }),
+            ev({
+              id: "b",
+              summary: "Two",
+              start: "2026-10-12T11:00:00",
+              end: "2026-10-12T12:00:00",
+            }),
+          ]}
+          colorOf={() => "#336699"}
+          range="day"
+          bounds={{ startHour: 0, endHour: 24 }}
+          zones={[]}
+          onZonesChange={() => {}}
+          allowZones={false}
+          now={new Date(2026, 9, 1)}
+          onEventClick={vi.fn()}
+        />,
+      );
+      expect(container.textContent).not.toMatch(/\d+ events?/);
+      // Each header is the weekday and the date, nothing else.
+      const headers = container.querySelectorAll(".border-b.border-rule > div.flex-1");
+      expect(headers).toHaveLength(2);
+      expect(headers[0].children).toHaveLength(2);
+      expect(headers[0].textContent).toMatch(/12$/);
+    },
+  );
+
+  // The hour gutter, the all-day band and the header's corner take one rem width string, so a zone
+  // column can't drift out of line with its header or the band.
+  it("gives the header corner, the all-day band and the hour gutter one width", () => {
+    const { container } = render(
+      <TimeGridView
+        days={[new Date(2026, 9, 12), new Date(2026, 9, 13)]}
+        events={[
+          ev({
+            id: "a",
+            summary: "Holiday",
+            start: "2026-10-12",
+            end: "2026-10-14",
+            all_day: true,
+          }),
+        ]}
+        colorOf={() => "#336699"}
+        range="day"
+        bounds={{ startHour: 0, endHour: 24 }}
+        zones={["Asia/Kolkata"]}
+        onZonesChange={() => {}}
+        now={new Date(2026, 9, 1)}
+        onEventClick={vi.fn()}
+      />,
+    );
+    const widths = [
+      container.querySelector<HTMLElement>(".border-b.border-rule > div.shrink-0"),
+      screen.getByText("all-day").parentElement,
+      container.querySelector<HTMLElement>(".overflow-y-auto > div > div.shrink-0"),
+    ].map((el) => el?.style.width);
+    expect(widths).toEqual(["7rem", "7rem", "7rem"]);
+    // And each column inside the hour gutter: the extra zone's, then the local one's.
+    const gutter = container.querySelector<HTMLElement>(".overflow-y-auto > div > div.shrink-0");
+    expect(Array.from(gutter?.children ?? []).map((el) => (el as HTMLElement).style.width)).toEqual(
+      ["3.25rem", "3.75rem"],
+    );
   });
 
   // Google's look: the fill is the colour the event was given, solid, in that colour's text colour; the
