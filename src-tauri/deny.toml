@@ -58,6 +58,16 @@ allow = ["LGPL-2.1-or-later"]
 name = "sqlcipher-src"
 allow = ["blessing", "WTFPL"]
 
+# zstd-sys (the C zstd that `zstd` compiles in) has declared `BSD-3-Clause AND BSD-2-Clause` since
+# 2.1.3 (2.1.2 said BSD-3-Clause only). The BSD-2-Clause part is real: PM's `zstd` turns on the
+# `legacy` feature, so zstd/lib/legacy/ (the v0.1-v0.7 format decoders, Yann Collet's 2-clause BSD)
+# is compiled in; the crate ships the text as LICENSE.BSD-2-Clause. Permissive and AGPL-compatible.
+# Scoped to this crate like r-efi and sqlcipher-src, so a new dependency under BSD-2-Clause
+# still trips here and gets its own decision.
+[[licenses.exceptions]]
+name = "zstd-sys"
+allow = ["BSD-2-Clause"]
+
 [bans]
 # A Tauri tree legitimately carries many duplicate versions; warn (don't fail).
 multiple-versions = "warn"

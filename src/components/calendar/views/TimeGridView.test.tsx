@@ -382,7 +382,10 @@ describe("TimeGridView — on a grid that drags", () => {
     expect(bar?.querySelector('[data-edge="left"]')).not.toBeNull();
     expect(bar?.style.borderLeftWidth).toBe("");
     // The calendar's stripe is still drawn there, inside the bar.
-    expect(bar?.style.boxShadow).toMatch(/inset 3px 0/);
+    // Not the exact string: how a shadow with zero blur and spread is written out differs by engine.
+    const shadow = bar?.style.boxShadow ?? "";
+    expect(shadow).toContain("inset");
+    expect(shadow).toMatch(/\b3px 0(px)?\b/);
   });
 
   it("the ghost's pieces sit at startMin/60 × rowH in their columns", () => {
