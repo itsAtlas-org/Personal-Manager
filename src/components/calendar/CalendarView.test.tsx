@@ -2421,6 +2421,9 @@ describe("CalendarView: the filters", () => {
         completed_at: new Date(Date.now() - 3 * hour).toISOString(),
       });
       tasks = [task({ id: 1, title: "Open one" }), doneBefore];
+      // No events: the default Standup (07:00 to 07:30 today) has ended once the clock passes
+      // 07:30, and Hide done would count it as well, so this test failed after 07:30.
+      rows = [];
       await open();
       const todayCol = await screen.findByRole("region", { name: "Today" });
       expect(within(todayCol).getByText("Done before")).toBeTruthy();
