@@ -653,14 +653,15 @@
       }
     },
     "soupsieve": {
-      "versions": ["2.10", "3.0.4"],
+      "versions": ["2.10", "4.1.1"],
       "licence": "MIT",
-      "stamp": "2702c392b509edace536e5f3eb2af9f2",
+      "stamp": "b62a89704191e0cd17e444556c4a99ca",
       "evidence": {
         "expression": "MIT",
         "license": null,
         "classifiers": ["License :: OSI Approved :: MIT License"]
-      }
+      },
+      "note": "4.1.1's py3 wheel (hash checked against the lock, read 2026-11-16) carries the same MIT LICENSE.md as 3.0.4 and no compiled code."
     },
     "threadpoolctl": {
       "versions": ["3.7.0"],
