@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.183.1-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "The small fields at the end of a row of tags or projects now have a visible edge too: adding a tag to a document, linking a document to another project, and adding a tag or another name in Teach. Before, only the faint hint text inside showed they were there to type in. In a project's list of documents, a screen reader now also says which document each tag or project field is for.",
+    ],
+  },
+  {
     version: "3.183.0-alpha",
     date: "2026-11-17",
     highlights: [

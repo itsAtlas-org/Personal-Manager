@@ -5,13 +5,19 @@
 // the vault serializes tags comma-separated.
 
 import { useState } from "react";
+import { cn } from "./ui";
+import { CHIP_INPUT } from "./ui/chipInput";
 
 export function TagEditor({
   tags,
   onChange,
+  label = "Add a tag",
 }: {
   tags: string[];
   onChange: (tags: string[]) => void;
+  /** The add field's accessible name. A list of documents names each one's, so a screen reader
+   *  can tell the rows apart. */
+  label?: string;
 }) {
   const [draft, setDraft] = useState("");
 
@@ -50,8 +56,9 @@ export function TagEditor({
           }
         }}
         onBlur={add}
+        aria-label={label}
         placeholder="add tag…"
-        className="w-24 bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none placeholder:text-ink4"
+        className={cn("w-24", CHIP_INPUT)}
       />
     </div>
   );

@@ -456,6 +456,7 @@ export function ProjectView({
                         }}
                         suggestions={projectNames}
                         listId={PROJECT_LIST_ID}
+                        label={`Add a project to ${d.title}`}
                       />
                     </div>
                   )}
@@ -464,7 +465,11 @@ export function ProjectView({
                     onChange={(importance) => void saveMeta(d, { importance })}
                   />
                   {showPower && (
-                    <TagEditor tags={d.tags} onChange={(tags) => void saveMeta(d, { tags })} />
+                    <TagEditor
+                      tags={d.tags}
+                      onChange={(tags) => void saveMeta(d, { tags })}
+                      label={`Add a tag to ${d.title}`}
+                    />
                   )}
                 </div>
               ) : (
