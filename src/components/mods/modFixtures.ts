@@ -57,6 +57,7 @@ export function mod(extra: Partial<ModInfo> = {}): ModInfo {
     internetHosts: [],
     navTab: "Acme Tool",
     calendarOverlay: null,
+    help: [],
     hasIcon: false,
     update: null,
     resumed: null,

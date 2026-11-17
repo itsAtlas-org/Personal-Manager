@@ -15,6 +15,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { HelpOverlay } from "../HelpOverlay";
+import { HELP as HELP_TEXT, HelpContext } from "../../lib/help";
 import { ModFrame, type ModTier } from "./ModFrame";
 import { PROMPT_GUARD_MS } from "./ModPermissionPrompt";
 import {
@@ -1081,5 +1083,178 @@ describe("the first-use question", () => {
     await settle();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(got).toEqual([]);
+  });
+});
+
+// B7: the mod's own help, shown by PM over the frame. The mod's words are drawn as text or through
+// the sanitizing Markdown component, never as markup, and the frame keeps its session underneath.
+describe("About this mod", () => {
+  const HELP = [
+    { id: "map-overview", title: "The map", body: "Hover a dot.\nClick it to read." },
+    { id: "map-names", title: "Names", body: "Shows **each** file name." },
+  ];
+
+  function mountAbout(about: { description: string; help: typeof HELP }) {
+    return render(<ModFrame modId="acme.tool" name="Acme Tool" tier="second" about={about} />);
+  }
+
+  const aboutButton = () => screen.queryByRole("button", { name: "About this mod" });
+
+  it("offers no button when the mod wrote neither a description nor any help", async () => {
+    mountAbout({ description: "", help: [] });
+    await theFrame();
+    expect(aboutButton()).toBeNull();
+    cleanup();
+    // Help that is only blank or invisible characters is nothing.
+    mountAbout({ description: " \u200b ", help: [{ id: "x", title: "T", body: "\u200b\n " }] });
+    await theFrame();
+    expect(aboutButton()).toBeNull();
+  });
+
+  it("opens the maker's help over the frame, keeps the session running, and Close gives the page back", async () => {
+    mountAbout({ description: "Draws your documents.", help: HELP });
+    const frame = await theFrame();
+    expect(frame.closest("section")?.getAttribute("data-help")).toBe("nav-mod-tab");
+    const button = aboutButton()!;
+    fireEvent.click(button);
+
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(within(panel).getByRole("heading", { name: "About this mod" })).toBeTruthy();
+    expect(panel.textContent).toContain("Written by the mod's maker, not by PM");
+    expect(panel.textContent).toContain("Draws your documents.");
+    expect(within(panel).getByRole("heading", { name: "The map" })).toBeTruthy();
+    expect(within(panel).getByRole("heading", { name: "Names" })).toBeTruthy();
+    // Markdown is rendered (bold), through the sanitizing component.
+    expect(panel.querySelector("strong")?.textContent).toBe("each");
+    // Over the frame, and the frame is still there under one session, not reopened.
+    expect(frameNow()).toBe(frame);
+    expect(modFrameOpen).toHaveBeenCalledTimes(1);
+    expect(modFrameClose).not.toHaveBeenCalled();
+    // PM's band is still drawn above the panel, and the panel's own sits over the one with the button.
+    expect(screen.getAllByText("Acme Tool", { selector: "span" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
+    expect(frameNow()).toBe(frame);
+    expect(document.activeElement).toBe(aboutButton());
+    expect(modFrameClose).not.toHaveBeenCalled();
+  });
+
+  it("takes focus when it opens, and Escape closes it", async () => {
+    mountAbout({ description: "", help: HELP });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(document.activeElement).toBe(within(panel).getByRole("button", { name: "Close" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
+  });
+
+  it("draws a hostile title and body as text: no markup, no link, no image, no handler reaches the page", async () => {
+    mountAbout({
+      description: "<img src=x onerror=alert(1)> desc",
+      help: [
+        {
+          id: "evil",
+          title: "<b>Bold</b><script>alert(1)</script>",
+          body: [
+            "<script>alert(2)</script><img src=x onerror=alert(3)>",
+            '<a href="https://evil.test" onclick="alert(4)">raw anchor</a>',
+            "[markdown link](https://evil.test/phish) and [js](javascript:alert(5))",
+            "![tracker](https://track.test/pixel.png)",
+            "https://bare.test/autolink",
+          ].join("\n\n"),
+        },
+      ],
+    });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(
+      panel.querySelector("script, img, iframe, object, embed, style, form, input"),
+    ).toBeNull();
+    // No link at all: not even a safe-looking one a click could send to the OS browser.
+    expect(panel.querySelector("a, [href], [src], [target]")).toBeNull();
+    for (const el of panel.querySelectorAll("*")) {
+      for (const attr of el.getAttributeNames()) expect(attr, el.outerHTML).not.toMatch(/^on/i);
+    }
+    // The title's markup is its literal text.
+    expect(within(panel).getByRole("heading", { name: /<b>Bold<\/b>/ })).toBeTruthy();
+    // The words that were links are still there to read, and an image is its alt text.
+    expect(panel.textContent).toContain("markdown link");
+    expect(panel.textContent).toContain("[tracker]");
+    expect(panel.textContent).toContain("https://bare.test/autolink");
+    // The description is a plain line, so its tag is text too.
+    expect(panel.textContent).toContain("<img src=x onerror=alert(1)> desc");
+  });
+
+  it("speaks for the frame in help mode (which can't see inside it) and for the panel", async () => {
+    render(
+      <HelpContext.Provider value={{ enabled: true, setEnabled: () => {} }}>
+        <HelpOverlay />
+        <ModFrame
+          modId="acme.tool"
+          name="Acme Tool"
+          tier="second"
+          about={{ description: "", help: HELP }}
+        />
+      </HelpContext.Provider>,
+    );
+    const frame = await theFrame();
+    // A hover over the frame lands on the iframe element itself, never on anything inside it.
+    fireEvent.mouseOver(frame);
+    expect(await screen.findByText(HELP_TEXT["nav-mod-tab"].title)).toBeTruthy();
+    expect(screen.getByText(/About this mod button above the page/)).toBeTruthy();
+    fireEvent.click(aboutButton()!);
+    fireEvent.mouseOver(document.querySelector('[data-help="mod-about"] h3')!);
+    expect(await screen.findByText(/simple text, with no links/)).toBeTruthy();
+  });
+
+  it("says so when only a description was written", async () => {
+    mountAbout({ description: "Draws your documents.", help: [] });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel.textContent).toContain("hasn't written any help");
+    expect(panel.textContent).toContain("Draws your documents.");
+  });
+
+  it("keeps the line breaks a maker typed and cleans invisible characters out of the body", async () => {
+    mountAbout({
+      description: "",
+      help: [
+        {
+          id: "a",
+          title: "T\u202e",
+          body: "First line.\nSecond\u200bline.\r\n\r\n\r\n\r\nThird.",
+        },
+      ],
+    });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    const paragraphs = [...panel.querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs).toContain("First line.\nSecond line.");
+    expect(paragraphs).toContain("Third.");
+    expect(panel.textContent).not.toMatch(/[\u200b\u202e]/);
+  });
+
+  it("leaves an Escape to a question PM asks over the frame, which it answers, and doesn't close with it", async () => {
+    modCall.mockResolvedValue({
+      kind: "error",
+      error: { code: "MOD-2002", message: "ask", permission: "calendar.details" },
+    });
+    mountAbout({ description: "", help: HELP });
+    const { port } = connect(await theFrame());
+    fireEvent.click(aboutButton()!);
+    port.postMessage({ id: 1, method: "calendar.events", args: null });
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.querySelector('[data-help="mod-about"]')).not.toBeNull();
+    // With the question gone, the next Escape is the panel's.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
   });
 });

@@ -193,6 +193,7 @@ function RunningMod({
       name={modText(mod.name) || mod.id}
       tier={mod.tier}
       onClosed={onClosed}
+      about={{ description: mod.description, help: mod.help }}
     />
   );
 }

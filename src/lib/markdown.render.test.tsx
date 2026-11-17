@@ -346,3 +346,36 @@ describe("plain typed lines (an event's description)", () => {
     expect(html("Title\n---")).toContain("<h2");
   });
 });
+
+// A mod's help (`links={false}`): third-party words in PM's own panel, where a link would be a
+// button PM seems to vouch for. Everything else about the pipeline is the same.
+describe("links off", () => {
+  const source = [
+    "[named](https://example.com/a) and https://example.com/bare and <https://example.com/angle>",
+    "[js](javascript:alert(1)) [mail](mailto:a@example.com) [rel](//evil.test/x)",
+  ].join("\n\n");
+
+  it("draws every kind of link as its text, with nothing to click or follow", () => {
+    const { container } = render(<Markdown links={false}>{source}</Markdown>);
+    expect(container.querySelector("a, [href], [target], [rel]")).toBeNull();
+    for (const text of ["named", "https://example.com/bare", "js", "mail", "rel"]) {
+      expect(container.textContent).toContain(text);
+    }
+  });
+
+  it("still sanitizes and still renders the rest as Markdown", () => {
+    const { container } = render(
+      <Markdown links={false}>
+        {"**bold** <script>alert(1)</script> ![pic](https://t.test/p.png)"}
+      </Markdown>,
+    );
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+    expect(container.querySelector("script, img")).toBeNull();
+    expect(container.textContent).toContain("[pic]");
+  });
+
+  it("leaves links alone everywhere else (the default is unchanged)", () => {
+    const { container } = render(<Markdown>{"[named](https://example.com/a)"}</Markdown>);
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("https://example.com/a");
+  });
+});

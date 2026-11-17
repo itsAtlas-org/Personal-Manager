@@ -56,6 +56,10 @@ pub struct ModDto {
     /// The sidebar tab's label, when the mod has one.
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
+    /// The mod's own help (`contributions.help`), for PM's "About this mod" panel. Author-written
+    /// text: the page draws the title as a plain line and the body only through its sanitizing
+    /// Markdown component, never as HTML.
+    pub help: Vec<HelpDto>,
     /// Whether the manifest names a PNG or WebP icon the file list holds, within the size cap;
     /// `mod_icon` answers the bytes.
     pub has_icon: bool,
@@ -65,6 +69,16 @@ pub struct ModDto {
     pub resumed: Option<ResumedDto>,
     pub installed_at: String,
     pub updated_at: String,
+}
+
+/// One help entry of a mod, as its manifest wrote it (already held to PM's plain-text rules at install).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelpDto {
+    pub id: String,
+    pub title: String,
+    /// Markdown source; the page renders it through `markdown.tsx` only.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -245,8 +259,16 @@ pub struct ManifestView {
     pub internet_hosts: Vec<String>,
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
+    pub help: Vec<HelpDto>,
     pub api: Option<ApiRange>,
 }
+
+/// The install check's own limits on help (`package.rs`: 64 entries, an 80-character title, a
+/// 2,000-character body). A stored row that was hand-edited past them reads as having less, so the
+/// listing can't be made to carry a megabyte of "help" to the page.
+const HELP_ENTRIES_MAX: usize = 64;
+const HELP_TITLE_MAX: usize = 80;
+const HELP_BODY_MAX: usize = 2000;
 
 /// Read a stored manifest (pure). Anything missing or oddly shaped reads as absent: the verifier
 /// checked the manifest at install, so this only meets a hand-edited or damaged row.
@@ -275,6 +297,16 @@ pub fn read_manifest(manifest: &str) -> ManifestView {
         internet_hosts: list(&v["internetHosts"]).iter().filter_map(text).collect(),
         nav_tab: text(&v["contributions"]["nav.tab"]["label"]),
         calendar_overlay: text(&v["contributions"]["calendar.overlay"]["label"]),
+        help: list(&v["contributions"]["help"])
+            .iter()
+            .filter_map(|h| {
+                let (id, title, body) = (text(&h["id"])?, text(&h["title"])?, text(&h["body"])?);
+                let fits = title.chars().count() <= HELP_TITLE_MAX
+                    && body.chars().count() <= HELP_BODY_MAX;
+                fits.then_some(HelpDto { id, title, body })
+            })
+            .take(HELP_ENTRIES_MAX)
+            .collect(),
         api,
     }
 }
@@ -430,6 +462,7 @@ fn dto(
         internet_hosts: m.internet_hosts.clone(),
         nav_tab: m.nav_tab.clone(),
         calendar_overlay: m.calendar_overlay.clone(),
+        help: m.help.clone(),
         has_icon: icon_path(m.icon.as_deref(), &row.files).is_some(),
         update: waiting.and_then(|w| update_dto(&row.version, w)),
         resumed: resumed.map(|r| ResumedDto {
@@ -646,6 +679,91 @@ mod tests {
         index: None,
         engine_sealed: true,
     };
+
+    #[test]
+    fn a_mods_help_is_read_in_order_and_whatever_is_malformed_or_oversized_is_left_out() {
+        let m = read_manifest(
+            &json!({"contributions": {"help": [
+                {"id": "a", "title": "First", "body": "One.\nTwo."},
+                {"id": "b", "title": 7, "body": "no title"},
+                {"id": "c", "title": "No body"},
+                "not an object",
+                {"id": "d", "title": "x".repeat(HELP_TITLE_MAX + 1), "body": "long title"},
+                {"id": "e", "title": "Long body", "body": "x".repeat(HELP_BODY_MAX + 1)},
+                {"id": "f", "title": "Edge", "body": "x".repeat(HELP_BODY_MAX)},
+            ]}})
+            .to_string(),
+        );
+        let ids: Vec<&str> = m.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["a", "f"]);
+        assert_eq!(m.help[0].body, "One.\nTwo.");
+        // No help, or help that isn't a list, reads as none.
+        for junk in [
+            json!({}),
+            json!({"contributions": {}}),
+            json!({"contributions": {"help": "text"}}),
+        ] {
+            assert!(read_manifest(&junk.to_string()).help.is_empty(), "{junk}");
+        }
+        // The count is bounded like the install check's.
+        let many: Vec<Value> = (0..HELP_ENTRIES_MAX + 5)
+            .map(|i| json!({"id": format!("h{i}"), "title": "T", "body": "B"}))
+            .collect();
+        let m = read_manifest(&json!({"contributions": {"help": many}}).to_string());
+        assert_eq!(m.help.len(), HELP_ENTRIES_MAX);
+    }
+
+    #[test]
+    fn the_listing_carries_a_mods_help_to_the_page_in_camel_case() {
+        let (_dir, c) = test_store();
+        let mut manifest = manifest(&["storage"]);
+        manifest["contributions"]["help"] =
+            json!([{"id": "map-overview", "title": "Map", "body": "Hover a document."}]);
+        insert(
+            &c,
+            &Row {
+                manifest,
+                ..Row::default()
+            },
+        );
+        let listed = list(&c, &CTX).unwrap();
+        let wire = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(
+            wire["help"],
+            json!([{"id": "map-overview", "title": "Map", "body": "Hover a document."}])
+        );
+        // A mod with none lists an empty array, never a missing field the page would have to guess at.
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["help"], json!([]));
+    }
+
+    #[test]
+    fn the_committed_map_manifests_help_reaches_the_listing_whole() {
+        // B6's eight entries, through the same reader the listing uses: none is dropped by the
+        // length limits or by the shape check.
+        let text = include_str!("../../../../mods/atlas.map/manifest.json");
+        let m = read_manifest(text);
+        let ids: Vec<&str> = m.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "map-overview",
+                "map-canvas",
+                "map-arrangement",
+                "map-cohesion",
+                "map-navigate",
+                "map-names",
+                "map-settings",
+                "map-updates"
+            ]
+        );
+        assert!(m
+            .help
+            .iter()
+            .all(|h| !h.title.is_empty() && !h.body.is_empty()));
+    }
 
     #[test]
     fn the_listing_reads_rows_decisions_and_notes_from_one_store() {

@@ -26,6 +26,26 @@ export function plainLine(text: string): string {
   return cleanModChars(text).replace(/ {2,}/g, " ").trim();
 }
 
+const INVISIBLE_BUT_NEWLINE = /(?!\n)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/** A mod's help text, which may have several lines: the same cleaning as {@link plainLine} but the
+ *  line breaks stay (a carriage return counts as one), spaces are left as written, and a run of
+ *  blank lines is cut to one so a body can't push the rest of the panel off the screen. */
+export function modBody(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(INVISIBLE_BUT_NEWLINE, " ")
+    .replace(MARK_RUN, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Whether a mod has anything to put in its About panel: a description, or a help entry with a body,
+ *  once cleaned. False means ModFrame offers no button that would open an empty panel. */
+export function hasAbout(description: string, help: readonly { body: string }[]): boolean {
+  return plainLine(description) !== "" || help.some((h) => modBody(h.body) !== "");
+}
+
 /** A mod's name as it sits inside one of PM's own sentences, titles and menu items: in quotes, which
  *  the name can't close (a double quote inside it becomes a single one), so a name like
  *  `Calendar. Nothing was changed.` reads as the mod's name rather than as more of PM's sentence.

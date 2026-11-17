@@ -108,6 +108,7 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
     internetHosts: [],
     navTab: "Acme Tool",
     calendarOverlay: null,
+    help: [],
     hasIcon: false,
     update: null,
     resumed: null,
@@ -171,6 +172,32 @@ describe("a mod that can run", () => {
     expect(modFrameOpen).toHaveBeenCalledWith("acme.tool", expect.any(Function));
     expect(screen.getByLabelText("Mod: Acme Tool")).toBeTruthy();
     expect(screen.getByText("Reviewed by Atlas")).toBeTruthy();
+  });
+
+  it("offers the maker's help (the row's description and help entries) as About this mod", async () => {
+    render(
+      <Tab
+        rows={[
+          mod({
+            help: [
+              { id: "map-overview", title: "The map", body: "Hover a dot.\nClick it to read." },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "About this mod" }));
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel.textContent).toContain("Does a thing.");
+    expect(panel.textContent).toContain("The map");
+    expect(panel.textContent).toContain("Hover a dot.");
+  });
+
+  it("offers no About button for a mod with no help and no description", async () => {
+    render(<Tab rows={[mod({ description: "" })]} />);
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    expect(screen.queryByRole("button", { name: "About this mod" })).toBeNull();
   });
 
   it("ends the frame's session when the tab goes away (a tab switch unmounts it)", async () => {
@@ -773,6 +800,7 @@ describe("help", () => {
     }
     expect([...named].sort()).toEqual(
       expect.arrayContaining([
+        "mod-about",
         "mod-first-open",
         "mod-tab-status",
         "mods-permission-prompt",

@@ -175,6 +175,13 @@ export interface ModResumed {
   text: string;
 }
 
+/** One help entry a mod's manifest wrote (`contributions.help`). `body` is Markdown source. */
+export interface ModHelpEntry {
+  id: string;
+  title: string;
+  body: string;
+}
+
 export interface ModInfo {
   id: string;
   name: string;
@@ -195,6 +202,9 @@ export interface ModInfo {
   /** The sidebar tab's label, when the mod has one. */
   navTab: string | null;
   calendarOverlay: string | null;
+  /** The mod's own help (`contributions.help`), shown in PM's "About this mod" panel. The maker's
+   *  words: the title is a plain line and the body goes through `markdown.tsx` only. */
+  help: ModHelpEntry[];
   /** `modIcon` answers it. */
   hasIcon: boolean;
   update: ModUpdateWaiting | null;

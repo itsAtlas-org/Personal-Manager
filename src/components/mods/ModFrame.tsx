@@ -5,7 +5,9 @@
 //
 // - The band shows the mod's name as React text and its tier badge. It sits above the frame and
 //   outside it, so nothing the mod draws can cover it, and a mod's page can't pass itself off as a PM
-//   dialog. It carries no links and no buttons.
+//   dialog. It carries no links. Its one button, "About this mod", is PM's and appears only when the
+//   mod wrote help or a description: it opens ModAbout over the frame (B7), under a copy of this
+//   band, and the frame keeps running beneath it.
 // - The frame is `<iframe src sandbox="allow-scripts" allow="">` and nothing more: the ESLint fence
 //   allows an iframe only here and only in that shape (INVARIANTS.md I-24). Its `src` is the one-time
 //   entry URL `mod_frame_open` mints, set once; a new session gets a new element (keyed by session).
@@ -64,13 +66,17 @@ import {
   modPermissionDecide,
   modThemeChanged,
 } from "../../lib/ipc";
-import { failureText } from "../../lib/modsTypes";
+import { MOD_TAB_HELP_ID } from "../../lib/nav";
+import { failureText, type ModHelpEntry } from "../../lib/modsTypes";
 import { frameMounted } from "../../lib/modWatchdog";
 import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
+import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
+import { ModAbout } from "./ModAbout";
 import { ModPermissionPrompt } from "./ModPermissionPrompt";
+import { hasAbout } from "./modText";
 import { TierBadge } from "./TierBadge";
 import {
   EventPump,
@@ -105,6 +111,9 @@ export interface ModFrameProps {
    *  `uninstalled`, `replaced`, or null when it sent none PM reads). Called once the goodbye has
    *  been forwarded to the frame; the frame stays on screen until the owner replaces it. */
   onClosed?: (reason: string | null) => void;
+  /** What the mod's maker wrote about it (the manifest's description and help). When there is
+   *  something to show, the band offers "About this mod". */
+  about?: { description: string; help: readonly ModHelpEntry[] };
 }
 
 export function ModFrame(props: ModFrameProps) {
@@ -294,8 +303,22 @@ function closeReason(payload: unknown): string | null {
   return typeof reason === "string" && reason.length <= 32 ? reason : null;
 }
 
-function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
+function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
   const [phase, setPhase] = useState<Phase>({ kind: "opening" });
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const aboutButton = useRef<HTMLButtonElement>(null);
+  const canAbout = about !== undefined && hasAbout(about.description, about.help);
+  const closeAbout = useCallback(() => setAboutOpen(false), []);
+  // Focus goes back to the button that opened the panel once the panel is gone (and only then: not
+  // on first render, and not when the mod stops offering it).
+  const aboutWasOpen = useRef(false);
+  useEffect(() => {
+    if (aboutOpen) aboutWasOpen.current = true;
+    else if (aboutWasOpen.current) {
+      aboutWasOpen.current = false;
+      aboutButton.current?.focus();
+    }
+  }, [aboutOpen]);
   const onClosedRef = useRef(onClosed);
   useLayoutEffect(() => {
     onClosedRef.current = onClosed;
@@ -548,8 +571,19 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
   };
 
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-label={`Mod: ${name}`}>
-      <ModBand name={name} tier={tier} />
+    // `data-help` is on the section because help mode can't see inside the frame: hovering the
+    // page lands on the iframe element, and its nearest ancestor with one speaks for it.
+    <section
+      className="relative flex h-full min-h-0 flex-col"
+      aria-label={`Mod: ${name}`}
+      data-help={MOD_TAB_HELP_ID}
+    >
+      <ModBand
+        name={name}
+        tier={tier}
+        onAbout={canAbout ? () => setAboutOpen(true) : undefined}
+        aboutRef={aboutButton}
+      />
       {phase.kind === "open" && (
         <iframe
           key={phase.session}
@@ -584,12 +618,30 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
       {phase.kind === "failed" && (
         <Callout className="m-4">PM couldn't start this mod: {phase.message}</Callout>
       )}
+      {aboutOpen && canAbout && (
+        // Over the whole section, band included, so the iframe can't show through or take a click;
+        // the band is drawn again so the panel still sits under PM's own name-and-tier strip.
+        <div className="absolute inset-0 z-10 flex min-h-0 flex-col bg-bg">
+          <ModBand name={name} tier={tier} />
+          <ModAbout description={about.description} help={about.help} onClose={closeAbout} />
+        </div>
+      )}
     </section>
   );
 }
 
 /** The band above every mod frame: PM's own drawing, never the mod's. */
-function ModBand({ name, tier }: { name: string; tier: ModTier }) {
+function ModBand({
+  name,
+  tier,
+  onAbout,
+  aboutRef,
+}: {
+  name: string;
+  tier: ModTier;
+  onAbout?: () => void;
+  aboutRef?: React.Ref<HTMLButtonElement>;
+}) {
   return (
     <div className="flex min-w-0 flex-none items-center gap-2 border-b border-rule bg-panel px-3 py-1.5 text-xs">
       <span className="flex-none text-ink3">Mod</span>
@@ -597,6 +649,11 @@ function ModBand({ name, tier }: { name: string; tier: ModTier }) {
         {name}
       </span>
       <TierBadge tier={tier} />
+      {onAbout && (
+        <Button ref={aboutRef} variant="secondary" size="sm" className="ml-auto" onClick={onAbout}>
+          About this mod
+        </Button>
+      )}
     </div>
   );
 }

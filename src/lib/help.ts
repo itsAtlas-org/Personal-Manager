@@ -58,7 +58,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "nav-mod-tab": {
     title: "A mod's tab",
-    body: "A tab an installed mod added, marked 'mod' because the mod chose its name. What's inside is the mod's own page, running in a sealed box: it can only use what you allowed it. Right-click it to pin it to the top or hide it. A hidden mod tab is still reachable with Ctrl K and from the Mods tab.",
+    body: "A tab an installed mod added, marked 'mod' because the mod chose its name. What's inside is the mod's own page, running in a sealed box: it can only use what you allowed it. If the mod's maker wrote help for it, the About this mod button above the page shows it. Right-click the tab to pin it to the top or hide it. A hidden mod tab is still reachable with Ctrl K and from the Mods tab.",
+  },
+  "mod-about": {
+    title: "About this mod",
+    body: "What the mod's maker wrote to explain it. PM shows their words as simple text, with no links, and can't vouch for them. The mod keeps running behind this panel: Close takes you back to it exactly as it was.",
   },
   "mods-view": {
     title: "Mods",
