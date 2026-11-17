@@ -94,10 +94,10 @@ pub fn on_here(app: &AppHandle, state: &AppState) -> bool {
     let device = match crate::paths::data_dir(app)
         .map_err(|e| e.to_string())
         .and_then(|d| {
-            let vault = state
-                .active_vault_id()
+            let (vault, root) = state
+                .active_vault_place()
                 .ok_or_else(|| "no vault is open".to_owned())?;
-            devmode::Here::open(&d, &vault).map_err(|e| e.to_string())
+            devmode::Here::open(&d, &vault, &root).map_err(|e| e.to_string())
         }) {
         Ok(device) => device,
         Err(e) => {
@@ -112,6 +112,10 @@ pub fn on_here(app: &AppHandle, state: &AppState) -> bool {
             return false;
         }
     };
+    // The vault can have closed since the device was named: it answers off, and clears nothing.
+    if !device.is_open_in(state) {
+        return false;
+    }
     devmode::is_on(&conn, &device).unwrap_or_else(|e| {
         eprintln!("mods: developer mode couldn't be read, so it is off ({e})");
         false
@@ -127,11 +131,11 @@ pub fn set_dev_mode_for_this_device(
     cached: Option<&crate::mods::index::Index>,
 ) -> Result<DevSwitch, LedgerError> {
     let data_dir = crate::paths::data_dir(app).map_err(|e| LedgerError::Store(e.to_string()))?;
-    let vault = app
+    let (vault, root) = app
         .state::<AppState>()
-        .active_vault_id()
+        .active_vault_place()
         .ok_or_else(|| LedgerError::Store("no vault is open".into()))?;
-    let device = devmode::Here::open(&data_dir, &vault).map_err(LedgerError::Disk)?;
+    let device = devmode::Here::open(&data_dir, &vault, &root).map_err(LedgerError::Disk)?;
     let check = SafetyCheck::serve(cached);
     let switched = super::with_active_ledger(app, Mint::IfRows, |ledger| {
         ledger.set_dev_mode_for_device(&device, on, &check, Utc::now())
@@ -148,7 +152,7 @@ pub fn set_dev_mode_for_this_device(
     let mut conn = state
         .conn()
         .map_err(|e| LedgerError::Store(e.to_string()))?;
-    if state.active_vault_id().as_deref() != Some(device.vault()) {
+    if !device.is_open_in(&state) {
         return Err(LedgerError::VaultChanged);
     }
     let now_on = devmode::write(&mut conn, &device, on)?;

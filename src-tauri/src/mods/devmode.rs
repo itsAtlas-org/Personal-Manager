@@ -39,10 +39,19 @@
 //! write the store and has ever read it (it sits in the record while the device is on; an old copy
 //! of the store file keeps it) could write it back after the device was switched off or reset. So
 //! the store's record is only half the answer. The other half is [`DEVICE_FILE`]
-//! (`data_dir/mods-dev-mode.json`, versioned, the ids of the vaults this device switched on): developer
+//! (`data_dir/mods-dev-mode.json`, versioned, the vaults this device switched on): developer
 //! mode is on for this device in this vault **only if both say so**, the store's record lists this
 //! device's credential AND this device's file lists this vault ([`Here`]). A copied database, a
 //! restore, a joined vault or another machine has no device file entry, so it is off there.
+//! - **An entry is the vault's id and where its folder is.** The id is only what the vault's own
+//!   `vault-meta.json` says, which whoever wrote that vault chose, and the credential is the same
+//!   value in every store. So a hostile vault that claims the id of one this device switched on in,
+//!   and whose store lists a credential its writer saw there, would be on without a click if the
+//!   id were all the file kept. The entry therefore also holds a one-way tag of the folder the
+//!   vault sits in on this computer ([`place_of`]), which only this computer decides. A vault moved
+//!   to another folder is off until it is switched on again. An id PM could not have made
+//!   ([`disk::check_vault_id`]) names nobody ([`Here::open`] refuses it), so the file can never be
+//!   written with an entry that makes it "not ours" ([`vaults_of`]).
 //! - **Order.** Switching on writes the store's record first and the device's file second; switching
 //!   off writes the device's file first and the store's record second. A crash between the two
 //!   leaves it off either way.
@@ -79,8 +88,10 @@ use std::sync::{Mutex, PoisonError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use super::disk;
 use super::store;
 use super::tab::device;
+use crate::AppState;
 
 /// Most devices one vault remembers.
 pub const MAX_DEVICES: usize = 32;
@@ -160,8 +171,25 @@ pub const MAX_VAULTS: usize = 64;
 /// The most the device file may weigh (read and written). A larger file is off for every vault.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024;
 
-/// The longest vault id the device file keeps; a longer entry makes the file not ours.
+/// The longest vault id (or folder tag) the device file keeps; a longer entry makes the file not ours.
 const MAX_VAULT_ID_LEN: usize = 128;
+
+/// The place tests put their vault in.
+#[cfg(test)]
+const TEST_PLACE: &str = "test-place";
+
+/// Whether the device file could keep `vault` as an entry and PM could have made it. The file is
+/// rejected whole for one entry it wouldn't accept ([`vaults_of`]), so a write must never add one.
+fn entry_id_ok(vault: &str) -> io::Result<()> {
+    if vault.len() <= MAX_VAULT_ID_LEN && disk::check_vault_id(vault).is_ok() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "this vault's id isn't one PM made",
+        ))
+    }
+}
 
 /// Reading and rewriting the device file are one step at a time (the store's connection already
 /// orders the callers that matter; this keeps two threads' rewrites from losing one another's).
@@ -174,22 +202,73 @@ static DEVICE_FILE_LOCK: Mutex<()> = Mutex::new(());
 pub struct Here {
     id: String,
     vault: String,
+    /// Where on this computer the open vault sits ([`place_of`]): what the device's file ties its
+    /// entry to, because a vault id is only a name the vault's own files claim.
+    place: String,
     dir: PathBuf,
 }
 
+/// The tag a vault's folder gets in the device's file (pure apart from resolving links): a
+/// domain-separated one-way value of where the folder is. The vault's id comes from
+/// `vault-meta.json`, which whoever wrote the vault chose, so a second vault can claim the id of one
+/// this device switched developer mode on in; the folder it sits in on this computer is something
+/// only this computer decides.
+pub fn place_of(vault_root: &Path) -> String {
+    let root = std::fs::canonicalize(vault_root).unwrap_or_else(|_| vault_root.to_owned());
+    device::credential(PLACE_DOMAIN, &root.to_string_lossy())
+}
+
+/// The domain a vault folder's tag is made under (nothing else uses it).
+const PLACE_DOMAIN: &str = "pm-mods-dev-place-v1";
+
 impl Here {
-    /// `id`: this device's id ([`device::device_id`]); `vault`: the open vault's id; `dir`: `data_dir`.
-    pub fn new(id: &str, vault: &str, dir: &Path) -> Self {
+    /// `id`: this device's id ([`device::device_id`]); `vault`: the open vault's id; `place`: its
+    /// folder's [`place_of`]; `dir`: `data_dir`.
+    fn make(id: &str, vault: &str, place: &str, dir: &Path) -> Self {
         Self {
             id: id.to_owned(),
             vault: vault.to_owned(),
+            place: place.to_owned(),
             dir: dir.to_owned(),
         }
     }
 
-    /// This device in `vault`, naming the device by the file in `data_dir` (minted on first use).
-    pub fn open(data_dir: &Path, vault: &str) -> io::Result<Self> {
-        Ok(Self::new(&device::device_id(data_dir)?, vault, data_dir))
+    /// A device of a test world, in a vault folder the test doesn't name.
+    #[cfg(test)]
+    pub fn new(id: &str, vault: &str, dir: &Path) -> Self {
+        Self::make(id, vault, TEST_PLACE, dir)
+    }
+
+    /// The same device in the same vault, in a different folder (tests).
+    #[cfg(test)]
+    pub fn moved_to(&self, place: &str) -> Self {
+        Self::make(&self.id, &self.vault, place, &self.dir)
+    }
+
+    /// This device in `vault`, whose folder is `vault_root`, naming the device by the file in
+    /// `data_dir` (minted on first use). A vault id that PM could not have made (it comes from
+    /// `vault-meta.json`; see [`disk::check_vault_id`]) names nobody: no device file entry is kept
+    /// for it, so developer mode can't be on in it.
+    pub fn open(data_dir: &Path, vault: &str, vault_root: &Path) -> io::Result<Self> {
+        entry_id_ok(vault)?;
+        Ok(Self::make(
+            &device::device_id(data_dir)?,
+            vault,
+            &place_of(vault_root),
+            data_dir,
+        ))
+    }
+
+    /// Whether the vault open in `state` is the one this names (its id AND its folder). Ask it
+    /// **after** taking the store's connection ([`AppState::conn`]): the open vault can't change
+    /// while the connection is held, so a yes means the connection reaches this vault's store. A
+    /// `Here` built before the connection was taken may name a vault that is closed by now, and
+    /// [`is_on`] cannot tell (it would pair that vault's device entry with the next store's record).
+    /// A no is an off answer that touches nothing.
+    pub fn is_open_in(&self, state: &AppState) -> bool {
+        state
+            .active_vault_place()
+            .is_some_and(|(vault, root)| self.vault == vault && self.place == place_of(&root))
     }
 
     /// Where this device keeps its record (`data_dir`).
@@ -240,31 +319,42 @@ impl From<io::Error> for Error {
     }
 }
 
+/// One vault this device switched developer mode on in: its id, and the [`place_of`] its folder
+/// had then. Both must match for the entry to count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Entry {
+    id: String,
+    at: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeviceRecord {
     v: u32,
-    vaults: Vec<String>,
+    vaults: Vec<Entry>,
 }
 
 /// The vaults a device file names, or `None` when it isn't a file PM wrote: wrong shape or version,
-/// more than [`MAX_VAULTS`] entries, an entry that is empty or over-long (pure).
-fn vaults_of(text: &str) -> Option<Vec<String>> {
+/// more than [`MAX_VAULTS`] entries, an entry with an empty or over-long field (pure).
+fn vaults_of(text: &str) -> Option<Vec<Entry>> {
     let r: DeviceRecord = serde_json::from_str(text).ok()?;
+    let field = |f: &str| !f.is_empty() && f.len() <= MAX_VAULT_ID_LEN;
     let sane = r.v == FORMAT
         && r.vaults.len() <= MAX_VAULTS
-        && r.vaults
-            .iter()
-            .all(|v| !v.is_empty() && v.len() <= MAX_VAULT_ID_LEN);
+        && r.vaults.iter().all(|e| field(&e.id) && field(&e.at));
     sane.then_some(r.vaults)
 }
 
-/// The device file's text with `vault` switched on or off (pure): once in the list at most, newest
-/// last, no longer than [`MAX_VAULTS`].
-fn with_vault(mut vaults: Vec<String>, vault: &str, on: bool) -> String {
-    vaults.retain(|v| v != vault);
-    if on {
-        vaults.push(vault.to_owned());
+/// The device file's text with `vault` switched on (at `place`) or off (pure): once in the list at
+/// most, newest last, no longer than [`MAX_VAULTS`]. Off forgets the vault wherever it was.
+fn with_vault(mut vaults: Vec<Entry>, vault: &str, place: Option<&str>) -> String {
+    vaults.retain(|e| e.id != vault);
+    if let Some(at) = place {
+        vaults.push(Entry {
+            id: vault.to_owned(),
+            at: at.to_owned(),
+        });
     }
     let over = vaults.len().saturating_sub(MAX_VAULTS);
     vaults.drain(..over);
@@ -273,7 +363,7 @@ fn with_vault(mut vaults: Vec<String>, vault: &str, on: bool) -> String {
 
 /// The vaults the device file lists. A missing file, or one that isn't what PM writes (corrupt,
 /// over a cap), lists none; only a file that can't be *read* is an error.
-fn device_vaults(dir: &Path) -> io::Result<Vec<String>> {
+fn device_vaults(dir: &Path) -> io::Result<Vec<Entry>> {
     let file = match File::open(dir.join(DEVICE_FILE)) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -290,26 +380,37 @@ fn device_vaults(dir: &Path) -> io::Result<Vec<String>> {
         .unwrap_or_default())
 }
 
-/// Switch `vault` on or off in the device file. Off in a vault the file doesn't list writes nothing.
-/// On replaces a file that isn't ours (the other vaults then read as off).
-fn set_device(dir: &Path, vault: &str, on: bool) -> io::Result<()> {
+/// Switch `vault` on (`Some(place)`: the [`place_of`] of its folder) or off (`None`) in the device
+/// file. Off in a vault the file doesn't list writes nothing, and removes it whatever place it was
+/// listed at. On replaces a file that isn't ours (the other vaults then read as off), and refuses
+/// an id or place the file would not accept back, so a write can't make the file "not ours".
+fn set_device(dir: &Path, vault: &str, place: Option<&str>) -> io::Result<()> {
+    if let Some(at) = place {
+        entry_id_ok(vault)?;
+        if at.is_empty() || at.len() > MAX_VAULT_ID_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "this vault's folder can't be kept",
+            ));
+        }
+    }
     let _guard = DEVICE_FILE_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let vaults = device_vaults(dir)?;
-    if !on && !vaults.iter().any(|v| v == vault) {
+    if place.is_none() && !vaults.iter().any(|e| e.id == vault) {
         return Ok(());
     }
-    let text = with_vault(vaults, vault, on);
+    let text = with_vault(vaults, vault, place);
     crate::vault::write_atomic(&dir.join(DEVICE_FILE), text.as_bytes())
 }
 
-/// Whether the device's file lists `vault`. Any failure is off.
-fn device_says_on(dir: &Path, vault: &str) -> bool {
+/// Whether the device's file lists `vault` at `place`. Any failure is off.
+fn device_says_on(dir: &Path, vault: &str, place: &str) -> bool {
     let _guard = DEVICE_FILE_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    device_vaults(dir).is_ok_and(|vaults| vaults.iter().any(|v| v == vault))
+    device_vaults(dir).is_ok_and(|vaults| vaults.iter().any(|e| e.id == vault && e.at == place))
 }
 
 /// The store's record in `conn`, written with `credential` switched on or off, in one transaction.
@@ -339,12 +440,12 @@ pub fn is_on(conn: &Connection, here: &Here) -> rusqlite::Result<bool> {
         &here.credential(),
     );
     if !listed {
-        if let Err(e) = set_device(&here.dir, &here.vault, false) {
+        if let Err(e) = set_device(&here.dir, &here.vault, None) {
             eprintln!("mods: the device's developer-mode record couldn't be cleared ({e})");
         }
         return Ok(false);
     }
-    Ok(device_says_on(&here.dir, &here.vault))
+    Ok(device_says_on(&here.dir, &here.vault, &here.place))
 }
 
 /// Switch developer mode on or off for `here` in this vault, and say what it is now. Other devices'
@@ -357,12 +458,13 @@ pub fn write(conn: &mut Connection, here: &Here, on: bool) -> Result<bool, Error
     let credential = here.credential();
     if on {
         write_store(conn, &credential, true)?;
-        set_device(&here.dir, &here.vault, true)?;
+        set_device(&here.dir, &here.vault, Some(&here.place))?;
     } else {
-        set_device(&here.dir, &here.vault, false)?;
+        set_device(&here.dir, &here.vault, None)?;
         write_store(conn, &credential, false)?;
     }
-    Ok(on)
+    // What it is now, read back from both halves: never the answer that was asked for.
+    Ok(is_on(conn, here)?)
 }
 
 /// Switch developer mode off for every device in this vault (the restore reset: §1.11 says a restore
@@ -377,7 +479,7 @@ pub fn write(conn: &mut Connection, here: &Here, on: bool) -> Result<bool, Error
 /// and by nothing else: a shared-vault join writes nothing. A device file that can't be cleared is
 /// an error, so the restore is refused.
 pub fn all_devices_off(conn: &Connection, dir: &Path, vault: &str) -> Result<(), Error> {
-    set_device(dir, vault, false)?;
+    set_device(dir, vault, None)?;
     conn.execute(
         "INSERT INTO settings(key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -699,7 +801,7 @@ mod tests {
     }
 
     fn lists_vault(dir: &Path, vault: &str) -> bool {
-        device_vaults(dir).unwrap().iter().any(|v| v == vault)
+        device_vaults(dir).unwrap().iter().any(|e| e.id == vault)
     }
 
     /// A device folder and a store of one vault.
@@ -832,7 +934,7 @@ mod tests {
             }
             let _ = std::fs::remove_file(dir.path().join(DEVICE_FILE));
             if device_lists {
-                set_device(dir.path(), VAULT, true).unwrap();
+                set_device(dir.path(), VAULT, Some(TEST_PLACE)).unwrap();
             }
             assert_eq!(
                 is_on(&conn, &me).unwrap(),
@@ -851,17 +953,21 @@ mod tests {
         let me = here_in(dir.path(), A);
         write(&mut conn, &me, true).unwrap();
         assert!(is_on(&conn, &me).unwrap());
-        let listing = format!(r#"{{"v":1,"vaults":["{VAULT}"]}}"#);
-        let crowd: Vec<String> = (0..=MAX_VAULTS).map(|i| format!("v{i}")).collect();
-        let too_many = format!(
-            r#"{{"v":1,"vaults":["{VAULT}",{}]}}"#,
-            crowd
-                .iter()
-                .map(|v| format!("\"{v}\""))
-                .collect::<Vec<_>>()
-                .join(",")
+        let entry = |id: &str, at: &str| format!(r#"{{"id":"{id}","at":"{at}"}}"#);
+        let mine = entry(VAULT, TEST_PLACE);
+        let listing = format!(r#"{{"v":1,"vaults":[{mine}]}}"#);
+        let crowd: Vec<String> = (0..=MAX_VAULTS)
+            .map(|i| entry(&format!("v{i}"), TEST_PLACE))
+            .collect();
+        let too_many = format!(r#"{{"v":1,"vaults":[{mine},{}]}}"#, crowd.join(","));
+        let long_id = format!(
+            r#"{{"v":1,"vaults":[{mine},{}]}}"#,
+            entry(&"x".repeat(200), TEST_PLACE)
         );
-        let long_id = format!(r#"{{"v":1,"vaults":["{VAULT}","{}"]}}"#, "x".repeat(200));
+        let long_place = format!(
+            r#"{{"v":1,"vaults":[{mine},{}]}}"#,
+            entry("other", &"x".repeat(200))
+        );
         let padded = format!("{listing}{}", " ".repeat(MAX_FILE_BYTES as usize));
         for (what, bad) in [
             ("empty", String::new()),
@@ -869,12 +975,21 @@ mod tests {
             ("another version", listing.replace("\"v\":1", "\"v\":2")),
             ("an extra field", listing.replace('}', r#","extra":1}"#)),
             ("not a list", format!(r#"{{"v":1,"vaults":"{VAULT}"}}"#)),
+            (
+                "a bare id, the shape before a place was kept",
+                format!(r#"{{"v":1,"vaults":["{VAULT}"]}}"#),
+            ),
             ("too many entries", too_many),
             ("an over-long id", long_id),
-            (
-                "an empty id",
-                format!(r#"{{"v":1,"vaults":["{VAULT}",""]}}"#),
-            ),
+            ("an over-long place", long_place),
+            ("an empty id", {
+                let blank = entry("", TEST_PLACE);
+                format!(r#"{{"v":1,"vaults":[{mine},{blank}]}}"#)
+            }),
+            ("an empty place", {
+                let blank = entry("other", "");
+                format!(r#"{{"v":1,"vaults":[{mine},{blank}]}}"#)
+            }),
             ("over the size cap", padded),
         ] {
             std::fs::write(dir.path().join(DEVICE_FILE), &bad).unwrap();
@@ -984,29 +1099,29 @@ mod tests {
     fn the_device_file_is_small_versioned_atomic_and_capped_on_write() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..MAX_VAULTS + 3 {
-            set_device(dir.path(), &format!("v{i}"), true).unwrap();
+            set_device(dir.path(), &format!("v{i}"), Some(TEST_PLACE)).unwrap();
         }
         let kept = device_vaults(dir.path()).unwrap();
         assert_eq!(kept.len(), MAX_VAULTS);
         assert_eq!(
-            kept.first().map(String::as_str),
+            kept.first().map(|e| e.id.as_str()),
             Some("v3"),
             "oldest falls off"
         );
         assert!(!lists_vault(dir.path(), "v0"));
         assert!(device_file(dir.path()).unwrap().starts_with(r#"{"v":1,"#));
         // Switching on twice lists it once; off in a vault it doesn't list writes nothing.
-        set_device(dir.path(), "v10", true).unwrap();
+        set_device(dir.path(), "v10", Some(TEST_PLACE)).unwrap();
         assert_eq!(
             device_vaults(dir.path())
                 .unwrap()
                 .iter()
-                .filter(|v| *v == "v10")
+                .filter(|e| e.id == "v10")
                 .count(),
             1
         );
         let before = device_file(dir.path());
-        set_device(dir.path(), "not-listed", false).unwrap();
+        set_device(dir.path(), "not-listed", None).unwrap();
         assert_eq!(device_file(dir.path()), before);
         // No temp file is left beside it.
         let names: Vec<_> = std::fs::read_dir(dir.path())
@@ -1016,8 +1131,129 @@ mod tests {
         assert_eq!(names, [DEVICE_FILE]);
         // A missing folder is an error for a write and off for a read, not a panic.
         let gone = dir.path().join("gone");
-        assert!(set_device(&gone, "v", true).is_err());
-        assert!(!device_says_on(&gone, "v"));
+        assert!(set_device(&gone, "v", Some(TEST_PLACE)).is_err());
+        assert!(!device_says_on(&gone, "v", TEST_PLACE));
+    }
+
+    #[test]
+    fn a_lookalike_vault_with_the_same_id_in_another_folder_does_not_inherit_the_on() {
+        // The device switched developer mode on in vault V. Another vault, in a folder of its own,
+        // claims V's id in its `vault-meta.json` (whoever wrote it chose the id), and its store's
+        // record lists the credential its writer once read in V's. The credential is the same value
+        // in both stores, so only where the vault is can tell them apart.
+        let (dir, mut conn) = rig();
+        let real = here_in(dir.path(), A);
+        assert!(write(&mut conn, &real, true).unwrap());
+        let credential = record_row(&conn).unwrap();
+
+        let lookalike_store = store();
+        set_raw(&lookalike_store, store::SETTING_DEV_DEVICES, &credential);
+        let lookalike = real.moved_to("another-folder");
+        assert!(
+            !is_on(&lookalike_store, &lookalike).unwrap(),
+            "no click, no on"
+        );
+        // Asking from the lookalike took nothing from the real vault, which is still on.
+        assert!(is_on(&conn, &real).unwrap());
+        // And switching on in the lookalike is its own entry, not a way into the real one.
+        assert!(!is_on(&store(), &lookalike).unwrap());
+    }
+
+    #[test]
+    fn the_place_of_a_folder_is_stable_and_differs_between_folders() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        assert_eq!(place_of(one.path()), place_of(one.path()));
+        assert_ne!(place_of(one.path()), place_of(two.path()));
+        // A link to the folder is the folder.
+        #[cfg(unix)]
+        {
+            let link = two.path().join("link");
+            std::os::unix::fs::symlink(one.path(), &link).unwrap();
+            assert_eq!(place_of(&link), place_of(one.path()));
+        }
+        // A folder that is gone still has a tag, so asking never fails.
+        assert_eq!(place_of(&one.path().join("gone")).len(), 64);
+    }
+
+    #[test]
+    fn a_vault_id_pm_could_not_have_made_names_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = "0e9b6e1a-2f6e-4c43-9a07-5a3a8a0d7c11";
+        assert!(Here::open(dir.path(), ok, dir.path()).is_ok());
+        for bad in [
+            String::new(),
+            "x".repeat(MAX_VAULT_ID_LEN + 1),
+            "A-B".to_owned(),
+            "../escape".to_owned(),
+            "a/b".to_owned(),
+            "con".to_owned(),
+            "has space".to_owned(),
+        ] {
+            assert!(Here::open(dir.path(), &bad, dir.path()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_switch_that_the_device_file_cannot_keep_fails_and_leaves_the_other_vaults_alone() {
+        // A vault id the file would reject whole ([`vaults_of`]) used to be written anyway: the
+        // switch said "on", the next read found a file that wasn't ours, and every other vault's
+        // entry was lost with it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut other, mut odd) = (store(), store());
+        let kept = Here::new(A, "vault-kept", dir.path());
+        assert!(write(&mut other, &kept, true).unwrap());
+        for bad in ["x".repeat(MAX_VAULT_ID_LEN + 1), String::new()] {
+            let here = Here::new(A, &bad, dir.path());
+            assert!(write(&mut odd, &here, true).is_err(), "{bad:?}");
+            assert!(!is_on(&odd, &here).unwrap());
+            assert!(
+                is_on(&other, &kept).unwrap(),
+                "the other vault's entry survived {bad:?}"
+            );
+        }
+        // A folder tag the file would reject is refused the same way.
+        assert!(set_device(dir.path(), "vault-kept", Some(&"x".repeat(200))).is_err());
+        assert!(is_on(&other, &kept).unwrap());
+    }
+
+    /// An `AppState` with a vault open in `root` (the way `backup::strip`'s tests build one).
+    fn state_open_in(root: &Path) -> (AppState, String) {
+        let conn = store();
+        let sidecar = crate::sidecar::SidecarManager::new(crate::sidecar::SidecarPaths {
+            source_dir: root.join("sidecar"),
+            venv_dir: root.join("venv"),
+        });
+        let vault_root = root.join("vault-root");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        let meta = crate::vault::ensure_device_meta(&vault_root).unwrap();
+        let resolved = crate::vault::resolve_layout(&vault_root, None);
+        let master = crate::vault::master_from_db_key_hex(&"00".repeat(32)).unwrap();
+        let runtime = crate::VaultRuntime::build(&resolved, &meta, &master);
+        (
+            AppState::new(Some(conn), Some(runtime), sidecar, None, None),
+            meta.vault_id,
+        )
+    }
+
+    #[test]
+    fn a_device_named_for_one_vault_is_not_the_device_of_the_vault_open_now() {
+        let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (state, vault) = state_open_in(dir.path());
+        let root = dir.path().join("vault-root");
+        let data = tempfile::tempdir().unwrap();
+        let here = Here::open(data.path(), &vault, &root).unwrap();
+        assert!(here.is_open_in(&state));
+        // The same id in another folder is another vault.
+        assert!(!here
+            .moved_to(&place_of(&other.path().join("vault-root")))
+            .is_open_in(&state));
+        // Another id is another vault.
+        assert!(!Here::open(data.path(), "another-vault", &root)
+            .unwrap()
+            .is_open_in(&state));
+        // No vault open: nobody.
+        state.clear_vault_runtime().unwrap();
+        assert!(!here.is_open_in(&state));
     }
 
     #[test]

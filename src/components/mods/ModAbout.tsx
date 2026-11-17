@@ -26,7 +26,7 @@ export interface ModAboutProps {
   /** The mod's own description (the manifest's), as a plain line. */
   description: string;
   help: readonly ModHelpEntry[];
-  /** Who made it, already in `makerCredit`'s form ("Bobby Yu · Atlas"); empty to say nothing. */
+  /** Who made it, already in `makerCredit`'s form ("Atlas · credited in the mod to Bobby Yu"); empty to say nothing. */
   credit?: string;
   onClose: () => void;
 }

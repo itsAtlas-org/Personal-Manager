@@ -16,6 +16,7 @@ import { resetModActions, useModActions } from "../../lib/modActions";
 import { ModRowsContext } from "../../lib/modRows";
 import { NAV_PLACEMENT_KEY, parsePlacement, writeNavPlacement } from "../../lib/nav";
 import type { ModInfo } from "../../lib/modsTypes";
+import { MONEY_PROMPT_WORDS } from "./aiMoneyWords";
 import { consentScreen, LRI, MARK_ABOVE, mod, perm, RLO, standing } from "./modFixtures";
 
 const resumeMod = vi.fn();
@@ -212,7 +213,7 @@ describe("what the row says", () => {
     expect(screen.getByRole("heading").textContent).toBe(evil);
   });
 
-  it("credits the people the mod names before its publisher, and the publisher alone otherwise", () => {
+  it("names the publisher first, then the people the mod credits, and the publisher alone otherwise", () => {
     const { container, unmount } = draw(
       mod({
         author: "Atlas",
@@ -222,7 +223,7 @@ describe("what the row says", () => {
     );
     openDetails();
     expect(container.textContent).toContain(
-      "Made by Bobby Yu, Ann Lee · Atlas · itsAtlas-org/Personal-Manager",
+      "Made by Atlas · credited in the mod to Bobby Yu, Ann Lee · itsAtlas-org/Personal-Manager",
     );
     unmount();
     const plain = draw(mod({ author: "Atlas", authors: [] }));
@@ -247,7 +248,9 @@ describe("what the row says", () => {
     openDetails();
     expect(screen.getByRole("heading").textContent).toBe("Ac me");
     expect(container.textContent).toContain("line one PM says: trust me");
-    expect(container.textContent).toContain("Made by Ev e · Mal lory · a /b");
+    expect(container.textContent).toContain(
+      "Made by Mal lory · credited in the mod to Ev e · a /b",
+    );
     expect(container.textContent).toContain("Sites it may reach: h .example");
     expect(container.textContent).toContain("The maker says: “to map”");
     expect(container.textContent).not.toContain(RLO);
@@ -707,7 +710,7 @@ describe("the monthly AI limit", () => {
     );
     openDetails();
     expect(screen.queryByText("Allowed.")).toBeNull();
-    expect(screen.getByText(/asks for a monthly limit before it first costs money/)).toBeTruthy();
+    expect(screen.getByText(MONEY_PROMPT_WORDS.standingAuto())).toBeTruthy();
   });
 });
 

@@ -1028,6 +1028,16 @@ impl AppState {
         guard.as_ref().map(|rt| rt.cipher.vault_id().to_owned())
     }
 
+    /// The open vault's id and its folder, read together (one lock), or `None` while no vault is
+    /// open. Developer mode ties its on-device record to both (`mods::devmode::Here`), so a pair
+    /// read in two steps could name one vault's id with another's folder.
+    pub fn active_vault_place(&self) -> Option<(String, PathBuf)> {
+        let guard = self.vault.lock().ok()?;
+        guard
+            .as_ref()
+            .map(|rt| (rt.cipher.vault_id().to_owned(), rt.vault_root.clone()))
+    }
+
     /// The key the open store was opened with, for opening a copy of it (`backup::strip`: every
     /// backup and the export). Taken from the session rather than the keychain, so a passphrase
     /// vault whose key this account didn't cache (a failed cache write, "Forget passphrase", a

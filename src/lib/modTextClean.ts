@@ -29,19 +29,25 @@ export function plainLine(text: string): string {
 /** The most names a manifest may credit (`package.rs` `MAX_AUTHORS`); a longer list is cut to it. */
 const MAX_CREDITED = 8;
 
-/** Who made a mod, in the one short form every screen uses: the people the mod credits first, then
- *  the publisher the signature and pin are about ("Bobby Yu, Ann Lee · Atlas"). With no people it
- *  is the publisher alone, and with neither it is empty. All of it is the mod's own claim, cleaned
- *  like its name (the badge beside it says who, if anyone, checked it). */
+/** Who made a mod, in the one short form every screen uses: the publisher the signature and the
+ *  pin are about first, then, marked as the mod's own claim, the people it credits ("Atlas · credited
+ *  in the mod to Bobby Yu, Ann Lee"). The credited names are free text a mod's maker types, so they
+ *  never sit where the publisher does and always follow a label that says whose words they are: a
+ *  name like "Atlas" or "Bobby Yu · Atlas" can't pass for the publisher or for a reviewer. With no
+ *  people it is the publisher alone, and with neither it is empty. All of it is cleaned like the
+ *  mod's name. */
 export function makerCredit(authors: readonly string[] | undefined, publisher: string): string {
   const people = (authors ?? [])
     .slice(0, MAX_CREDITED)
     .map(plainLine)
     .filter((a) => a !== "");
-  return [people.join(", "), plainLine(publisher)].filter((part) => part !== "").join(" · ");
+  const who = plainLine(publisher);
+  if (people.length === 0) return who;
+  return `${who || "an unnamed publisher"} · credited in the mod to ${people.join(", ")}`;
 }
 
-/** The line every screen draws for it: "Made by Bobby Yu · Atlas", or "Maker not named". */
+/** The line every screen draws for it: "Made by Atlas · credited in the mod to Bobby Yu", or "Maker
+ *  not named". */
 export function madeByLine(authors: readonly string[] | undefined, publisher: string): string {
   const credit = makerCredit(authors, publisher);
   return credit ? `Made by ${credit}` : "Maker not named";

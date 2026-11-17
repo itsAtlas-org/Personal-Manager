@@ -73,6 +73,8 @@ function put(root, path, text) {
 const MAP_MANIFEST = JSON.parse(readReal("mods/atlas.map/manifest.json"));
 const HELLO_MANIFEST = JSON.parse(readReal("tests/mod-fixtures/acme.hello/manifest.json"));
 const json = (v) => `${JSON.stringify(v, null, 2)}\n`;
+/** The Map mod's version as committed: tests that need "the version the tree is at" read it. */
+const MV = MAP_MANIFEST.version;
 
 const packageRs = (perms = PERMISSIONS) =>
   `// the list\npub const PERMISSIONS: &[&str] = &[\n${perms.map((p) => `    "${p}",`).join("\n")}\n];\n`;
@@ -103,7 +105,7 @@ function goodTree(over = {}) {
     justfile: "tsc:\n    npx tsc --noEmit\n    npx tsc -p mods --noEmit\n",
     "mods/tsconfig.json": '// comment\n{\n  "exclude": ["**/dist", "**/node_modules",],\n}\n',
     "mods/atlas.map/manifest.json": json(MAP_MANIFEST),
-    "mods/atlas.map/CHANGELOG.md": "# Changelog\n\nIntro.\n\n## 1.0.0\n\n- The first.\n",
+    "mods/atlas.map/CHANGELOG.md": `# Changelog\n\nIntro.\n\n## ${MAP_MANIFEST.version}\n\n- The first.\n`,
     "mods/atlas.map/src/index.html": "<html></html>\n",
     "mods/atlas.map/src/main.ts": "export {};\n",
     "tests/mod-fixtures/acme.hello/manifest.json": json(HELLO_MANIFEST),
@@ -393,8 +395,8 @@ describe("the manifest", () => {
     expectRefused(
       goodTree({
         "mods/atlas.map/manifest.json": text.replace(
-          '"version": "1.0.0",',
-          '"version": "1.0.0",\n  "version": "9.9.9",',
+          `"version": "${MV}",`,
+          `"version": "${MV}",\n  "version": "9.9.9",`,
         ),
       }),
       "repeated",
@@ -520,13 +522,13 @@ describe("the CHANGELOG", () => {
     expectRefused(cl("## 1.0.1\n\n- a\n\n## 1.0.0\n\n- b\n"), 'the top entry is "1.0.1"');
     expectRefused(cl("## v1.0.0\n\n- a\n"), 'the top entry is "v1.0.0"');
     expectRefused(cl("# Changelog\n\nNo entries.\n"), "has no");
-    expectRefused(cl("## 1.0.0\n\n## 0.9.0\n\n- old\n"), "says nothing");
+    expectRefused(cl(`## ${MV}\n\n## 0.9.0\n\n- old\n`), "says nothing");
     expectRefused(goodTree({ "mods/atlas.map/CHANGELOG.md": null }), "no CHANGELOG.md");
-    expect(problemsOf(cl("## 1.0.0 (2026-11-17)\n\n- fine\n"))).toEqual([]);
+    expect(problemsOf(cl(`## ${MV} (2026-11-17)\n\n- fine\n`))).toEqual([]);
     // the manifest moved on without the changelog
     expectRefused(
-      withMap((m) => (m.version = "1.0.1")),
-      'the top entry is "1.0.0"',
+      withMap((m) => (m.version = "9.9.9")),
+      `the top entry is "${MV}"`,
     );
   });
 });
@@ -1230,6 +1232,16 @@ describe("Rust embedding a file of mods/", () => {
     passes("src-tauri/src/mods/x.rs", `#![cfg(test)]\n${use}`);
   });
 
+  it("still sees an embed after a backslash or quote character literal", () => {
+    // `'\\'` used to swallow the closing quote and everything to the next one, hiding the embed.
+    for (const lit of ["'\\\\'", "'\\''", "b'\\\\'"]) {
+      flagged(
+        "src-tauri/src/mods/x.rs",
+        `fn f(p: &str) -> String { p.replace(${lit}, "/") }\nconst A: &str = include_str!("${MAP}");\nfn g() -> char { 'q' }\n`,
+      );
+    }
+  });
+
   it("allows a test module only as far as its closing brace", () => {
     const after =
       '#[cfg(test)]\nmod tests {\n    fn t() { let c = \'}\'; let s = "}"; /* } */ let _: &\'static str = ""; }\n}\n' +
@@ -1301,6 +1313,43 @@ describe("Rust embedding a file of mods/", () => {
   });
 });
 
+describe("rustTokens on escaped characters", () => {
+  const embeds = (src) => {
+    const t = rustTokens(src);
+    return t.some((x) => x.t === "id" && x.v === "include_str");
+  };
+  const careless = 'include_str!("../../../mods/atlas.map/manifest.json");';
+
+  it("sees code after a backslash, a quote or a unicode character literal", () => {
+    for (const lit of [
+      "'\\\\'", // '\\'
+      "'\\''", // '\''
+      "b'\\\\'", // b'\\'
+      "'\\u{1F600}'", // '\u{1F600}'
+      "'\\x41'", // '\x41'
+      "'\\n'",
+    ]) {
+      const src = `fn f() { let c = ${lit}; ${careless} }\n`;
+      expect(embeds(src), lit).toBe(true);
+      const strs = rustTokens(src).filter((x) => x.t === "str");
+      expect(
+        strs.map((x) => x.v),
+        lit,
+      ).toEqual(["../../../mods/atlas.map/manifest.json"]);
+    }
+  });
+
+  it("keeps string and code apart after a backslash literal, and finds a test range past it", () => {
+    const src =
+      "fn a() { let s = path.replace('\\\\', \"/\"); }\n#[cfg(test)]\nmod t { fn b() { let q = '\\''; } }\nfn after() {}\n";
+    const tokens = rustTokens(src);
+    expect(tokens.filter((x) => x.t === "str").map((x) => x.v)).toEqual(["/"]);
+    const [[from, to]] = testRanges(tokens);
+    expect(tokens[from].v).toBe("#");
+    expect(tokens[to + 1].v).toBe("fn");
+  });
+});
+
 describe("the command", () => {
   const SCRIPTS = [
     "check-mods.mjs",
@@ -1358,9 +1407,9 @@ describe("the command", () => {
     put(r.root, "mods/atlas.map/src/main.ts", "export const changed = 1;\n");
     const stuck = run(r.root, "--base", r.base);
     expect(stuck.status).toBe(1);
-    expect(stuck.out).toContain("not greater than 1.0.0");
-    put(r.root, "mods/atlas.map/manifest.json", manifestAt("1.0.1"));
-    put(r.root, "mods/atlas.map/CHANGELOG.md", changelogAt("1.0.1", "1.0.0"));
+    expect(stuck.out).toContain(`not greater than ${MV}`);
+    put(r.root, "mods/atlas.map/manifest.json", manifestAt("9.9.9"));
+    put(r.root, "mods/atlas.map/CHANGELOG.md", changelogAt("9.9.9", MV));
     const moved = run(r.root, "--base", r.base);
     expect(moved.out).toContain(
       "1 changed mod folder(s) (0 new, 1 with a greater version) against",

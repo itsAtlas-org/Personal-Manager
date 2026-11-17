@@ -168,7 +168,7 @@ fn the_answer_is_camel_case_with_kebab_routes() {
     ] {
         assert_eq!(serde_json::to_value(route).unwrap(), json!(word));
     }
-    let none = describe(None, None);
+    let none = describe(None, None, &[]);
     assert!(none.cloud_models.is_empty());
     assert_eq!(none.local_model, None);
     assert_eq!(money::SUGGESTED_CAP_USD, 1.0);
@@ -248,6 +248,40 @@ async fn the_prompt_and_the_call_agree_on_what_costs_money() {
     }
 }
 
+/// With auto-switch off (the default) the route carries only the first of the person's Background
+/// models, but the prompt names the whole list: turning auto-switch on later, or moving a model up,
+/// makes the grant use models the prompt never named otherwise. A model the route has that the list
+/// read missed is still told; a route with no cloud arm names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_prompt_names_the_whole_background_list_not_only_the_one_model_in_use() {
+    let host = TestHost::new();
+    let model = host.model();
+    model.set_plan(PlanSpec::Cloud(&["a/first"]));
+    model.set_listed_models(&["a/first", "b/second", "c/third"]);
+    let said = told(&host).await;
+    assert_eq!(said.cloud_models, ["a/first", "b/second", "c/third"]);
+    assert!(said.paid);
+    // The same through the other routes that have a cloud arm.
+    model.set_plan(PlanSpec::LocalThenCloud(&["a/first"]));
+    assert_eq!(told(&host).await.cloud_models.len(), 3);
+    model.set_plan(PlanSpec::Power(&["a/first"]));
+    assert_eq!(told(&host).await.cloud_models.len(), 3);
+    // The list moved between the two reads: what the route will send is never left out.
+    model.set_plan(PlanSpec::Cloud(&["z/new"]));
+    assert_eq!(
+        told(&host).await.cloud_models,
+        ["a/first", "b/second", "c/third", "z/new"]
+    );
+    // A list that can't be read falls back to the route's own names.
+    model.set_plan(PlanSpec::Cloud(CLOUD));
+    model.set_listed_models(&[]);
+    assert_eq!(told(&host).await.cloud_models, CLOUD);
+    // No cloud arm: no cloud names, whatever the list holds.
+    model.set_listed_models(&["a/first", "b/second"]);
+    model.set_plan(PlanSpec::Local);
+    assert!(told(&host).await.cloud_models.is_empty());
+}
+
 /// The prompt names the models the route will really use, as the person set them and in the order
 /// the call tries them; a blank name (a hand-edited setting) is not a model and is not told. On
 /// battery the policy's route has no local arm, but the local model it set aside is still named,
@@ -266,7 +300,7 @@ fn the_models_told_are_the_routes_own_names_in_order_with_blanks_left_out() {
         token: None,
     };
     let told = |plan: RoutePlan| {
-        let said = describe(Some(&plan), Some(EndpointClass::Loopback));
+        let said = describe(Some(&plan), Some(EndpointClass::Loopback), &[]);
         (said.cloud_models, said.local_model)
     };
     let names = |v: &[&str]| v.iter().map(|m| (*m).to_owned()).collect::<Vec<_>>();

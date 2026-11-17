@@ -58,11 +58,11 @@ pub struct DevModeState {
 /// No store open is the typed refusal, so nothing is answered for a vault that isn't there.
 pub(super) fn this_device(app: &AppHandle) -> Result<devmode::Here> {
     let data_dir = crate::paths::data_dir(app).map_err(ModsError::internal)?;
-    let vault = app
+    let (vault, root) = app
         .state::<AppState>()
-        .active_vault_id()
+        .active_vault_place()
         .ok_or_else(ModsError::no_store)?;
-    devmode::Here::open(&data_dir, &vault).map_err(ModsError::internal)
+    devmode::Here::open(&data_dir, &vault, &root).map_err(ModsError::internal)
 }
 
 /// The refusal an unsigned file gets while developer mode is off (pure).
@@ -78,7 +78,8 @@ pub fn dev_mode_off() -> ModsError {
 pub(super) fn require_dev_mode(app: &AppHandle, device: &devmode::Here) -> Result<()> {
     let state = app.state::<AppState>();
     let conn = state.conn().map_err(|_| ModsError::no_store())?;
-    if devmode::is_on(&conn, device).map_err(ModsError::internal)? {
+    // The vault can have closed since the device was named: off, and nothing cleared.
+    if device.is_open_in(&state) && devmode::is_on(&conn, device).map_err(ModsError::internal)? {
         Ok(())
     } else {
         Err(dev_mode_off())
@@ -108,7 +109,9 @@ pub async fn dev_mode_state(webview: Webview) -> Result<DevModeState> {
             }
         };
         let conn = state.conn().map_err(|_| ModsError::no_store())?;
-        let on = devmode::is_on(&conn, &device).map_err(ModsError::internal)?;
+        // The vault can have closed since the device was named: off, and nothing cleared.
+        let on = device.is_open_in(&state)
+            && devmode::is_on(&conn, &device).map_err(ModsError::internal)?;
         Ok(DevModeState { on, problem: None })
     })
     .await
@@ -258,6 +261,44 @@ mod tests {
         let e = dev_mode_off();
         assert_eq!(e.code, Code::DevModeOff);
         assert!(e.message.contains("Developer mode is off"));
+    }
+
+    #[test]
+    fn every_developer_mode_read_checks_the_open_vault_after_taking_the_store() {
+        // A `Here` is built from the open vault in one step and the store is taken in the next. If
+        // the vault changed between them, `is_on` would pair the old vault's device entry with the
+        // new store's record (and clear the old vault's entry). So each read asks `is_open_in`
+        // once it holds the connection, and only then `is_on`.
+        let here = include_str!("dev_commands.rs");
+        let here = here.split("#[cfg(test)]").next().unwrap();
+        let switch = include_str!("../ledger/dev_switch.rs");
+        let switch = switch.split("#[cfg(test)]").next().unwrap();
+        for (file, name, text) in [
+            ("dev_commands", "pub(super) fn require_dev_mode", here),
+            ("dev_commands", "pub async fn dev_mode_state", here),
+            ("dev_switch", "pub fn on_here", switch),
+        ] {
+            let body = text.split(name).nth(1).unwrap_or_else(|| panic!("{name}"));
+            let body = body.split("\n}\n").next().unwrap();
+            let conn = body
+                .find("state.conn()")
+                .unwrap_or_else(|| panic!("{name}"));
+            let open = body
+                .find("is_open_in(")
+                .unwrap_or_else(|| panic!("{file}: {name}"));
+            let ask = body.find("devmode::is_on(").unwrap();
+            assert!(
+                conn < open && open < ask,
+                "{file}: {name} must take the store, check the vault, then ask"
+            );
+        }
+        // The no-ledger switch checks it too, with the store held.
+        let body = switch
+            .split("pub fn set_dev_mode_for_this_device")
+            .nth(1)
+            .unwrap();
+        assert!(body.find("is_open_in(").unwrap() < body.find("devmode::write(").unwrap());
+        assert!(!body.contains("active_vault_id()"));
     }
 
     #[test]

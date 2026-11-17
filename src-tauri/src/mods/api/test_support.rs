@@ -375,6 +375,8 @@ pub struct FakeModel {
     pub on_complete: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Run when the route is read: before the call is checked, priced and booked.
     pub on_resolve: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The person's whole Background list, when a test sets one (otherwise the plan's own models).
+    pub listed: Mutex<Option<Vec<String>>>,
     /// When set, the local endpoint's address lookup never returns.
     pub stall_class: AtomicBool,
     /// When set, the price refresh never returns.
@@ -396,6 +398,7 @@ impl Default for FakeModel {
             gate: tokio::sync::Semaphore::new(0),
             on_complete: Mutex::new(None),
             on_resolve: Mutex::new(None),
+            listed: Mutex::new(None),
             stall_class: AtomicBool::new(false),
             stall_prices: AtomicBool::new(false),
         }
@@ -405,6 +408,10 @@ impl Default for FakeModel {
 impl FakeModel {
     pub fn set_plan(&self, plan: PlanSpec) {
         *self.plan.lock().unwrap() = plan;
+    }
+
+    pub fn set_listed_models(&self, listed: &[&str]) {
+        *self.listed.lock().unwrap() = Some(listed.iter().map(|m| (*m).to_owned()).collect());
     }
 
     pub fn set_answer(&self, answer: Answer) {
@@ -458,6 +465,21 @@ impl FakeModel {
 }
 
 impl ModelEdge for FakeModel {
+    fn listed_models(&self) -> crate::error::Result<Vec<String>> {
+        if let Some(listed) = self.listed.lock().unwrap().clone() {
+            return Ok(listed);
+        }
+        // Unless a test sets the person's list, it is what the plan carries.
+        Ok(match Self::build(*self.plan.lock().unwrap()) {
+            Some(
+                RoutePlan::Cloud(cloud)
+                | RoutePlan::LocalThenCloud { cloud, .. }
+                | RoutePlan::CloudForPower { cloud, .. },
+            ) => cloud.models,
+            _ => Vec::new(),
+        })
+    }
+
     fn resolve(&self) -> crate::error::Result<Option<RoutePlan>> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         let hook = self.on_resolve.lock().unwrap().clone();

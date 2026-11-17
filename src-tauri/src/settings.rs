@@ -473,7 +473,7 @@ fn current_model(conn: &Connection) -> Result<String> {
 /// The ordered model list stored for a role, parsed from its JSON setting. Falls
 /// back to the single legacy `default_model` (or `DEFAULT_MODEL`) when unset or
 /// empty, so existing installs keep working. Never returns an empty list.
-fn models_for(conn: &Connection, key: &str) -> Result<Vec<String>> {
+pub(crate) fn models_for(conn: &Connection, key: &str) -> Result<Vec<String>> {
     if let Some(raw) = db::get_setting(conn, key)? {
         if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw) {
             let list: Vec<String> = list

@@ -888,6 +888,14 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
     Ok(Some(CloudArm { key, models }))
 }
 
+/// The Background role's whole model list in the person's order, with auto-switch ignored (the
+/// money prompt of a mod's `ai` names all of it; see `mods::api::ai::ModelEdge::listed_models`).
+pub(crate) fn background_model_list(app: &AppHandle) -> Result<Vec<String>> {
+    let state = app.state::<AppState>();
+    let conn = state.conn()?;
+    crate::settings::models_for(&conn, BACKGROUND_MODELS_KEY)
+}
+
 /// Hydrate the local arm for a role: the shared base URL + the role's model + the optional bearer
 /// token, or `None` when the endpoint isn't fully configured (no URL, or no model for the role).
 fn local_arm(app: &AppHandle, role: Role) -> Result<Option<LocalArm>> {

@@ -800,11 +800,21 @@ one-way hash of the device id, no device-held secret), so the store's record alo
 a store writer who had ever read this device's credential (it sits in the record while the device is
 on; an old copy of the store keeps it) could write it back after the device was switched off or
 reset. So the store's record is only half the answer. The other half is `data_dir/mods-dev-mode.json`
-(versioned, the ids of the vaults this device switched on, written atomically, at most 16 KiB and 64
-entries): developer mode is on for this device in this vault **only if both say so**, the store's
-record lists the device's credential AND the device's file lists the open vault's id
-(`devmode::Here`, built from `data_dir`, the device id file and `AppState::active_vault_id`; the
-ledger refuses a device named in another vault than its own, `Ledger::bound_to`). Missing, unreadable,
+(versioned, each entry a vault's id AND a one-way tag of the folder that vault sat in on this
+computer when it was switched on, written atomically, at most 16 KiB and 64 entries): developer mode
+is on for this device in this vault **only if both say so**, the store's record lists the device's
+credential AND the device's file lists the open vault's id at the open vault's folder
+(`devmode::Here`, built from `data_dir`, the device id file and `AppState::active_vault_place`; the
+ledger refuses a device named in another vault than its own, `Ledger::bound_to`, and the commands
+that read the answer check `Here::is_open_in` once they hold the store's connection, so a vault
+that closed between naming the device and taking the store answers off and clears nothing). The
+folder tag is what stops a lookalike: the vault id is only what `vault-meta.json` says, whoever
+wrote that vault chose it, and the credential is the same value in every store, so a hostile
+vault that claims the id of one this device switched on in, and lists a credential its writer saw
+there, would otherwise inherit the on; the folder is something only this computer decides, so
+it is off. A vault moved to another folder reads as off until it is switched on again. A vault id
+PM could not have made (`disk::check_vault_id`) names nobody: `Here::open` refuses it and the file
+never takes it. Missing, unreadable,
 corrupt, oversized or capped out is off, for every vault. Switching on writes the store's record then
 the device's file, off writes the device's file then the store's record, so a crash between leaves it
 off. **The store can only ever turn it off:** whenever a read finds the store's record does not list

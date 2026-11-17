@@ -97,6 +97,12 @@ pub trait ModelEdge: Send + Sync {
     /// when nothing can answer.
     fn resolve(&self) -> crate::error::Result<Option<RoutePlan>>;
 
+    /// The Background role's whole cloud model list, in the person's order, whether or not
+    /// auto-switch is on (so a plan with auto-switch off carries only the first of it). It is what
+    /// the money prompt names: the call may use more of it later (the person turns auto-switch on,
+    /// or moves a model up), and the prompt has to stay true then. A blocking store read.
+    fn listed_models(&self) -> crate::error::Result<Vec<String>>;
+
     /// The class of the address a local endpoint resolves to now, or `None` when it cannot be told
     /// (counted as public by the caller). A DNS lookup: the caller bounds the wait.
     fn local_class(&self, base_url: &str) -> impl Future<Output = Option<EndpointClass>> + Send;
@@ -123,6 +129,10 @@ pub trait ModelEdge: Send + Sync {
 impl ModelEdge for tauri::AppHandle {
     fn resolve(&self) -> crate::error::Result<Option<RoutePlan>> {
         crate::llm_gateway::resolve(self, crate::llm_gateway::Role::Background)
+    }
+
+    fn listed_models(&self) -> crate::error::Result<Vec<String>> {
+        crate::llm_gateway::background_model_list(self)
     }
 
     fn local_class(&self, base_url: &str) -> impl Future<Output = Option<EndpointClass>> + Send {
@@ -494,9 +504,10 @@ pub struct PromptInfo {
     /// PM cannot price the route (a public "local" endpoint, or no arm it can name): every call is
     /// refused with "price unknown" (MOD-5005), so a limit would change nothing.
     pub unpriced: bool,
-    /// The Background role's cloud models, in the order the call uses them (what the route will
-    /// send, so with auto-switch off just the first of the person's list). Empty when the route
-    /// has no cloud arm. Plain text the person chose, never anything the mod supplied.
+    /// The Background role's cloud models: the person's whole list in their order, not only the
+    /// one a call would send first (with auto-switch off that is just the first of them), so the
+    /// prompt stays true when the list is used differently later. Empty when the route has no
+    /// cloud arm. Plain text the person chose, never anything the mod supplied.
     pub cloud_models: Vec<String>,
     /// The Background role's local model, when Local AI is on and the role uses it. On battery it
     /// is the model the policy set aside, so the prompt can still name it.
@@ -505,10 +516,14 @@ pub struct PromptInfo {
     pub suggested_cap_usd: f64,
 }
 
-/// [`PromptInfo`] from the resolved route and the class of its local arm's address (the same rule
-/// the call itself prices by, so the prompt can never call a route free that the call would charge
-/// for). Pure.
-pub(crate) fn describe(plan: Option<&RoutePlan>, local_class: Option<EndpointClass>) -> PromptInfo {
+/// [`PromptInfo`] from the resolved route, the class of its local arm's address (the same rule the
+/// call itself prices by, so the prompt can never call a route free that the call would charge
+/// for) and the Background role's whole model list (`listed`, [`ModelEdge::listed_models`]). Pure.
+pub(crate) fn describe(
+    plan: Option<&RoutePlan>,
+    local_class: Option<EndpointClass>,
+    listed: &[String],
+) -> PromptInfo {
     let suggested_cap_usd = money::SUGGESTED_CAP_USD;
     // A route that cannot carry a mod's text is no route: the call answers "pick a model".
     let Some(plan) = plan.filter(|p| serves_a_mod(p)) else {
@@ -540,6 +555,19 @@ pub(crate) fn describe(plan: Option<&RoutePlan>, local_class: Option<EndpointCla
             displaced_local_model,
         } => (cloud.models.clone(), Some(displaced_local_model.clone())),
     };
+    // The whole list, then any model the route has that the list read missed (the setting moved
+    // between the two reads): never fewer names than the call will really use.
+    let cloud_models = if cloud_models.is_empty() {
+        cloud_models
+    } else {
+        let mut all: Vec<String> = listed.to_vec();
+        for m in cloud_models {
+            if !all.contains(&m) {
+                all.push(m);
+            }
+        }
+        all
+    };
     PromptInfo {
         route,
         paid: cost.is_cloud(),
@@ -565,7 +593,15 @@ pub(crate) async fn prompt_info<H: Host>(host: &H) -> Result<PromptInfo, ModErro
             .flatten(),
         None => None,
     };
-    Ok(describe(plan.as_ref(), class))
+    // A list that can't be read falls back to the route's own names (never a failure: the route
+    // already says what will answer).
+    let listed = if plan.as_ref().is_some_and(has_cloud_arm) {
+        let host = host.clone();
+        blocking(move || Ok(host.model().listed_models().unwrap_or_default())).await?
+    } else {
+        Vec::new()
+    };
+    Ok(describe(plan.as_ref(), class, &listed))
 }
 
 /// The local arm's endpoint, if the plan has one.

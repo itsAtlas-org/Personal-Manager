@@ -767,8 +767,13 @@ export function rustTokens(text) {
       const cp = text.codePointAt(i + 1);
       const width = cp === undefined ? 0 : String.fromCodePoint(cp).length;
       if (text[i + 1] === "\\") {
-        let j = i + 2;
-        while (j < n && text[j] !== "'") j += text[j] === "\\" ? 2 : 1;
+        // The character after the backslash is part of the escape, whatever it is: `'\\'` (a
+        // backslash) and `'\''` (a quote) close one character later than a plain scan would find.
+        let j = i + 3;
+        if (text[i + 2] === "u" && text[j] === "{") {
+          const close = text.indexOf("}", j);
+          j = close < 0 ? n : close + 1;
+        } else while (j < n && text[j] !== "'" && text[j] !== "\n") j++; // `\x41` has more to read
         i = j + 1;
       } else if (width > 0 && text[i + 1 + width] === "'") i += width + 2;
       else i++;
