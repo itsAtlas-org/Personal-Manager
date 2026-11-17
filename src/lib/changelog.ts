@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.184.0-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "Mods can now ask to use an AI model. PM asks you first: it names every model in your Background list, local ones included, so a later switch never surprises you, and says whether it can cost money. You set a monthly limit and can change it any time in the Mods tab. Atlas's own mods may use a free local model without asking, and ask before anything costs money. A mod only uses providers that keep nothing, never your direct Anthropic or Gemini keys, and Settings → AI & Models → Usage & cost shows what each mod has spent.",
+      "Mods can also ask to reach websites they name (public addresses only, and only the ones you allow), to keep their own keys such as an API key, and to show you a short notice inside PM, at most five a day. A mod's keys are kept in your encrypted vault, where anyone you share the vault with could read them, and are never put in a backup.",
+      "Each mod's tab has an About panel with its description and help, and mod screens show who made it: the publisher first, then the people it credits, like “Made by Atlas · author: Bobby Yu”.",
+      "Developer mode is now kept on each computer as well as in the vault, so nothing written into a shared vault or a backup can switch it on for you. If you had it on, switch it on again in Settings → Developer.",
+      "If you chose “Don't show this again” for the Mods notice, Settings → General now has a Show it again button.",
+      "Behind the scenes, the Map is being rebuilt as a mod called Document Map. Nothing changes yet: the Map you have keeps working, its enhanced layout included.",
+    ],
+  },
+  {
     version: "3.183.4-alpha",
     date: "2026-11-17",
     highlights: [
