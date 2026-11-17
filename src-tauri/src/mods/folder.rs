@@ -485,13 +485,56 @@ pub(crate) mod tests {
             "app/x:y",
         ] {
             let dir = folder();
-            // `x:y` can't be created on Windows; skip a name this filesystem won't take.
-            if fs::write(dir.path().join(bad), "x").is_err() {
+            // Skip a name this filesystem won't keep as written: on Windows `x:y` is not a file
+            // called `x:y` but a data stream `y` of a file `x` (the write succeeds), and a
+            // device name or a trailing dot or space is normalised away by Win32. The refused
+            // name then never existed, and the scan rightly reads what did.
+            if !exists_as_written(dir.path(), bad) {
                 continue;
             }
             let e = scan(dir.path(), false).unwrap_err();
             assert_eq!(e.refusal, Refusal::EntryName, "{bad}");
             assert!(e.detail.contains("app/"), "{bad}: {}", e.detail);
+        }
+    }
+
+    /// Whether writing `rel` under `root` made a file whose listed name is exactly `rel`'s last part.
+    fn exists_as_written(root: &Path, rel: &str) -> bool {
+        let path = root.join(rel);
+        if fs::write(&path, "x").is_err() {
+            return false;
+        }
+        let want = rel.rsplit('/').next().unwrap();
+        fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .any(|e| e.unwrap().file_name().to_str() == Some(want))
+    }
+
+    /// What Windows does with the names the packer refuses, pinned (this runs only in CI's
+    /// `rust-windows` job). The scan reads the names the directory LISTS and opens only those, so a
+    /// name Win32 normalises can never make it read a different file than the one it checked.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_windows_normalises_is_never_read_as_another_file() {
+        // `x:y` writes the stream `y` of the file `app/x`. A listing shows only `x`, the scan
+        // reads only its main stream (empty here), and the hidden stream is not in the package.
+        let dir = folder();
+        fs::write(dir.path().join("app/x:y"), "hidden").unwrap();
+        let got = scan(dir.path(), false).unwrap();
+        assert_eq!(got.pkg.files["app/x"].bytes, b"");
+        assert!(!got.pkg.files.keys().any(|k| k.contains(':')));
+        // A trailing dot is stripped by Win32, so `app/dotted.` is the file `app/dotted`.
+        let dir = folder();
+        fs::write(dir.path().join("app/dotted."), "d").unwrap();
+        let got = scan(dir.path(), false).unwrap();
+        assert!(got.pkg.files.contains_key("app/dotted"));
+        assert!(!got.pkg.files.contains_key("app/dotted."));
+        // A name that really has a trailing dot (made through a verbatim path, which Win32 leaves
+        // alone) is listed as written, and refused by name, never opened under its stripped name.
+        let dir = folder();
+        let verbatim = format!(r"\\?\{}", dir.path().join(r"app\real.").display());
+        if fs::write(&verbatim, "r").is_ok() {
+            assert_eq!(refusal(scan(dir.path(), false)), Refusal::EntryName);
         }
     }
 

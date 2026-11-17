@@ -236,7 +236,7 @@ async fn the_checks_refuse_in_order() {
         Code::UnknownMethod
     );
     // 5. The grant, before the rate.
-    drain_bucket(&host, "acme.tool");
+    let drained_at = drain_bucket(&host, "acme.tool");
     let e = error(call_from(&host, main, &s, "storage.get").await);
     assert_eq!((e.code, e.permission), (Code::NotGranted, Some("storage")));
     host.sql(|c| {
@@ -246,15 +246,17 @@ async fn the_checks_refuse_in_order() {
         )
         .unwrap()
     });
-    // 6. The rate, before the arguments.
+    // 6. The rate, before the arguments. A pause longer than the 20 ms a token takes to earn is
+    // what a loaded CI runner does between the steps; the order must not depend on being quick.
+    std::thread::sleep(std::time::Duration::from_millis(60));
     assert_eq!(
         code(call_from(&host, main, &s, "storage.get").await),
         Code::RateLimited
     );
     // 7. With a token again, the arguments.
-    let later = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let later = drained_at + std::time::Duration::from_secs(10);
     drop(host.calls().admit(&id("acme.tool"), later).unwrap());
-    // (The bucket refilled at `later`; real time catches up with it only in ten seconds, so the
+    // (The bucket refilled at `later`; real time catches up with it only in an hour, so the
     // next call reads a bucket stamped in its future, which earns nothing but holds 99 tokens.)
     assert_eq!(
         code(call_from(&host, main, &s, "storage.get").await),
@@ -262,10 +264,22 @@ async fn the_checks_refuse_in_order() {
     );
 }
 
-/// Spend `m`'s whole bucket now.
-fn drain_bucket(host: &TestHost, m: &str) {
-    let now = std::time::Instant::now();
-    while host.calls().admit(&id(m), now).is_ok() {}
+/// Spend `m`'s whole bucket, stamped an hour AHEAD of the real clock, and say that stamp. The
+/// dispatcher reads the real `Instant::now()`, which is behind the stamp, so the real calls that
+/// follow earn nothing however long they take. (Draining at the real "now" left the test racing a
+/// clock: the bucket earns a token every 20 ms, and a loaded Windows runner took longer than that
+/// between the drain and the call that had to be refused.)
+fn drain_bucket(host: &TestHost, m: &str) -> std::time::Instant {
+    let stamp = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    while host.calls().admit(&id(m), stamp).is_ok() {}
+    stamp
+}
+
+/// `m`'s bucket created full and stamped an hour ahead of the real clock (see [`drain_bucket`]),
+/// so the calls that follow spend its burst and earn nothing back.
+fn freeze_bucket(host: &TestHost, m: &str) {
+    let stamp = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    drop(host.calls().admit(&id(m), stamp).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -465,7 +479,10 @@ async fn a_mod_calling_too_fast_is_refused_and_another_is_not() {
     let host = TestHost::new();
     let a = installed(&host, map_row());
     let b = installed(&host, ModRow::signed("acme.tool", "second", &["storage"]));
-    let mut admitted = 0;
+    // The bucket frozen full (one token spent here) so a slow machine can't earn back what the
+    // loop spends: the refusal comes after exactly the burst, however long a call takes.
+    freeze_bucket(&host, "atlas.map");
+    let mut admitted = 1;
     let refused = loop {
         match call(&host, &a, "theme.get", Value::Null).await {
             Reply::Page { .. } => admitted += 1,
