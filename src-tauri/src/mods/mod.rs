@@ -19,6 +19,8 @@
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
 //!   the handlers; `mod_call` hands it each call.
+//! - [`ai`]: what a mod's AI call may cost and the reserve-then-settle ledger that holds it under
+//!   the mod's monthly cap (§1.6); pure, with no dispatch row until `ai.complete`.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
@@ -49,6 +51,7 @@
 //! gives each the app's local data folder), so every window is built with PM's environment, or,
 //! when the main window couldn't be, every window without it.
 
+pub mod ai;
 pub mod api;
 pub mod devmode;
 pub mod disk;

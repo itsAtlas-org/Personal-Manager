@@ -22,7 +22,7 @@ use crate::sidecar::{SidecarManager, SidecarPaths};
 use crate::AppState;
 
 /// A key made for tests only, as every other store test in the tree uses.
-const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+pub const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 /// A fresh, fully migrated store in a temporary folder.
 pub fn store() -> (tempfile::TempDir, Connection) {
