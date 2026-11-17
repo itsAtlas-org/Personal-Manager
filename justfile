@@ -197,7 +197,8 @@ pip-audit:
 
 # JS dependency CVE audit against the npm lockfile. `moderate` (not `high`) so a moderate-rated
 # sanitizer / proto-pollution advisory in the render path can't pass green (L-7). The script runs
-# `npm audit` and lets through only an advisory listed in its ACCEPTED (dated, with the decision),
+# `npm audit` and lets through only an advisory listed in scripts/npm-audit-rules.mjs's ACCEPTED (dated,
+# with the decision),
 # and only while a second audit of the shipped tree alone (`--omit=dev`) doesn't report it.
 npm-audit:
     node scripts/npm-audit.mjs

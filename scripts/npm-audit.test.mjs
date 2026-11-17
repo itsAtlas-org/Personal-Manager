@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The npm audit gate's decision (scripts/npm-audit.mjs). Each rule is shown a report that breaks it:
+// The npm audit gate's decision (scripts/npm-audit-rules.mjs; scripts/npm-audit.mjs is the command). Each rule is shown a report that breaks it:
 // the gate fails in the passing direction silently if a rule drifts, so every way out is tested shut.
 
 import { describe, expect, it } from "vitest";
-import { ACCEPTED, advisories, decide, entryProblem, ghsaOf, readReport } from "./npm-audit.mjs";
+import {
+  ACCEPTED,
+  advisories,
+  decide,
+  entryProblem,
+  ghsaOf,
+  readReport,
+} from "./npm-audit-rules.mjs";
 
 const ID = "GHSA-fc5q-39xc-vjpf";
 const OTHER = "GHSA-2222-3333-4444";
@@ -104,10 +111,41 @@ describe("npm-audit gate", () => {
     expect(r.failures.join("\n")).toContain(OTHER);
   });
 
+  it("accepting an advisory for one package never hides it on another, in either order", () => {
+    const shared = (order) => ({
+      vulnerabilities: Object.fromEntries(
+        order.map((pkg) => [
+          pkg,
+          {
+            severity: "high",
+            via: [
+              {
+                source: 1,
+                name: pkg,
+                title: "t",
+                url: `https://github.com/advisories/${ID}`,
+                severity: "high",
+              },
+            ],
+          },
+        ]),
+      ),
+    });
+    for (const order of [
+      ["evilpkg", "picomatch"],
+      ["picomatch", "evilpkg"],
+    ]) {
+      const r = decide(shared(order), EMPTY, [entry()], "2026-11-17");
+      expect(r.failures).toHaveLength(1);
+      expect(r.failures[0]).toContain("evilpkg");
+      expect(r.accepted).toHaveLength(1);
+    }
+  });
+
   it("a package listed only because it depends on a vulnerable one adds no advisory", () => {
     const found = advisories(report([{ id: ID, pkg: "picomatch" }]));
-    expect([...found.keys()]).toEqual([ID]);
-    expect(found.get(ID).package).toBe("picomatch");
+    expect([...found.keys()]).toEqual([`${ID}|picomatch`]);
+    expect(found.get(`${ID}|picomatch`).package).toBe("picomatch");
   });
 
   it("an advisory with no GHSA link still counts, under the npm source id", () => {
