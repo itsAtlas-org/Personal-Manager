@@ -15,9 +15,9 @@
 //!   sinkhole;
 //! - **Sessions**: each mounted frame's event counters (sent, acknowledged, dropped).
 //!
-//! **Not here: Test keys.** A mod's test secrets are stored "like any mod secret" (§1.15), and a
-//! secret is written by `secrets.set`, which is PR B's (an experimental call with host-bound
-//! secrets). The fields and their command ship with it; nothing here pretends otherwise.
+//! **Not here yet: Test keys.** A mod's test secrets are stored "like any mod secret" (§1.15), and a
+//! secret is written by PM's own field, which is PR B's (X4's commands, X8's fields). The section
+//! ships with them; nothing here pretends otherwise.
 //!
 //! Main window only, and only while developer mode is on for this device (the tab it feeds exists
 //! only then). It reads, and changes nothing. [`build`] is pure.
@@ -97,6 +97,30 @@ pub struct Limits {
     pub max_ids_per_event: usize,
     pub event_coalesce_ms: u64,
     pub max_pending_ids: usize,
+    // The experimental calls' limits (PR B); times are in milliseconds.
+    pub call_timeout_ms: u64,
+    pub ai_max_in_flight: usize,
+    pub ai_calls_per_minute: u64,
+    pub ai_call_burst: u64,
+    pub max_ai_prompt_bytes: usize,
+    pub max_ai_messages: usize,
+    pub max_ai_output_tokens: u32,
+    pub net_max_in_flight: usize,
+    pub net_fetches_per_second: u64,
+    pub net_fetch_burst: u64,
+    pub max_fetch_request_bytes: usize,
+    pub max_fetch_response_bytes: usize,
+    pub fetch_connect_timeout_ms: u64,
+    pub fetch_total_timeout_ms: u64,
+    pub max_fetch_redirects: usize,
+    pub notify_max_chars: usize,
+    pub notify_per_day: u32,
+    pub secret_asks_per_session: u32,
+}
+
+/// A duration in whole milliseconds, held to what a `u64` says (every limit here is seconds).
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the web engine's seal says.
@@ -172,6 +196,24 @@ pub fn limits_now() -> Limits {
         max_ids_per_event: limits::MAX_IDS_PER_EVENT,
         event_coalesce_ms: limits::EVENT_COALESCE_MS,
         max_pending_ids: limits::MAX_PENDING_IDS,
+        call_timeout_ms: millis(limits::CALL_TIMEOUT),
+        ai_max_in_flight: limits::AI_MAX_IN_FLIGHT,
+        ai_calls_per_minute: limits::AI_CALLS_PER_MINUTE,
+        ai_call_burst: limits::AI_CALL_BURST,
+        max_ai_prompt_bytes: limits::MAX_AI_PROMPT_BYTES,
+        max_ai_messages: limits::MAX_AI_MESSAGES,
+        max_ai_output_tokens: limits::MAX_AI_OUTPUT_TOKENS,
+        net_max_in_flight: limits::NET_MAX_IN_FLIGHT,
+        net_fetches_per_second: limits::NET_FETCHES_PER_SECOND,
+        net_fetch_burst: limits::NET_FETCH_BURST,
+        max_fetch_request_bytes: limits::MAX_FETCH_REQUEST_BYTES,
+        max_fetch_response_bytes: limits::MAX_FETCH_RESPONSE_BYTES,
+        fetch_connect_timeout_ms: millis(limits::FETCH_CONNECT_TIMEOUT),
+        fetch_total_timeout_ms: millis(limits::FETCH_TOTAL_TIMEOUT),
+        max_fetch_redirects: limits::MAX_FETCH_REDIRECTS,
+        notify_max_chars: limits::NOTIFY_MAX_CHARS,
+        notify_per_day: limits::NOTIFY_PER_DAY,
+        secret_asks_per_session: limits::SECRET_ASKS_PER_SESSION,
     }
 }
 
@@ -302,6 +344,7 @@ mod tests {
                 deprecated: Some((1, 3)),
                 removed: Some((2, 0)),
                 experimental: false,
+                family: crate::mods::api::limits::Family::General,
             },
             Row {
                 name: "new.call",
@@ -312,6 +355,7 @@ mod tests {
                 deprecated: None,
                 removed: None,
                 experimental: true,
+                family: crate::mods::api::limits::Family::Ai,
             },
         ];
         let info = build(rows, sealed(), Vec::new());
@@ -335,8 +379,22 @@ mod tests {
         assert_eq!(l.max_args_bytes, limits::MAX_ARGS_BYTES);
         assert_eq!(l.storage_quota_bytes, limits::STORAGE_QUOTA_BYTES);
         assert_eq!(l.event_window, limits::EVENT_WINDOW);
+        // The experimental calls' limits, times in whole milliseconds.
+        assert_eq!(l.call_timeout_ms, 180_000);
+        assert_eq!(l.fetch_connect_timeout_ms, 10_000);
+        assert_eq!(l.fetch_total_timeout_ms, 30_000);
+        assert_eq!(l.ai_max_in_flight, limits::AI_MAX_IN_FLIGHT);
+        assert_eq!(l.net_max_in_flight, limits::NET_MAX_IN_FLIGHT);
+        assert_eq!(l.max_fetch_response_bytes, limits::MAX_FETCH_RESPONSE_BYTES);
+        assert_eq!(l.max_ai_output_tokens, limits::MAX_AI_OUTPUT_TOKENS);
+        assert_eq!(l.notify_per_day, limits::NOTIFY_PER_DAY);
         // The JSON the page reads is camelCase and carries every limit.
         let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["limits"]["callTimeoutMs"], 180_000);
+        assert_eq!(
+            json["limits"]["maxFetchRedirects"],
+            limits::MAX_FETCH_REDIRECTS
+        );
         assert_eq!(json["limits"]["callsPerSecond"], limits::CALLS_PER_SECOND);
         assert_eq!(json["api"]["oldestMajor"], MOD_API_OLDEST_MAJOR);
         assert_eq!(json["engine"]["sinkholeAttempts"], 0);

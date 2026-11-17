@@ -19,7 +19,9 @@
 //! 4. the mod runs: its row is active and turned on (paused, parked, installing, blacklisted and an
 //!    unaccepted auto-install all refuse), and the method exists in this API (the table);
 //! 5. the grant ([`grants`], D3's exclusions and the sealed-engine rule included);
-//! 6. the rate bucket and the concurrency cap ([`limits`]);
+//! 6. the rate bucket and the concurrency cap ([`limits`]), then the call's family's own (the
+//!    experimental AI and network calls: tighter, because they hold their admission while they wait
+//!    on something outside PM);
 //! 7. the handler, with the arguments' size cap first.
 //!
 //! **Never past an await on stale facts.** Steps 2-5 run in one blocking task, each DB read a short
@@ -310,6 +312,11 @@ async fn call<H: Host>(
     // 6. The rate bucket and the concurrency cap. The admission counts the call as in flight until
     // it returns.
     let _admission = host.calls().admit(&auth.ticket.mod_id, Instant::now())?;
+    // ...and, for a call that waits on a model or a website, its family's own (the row says which),
+    // held for as long as the call runs. A general call gets an admission that counts nothing.
+    let _family =
+        host.calls()
+            .admit_family(&auth.ticket.mod_id, auth.row.family, Instant::now())?;
     // 7. The handler.
     if args.len() > limits::MAX_ARGS_BYTES {
         return Err(ModError::new(

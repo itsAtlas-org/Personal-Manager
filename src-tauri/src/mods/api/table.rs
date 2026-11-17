@@ -13,6 +13,7 @@
 //! `experimental` rows (D13) are outside the API freeze and may change in a minor: the four calls no
 //! pilot uses yet (`ai.complete`, `net.fetch`, `secrets.set`, `notify`, PR B) land marked so.
 
+use super::limits::Family;
 use super::permissions::Class;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,9 @@ pub struct Row {
     pub deprecated: Option<(u16, u16)>,
     pub removed: Option<(u16, u16)>,
     pub experimental: bool,
+    /// The bucket and concurrency cap, beyond the generic ones, the dispatcher admits it under
+    /// (`limits::Family`). `General` for everything that waits only on PM's own database.
+    pub family: Family,
 }
 
 const fn call(name: &'static str, permission: &'static str, class: Class) -> Row {
@@ -49,6 +53,27 @@ const fn call(name: &'static str, permission: &'static str, class: Class) -> Row
         deprecated: None,
         removed: None,
         experimental: false,
+        family: Family::General,
+    }
+}
+
+/// One of PR B's four experimental calls (D13: outside the API freeze, `ai.complete`, `net.fetch`,
+/// `secrets.set`, `notify`): a call row marked so, which the Developer tab and ERROR_CODES show as
+/// experimental. It needs a `family` because each of them waits on something outside PM (or, for
+/// `secrets.set` and `notify`, on the person), and a handler slice must say which limits it lives
+/// under rather than inherit "none" by default.
+// Used by the rows each handler slice adds (X5, X6); the table has none until then.
+#[cfg_attr(not(test), allow(dead_code))]
+const fn experimental_call(
+    name: &'static str,
+    permission: &'static str,
+    class: Class,
+    family: Family,
+) -> Row {
+    Row {
+        experimental: true,
+        family,
+        ..call(name, permission, class)
     }
 }
 
@@ -64,6 +89,7 @@ const fn event(name: &'static str, permission: Option<&'static str>, class: Clas
         deprecated: None,
         removed: None,
         experimental: false,
+        family: Family::General,
     }
 }
 
@@ -178,6 +204,15 @@ mod tests {
                 "{} arrives after this PM",
                 row.name
             );
+            // A family's limits are for the calls that wait on the outside, which are the
+            // experimental ones; an event is never admitted at all.
+            if row.family != Family::General {
+                assert!(
+                    row.kind == Kind::Call && row.experimental,
+                    "{}: a family is for an experimental call",
+                    row.name
+                );
+            }
             if let Some(d) = row.deprecated {
                 assert!(d >= row.added, "{}", row.name);
             }
@@ -245,6 +280,65 @@ mod tests {
             ..call("a.event", "storage", Class::Local)
         },
     ];
+
+    /// The helper PR B's rows are made with: a call row, in API 1.0, marked experimental, under the
+    /// family it is given; and it differs from a plain `call` in exactly those two fields.
+    #[test]
+    fn an_experimental_call_is_a_call_row_marked_so_under_its_family() {
+        let row = experimental_call("a.b", "ai", Class::Money, Family::Ai);
+        assert_eq!(
+            row,
+            Row {
+                experimental: true,
+                family: Family::Ai,
+                ..call("a.b", "ai", Class::Money)
+            }
+        );
+        assert!(row.experimental && row.kind == Kind::Call);
+        assert_eq!((row.permission, row.class), (Some("ai"), Class::Money));
+        assert_eq!(
+            (row.added, row.deprecated, row.removed),
+            ((1, 0), None, None)
+        );
+        // A plain call and an event are neither experimental nor limited beyond the generic.
+        for plain in [
+            call("a.c", "storage", Class::Local),
+            event("a.d", None, Class::Local),
+        ] {
+            assert!(!plain.experimental && plain.family == Family::General);
+        }
+        // It is found like any call row, and `kit.rs` lists it by `experimental`.
+        const NET_ROWS: &[Row] = &[experimental_call(
+            "net.x",
+            "internet",
+            Class::Egress,
+            Family::Net,
+        )];
+        assert!(matches!(
+            lookup_call(NET_ROWS, "net.x", MOD_API_VERSION),
+            Lookup::Found(r) if r.experimental && r.family == Family::Net
+        ));
+    }
+
+    /// The only experimental rows the live table may ever carry are PR B's four, each under the
+    /// family its limits are written for; every other row is general.
+    #[test]
+    fn the_live_tables_experimental_rows_are_held_to_their_families() {
+        for row in ROWS {
+            if row.experimental {
+                let want = match row.name {
+                    "ai.complete" => Family::Ai,
+                    "net.fetch" => Family::Net,
+                    "secrets.set" | "notify" => Family::General,
+                    other => panic!("{other} is experimental but isn't one of PR B's four"),
+                };
+                assert_eq!(row.family, want, "{}", row.name);
+                assert_eq!(row.kind, Kind::Call, "{}", row.name);
+            } else {
+                assert_eq!(row.family, Family::General, "{}", row.name);
+            }
+        }
+    }
 
     #[test]
     fn a_name_is_found_removed_or_unknown_by_the_callers_api() {

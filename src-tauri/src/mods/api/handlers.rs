@@ -6,11 +6,15 @@
 //! check, and the arguments already parsed as JSON; it validates their shape itself, and touches
 //! data only through [`super::recheck`] under the guard it uses.
 
+use std::future::Future;
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    doc_storage, documents, embeddings, storage, Authorised, Host, ModError, PageAction, Reply,
+    doc_storage, documents, embeddings, limits, storage, Authorised, Host, ModError, PageAction,
+    Reply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +121,31 @@ pub(super) fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, ModError> {
     T::deserialize(args).map_err(|e| ModError::bad_args(format!("Bad arguments: {e}.")))
 }
 
+/// Run the async part of a handler that waits on something outside PM (a model, a website) under
+/// [`limits::CALL_TIMEOUT`]: past it the work is dropped (a dropped future's RAII guards run, so a
+/// reservation settles and a slot frees) and the mod is told [`Code::CallTimedOut`]. Only
+/// cancellable async work stops this way: a `spawn_blocking` step that began is not cancelled, so
+/// the handler asks [`super::still_current`] after the await and commits nothing for a call
+/// that ended.
+// Used by the handlers of the experimental calls (X5, X6).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) async fn within_call_timeout<T>(
+    work: impl Future<Output = Result<T, ModError>>,
+) -> Result<T, ModError> {
+    within(limits::CALL_TIMEOUT, work).await
+}
+
+/// [`within_call_timeout`] with the limit given (a test's short one).
+#[cfg_attr(not(test), allow(dead_code))]
+async fn within<T>(
+    limit: Duration,
+    work: impl Future<Output = Result<T, ModError>>,
+) -> Result<T, ModError> {
+    tokio::time::timeout(limit, work)
+        .await
+        .unwrap_or_else(|_elapsed| Err(ModError::call_timed_out()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +175,72 @@ mod tests {
         }
         for args in [json!({"x": 1}), json!([]), json!("dark"), json!(0)] {
             assert_eq!(theme_get(&args).unwrap_err().code, Code::BadArgs, "{args}");
+        }
+    }
+
+    /// Sets a flag when dropped: the stand-in for a reservation's or an admission's RAII guard.
+    struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_past_its_deadline_is_stopped_told_so_and_its_guards_run() {
+        let short = Duration::from_millis(30);
+        // Done in time: the answer and an error both pass through untouched.
+        assert_eq!(within(short, async { Ok(7) }).await, Ok(7));
+        // The helper handlers use is the same under the shipped limit.
+        assert_eq!(within_call_timeout(async { Ok(3) }).await, Ok(3));
+        let refused: Result<u8, _> = within(short, async {
+            Err(ModError::new(Code::NotFound, "nothing"))
+        })
+        .await;
+        assert_eq!(refused.unwrap_err().code, Code::NotFound);
+
+        // Never done: stopped at the deadline, with the one fixed sentence, and the work is dropped
+        // (so what it held is given back).
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Guard(std::sync::Arc::clone(&dropped));
+        let began = std::time::Instant::now();
+        let stopped: Result<u8, _> = within(short, async move {
+            let _held = guard;
+            std::future::pending::<()>().await;
+            Ok(1)
+        })
+        .await;
+        let e = stopped.unwrap_err();
+        assert_eq!(e, ModError::call_timed_out());
+        assert_eq!(e.code, Code::CallTimedOut);
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "it waited past the limit"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the work was not dropped"
+        );
+
+        // Work that is slow but inside the limit finishes.
+        assert_eq!(
+            within(Duration::from_secs(5), async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(2)
+            })
+            .await,
+            Ok(2)
+        );
+    }
+
+    /// The shipped limit is the one in `limits`, and it outlasts the longest thing a call may
+    /// legitimately wait on (a whole fetch; the model route's 20 s slot wait and 120 s cold load).
+    #[test]
+    fn the_calls_deadline_is_the_limit_and_outlasts_what_a_call_may_wait_for() {
+        const {
+            assert!(limits::CALL_TIMEOUT.as_secs() > limits::FETCH_TOTAL_TIMEOUT.as_secs());
+            assert!(limits::CALL_TIMEOUT.as_secs() >= 20 + 120);
         }
     }
 

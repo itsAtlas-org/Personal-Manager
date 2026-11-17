@@ -326,6 +326,25 @@ export interface KitLimits {
   maxIdsPerEvent: number;
   eventCoalesceMs: number;
   maxPendingIds: number;
+  // The experimental calls' limits (PR B); times in milliseconds.
+  callTimeoutMs: number;
+  aiMaxInFlight: number;
+  aiCallsPerMinute: number;
+  aiCallBurst: number;
+  maxAiPromptBytes: number;
+  maxAiMessages: number;
+  maxAiOutputTokens: number;
+  netMaxInFlight: number;
+  netFetchesPerSecond: number;
+  netFetchBurst: number;
+  maxFetchRequestBytes: number;
+  maxFetchResponseBytes: number;
+  fetchConnectTimeoutMs: number;
+  fetchTotalTimeoutMs: number;
+  maxFetchRedirects: number;
+  notifyMaxChars: number;
+  notifyPerDay: number;
+  secretAsksPerSession: number;
 }
 
 /** What `devKitInfo` answers: the Developer kit's rail sections. */

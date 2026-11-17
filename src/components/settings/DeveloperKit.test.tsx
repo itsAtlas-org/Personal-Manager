@@ -145,9 +145,23 @@ describe("the limits", () => {
     expect(limits.getByText("1 MB")).toBeTruthy(); // largest call
     expect(limits.getByText("8 MB")).toBeTruthy(); // largest answer
     expect(limits.getByText("50 MB")).toBeTruthy(); // a mod's own storage
-    expect(limits.getByText("64 KB")).toBeTruthy(); // largest event
+    expect(limits.getAllByText("64 KB")).toHaveLength(2); // largest event, largest AI prompt
     expect(limits.getByText("250 ms")).toBeTruthy();
     expect(limits.getByText("100000")).toBeTruthy();
+  });
+
+  it("says the experimental calls' limits, times in seconds", async () => {
+    devKitInfo.mockResolvedValue(devKit());
+    render(<DeveloperKit on />);
+    const limits = section("sec-dev-limits");
+    await limits.findByText("Calls per second, sustained");
+    const said = (label: string) => limits.getByText(label).parentElement?.textContent ?? "";
+    expect(said("Longest a call may wait before it is stopped")).toContain("180 s");
+    expect(said("Longest a whole web request may take")).toContain("30 s");
+    expect(said("Longest wait to connect to a website")).toContain("10 s");
+    expect(said("Largest web answer")).toContain("4 MB");
+    expect(said("Largest web request body")).toContain("256 KB");
+    expect(said("Notices per mod per day")).toContain("5");
   });
 
   it("has a label for exactly the limits the backend sends (a new one can't ship unnamed)", () => {
