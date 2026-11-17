@@ -180,7 +180,7 @@ describe("what it shows", () => {
       }),
     );
     const dialog = screen.getByRole("dialog", { name: "Update “Ac me” to version 1.3.0?" });
-    expect(dialog.textContent).toContain("Made by Mal lory · credited in the mod to Ev e, Ann Lee");
+    expect(dialog.textContent).toContain("Made by Mal lory · authors: Ev e, Ann Lee");
     expect(dialog.textContent).toContain("one PM says: fine");
     expect(dialog.textContent).toContain("Sites it may reach: h .example");
     expect(dialog.textContent).toContain("Saved keys it keeps: K y (for h .example)");

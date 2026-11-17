@@ -223,7 +223,7 @@ describe("what the row says", () => {
     );
     openDetails();
     expect(container.textContent).toContain(
-      "Made by Atlas · credited in the mod to Bobby Yu, Ann Lee · itsAtlas-org/Personal-Manager",
+      "Made by Atlas · authors: Bobby Yu, Ann Lee · itsAtlas-org/Personal-Manager",
     );
     unmount();
     const plain = draw(mod({ author: "Atlas", authors: [] }));
@@ -248,9 +248,7 @@ describe("what the row says", () => {
     openDetails();
     expect(screen.getByRole("heading").textContent).toBe("Ac me");
     expect(container.textContent).toContain("line one PM says: trust me");
-    expect(container.textContent).toContain(
-      "Made by Mal lory · credited in the mod to Ev e · a /b",
-    );
+    expect(container.textContent).toContain("Made by Mal lory · author: Ev e · a /b");
     expect(container.textContent).toContain("Sites it may reach: h .example");
     expect(container.textContent).toContain("The maker says: “to map”");
     expect(container.textContent).not.toContain(RLO);

@@ -3,20 +3,15 @@
 The Document Map's own history. Its version is the one in `manifest.json`, separate from PM's (spec D12): a
 change that touches only this folder bumps this version and adds an entry here.
 
-## 1.1.0
-
-- Named the Document Map, so it isn't mistaken for a geographical map: the mod, its tab, its page
-  heading and its help say "Document Map". The id (`atlas.map`) stays.
-- Credits the person who made it: the manifest names Bobby Yu in `authors`, shown after the
-  publisher ("Made by Atlas · credited in the mod to Bobby Yu"). `authors` is for credit only; the
-  publisher (Atlas) is still what pins updates.
-
 ## 1.0.0
 
-- The Map as a mod: the documents laid out on one canvas, by project (each project a hub with its
+- The Document Map, PM's Map as a mod (named so it isn't mistaken for a geographical map; the id stays
+  `atlas.map`): the documents laid out on one canvas, by project (each project a hub with its
   documents around it) or by meaning (similar documents close together), with a legend, pan and zoom,
   a card on hover, file names on the dots, and a click to read the document in PM's reader. It wears
   PM's theme, text size and colour-blind palette.
+- Credits the person who made it: `authors` names Bobby Yu, shown after the publisher ("Made by Atlas
+  · author: Bobby Yu"). `authors` is for credit only; the publisher (Atlas) is still what pins updates.
 - Per-vault settings (arrangement, cohesion, file names, the most documents placed by meaning), kept
   with the vault and its backups.
 - Different from the Map that was built into PM: the layout by meaning is worked out in the page (a

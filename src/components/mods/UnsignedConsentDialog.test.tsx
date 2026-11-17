@@ -122,7 +122,7 @@ describe("what it says", () => {
     cleanup();
     open(unsigned({ authors: ["Ann Lee", `Bo${RLO}b`] }));
     const credited = screen.getByRole("dialog");
-    expect(credited.textContent).toContain("Made by: Acme · credited in the mod to Ann Lee, Bo b");
+    expect(credited.textContent).toContain("Made by: Acme · authors: Ann Lee, Bo b");
     expect(credited.textContent).not.toContain(RLO);
     expect(dialog.textContent).toContain("Repository: acme/tool");
     expect(dialog.textContent).toContain("Commit: abcdef0123456789");

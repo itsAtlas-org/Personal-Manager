@@ -93,12 +93,12 @@ describe("ModAbout", () => {
       <ModAbout
         description={DESCRIPTION}
         help={HELP.slice(0, 1)}
-        credit="Atlas · credited in the mod to Bobby Yu"
+        credit="Atlas · author: Bobby Yu"
         onClose={() => {}}
       />,
     );
     const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
-    expect(within(panel).getByText("Made by Atlas · credited in the mod to Bobby Yu")).toBeTruthy();
+    expect(within(panel).getByText("Made by Atlas · author: Bobby Yu")).toBeTruthy();
   });
 
   it("draws no credit line when the mod has none to show", () => {

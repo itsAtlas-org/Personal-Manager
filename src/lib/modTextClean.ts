@@ -30,9 +30,9 @@ export function plainLine(text: string): string {
 const MAX_CREDITED = 8;
 
 /** Who made a mod, in the one short form every screen uses: the publisher the signature and the
- *  pin are about first, then, marked as the mod's own claim, the people it credits ("Atlas · credited
- *  in the mod to Bobby Yu, Ann Lee"). The credited names are free text a mod's maker types, so they
- *  never sit where the publisher does and always follow a label that says whose words they are: a
+ *  pin are about first, then, marked as the mod's own claim, the people it credits, after a label ("Atlas
+ *  · author: Bobby Yu", "Atlas · authors: Bobby Yu, Ann Lee"). The credited names are free text a
+ *  mod's maker types, so they never sit where the publisher does and always follow that label: a
  *  name like "Atlas" or "Bobby Yu · Atlas" can't pass for the publisher or for a reviewer. With no
  *  people it is the publisher alone, and with neither it is empty. All of it is cleaned like the
  *  mod's name. */
@@ -43,10 +43,10 @@ export function makerCredit(authors: readonly string[] | undefined, publisher: s
     .filter((a) => a !== "");
   const who = plainLine(publisher);
   if (people.length === 0) return who;
-  return `${who || "an unnamed publisher"} · credited in the mod to ${people.join(", ")}`;
+  return `${who || "an unnamed publisher"} · ${people.length === 1 ? "author" : "authors"}: ${people.join(", ")}`;
 }
 
-/** The line every screen draws for it: "Made by Atlas · credited in the mod to Bobby Yu", or "Maker
+/** The line every screen draws for it: "Made by Atlas · author: Bobby Yu", or "Maker
  *  not named". */
 export function madeByLine(authors: readonly string[] | undefined, publisher: string): string {
   const credit = makerCredit(authors, publisher);

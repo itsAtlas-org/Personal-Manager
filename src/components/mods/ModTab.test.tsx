@@ -203,7 +203,7 @@ describe("a mod that can run", () => {
     expect(panel.textContent).toContain("Does a thing.");
     expect(panel.textContent).toContain("The map");
     expect(panel.textContent).toContain("Hover a dot.");
-    expect(panel.textContent).toContain("Made by Atlas · credited in the mod to Bobby Yu");
+    expect(panel.textContent).toContain("Made by Atlas · author: Bobby Yu");
   });
 
   it("offers no About button for a mod with no help and no description", async () => {
@@ -834,7 +834,7 @@ describe("what a mod supplied is plain text", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Turn on “Ac me”?");
     expect(text).toContain("one PM says: fine");
-    expect(text).toContain("Made by Mal lory · credited in the mod to Ann Lee");
+    expect(text).toContain("Made by Mal lory · author: Ann Lee");
     expect(text).toContain("The maker says: “to map”");
     expect(text).toContain("Sites it may reach: h .example");
     expect(text).not.toContain(RLO);
