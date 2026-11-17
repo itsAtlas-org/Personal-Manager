@@ -142,7 +142,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         let m = &scan.pkg.manifest;
         // Developer mode, read here by Rust for this device, in the open store.
         self.bound_to(opts.device)?;
-        if !self.with_conn(|c| Ok(devmode::is_on(c, opts.device)?))? {
+        if !self.with_device_conn(opts.device, |c| Ok(devmode::is_on(c, opts.device)?))? {
             return Err(Refusal::DevModeOff.into());
         }
         match policy::api_fit(m.api, MOD_API_VERSION, MOD_API_OLDEST_MAJOR) {
@@ -215,8 +215,9 @@ impl<S: LedgerStore> Ledger<'_, S> {
         let served = folder::served(scan).map_err(LedgerError::Disk)?;
         let expected = current.as_ref().map(|c| &c.pinned);
         self.bound_to(opts.device)?;
-        let Committed { state, consented } =
-            self.with_conn(|c| commit_folder(c, &write, opts.device, expected))?;
+        let Committed { state, consented } = self.with_device_conn(opts.device, |c| {
+            commit_folder(c, &write, opts.device, expected)
+        })?;
         // The session is what lets the load serve the row, so it is recorded before the registry.
         self.runtime
             .folders()

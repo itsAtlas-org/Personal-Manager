@@ -205,6 +205,30 @@ pub trait LedgerStore {
         layout: &Layout,
         f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
     ) -> Result<T, LedgerError>;
+
+    /// Whether the open vault is the one `device` was named in: its id AND its folder. Asked with
+    /// the connection held ([`Self::with_device_conn`]), so the answer is about the store `f`
+    /// reaches.
+    fn holds_device(&self, device: &super::devmode::Here) -> bool;
+
+    /// [`Self::with_conn`] for a step that reads or writes `device`'s developer-mode answer
+    /// ([`super::devmode::is_on`], [`super::devmode::write`]). A vault id is only a name its own
+    /// files claim, so a store can share one with the vault the device was named in; the folder
+    /// tells them apart, and it is checked once the connection is held, when the open vault can't
+    /// change under it.
+    fn with_device_conn<T>(
+        &self,
+        layout: &Layout,
+        device: &super::devmode::Here,
+        f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        self.with_conn(layout, |conn| {
+            if !self.holds_device(device) {
+                return Err(LedgerError::VaultChanged);
+            }
+            f(conn)
+        })
+    }
 }
 
 impl LedgerStore for AppState {
@@ -219,6 +243,10 @@ impl LedgerStore for AppState {
         }
         same_store(&conn, layout)?;
         f(&mut conn)
+    }
+
+    fn holds_device(&self, device: &super::devmode::Here) -> bool {
+        device.is_open_in(self)
     }
 }
 
@@ -507,8 +535,21 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         self.store.with_conn(self.layout, f)
     }
 
+    /// [`LedgerStore::with_device_conn`] on this ledger's store: one step that reads or writes
+    /// `device`'s developer-mode answer, refused unless the open vault is the device's by id AND
+    /// folder.
+    pub(crate) fn with_device_conn<T>(
+        &self,
+        device: &super::devmode::Here,
+        f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        self.store.with_device_conn(self.layout, device, f)
+    }
+
     /// The device was named in the vault this ledger is for: its developer-mode answer is that
-    /// vault's, so a device named before a vault switch never answers for the store after it.
+    /// vault's, so a device named before a vault switch never answers for the store after it. An
+    /// early, connection-free check on the id alone: every step that reads the answer goes through
+    /// [`Self::with_device_conn`], which also checks the folder.
     pub(crate) fn bound_to(&self, device: &super::devmode::Here) -> Result<(), LedgerError> {
         if device.vault() == self.layout.vault_id() {
             Ok(())
@@ -1706,6 +1747,7 @@ pub fn quiesce(app: &AppHandle) -> Option<MutexGuard<'_, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mods::devmode;
     use crate::mods::engine::Platform;
     use crate::mods::package::tests::signed_package;
     use crate::mods::runtime::FrameError;
@@ -1736,6 +1778,8 @@ mod tests {
     struct TestStore {
         conn: Mutex<Connection>,
         vault_id: Mutex<String>,
+        /// Where the vault sits on this computer ([`devmode::place_of`]'s value).
+        place: Mutex<String>,
         closed: AtomicBool,
         steps: AtomicUsize,
         before_step: Mutex<Option<(usize, String)>>,
@@ -1763,6 +1807,10 @@ mod tests {
             same_store(&conn, layout)?;
             f(&mut conn)
         }
+
+        fn holds_device(&self, device: &devmode::Here) -> bool {
+            device.names_place(&self.vault_id.lock().unwrap(), &self.place.lock().unwrap())
+        }
     }
 
     struct World {
@@ -1785,6 +1833,7 @@ mod tests {
             store: TestStore {
                 conn: Mutex::new(conn),
                 vault_id: Mutex::new(VAULT.into()),
+                place: Mutex::new(devmode::TEST_PLACE.into()),
                 closed: AtomicBool::new(false),
                 steps: AtomicUsize::new(0),
                 before_step: Mutex::new(None),

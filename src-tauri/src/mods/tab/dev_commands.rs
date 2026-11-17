@@ -299,6 +299,39 @@ mod tests {
             .unwrap();
         assert!(body.find("is_open_in(").unwrap() < body.find("devmode::write(").unwrap());
         assert!(!body.contains("active_vault_id()"));
+        // The ledger's steps ask through `with_device_conn`, which checks the folder with the
+        // connection held; a bare `with_conn` beside `devmode::is_on` or `devmode::write` would not.
+        for (file, text) in [
+            ("folder", include_str!("../ledger/folder.rs")),
+            ("unsigned", include_str!("../ledger/unsigned.rs")),
+            ("dev_switch", include_str!("../ledger/dev_switch.rs")),
+        ] {
+            let text = text.split("#[cfg(test)]").next().unwrap();
+            // The commits re-read the answer in their transaction, so their step is the guarded one.
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.contains("commit_folder(c,") || line.contains("commit_unsigned(c,") {
+                    assert!(
+                        lines[i - 1].contains("with_device_conn"),
+                        "{file}: a commit's step must be a with_device_conn"
+                    );
+                }
+            }
+            for line in text.lines().filter(|l| {
+                !l.trim_start().starts_with("//")
+                    && (l.contains("devmode::is_on(") || l.contains("devmode::write("))
+            }) {
+                // Inside a transaction helper the caller's `with_device_conn` has the connection.
+                if line.contains("&tx") || line.contains("&conn") || line.contains("&mut conn") {
+                    continue;
+                }
+                assert!(
+                    line.contains("with_device_conn"),
+                    "{file}: `{}` reads the answer outside with_device_conn",
+                    line.trim()
+                );
+            }
+        }
     }
 
     #[test]

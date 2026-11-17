@@ -1013,6 +1013,34 @@ fn a_device_named_in_another_vault_neither_installs_nor_switches_in_this_one() {
 }
 
 #[test]
+fn a_device_named_for_one_folder_does_not_answer_for_a_lookalike_vault_in_another() {
+    // The open vault changed to one with the SAME vault id and store id in another folder (a
+    // copied vault): the device's entry still names its own folder, and the copied store lists its
+    // credential, so only the folder tells them apart. Every read and write of the answer refuses.
+    let w = world();
+    dev_on(&w);
+    *w.store.place.lock().unwrap() = "another-folder".into();
+    let bytes = plain();
+    assert!(matches!(
+        install_file(&w, &bytes, None),
+        Err(LedgerError::VaultChanged)
+    ));
+    let pkg = package::verify_unsigned(&bytes).unwrap();
+    assert!(matches!(
+        w.ledger()
+            .preview_unsigned(&pkg, &sha(&bytes), &uopts(None)),
+        Err(LedgerError::VaultChanged)
+    ));
+    assert!(matches!(
+        w.ledger()
+            .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now()),
+        Err(LedgerError::VaultChanged)
+    ));
+    nothing_written(&w);
+    assert!(devmode::is_on(&w.store.conn.lock().unwrap(), test_here(DEVICE)).unwrap());
+}
+
+#[test]
 fn switching_off_pauses_every_unsigned_mod_and_only_those_and_ends_their_sessions() {
     let w = world();
     dev_on(&w);

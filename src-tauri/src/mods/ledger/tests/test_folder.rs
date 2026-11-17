@@ -219,6 +219,25 @@ fn a_folder_loads_only_while_developer_mode_is_on_for_this_device() {
 }
 
 #[test]
+fn a_folder_is_not_loaded_into_a_lookalike_vault_in_another_folder() {
+    // Same vault id and store id, another folder on this computer: the device's entry names its
+    // own folder, so the preview and the load both refuse before anything is written.
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir();
+    *w.store.place.lock().unwrap() = "another-folder".into();
+    assert!(matches!(
+        load(&w, dir.path(), None),
+        Err(LedgerError::VaultChanged)
+    ));
+    assert!(matches!(
+        w.ledger().preview_folder(&scan(dir.path()), &uopts(None)),
+        Err(LedgerError::VaultChanged)
+    ));
+    nothing_written(&w);
+}
+
+#[test]
 fn a_switch_off_between_the_checks_and_the_commit_wins() {
     let w = world();
     dev_on(&w);

@@ -62,7 +62,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         self.bound_to(device)?;
         let _ledger = self.runtime.ledger_lock();
         // The record first: a write that fails changes nothing.
-        let now_on = self.with_conn(|c| Ok(devmode::write(c, device, on)?))?;
+        let now_on = self.with_device_conn(device, |c| Ok(devmode::write(c, device, on)?))?;
         self.runtime.set_unsigned_allowed(now_on);
         // Off: a test folder is not paused, it is unloaded (plan decision 8: session only, nothing
         // left behind), so the rows are gone before the load reads them. A failure here is not

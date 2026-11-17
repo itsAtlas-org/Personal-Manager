@@ -250,7 +250,7 @@ export interface AiPromptInfo {
   route: AiPromptRoute;
   paid: boolean;
   unpriced: boolean;
-  /** The Background role's cloud models, in the order the call uses them. Empty with no cloud arm. */
+  /** The person's whole Background cloud model list, in their order. Empty with no cloud arm. */
   cloudModels: string[];
   /** The Background role's local model (on battery, the one the policy set aside), or none. */
   localModel: string | null;

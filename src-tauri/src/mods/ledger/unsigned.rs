@@ -151,7 +151,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         }
         // Developer mode, read here by Rust for this device, in the open store.
         self.bound_to(opts.device)?;
-        if !self.with_conn(|c| Ok(devmode::is_on(c, opts.device)?))? {
+        if !self.with_device_conn(opts.device, |c| Ok(devmode::is_on(c, opts.device)?))? {
             return Err(Refusal::DevModeOff.into());
         }
         if m.publisher.tier != Tier::Third {
@@ -239,8 +239,9 @@ impl<S: LedgerStore> Ledger<'_, S> {
         let installed = InstalledMod::from_package(pkg, placed.dir()).map_err(LedgerError::Disk)?;
         let expected = current.as_ref().map(|c| &c.pinned);
         self.bound_to(opts.device)?;
-        let Committed { state, consented } =
-            self.with_conn(|c| commit_unsigned(c, &write, opts.device, expected))?;
+        let Committed { state, consented } = self.with_device_conn(opts.device, |c| {
+            commit_unsigned(c, &write, opts.device, expected)
+        })?;
         placed.keep();
         // Served only while the registry's own copy of developer mode agrees with the store's.
         if policy::serves(&state, consented) && self.runtime.unsigned_allowed() {

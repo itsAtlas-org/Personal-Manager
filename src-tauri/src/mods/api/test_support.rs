@@ -156,6 +156,10 @@ impl crate::mods::ledger::LedgerStore for OverHost<'_> {
             .map_err(|e| crate::mods::ledger::LedgerError::Store(e.to_string()))?;
         f(&mut conn)
     }
+
+    fn holds_device(&self, _device: &crate::mods::devmode::Here) -> bool {
+        true
+    }
 }
 
 /// What a test hooks into a call in flight.

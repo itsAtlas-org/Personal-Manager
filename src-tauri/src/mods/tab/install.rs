@@ -109,7 +109,7 @@ pub struct ConsentScreen {
     /// The publisher: the name the maker's pin and signature speak of.
     pub author: String,
     /// The people the manifest credits (`authors`), in its order; empty when it names none. Shown
-    /// before the publisher, and as much the mod's own claim as its name is.
+    /// after the publisher, under a label that marks them as the mod's own claim.
     pub authors: Vec<String>,
     /// The source repo, `owner/repo`, and the commit the maker's signed build came from.
     pub repo: String,

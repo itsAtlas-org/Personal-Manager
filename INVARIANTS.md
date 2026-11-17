@@ -805,9 +805,11 @@ computer when it was switched on, written atomically, at most 16 KiB and 64 entr
 is on for this device in this vault **only if both say so**, the store's record lists the device's
 credential AND the device's file lists the open vault's id at the open vault's folder
 (`devmode::Here`, built from `data_dir`, the device id file and `AppState::active_vault_place`; the
-ledger refuses a device named in another vault than its own, `Ledger::bound_to`, and the commands
-that read the answer check `Here::is_open_in` once they hold the store's connection, so a vault
-that closed between naming the device and taking the store answers off and clears nothing). The
+ledger refuses a device named in another vault than its own, `Ledger::bound_to` early and
+`LedgerStore::with_device_conn` (id AND folder, once the connection is held) on every ledger step
+that reads or writes the answer, and the commands that read it check `Here::is_open_in` once they
+hold the store's connection, so a vault that closed between naming the device and taking the store
+answers off and clears nothing). The
 folder tag is what stops a lookalike: the vault id is only what `vault-meta.json` says, whoever
 wrote that vault chose it, and the credential is the same value in every store, so a hostile
 vault that claims the id of one this device switched on in, and lists a credential its writer saw

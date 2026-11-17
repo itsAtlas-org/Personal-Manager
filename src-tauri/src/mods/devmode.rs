@@ -176,7 +176,7 @@ const MAX_VAULT_ID_LEN: usize = 128;
 
 /// The place tests put their vault in.
 #[cfg(test)]
-const TEST_PLACE: &str = "test-place";
+pub(crate) const TEST_PLACE: &str = "test-place";
 
 /// Whether the device file could keep `vault` as an entry and PM could have made it. The file is
 /// rejected whole for one entry it wouldn't accept ([`vaults_of`]), so a write must never add one.
@@ -268,7 +268,7 @@ impl Here {
     pub fn is_open_in(&self, state: &AppState) -> bool {
         state
             .active_vault_place()
-            .is_some_and(|(vault, root)| self.vault == vault && self.place == place_of(&root))
+            .is_some_and(|(vault, root)| self.names(&vault, &root))
     }
 
     /// Where this device keeps its record (`data_dir`).
@@ -280,6 +280,18 @@ impl Here {
     /// The vault this is the device in.
     pub fn vault(&self) -> &str {
         &self.vault
+    }
+
+    /// Whether this names the vault `vault` whose folder is `vault_root` (id AND folder), for a
+    /// store that knows both ([`is_open_in`](Self::is_open_in) is the open vault's).
+    pub(crate) fn names(&self, vault: &str, vault_root: &Path) -> bool {
+        self.vault == vault && self.place == place_of(vault_root)
+    }
+
+    /// Whether this names `vault` in the folder tagged `place` (a [`place_of`] value).
+    #[cfg(test)]
+    pub(crate) fn names_place(&self, vault: &str, place: &str) -> bool {
+        self.vault == vault && self.place == place
     }
 
     fn credential(&self) -> String {
