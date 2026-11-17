@@ -437,9 +437,12 @@ that, and runtime.rs's unit tests are what hold it.
 
 A mod reaches a user only as a signed `.pmmod` release asset, installed through the Mods tab (Mods
 spec §1.1, §1.3). First-party mod source lives under `mods/` in this repo and is built into its own
-`.pmmod` files: nothing under `mods/` is in any `bundle.resources` (or any other bundle key that
-copies repo files into the installer: `linux.{deb,rpm,appimage}.files`, `macOS.files`,
-`externalBin`), and nothing in `src/` imports `mods/`.
+`.pmmod` files: nothing under `mods/` is in any `bundle.resources` (or any other bundle key the gate
+reads that copies repo files into the installer: `linux.{deb,rpm,appimage}.files`, `macOS.files`,
+`externalBin`, and the path-valued keys `icon`, `licenseFile`, `macOS.frameworks`, the NSIS and WiX
+templates, hooks and fragments, and the deb/rpm scripts, all listed in `PATH_KEYS`), and nothing in
+`src/` imports `mods/`. A new Tauri bundle key that copies files is not seen until it is added to
+that list: adding a key to a tauri config is a review item for it.
 
 **Why.** An installed mod is one the ledger recorded after the verifier accepted it, under the
 switches, the blacklist and the user's own uninstall. A mod inside the installer would skip every one

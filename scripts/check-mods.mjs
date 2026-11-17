@@ -30,7 +30,8 @@
 //     * no source that a tauri config copies into the installer, merged the way Tauri merges them
 //       (RFC 7386 JSON Merge Patch), is under mods/, is a glob that matches it, or is a folder that
 //       contains it: `bundle.resources`, `bundle.linux.{deb,rpm,appimage}.files`,
-//       `bundle.macOS.files` and `bundle.externalBin` (`bundleSources`). A mod inside the installer
+//       `bundle.macOS.files`, `bundle.externalBin` and the path-valued keys (icon, licenseFile,
+//       frameworks, NSIS/WiX templates, hooks and fragments, deb/rpm scripts: `bundleSources`). A mod inside the installer
 //       would skip the verifier, the ledger and the blacklist, and ship to everyone;
 //     * nothing under src/ (and not the root index.html) imports from the top-level mods/ folder.
 //       Each specifier is RESOLVED against the importing file: a substring test would refuse src/components/mods/, which is
@@ -379,12 +380,47 @@ function resourceSources(resources) {
   return [];
 }
 
+// Bundle keys whose value is a path (or a list of paths) to a repo file that goes into the installer.
+// Tauri's serde accepts the macOS key as `macOS` and as the alias `macos`; both spellings are listed
+// so a lowercase one cannot slip past.
+const MACOS_PATH_KEYS = ["frameworks", "entitlements", "license", ["dmg", "background"]];
+const PATH_KEYS = [
+  ["icon"],
+  ["licenseFile"],
+  ["license"],
+  ...["macOS", "macos"].flatMap((m) =>
+    MACOS_PATH_KEYS.map((k) => [m, ...(Array.isArray(k) ? k : [k])]),
+  ),
+  ...["template", "installerHooks", "license", "headerImage", "sidebarImage", "installerIcon"].map(
+    (k) => ["windows", "nsis", k],
+  ),
+  ...["template", "fragmentPaths", "bannerPath", "dialogImagePath", "license"].map((k) => [
+    "windows",
+    "wix",
+    k,
+  ]),
+  ["windows", "webviewInstallMode", "path"],
+  ...["deb", "rpm"].flatMap((kind) =>
+    [
+      "desktopTemplate",
+      "preInstallScript",
+      "postInstallScript",
+      "preRemoveScript",
+      "postRemoveScript",
+      "changelog",
+    ].map((k) => ["linux", kind, k]),
+  ),
+];
+
 /**
  * Every repo path a bundle config copies into the installer, with the key that named it. Not only
  * `resources`: tauri-utils' config also lets `linux.{deb,rpm,appimage}.files` and `macOS.files` (a
  * map from destination to SOURCE path) and `externalBin` pull in arbitrary files, so a gate that read
- * `resources` alone would stay green while a mod shipped through one of the others. Windows has no
- * such key (its NSIS/WiX settings name templates and hooks, not payload folders).
+ * `resources` alone would stay green while a mod shipped through one of the others. The plain path
+ * keys (`PATH_KEYS`: icons, licence files, frameworks, templates, hooks, scripts, WiX fragments) copy
+ * a repo file into the installer too, so they are read the same way. The list is the path-valued
+ * keys of Tauri 2's bundle config as known when this was written; a new Tauri key that copies files
+ * is not seen until it is added there.
  */
 export function bundleSources(bundle) {
   if (!isObject(bundle)) return [];
@@ -392,6 +428,14 @@ export function bundleSources(bundle) {
     key: "bundle.resources",
     source,
   }));
+  for (const keyPath of PATH_KEYS) {
+    let value = bundle;
+    for (const part of keyPath) value = isObject(value) ? value[part] : undefined;
+    const sources = Array.isArray(value) ? value : [value];
+    for (const source of sources) {
+      if (typeof source === "string") out.push({ key: `bundle.${keyPath.join(".")}`, source });
+    }
+  }
   const fileMap = (key, files) => {
     if (!isObject(files)) return;
     for (const source of Object.values(files)) {

@@ -218,7 +218,7 @@ zizmor:
 # --- bespoke gates (pure Node, no deps) -----------------------------------
 
 # Version lockstep + changelog; pass --base <ref> to require a bump, --tag <vX.Y.Z> to match a tag.
-# With --base, a change that touches only mods/ is exempt from PM's bump and owes its mod's own (D12).
+# With --base, a change that touches only mod folders (mods/<id>/) is exempt from PM's bump and owes its mod's own (D12).
 version *args:
     node scripts/check-version-lockstep.mjs {{args}}
 

@@ -979,11 +979,36 @@ function urlText(value) {
   return decoded.slice(start);
 }
 
+/**
+ * HTML text with its comments dropped. `<!-->` and `<!--->` are complete comments to a browser, and
+ * `--!>` closes one: a plain `-->` search would swallow the markup after them and never look at it.
+ * Inside a raw-text or RCDATA element (title, textarea, style, script, ...) `<!--` is plain text and
+ * the element ends at its own end tag, so a comment opener there hides nothing: that content is kept
+ * whole, and the tags after it are still read.
+ */
+function stripComments(text) {
+  const re =
+    /<!--(?:-?>|[\s\S]*?--!?>)|<(title|textarea|style|script|xmp|iframe|noembed|noframes)(?=[\s/>])/gi;
+  let out = "";
+  let from = 0;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    if (m[1] === undefined) {
+      out += text.slice(from, m.index);
+      from = re.lastIndex;
+      continue;
+    }
+    const close = new RegExp(`</${m[1]}[\\s/>]`, "i").exec(text.slice(re.lastIndex));
+    const end = close ? re.lastIndex + close.index : text.length;
+    out += text.slice(from, end);
+    from = end;
+    re.lastIndex = end;
+  }
+  return out + text.slice(from);
+}
+
 /** The rules for one HTML file (`checkBuiltFile` calls it). */
 function checkBuiltHtml(text, where) {
-  // `<!-->` and `<!--->` are complete comments to a browser, and `--!>` closes one: a plain `-->`
-  // search would swallow the markup after them and never look at it.
-  const html = text.replace(/<!--(?:-?>|[\s\S]*?--!?>)/g, "");
+  const html = stripComments(text);
   for (const tag of startTags(html)) {
     if (!tag.closed) where("has a tag that never ends");
     const all = (name) => tag.attrs.filter((a) => a.name === name).map((a) => a.value);
@@ -1027,7 +1052,8 @@ function checkBuiltHtml(text, where) {
  * Rules for built output, which package.rs does not have (a package is data to it) but the frame
  * does. They catch a build that went wrong or an author's slip, and the frame's CSP is what holds
  * against a hostile page: this is a slip-catcher, not the security control. HTML is tokenized (see
- * `startTags`) after its comments are dropped; CSS and JS are text rules.
+ * `startTags`) after its comments are dropped (`stripComments`, which leaves raw-text elements
+ * alone); it does not model the rest of a browser's parser. CSS and JS are text rules.
  */
 export function checkBuiltFile(path, bytes) {
   const where = (why) => refuse(`${quote(path)} ${why}`);

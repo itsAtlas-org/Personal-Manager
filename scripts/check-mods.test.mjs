@@ -749,6 +749,30 @@ describe("bundle.resources", () => {
       ["bundle.macOS.files", { macOS: { files: { "Resources/mods": "../mods" } } }],
       ["bundle.macos.files", { macos: { files: { "Resources/mods": "../mods/atlas.map" } } }],
       ["bundle.externalBin", { externalBin: ["../mods/atlas.map/bin/tool"] }],
+      // The plain path keys: a repo file each copies into the installer.
+      ["bundle.icon", { icon: ["icons/icon.ico", "../mods/atlas.map/icon.png"] }],
+      ["bundle.licenseFile", { licenseFile: "../mods/atlas.map/LICENCE" }],
+      ["bundle.macOS.frameworks", { macOS: { frameworks: ["../mods/atlas.map/x.framework"] } }],
+      ["bundle.macos.frameworks", { macos: { frameworks: ["../mods/atlas.map/x.framework"] } }],
+      ["bundle.macOS.entitlements", { macOS: { entitlements: "../mods/atlas.map/e.plist" } }],
+      ["bundle.macOS.dmg.background", { macOS: { dmg: { background: "../mods/a.png" } } }],
+      [
+        "bundle.windows.nsis.installerHooks",
+        { windows: { nsis: { installerHooks: "../mods/atlas.map/h.nsh" } } },
+      ],
+      ["bundle.windows.nsis.template", { windows: { nsis: { template: "../mods/t.nsi" } } }],
+      [
+        "bundle.windows.wix.fragmentPaths",
+        { windows: { wix: { fragmentPaths: ["../mods/atlas.map/f.wxs"] } } },
+      ],
+      [
+        "bundle.linux.deb.postInstallScript",
+        { linux: { deb: { postInstallScript: "../mods/atlas.map/post.sh" } } },
+      ],
+      [
+        "bundle.linux.rpm.desktopTemplate",
+        { linux: { rpm: { desktopTemplate: "../mods/atlas.map/pm.desktop" } } },
+      ],
     ])("refuses a mod source under %s", (key, bundle) => {
       expectRefused(withBundle(bundle), `${key} source`);
       expectRefused(withBundle(bundle), "I-25");
@@ -803,6 +827,13 @@ describe("bundle.resources", () => {
       );
       expect(bundleSources(undefined)).toEqual([]);
       expect(bundleSources({ externalBin: "../mods" })).toEqual([]);
+      expect(
+        bundleSources({ icon: "icons/a.png", macOS: { frameworks: [3, "A.framework"] } }),
+      ).toEqual([
+        { key: "bundle.icon", source: "icons/a.png" },
+        { key: "bundle.macOS.frameworks", source: "A.framework" },
+      ]);
+      expect(bundleSources({ windows: { nsis: "../mods" }, licenseFile: 3 })).toEqual([]);
     });
   });
 

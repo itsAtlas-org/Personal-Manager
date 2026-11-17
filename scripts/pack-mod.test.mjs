@@ -1874,6 +1874,22 @@ describe("built-output rules", () => {
     expect(() => html(page("<!-- <script>x</script> --><p>ok</p>"))).not.toThrow();
   });
 
+  it("does not let a comment opener inside a raw-text element hide the markup after it", () => {
+    // In <title> and <textarea> (RCDATA) a `<!--` is plain text, so the element ends at its own end
+    // tag and the script that follows runs.
+    for (const tag of ["title", "textarea", "TITLE", "title\n"]) {
+      refused(
+        () => html(`<${tag}><!--</${tag.trim()}><script>alert(1)</script>-->`),
+        "inline script",
+      );
+    }
+    // The same text in a real comment, or after a closed element, is still a comment.
+    expect(() => html(page("<!-- <title> --><p>ok</p>"))).not.toThrow();
+    expect(() => html(page("<title>a</title><!-- <script>x</script> -->"))).not.toThrow();
+    // An unclosed raw element keeps the rest of the file in view.
+    refused(() => html("<title><!--<script>alert(1)</script>"), "inline script");
+  });
+
   it("refuses a tag the text ends inside", () => {
     refused(() => html("<p>ok</p><div onclick="), "never ends");
     refused(() => html("<img src='a.png"), "never ends");
