@@ -979,19 +979,21 @@ function readStartTag(html, from) {
 }
 
 /**
- * The start tags of HTML text, tokenized by `readStartTag` rather than a `<[^>]*>` pattern, and
- * with every name counted. It models this one corner of a browser's tokenizer (attributes, quotes,
- * slashes), not the whole parser: see `checkBuiltFile`.
+ * Every `<` plus a letter in HTML text read as the start of a tag, by `readStartTag` rather than a
+ * `<[^>]*>` pattern, and with every name counted. It models this one corner of a browser's
+ * tokenizer (attributes, quotes, slashes), not the whole parser, so it does not know a comment, a
+ * title or a textarea from markup: a `<a b='` inside a comment would swallow the real tags up to a
+ * quote in a later comment if each read skipped to its own end. So the reads OVERLAP: the search
+ * resumes right after the tag's NAME, never after its end, and each candidate tag is checked from
+ * its own start. A `<x` inside a quoted value or a comment is read too, which can only ever refuse
+ * more (fail closed). A generator, so the first refusal stops the work.
  */
-function startTags(html) {
-  const tags = [];
+function* startTags(html) {
   const open = /<([a-zA-Z][^\t\n\f\r />]*)/g;
   for (let m = open.exec(html); m !== null; m = open.exec(html)) {
     const { attrs, end, closed } = readStartTag(html, open.lastIndex);
-    tags.push({ name: m[1].toLowerCase(), attrs, end, closed });
-    open.lastIndex = end;
+    yield { name: m[1].toLowerCase(), attrs, end, closed };
   }
-  return tags;
 }
 
 /**

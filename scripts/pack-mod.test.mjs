@@ -2056,6 +2056,32 @@ describe("built-output rules", () => {
     refused(() => html("<img src='a.png"), "never ends");
   });
 
+  it("reads every candidate tag from its own start (a fake tag in a comment, title or textarea hides nothing)", () => {
+    // `<a b='` inside the first comment opens a quote that only the second comment closes; a
+    // tokenizer that skips to each tag's end never examines the real tag in between.
+    const hide = (real) => page(`<!-- <a b=' -->${real}<!-- ' -->`);
+    refused(() => html(hide("<img src=x style=x>")), "inline style attribute");
+    refused(() => html(hide("<img src=x onerror=alert(1)>")), "inline event handler");
+    refused(() => html(hide("<img src=x style=x onerror=alert(1)>")), "inline style attribute");
+    refused(() => html(hide("<a href='javascript:alert(1)'>x</a>")), "javascript: URL");
+    refused(() => html(hide("<iframe srcdoc=x></iframe>")), "srcdoc");
+    refused(() => html(hide("<link rel=modulepreload href=a.js>")), "preloads a module");
+    refused(
+      () => html(hide("<script src=https://evil.example/x.js></script>")),
+      "isn't one of the mod's own files",
+    );
+    refused(
+      () => html(page("<textarea><a b='</textarea><img style=x><textarea>'</textarea>")),
+      "inline style attribute",
+    );
+    refused(
+      () => html(page("<title><a b='</title><img style=x onerror=1><title>'</title>")),
+      "inline style attribute",
+    );
+    // control: the same shape with nothing hidden in it passes
+    expect(() => html(hide("<img src=x alt=y>"))).not.toThrow();
+  });
+
   it("still accepts local references, navigation links and a > inside a quoted value", () => {
     for (const src of ["./a.js", "a.js", "/a.js", "../a.js", "assets/a.js?x=1&y=2", "a.js#top"]) {
       expect(() => html(page("", `<script src="${src}"></script>`)), src).not.toThrow();
