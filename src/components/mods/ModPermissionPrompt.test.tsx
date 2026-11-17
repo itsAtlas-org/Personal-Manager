@@ -28,7 +28,8 @@ const info = (extra: Partial<AiPromptInfo> = {}): AiPromptInfo => ({
   route: "cloud",
   paid: true,
   unpriced: false,
-  model: "a/cheap",
+  cloudModels: ["a/cheap"],
+  localModel: null,
   suggestedCapUsd: 1,
   ...extra,
 });
@@ -93,7 +94,19 @@ describe("the money question", () => {
     await flush();
     const field = screen.getByRole("textbox") as HTMLInputElement;
     expect(field.value).toBe("1.00");
-    expect(screen.getByTestId("money-prompt").textContent).toContain("a/cheap");
+    const said = screen.getByTestId("money-prompt").textContent ?? "";
+    expect(said).toContain("This mod wants to ask an AI model to do things for it.");
+    expect(said).toContain(
+      "It uses your Background model (Settings → AI & Models): a/cheap. If you change it, it uses the new one.",
+    );
+    expect(said).toContain("It can cost real money.");
+    expect(said).toContain("You can change it any time in the Mods tab.");
+    expect(screen.getByRole("textbox", { name: "Monthly limit" })).toBe(field);
+    // The limit field already says it, so the dialog's own footer does not repeat it.
+    expect(screen.getByRole("dialog").textContent?.split("any time in the Mods tab").length).toBe(
+      2,
+    );
+    expect(screen.getByRole("dialog").textContent).not.toContain("whenever you like");
     waitOut();
     fireEvent.change(field, { target: { value: "2.50" } });
     fireEvent.click(button("Allow"));
@@ -131,7 +144,7 @@ describe("the money question", () => {
   });
 
   it("No and Not now send no limit", async () => {
-    modAiPromptInfo.mockResolvedValue(info({ route: "local-then-cloud", model: "llama" }));
+    modAiPromptInfo.mockResolvedValue(info({ route: "local-then-cloud", localModel: "llama" }));
     draw("ai");
     await flush();
     waitOut();
@@ -143,21 +156,26 @@ describe("the money question", () => {
   });
 
   it("on a free route asks for no limit, so a later paid route asks then", async () => {
-    modAiPromptInfo.mockResolvedValue(info({ route: "local", paid: false, model: "llama" }));
+    modAiPromptInfo.mockResolvedValue(
+      info({ route: "local", paid: false, cloudModels: [], localModel: "llama" }),
+    );
     draw("ai");
     await flush();
     expect(screen.queryByRole("textbox")).toBeNull();
-    expect(screen.getByTestId("money-prompt").textContent).toContain("llama");
+    const said = screen.getByTestId("money-prompt").textContent ?? "";
+    expect(said).toContain("your local model llama");
+    expect(said).toContain("A local model costs nothing.");
     waitOut();
     fireEvent.click(button("Allow"));
     expect(onAnswer).toHaveBeenCalledWith(true, undefined);
   });
 
   it("with no model set up, or a route PM cannot price, asks for no limit either", async () => {
-    for (const extra of [
-      { route: "none", paid: false, model: null },
+    const cases: Partial<AiPromptInfo>[] = [
+      { route: "none", paid: false, cloudModels: [], localModel: null },
       { route: "local", paid: false, unpriced: true },
-    ] as const) {
+    ];
+    for (const extra of cases) {
       modAiPromptInfo.mockResolvedValue(info(extra));
       const { unmount } = draw("ai");
       await flush();
@@ -189,7 +207,7 @@ describe("the money question", () => {
     expect(button("No").disabled).toBe(false);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(document.body.textContent).not.toContain("TEXT-THAT-MUST-NOT-SHOW");
-    expect(screen.getByRole("dialog").textContent).toContain("wording pending: Bobby");
+    expect(screen.getByRole("dialog").textContent).toContain("PM couldn't check which AI model");
   });
 
   it("restarts the hold when the content changes under the pointer", async () => {
@@ -214,11 +232,15 @@ describe("the money question", () => {
   });
 
   it("draws the model's name and the mod's name as text, never as markup", async () => {
-    modAiPromptInfo.mockResolvedValue(info({ model: '<img src=x onerror="alert(1)">' }));
+    modAiPromptInfo.mockResolvedValue(
+      info({ cloudModels: ['<img src=x onerror="alert(1)">'], localModel: "<b>x</b>" }),
+    );
     draw("ai");
     await flush();
     const money = screen.getByTestId("money-prompt");
     expect(money.querySelector("img")).toBeNull();
+    expect(money.querySelector("b")).toBeNull();
+    expect(money.textContent).toContain("your local model <b>x</b>");
     expect(money.textContent).toContain('<img src=x onerror="alert(1)">');
     // Nothing the mod said is in it but its name, in the title.
     const dialog = screen.getByRole("dialog");

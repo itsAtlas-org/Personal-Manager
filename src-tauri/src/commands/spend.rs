@@ -723,4 +723,29 @@ mod tests {
         // And the summary carries it.
         assert_eq!(build_cost_summary(&conn).unwrap().by_mod.len(), 2);
     }
+
+    /// The Usage and cost totals are everything PM spent, the mods' calls included: a mod's rows
+    /// are in the per-model lists and in both totals, with `by_mod` as the breakdown of the part
+    /// that was theirs.
+    #[test]
+    fn the_totals_include_what_mods_spent() {
+        let (_dir, conn) = temp_db();
+        let log = |mod_id: Option<&str>, cost: f64| {
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, prompt_tokens, completion_tokens, cost_usd, mod_id) \
+                 VALUES ('a/m', 'background', 10, 10, ?1, ?2)",
+                params![cost, mod_id],
+            )
+            .unwrap();
+        };
+        log(None, 1.0);
+        log(Some("acme.tool"), 0.25);
+        log(Some("acme.other"), 0.5);
+        let summary = build_cost_summary(&conn).unwrap();
+        assert!((summary.total_all_time_usd.unwrap() - 1.75).abs() < 1e-9);
+        assert!((summary.total_30d_usd.unwrap() - 1.75).abs() < 1e-9);
+        assert_eq!(summary.all_time[0].request_count, 3);
+        let theirs: f64 = summary.by_mod.iter().filter_map(|m| m.cost_usd).sum();
+        assert!((theirs - 0.75).abs() < 1e-9);
+    }
 }

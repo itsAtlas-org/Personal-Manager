@@ -187,6 +187,13 @@ pub fn civil_month(zone: Tz, now: DateTime<Utc>) -> String {
         .to_string()
 }
 
+/// The month `now` falls in for the person: [`civil_month`] in the zone PM has stored for them (UTC
+/// until one is stored). The one place a cap's month is read, so the booking, the listing and the
+/// roll all agree where the boundary is.
+pub fn current_month(conn: &Connection, now: DateTime<Utc>) -> String {
+    civil_month(crate::commands::resolve_zone(conn), now)
+}
+
 /// `YYYY-MM` with a month 01 to 12 and nothing else, so string order is calendar order.
 fn is_month(s: &str) -> bool {
     let b = s.as_bytes();
@@ -964,6 +971,27 @@ mod tests {
             .with_ymd_and_hms(2026, 12, 31, 20, 0, 0)
             .unwrap();
         assert_eq!(civil_month(chrono_tz::Asia::Tokyo, jan), "2027-01");
+    }
+
+    /// The month a cap counts in is read from the zone PM has stored for the person, not from UTC:
+    /// the same instant is November in one zone and December in another, and a junk or missing zone
+    /// is UTC.
+    #[test]
+    fn the_current_month_is_read_in_the_zone_pm_stored() {
+        let (_dir, conn) = store();
+        let at = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 30, 23, 30, 0)
+            .unwrap();
+        assert_eq!(current_month(&conn, at), "2026-11", "no zone stored: UTC");
+        let zone = |z: &str| {
+            crate::db::set_setting(&conn, crate::settings::TIME_ZONE_KEY, z).unwrap();
+        };
+        zone("Pacific/Auckland");
+        assert_eq!(current_month(&conn, at), "2026-12");
+        zone("America/Los_Angeles");
+        assert_eq!(current_month(&conn, at), "2026-11");
+        zone("not a zone");
+        assert_eq!(current_month(&conn, at), "2026-11", "junk reads as UTC");
     }
 
     // --- the cap --------------------------------------------------------------------------------

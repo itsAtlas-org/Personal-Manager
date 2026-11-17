@@ -1,29 +1,28 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The money prompt's sentences are placeholders until Bobby words them (plan Q8a): this holds that
-// every one carries the visible marker while `WORDING_PENDING` is on, and that the facts they are
-// built from pick the right sentence. When the wording is final, set the flag false and replace the
-// marker test below with the final texts.
+// The money prompt's final wording (Bobby's, 2026-11-17), and the facts that pick each sentence.
+// The model sentence names the whole Background list, local models included.
 
 import { describe, expect, it } from "vitest";
 
 import type { AiPromptInfo } from "../../lib/modsTypes";
-import { MONEY_PROMPT_WORDS as W, PENDING_MARK, WORDING_PENDING, say } from "./aiMoneyWords";
+import { MONEY_PROMPT_WORDS as W } from "./aiMoneyWords";
 
 const info = (extra: Partial<AiPromptInfo> = {}): AiPromptInfo => ({
   route: "cloud",
   paid: true,
   unpriced: false,
-  model: "a/b",
+  cloudModels: ["a/cheap", "b/dear"],
+  localModel: null,
   suggestedCapUsd: 1,
   ...extra,
 });
 
-describe("the money prompt's placeholder wording", () => {
-  it("is marked 'wording pending: Bobby' on every sentence while it is pending", () => {
-    expect(WORDING_PENDING).toBe(true);
-    expect(PENDING_MARK).toBe("[wording pending: Bobby]");
+const WHERE = "Settings → AI & Models";
+
+describe("the money prompt's wording", () => {
+  it("ships no placeholder mark on any sentence", () => {
     const all: string[] = [
       W.checking(),
       W.failed(),
@@ -34,26 +33,59 @@ describe("the money prompt's placeholder wording", () => {
       W.capHelp(),
       W.capInvalid(),
       ...(["cloud", "local", "local-then-cloud", "cloud-for-power", "none"] as const).map((route) =>
-        W.route(info({ route })),
+        W.models(info({ route, localModel: "llama" })),
       ),
       W.cost(info()),
       W.cost(info({ paid: false })),
       W.cost(info({ paid: false, unpriced: true })),
     ];
     expect(all.length).toBeGreaterThan(10);
-    for (const s of all) expect(s.startsWith(PENDING_MARK + " "), s).toBe(true);
-    expect(say("x")).toBe(`${PENDING_MARK} x`);
+    for (const s of all) {
+      expect(s, s).not.toMatch(/pending|\[|\]|—|–/);
+      expect(s.trim(), s).not.toBe("");
+    }
   });
 
-  it("names the route the facts name, and the model as the person set it", () => {
-    expect(W.route(info({ route: "cloud" }))).toContain("OpenRouter model (a/b)");
-    expect(W.route(info({ route: "local", model: "llama" }))).toContain("local model (llama)");
-    expect(W.route(info({ route: "local-then-cloud", model: "llama" }))).toContain(
-      "falls back to the cloud",
+  it("states the final texts of the fixed sentences", () => {
+    expect(W.intro()).toBe("This mod wants to ask an AI model to do things for it.");
+    expect(W.sends()).toBe(
+      "PM sends the text the mod writes to that model and nothing else of yours, and sends it only to providers that keep nothing.",
     );
-    expect(W.route(info({ route: "cloud-for-power" }))).toContain("On battery");
-    expect(W.route(info({ route: "none", model: null }))).toContain("No AI model");
-    expect(W.route(info({ route: "cloud", model: null }))).not.toContain("(");
+    expect(W.capLabel()).toBe("Monthly limit");
+    expect(W.capHelp()).toBe("You can change it any time in the Mods tab.");
+    expect(W.cost(info())).toBe("It can cost real money.");
+    expect(W.cost(info({ paid: false }))).toBe("A local model costs nothing.");
+  });
+
+  it("names the whole Background list, local included, and says a later change applies", () => {
+    expect(W.models(info({ route: "local-then-cloud", localModel: "llama" }))).toBe(
+      `It uses your Background models (${WHERE}), local ones included: a/cheap, b/dear and your local model llama. It tries your local model first. If you change them, it uses the new ones.`,
+    );
+    expect(W.models(info())).toBe(
+      `It uses your Background models (${WHERE}): a/cheap and b/dear. If you change them, it uses the new ones.`,
+    );
+    expect(W.models(info({ cloudModels: ["a/cheap"] }))).toBe(
+      `It uses your Background model (${WHERE}): a/cheap. If you change it, it uses the new one.`,
+    );
+    expect(
+      W.models(info({ route: "local", paid: false, cloudModels: [], localModel: "llama" })),
+    ).toBe(
+      `It uses your Background model (${WHERE}): your local model llama. If you change it, it uses the new one.`,
+    );
+  });
+
+  it("on battery says the list, then what applies now", () => {
+    const said = W.models(info({ route: "cloud-for-power", localModel: "llama" }));
+    expect(said).toContain("a/cheap, b/dear and your local model llama");
+    expect(said).toContain("You are on battery, so right now it uses only the cloud ones.");
+    expect(said.indexOf("local model llama")).toBeLessThan(said.indexOf("on battery"));
+  });
+
+  it("says plainly when no Background model is set up", () => {
+    const none = info({ route: "none", paid: false, cloudModels: [], localModel: null });
+    expect(W.models(none)).toBe(
+      `No Background model is set up yet, so its requests fail until you choose one in ${WHERE}.`,
+    );
   });
 
   it("says whether it can cost money from the facts, not from the route's name", () => {

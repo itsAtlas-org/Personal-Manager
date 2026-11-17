@@ -17,17 +17,21 @@ use crate::mods::ai as money;
 const MOD: &str = "acme.chat";
 const CLOUD: &[&str] = &["a/cheap", "b/dear"];
 
+/// `cloud` are the Background role's cloud models in order, `local` its local model: the names the
+/// prompt tells the person about, whatever the route is doing right now.
 fn info(
     route: PromptRoute,
     paid: bool,
     unpriced: bool,
-    model: Option<&str>,
+    cloud: &[&str],
+    local: Option<&str>,
 ) -> super::ai::PromptInfo {
     super::ai::PromptInfo {
         route,
         paid,
         unpriced,
-        model: model.map(str::to_owned),
+        cloud_models: cloud.iter().map(|m| (*m).to_owned()).collect(),
+        local_model: local.map(str::to_owned),
         suggested_cap_usd: 1.0,
     }
 }
@@ -52,32 +56,44 @@ async fn each_route_is_described_by_its_arms() {
     check(
         PlanSpec::None,
         None,
-        info(PromptRoute::None, false, false, None),
+        info(PromptRoute::None, false, false, &[], None),
     )
     .await;
     check(
         PlanSpec::Cloud(CLOUD),
         None,
-        info(PromptRoute::Cloud, true, false, Some("a/cheap")),
+        info(PromptRoute::Cloud, true, false, CLOUD, None),
     )
     .await;
     check(
         PlanSpec::Power(CLOUD),
         None,
-        info(PromptRoute::CloudForPower, true, false, Some("a/cheap")),
+        info(
+            PromptRoute::CloudForPower,
+            true,
+            false,
+            CLOUD,
+            Some("llama"),
+        ),
     )
     .await;
     for class in [Loopback, PrivateRemote] {
         check(
             PlanSpec::Local,
             Some(class),
-            info(PromptRoute::Local, false, false, Some("llama")),
+            info(PromptRoute::Local, false, false, &[], Some("llama")),
         )
         .await;
         check(
             PlanSpec::LocalThenCloud(CLOUD),
             Some(class),
-            info(PromptRoute::LocalThenCloud, true, false, Some("llama")),
+            info(
+                PromptRoute::LocalThenCloud,
+                true,
+                false,
+                CLOUD,
+                Some("llama"),
+            ),
         )
         .await;
     }
@@ -85,13 +101,19 @@ async fn each_route_is_described_by_its_arms() {
         check(
             PlanSpec::Local,
             class,
-            info(PromptRoute::Local, false, true, Some("llama")),
+            info(PromptRoute::Local, false, true, &[], Some("llama")),
         )
         .await;
         check(
             PlanSpec::LocalThenCloud(CLOUD),
             class,
-            info(PromptRoute::LocalThenCloud, false, true, Some("llama")),
+            info(
+                PromptRoute::LocalThenCloud,
+                false,
+                true,
+                CLOUD,
+                Some("llama"),
+            ),
         )
         .await;
     }
@@ -120,14 +142,21 @@ async fn only_a_local_arm_is_looked_up_and_nothing_is_refreshed() {
 /// The page reads these field names; a rename here is a break there.
 #[test]
 fn the_answer_is_camel_case_with_kebab_routes() {
-    let cloud = info(PromptRoute::CloudForPower, true, false, Some("a/b"));
+    let cloud = info(
+        PromptRoute::CloudForPower,
+        true,
+        false,
+        &["a/b", "c/d"],
+        Some("llama"),
+    );
     assert_eq!(
         serde_json::to_value(&cloud).unwrap(),
         json!({
             "route": "cloud-for-power",
             "paid": true,
             "unpriced": false,
-            "model": "a/b",
+            "cloudModels": ["a/b", "c/d"],
+            "localModel": "llama",
             "suggestedCapUsd": 1.0,
         })
     );
@@ -139,7 +168,9 @@ fn the_answer_is_camel_case_with_kebab_routes() {
     ] {
         assert_eq!(serde_json::to_value(route).unwrap(), json!(word));
     }
-    assert_eq!(describe(None, None).model, None);
+    let none = describe(None, None);
+    assert!(none.cloud_models.is_empty());
+    assert_eq!(none.local_model, None);
     assert_eq!(money::SUGGESTED_CAP_USD, 1.0);
 }
 
@@ -215,4 +246,50 @@ async fn the_prompt_and_the_call_agree_on_what_costs_money() {
             (_, true, true) => panic!("{label}: paid and unpriced at once"),
         }
     }
+}
+
+/// The prompt names the models the route will really use, as the person set them and in the order
+/// the call tries them; a blank name (a hand-edited setting) is not a model and is not told. On
+/// battery the policy's route has no local arm, but the local model it set aside is still named,
+/// so the sentence stays true if the person unplugs.
+#[test]
+fn the_models_told_are_the_routes_own_names_in_order_with_blanks_left_out() {
+    use crate::llm_gateway::{CloudArm, LocalArm, RoutePlan};
+    use crate::secret::Secret;
+    let cloud = |models: &[&str]| CloudArm {
+        key: Secret::from("k".to_string()),
+        models: models.iter().map(|m| (*m).to_owned()).collect(),
+    };
+    let local = |model: &str| LocalArm {
+        base_url: "http://127.0.0.1:1".into(),
+        model: model.into(),
+        token: None,
+    };
+    let told = |plan: RoutePlan| {
+        let said = describe(Some(&plan), Some(EndpointClass::Loopback));
+        (said.cloud_models, said.local_model)
+    };
+    let names = |v: &[&str]| v.iter().map(|m| (*m).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        told(RoutePlan::Cloud(cloud(&["z/last", "", "a/first", "  "]))),
+        (names(&["z/last", "a/first"]), None)
+    );
+    assert_eq!(
+        told(RoutePlan::LocalOnly(local("llama"))),
+        (names(&[]), Some("llama".to_owned()))
+    );
+    assert_eq!(
+        told(RoutePlan::LocalThenCloud {
+            local: local(" "),
+            cloud: cloud(&["a/b"]),
+        }),
+        (names(&["a/b"]), None)
+    );
+    assert_eq!(
+        told(RoutePlan::CloudForPower {
+            cloud: cloud(&["a/b", "c/d"]),
+            displaced_local_model: "llama".into(),
+        }),
+        (names(&["a/b", "c/d"]), Some("llama".to_owned()))
+    );
 }

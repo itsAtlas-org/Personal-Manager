@@ -236,7 +236,7 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     // Which slots have a key: names, hosts and headers only, never the value column.
     let bound = secrets::bound_pairs(conn)?;
     // The limits and the month's use, by the cap's own rule for the month (`mods::ai::month_use`).
-    let month = money::civil_month(crate::commands::resolve_zone(conn), Utc::now());
+    let month = money::current_month(conn, Utc::now());
     let ledgers = money::read_ledgers(conn, &month)?;
     let mut out: Vec<ModDto> = rows
         .iter()
@@ -1131,7 +1131,7 @@ mod tests {
         let listed = list(&c, &CTX).unwrap();
         assert_eq!(listed[0].ai_cap_usd, None, "no limit until one is set");
         assert_eq!(listed[0].ai_spent_usd, 0.0);
-        let now = money::civil_month(crate::commands::resolve_zone(&c), Utc::now());
+        let now = money::current_month(&c, Utc::now());
         assert_eq!(listed[0].ai_month, now);
         c.execute(
             "UPDATE mods SET ai_cap_usd = 2.0, ai_spent_usd = 0.5, ai_month = ?1",

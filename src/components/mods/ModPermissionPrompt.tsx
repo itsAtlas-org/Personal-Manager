@@ -16,8 +16,7 @@
 // take (`mod_ai_prompt_info`: the person's own settings, not anything the mod said) and, when the
 // route can cost money, shows a monthly limit field that rides with the Allow, written in the same
 // transaction as the grant. A route that costs nothing asks for no limit, so a mod moved to a paid
-// route later is asked then (the call's own state check). Its sentences are in `aiMoneyWords`
-// (wording pending: Bobby).
+// route later is asked then (the call's own state check). Its sentences are in `aiMoneyWords`.
 
 import { useEffect, useLayoutEffect, useState } from "react";
 import { modAiPromptInfo } from "../../lib/ipc";
@@ -152,7 +151,7 @@ export function ModPermissionPrompt({
             {info && (
               <>
                 <p>{WORDS.intro()}</p>
-                <p>{WORDS.route(info)}</p>
+                <p>{WORDS.models(info)}</p>
                 <p>{WORDS.sends()}</p>
                 <p className="font-medium text-ink">{WORDS.cost(info)}</p>
                 {needsCap && (
@@ -162,14 +161,19 @@ export function ModPermissionPrompt({
                     error={cap === null ? WORDS.capInvalid() : undefined}
                   >
                     {(controlProps) => (
-                      <Input
-                        {...controlProps}
-                        inputMode="decimal"
-                        autoComplete="off"
-                        value={capText}
-                        disabled={working}
-                        onChange={(e) => setCapText(e.target.value)}
-                      />
+                      <div className="flex items-center gap-2">
+                        <span aria-hidden="true" className="text-ink3">
+                          $
+                        </span>
+                        <Input
+                          {...controlProps}
+                          inputMode="decimal"
+                          autoComplete="off"
+                          value={capText}
+                          disabled={working}
+                          onChange={(e) => setCapText(e.target.value)}
+                        />
+                      </div>
                     )}
                   </Field>
                 )}
@@ -181,8 +185,10 @@ export function ModPermissionPrompt({
           <p className="text-ink3">Nobody has checked this mod, so PM can&apos;t vouch for it.</p>
         )}
         <p className="text-xs text-ink3">
-          You can change this whenever you like in the Mods tab. &ldquo;Not now&rdquo; leaves it
-          unanswered and the mod is told it doesn&apos;t have permission yet.
+          {/* The limit field says this itself; once is enough. */}
+          {needsCap ? "" : "You can change this whenever you like in the Mods tab. "}
+          &ldquo;Not now&rdquo; leaves it unanswered and the mod is told it doesn&apos;t have
+          permission yet.
         </p>
         {error && <Callout size="md">{error}</Callout>}
       </div>

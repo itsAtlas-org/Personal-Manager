@@ -1047,7 +1047,8 @@ describe("the first-use question", () => {
       route: "cloud",
       paid: true,
       unpriced: false,
-      model: "a/b",
+      cloudModels: ["a/b"],
+      localModel: null,
       suggestedCapUsd: 1,
     });
     modCall.mockResolvedValueOnce(NEEDS_AI).mockResolvedValueOnce(VALUE);
@@ -1079,7 +1080,8 @@ describe("the first-use question", () => {
       route: "cloud",
       paid: true,
       unpriced: false,
-      model: "a/b",
+      cloudModels: ["a/b"],
+      localModel: null,
       suggestedCapUsd: 1,
     });
     modCall.mockResolvedValue(NEEDS_AI);

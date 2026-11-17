@@ -255,6 +255,54 @@ async fn without_the_grant_the_call_is_asked_about_before_the_route_is_read() {
     assert_eq!(host.model().entered(), 0);
 }
 
+/// Who is asked about the AI before its first call, on a route that costs nothing: a first-party
+/// mod is not (its cell is `Auto`), a second-party mod and an unsigned one always are, and the
+/// model is never reached for the two that are asked. On a paid route with no limit set, all three
+/// are asked for the limit, the first-party one included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_first_party_mod_runs_on_a_free_route_without_being_asked() {
+    for (tier, signed, asked) in [
+        ("first", true, false),
+        ("second", true, true),
+        ("third", false, true),
+    ] {
+        let host = TestHost::new();
+        let row = if signed {
+            ModRow::signed(MOD, tier, &["ai"])
+        } else {
+            ModRow::unsigned(MOD, &["ai"])
+        };
+        host.sql(|c| insert_mod(c, &row));
+        serve(&host, MOD);
+        let s = live_session(&host, MOD, crate::mods::outbox::testing::discarding());
+        // No grant row: nothing was ever answered.
+        host.model().set_plan(PlanSpec::Local);
+        let free = dispatched(&host, &s, ask("hi", 10)).await;
+        if asked {
+            let e = error(free);
+            assert_eq!(
+                (e.code, e.permission),
+                (Code::NeedsPrompt, Some("ai")),
+                "{tier}"
+            );
+            assert_eq!(host.model().entered(), 0, "{tier}");
+        } else {
+            value(free);
+            assert_eq!(host.model().entered(), 1, "{tier}");
+        }
+        // A paid route asks for a limit whoever the mod is.
+        price(&host, "a/cheap", 1e-6, 2e-6);
+        host.model().set_plan(PlanSpec::Cloud(&["a/cheap"]));
+        let paid = error(call(&host, &s, ask("hi", 10)).await);
+        assert_eq!(
+            (paid.code, paid.permission),
+            (Code::NeedsPrompt, Some("ai")),
+            "{tier}"
+        );
+        assert_eq!(ledger(&host), (None, 0.0), "{tier}");
+    }
+}
+
 /// A priced route with no cap asks again, whatever was granted before (the state decides): the
 /// mod is moved from a free route to a paid one and is asked then. The model is never reached and
 /// nothing is booked.

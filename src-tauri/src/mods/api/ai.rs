@@ -494,8 +494,13 @@ pub struct PromptInfo {
     /// PM cannot price the route (a public "local" endpoint, or no arm it can name): every call is
     /// refused with "price unknown" (MOD-5005), so a limit would change nothing.
     pub unpriced: bool,
-    /// The model the call would try first: the person's own setting.
-    pub model: Option<String>,
+    /// The Background role's cloud models, in the order the call uses them (what the route will
+    /// send, so with auto-switch off just the first of the person's list). Empty when the route
+    /// has no cloud arm. Plain text the person chose, never anything the mod supplied.
+    pub cloud_models: Vec<String>,
+    /// The Background role's local model, when Local AI is on and the role uses it. On battery it
+    /// is the model the policy set aside, so the prompt can still name it.
+    pub local_model: Option<String>,
     /// The limit the prompt starts from.
     pub suggested_cap_usd: f64,
 }
@@ -511,7 +516,8 @@ pub(crate) fn describe(plan: Option<&RoutePlan>, local_class: Option<EndpointCla
             route: PromptRoute::None,
             paid: false,
             unpriced: false,
-            model: None,
+            cloud_models: Vec::new(),
+            local_model: None,
             suggested_cap_usd,
         };
     };
@@ -522,11 +528,24 @@ pub(crate) fn describe(plan: Option<&RoutePlan>, local_class: Option<EndpointCla
         RoutePlan::LocalThenCloud { .. } => PromptRoute::LocalThenCloud,
         RoutePlan::CloudForPower { .. } => PromptRoute::CloudForPower,
     };
+    let named = |m: &String| !m.trim().is_empty();
+    let (cloud_models, local_model) = match plan {
+        RoutePlan::Cloud(cloud) => (cloud.models.clone(), None),
+        RoutePlan::LocalOnly(local) => (Vec::new(), Some(local.model.clone())),
+        RoutePlan::LocalThenCloud { local, cloud } => {
+            (cloud.models.clone(), Some(local.model.clone()))
+        }
+        RoutePlan::CloudForPower {
+            cloud,
+            displaced_local_model,
+        } => (cloud.models.clone(), Some(displaced_local_model.clone())),
+    };
     PromptInfo {
         route,
         paid: cost.is_cloud(),
         unpriced: cost == money::RouteCost::Unpriced,
-        model: Some(plan.primary_model_id().to_owned()).filter(|m| !m.is_empty()),
+        cloud_models: cloud_models.into_iter().filter(named).collect(),
+        local_model: local_model.filter(named),
         suggested_cap_usd,
     }
 }
@@ -586,7 +605,7 @@ fn reserve<H: Host>(
         money::model_price(&conn, m)
     })
     .map_err(|_| ModError::price_unknown())?;
-    let month = money::civil_month(crate::commands::resolve_zone(&conn), chrono::Utc::now());
+    let month = money::current_month(&conn, chrono::Utc::now());
     let reservation = money::reserve(
         &mut conn,
         epoch,

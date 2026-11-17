@@ -250,8 +250,10 @@ export interface AiPromptInfo {
   route: AiPromptRoute;
   paid: boolean;
   unpriced: boolean;
-  /** The model the call would try first (the person's own setting). */
-  model: string | null;
+  /** The Background role's cloud models, in the order the call uses them. Empty with no cloud arm. */
+  cloudModels: string[];
+  /** The Background role's local model (on battery, the one the policy set aside), or none. */
+  localModel: string | null;
   suggestedCapUsd: number;
 }
 
