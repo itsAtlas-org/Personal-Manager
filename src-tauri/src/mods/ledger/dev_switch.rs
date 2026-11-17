@@ -32,7 +32,6 @@ use super::{read_rows, Ledger, LedgerError, LedgerStore, Mint, ServeCheck};
 use crate::mods::devmode;
 use crate::mods::runtime::ModRuntime;
 use crate::mods::safety::SafetyCheck;
-use crate::mods::tab::device;
 use crate::AppState;
 
 /// What switching developer mode did.
@@ -55,11 +54,12 @@ impl<S: LedgerStore> Ledger<'_, S> {
     /// load, under the ledger lock.
     pub fn set_dev_mode_for_device(
         &self,
-        device: &str,
+        device: &devmode::Here,
         on: bool,
         check: &dyn ServeCheck,
         now: DateTime<Utc>,
     ) -> Result<DevSwitch, LedgerError> {
+        self.bound_to(device)?;
         let _ledger = self.runtime.ledger_lock();
         // The record first: a write that fails changes nothing.
         let now_on = self.with_conn(|c| Ok(devmode::write(c, device, on)?))?;
@@ -88,12 +88,17 @@ impl<S: LedgerStore> Ledger<'_, S> {
 }
 
 /// Whether developer mode is on for this device in the open store: the device's id (a file read,
-/// done before the store is touched) against the store's record. Any failure is off, logged.
+/// done before the store is touched) against the store's record AND the device's own record. Any
+/// failure is off, logged.
 pub fn on_here(app: &AppHandle, state: &AppState) -> bool {
     let device = match crate::paths::data_dir(app)
         .map_err(|e| e.to_string())
-        .and_then(|d| device::device_id(&d).map_err(|e| e.to_string()))
-    {
+        .and_then(|d| {
+            let vault = state
+                .active_vault_id()
+                .ok_or_else(|| "no vault is open".to_owned())?;
+            devmode::Here::open(&d, &vault).map_err(|e| e.to_string())
+        }) {
         Ok(device) => device,
         Err(e) => {
             eprintln!("mods: this device couldn't be named, so developer mode is off ({e})");
@@ -122,7 +127,11 @@ pub fn set_dev_mode_for_this_device(
     cached: Option<&crate::mods::index::Index>,
 ) -> Result<DevSwitch, LedgerError> {
     let data_dir = crate::paths::data_dir(app).map_err(|e| LedgerError::Store(e.to_string()))?;
-    let device = device::device_id(&data_dir).map_err(LedgerError::Disk)?;
+    let vault = app
+        .state::<AppState>()
+        .active_vault_id()
+        .ok_or_else(|| LedgerError::Store("no vault is open".into()))?;
+    let device = devmode::Here::open(&data_dir, &vault).map_err(LedgerError::Disk)?;
     let check = SafetyCheck::serve(cached);
     let switched = super::with_active_ledger(app, Mint::IfRows, |ledger| {
         ledger.set_dev_mode_for_device(&device, on, &check, Utc::now())
@@ -139,6 +148,9 @@ pub fn set_dev_mode_for_this_device(
     let mut conn = state
         .conn()
         .map_err(|e| LedgerError::Store(e.to_string()))?;
+    if state.active_vault_id().as_deref() != Some(device.vault()) {
+        return Err(LedgerError::VaultChanged);
+    }
     let now_on = devmode::write(&mut conn, &device, on)?;
     runtime.set_unsigned_allowed(now_on);
     Ok(DevSwitch {

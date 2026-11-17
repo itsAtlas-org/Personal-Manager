@@ -141,6 +141,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
     ) -> Result<FChecked, LedgerError> {
         let m = &scan.pkg.manifest;
         // Developer mode, read here by Rust for this device, in the open store.
+        self.bound_to(opts.device)?;
         if !self.with_conn(|c| Ok(devmode::is_on(c, opts.device)?))? {
             return Err(Refusal::DevModeOff.into());
         }
@@ -213,6 +214,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         };
         let served = folder::served(scan).map_err(LedgerError::Disk)?;
         let expected = current.as_ref().map(|c| &c.pinned);
+        self.bound_to(opts.device)?;
         let Committed { state, consented } =
             self.with_conn(|c| commit_folder(c, &write, opts.device, expected))?;
         // The session is what lets the load serve the row, so it is recorded before the registry.
@@ -436,7 +438,7 @@ fn manifest_text(scan: &Scan) -> Result<String, LedgerError> {
 fn commit_folder(
     conn: &mut Connection,
     w: &RowWrite<'_>,
-    device: &str,
+    device: &devmode::Here,
     expected: Option<&Pinned>,
 ) -> Result<Committed, LedgerError> {
     let tx = conn.transaction()?;

@@ -33,6 +33,7 @@ use super::listing;
 use super::stage::{self, Staged, Trust};
 use crate::mods::api::grants;
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
+use crate::mods::devmode;
 use crate::mods::ids::ModId;
 use crate::mods::index::Index;
 use crate::mods::ledger::{
@@ -48,7 +49,7 @@ pub struct UnsignedEnv<'a> {
     pub now: DateTime<Utc>,
     pub index: Option<&'a Index>,
     pub engine_sealed: bool,
-    pub device: &'a str,
+    pub device: &'a devmode::Here,
 }
 
 impl<'a> UnsignedEnv<'a> {

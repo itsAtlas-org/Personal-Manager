@@ -11,7 +11,7 @@
 //! and says why when it can't; and no package ever installs over a folder.
 
 use super::*;
-use crate::mods::devmode;
+use crate::mods::devmode::{self, test_here};
 use crate::mods::folder::tests::{edit_manifest, tool_folder, write_files};
 use crate::mods::folder::{self, Scan};
 use crate::mods::index::Index;
@@ -36,7 +36,7 @@ const OTHER_DEVICE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn dev(w: &World, device: &str, on: bool) {
     let mut c = w.store.conn.lock().unwrap();
-    devmode::write(&mut c, device, on).unwrap();
+    devmode::write(&mut c, test_here(device), on).unwrap();
 }
 
 /// Developer mode on for this device, in the store and in the registry's copy.
@@ -47,7 +47,7 @@ fn dev_on(w: &World) {
 
 fn uopts(index: Option<&Index>) -> UnsignedOptions<'_> {
     UnsignedOptions {
-        device: DEVICE,
+        device: test_here(DEVICE),
         index,
     }
 }
@@ -596,7 +596,7 @@ fn switching_developer_mode_off_unloads_every_folder_and_on_does_not_bring_them_
 
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all, now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all, now())
         .unwrap();
     assert_eq!(done.unloaded, vec!["acme.tool".to_owned()]);
     assert_eq!(done.paused, vec!["acme.other".to_owned()]);
@@ -618,7 +618,7 @@ fn switching_developer_mode_off_unloads_every_folder_and_on_does_not_bring_them_
     // On again: the file mod comes back, the folder does not.
     let back = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, true, &serve_all, now())
+        .set_dev_mode_for_device(test_here(DEVICE), true, &serve_all, now())
         .unwrap();
     assert_eq!(back.resumed, vec!["acme.other".to_owned()]);
     assert!(back.unloaded.is_empty());
@@ -1005,7 +1005,7 @@ fn env<'a>(index: Option<&'a Index>) -> UnsignedEnv<'a> {
         now: now(),
         index,
         engine_sealed: true,
-        device: DEVICE,
+        device: test_here(DEVICE),
     }
 }
 
@@ -1344,12 +1344,17 @@ fn a_restore_swapping_the_store_under_a_loaded_folder_ends_it_and_serves_none_of
     let frame = live_frame(&w, "acme.tool");
     {
         let c = w.store.conn.lock().unwrap();
-        crate::backup::adopt_mods::reset_for_adopt(&c).unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(
+            &c,
+            test_here(DEVICE).dir(),
+            devmode::TEST_VAULT,
+        )
+        .unwrap();
     }
     // The open that follows looks developer mode up (off for everyone after the reset) and loads.
     w.runtime.set_unsigned_allowed({
         let c = w.store.conn.lock().unwrap();
-        devmode::is_on(&c, DEVICE).unwrap()
+        devmode::is_on(&c, test_here(DEVICE)).unwrap()
     });
     let report = w.ledger().startup(now(), &serve_all);
     assert!(report.skipped.is_none());

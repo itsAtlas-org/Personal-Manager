@@ -277,7 +277,8 @@ fn write_fixture(dir: &Path) {
 fn load(host: &TestHost, dir: &Path) {
     {
         let mut conn = host.store().conn().unwrap();
-        crate::mods::devmode::write(&mut conn, DEVICE, true).unwrap();
+        crate::mods::devmode::write(&mut conn, crate::mods::devmode::test_here(DEVICE), true)
+            .unwrap();
     }
     host.runtime().set_unsigned_allowed(true);
     let scan = folder::scan(dir, true).unwrap();
@@ -286,7 +287,7 @@ fn load(host: &TestHost, dir: &Path) {
             .load_folder(
                 &scan,
                 &UnsignedOptions {
-                    device: DEVICE,
+                    device: crate::mods::devmode::test_here(DEVICE),
                     index: None,
                 },
                 chrono::Utc::now(),

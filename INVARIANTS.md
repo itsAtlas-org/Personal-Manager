@@ -780,23 +780,39 @@ holds a differently-separated value, `tab::device::credential`, and a record in 
 reads as off), never a vault-wide switch, so a restore onto another machine, a joined shared vault or a copied database carries no
 "on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
 or writes it, and **nothing but a record that lists the device switches it on, ever**: asking
-(`devmode::is_on`) is a pure read, so a vault with no record is off for every device, and a record
-that is deleted (by a member of a shared vault, who holds the store key) leaves everyone off. The
+(`devmode::is_on`) writes only toward off (below), so a vault with no record is off for every
+device, and a record that is deleted (by a member of a shared vault, who holds the store key) leaves
+everyone off. The
 old webview-written `dev_mode` row is out of the page's allow-list and is **never read** (an earlier
 build carried an old "on" over to the first device that asked, which made a deleted record plus a
 written old row switch a victim's device on with no click: unsigned mods the victim had paused
 resumed and the install gate opened; removed, so upgrading turns developer mode off once and each
 person switches it on again in Settings > Developer). Rust writes the old row in one place only: the
 restore reset (`devmode::all_devices_off`, which also writes an empty record) sets it `"false"` for
-an older PM sharing the vault. A shared-vault join writes nothing (I-32). **Known limit:** a
-listed credential is a bearer value (a one-way hash of the device id, no device-held secret), so a
-store writer who has ever read this device's credential (it sits in the record while the device is
-on; an old copy of the store keeps it) can write it back after the device was switched off or
-reset, and the device is on again with no click. The record is trustworthy only against a writer who
-has never seen this device's credential. A keyed MAC over each entry would not close that (a
-replayed entry still verifies); the device itself must remember whether it is on, so closing it
-means keeping the on/off answer on the device (`data_dir`, per vault) instead of in the store, an
-open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+an older PM sharing the vault. A shared-vault join writes nothing (I-32). **The device remembers too.** A listed credential is a bearer value (a
+one-way hash of the device id, no device-held secret), so the store's record alone could be replayed:
+a store writer who had ever read this device's credential (it sits in the record while the device is
+on; an old copy of the store keeps it) could write it back after the device was switched off or
+reset. So the store's record is only half the answer. The other half is `data_dir/mods-dev-mode.json`
+(versioned, the ids of the vaults this device switched on, written atomically, at most 16 KiB and 64
+entries): developer mode is on for this device in this vault **only if both say so**, the store's
+record lists the device's credential AND the device's file lists the open vault's id
+(`devmode::Here`, built from `data_dir`, the device id file and `AppState::active_vault_id`; the
+ledger refuses a device named in another vault than its own, `Ledger::bound_to`). Missing, unreadable,
+corrupt, oversized or capped out is off, for every vault. Switching on writes the store's record then
+the device's file, off writes the device's file then the store's record, so a crash between leaves it
+off. **The store can only ever turn it off:** whenever a read finds the store's record does not list
+this device (a record without it, or none), `is_on` clears the vault from the device's file (best
+effort; a failed clear still answers off), so a restore or reset that removed the device can't be
+undone later by writing an old credential back; the restore reset (`devmode::all_devices_off`,
+which `reset_for_adopt` runs last, inside its transaction, with `data_dir` and the restored vault's
+id) clears it directly and fails, refusing the restore, if it can't. A copied database, a restore, a
+joined vault or another machine has no entry in the device's file, so it is off there. Held: a store
+writer, whatever they have read or kept, can never switch this device on. Not held, and out of scope
+as for every file kept in `data_dir`: someone who can write this computer's `data_dir` can write the
+device's file (and the device id file) as they like. Upgrading from a build that kept the answer in
+the store alone turns developer mode off once more (there is no device file yet); each person
+switches it on again in Settings > Developer. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row

@@ -156,13 +156,13 @@ fn only_the_users_resume_lifts_it_and_the_safety_list_still_has_its_say() {
 
 #[test]
 fn developer_mode_off_pauses_an_unsigned_mod_and_on_does_not_resume_a_frozen_one() {
-    use crate::mods::devmode;
+    use crate::mods::devmode::{self, test_here};
     use crate::mods::package::tests::unsigned_package;
     const DEVICE: &str = "dddddddddddddddddddddddddddddddd";
     let w = world();
     {
         let mut c = w.store.conn.lock().unwrap();
-        devmode::write(&mut c, DEVICE, true).unwrap();
+        devmode::write(&mut c, test_here(DEVICE), true).unwrap();
     }
     w.runtime.set_unsigned_allowed(true);
     let file = unsigned_package(|_, _| {});
@@ -172,7 +172,7 @@ fn developer_mode_off_pauses_an_unsigned_mod_and_on_does_not_resume_a_frozen_one
             &pkg,
             &hex::encode(Sha256::digest(&file)),
             &UnsignedOptions {
-                device: DEVICE,
+                device: test_here(DEVICE),
                 index: None,
             },
             now(),
@@ -182,7 +182,7 @@ fn developer_mode_off_pauses_an_unsigned_mod_and_on_does_not_resume_a_frozen_one
     w.ledger().pause_frozen(&tool, now()).unwrap();
     for on in [false, true] {
         w.ledger()
-            .set_dev_mode_for_device(DEVICE, on, &serve_all, now())
+            .set_dev_mode_for_device(test_here(DEVICE), on, &serve_all, now())
             .unwrap();
         assert_eq!(
             w.sql::<String>("SELECT state || ':' || state_reason FROM mods"),

@@ -168,6 +168,15 @@ impl From<rusqlite::Error> for LedgerError {
     }
 }
 
+impl From<crate::mods::devmode::Error> for LedgerError {
+    fn from(e: crate::mods::devmode::Error) -> Self {
+        match e {
+            crate::mods::devmode::Error::Db(e) => Self::Db(e),
+            crate::mods::devmode::Error::Disk(e) => Self::Disk(e),
+        }
+    }
+}
+
 impl From<Refusal> for LedgerError {
     fn from(r: Refusal) -> Self {
         Self::Refused(r)
@@ -496,6 +505,16 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
     ) -> Result<T, LedgerError> {
         self.store.with_conn(self.layout, f)
+    }
+
+    /// The device was named in the vault this ledger is for: its developer-mode answer is that
+    /// vault's, so a device named before a vault switch never answers for the store after it.
+    pub(crate) fn bound_to(&self, device: &super::devmode::Here) -> Result<(), LedgerError> {
+        if device.vault() == self.layout.vault_id() {
+            Ok(())
+        } else {
+            Err(LedgerError::VaultChanged)
+        }
     }
 
     /// The folders this ledger writes to.

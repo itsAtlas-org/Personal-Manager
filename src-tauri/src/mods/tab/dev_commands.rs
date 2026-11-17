@@ -25,7 +25,6 @@ use tauri::{AppHandle, Emitter, Manager, Webview};
 
 use super::commands::{blocking, current_epoch, with_ledger, with_token, View};
 use super::consent::Answers;
-use super::device;
 use super::error::{Code, ModsError, Result};
 use super::install::{self, ConsentScreen, Finished};
 use super::stage::Staged;
@@ -55,9 +54,15 @@ pub struct DevModeState {
     pub problem: Option<String>,
 }
 
-pub(super) fn this_device(app: &AppHandle) -> Result<String> {
+/// This device in the open vault (the file read for the id happens before the store is touched).
+/// No store open is the typed refusal, so nothing is answered for a vault that isn't there.
+pub(super) fn this_device(app: &AppHandle) -> Result<devmode::Here> {
     let data_dir = crate::paths::data_dir(app).map_err(ModsError::internal)?;
-    device::device_id(&data_dir).map_err(ModsError::internal)
+    let vault = app
+        .state::<AppState>()
+        .active_vault_id()
+        .ok_or_else(ModsError::no_store)?;
+    devmode::Here::open(&data_dir, &vault).map_err(ModsError::internal)
 }
 
 /// The refusal an unsigned file gets while developer mode is off (pure).
@@ -70,7 +75,7 @@ pub fn dev_mode_off() -> ModsError {
 }
 
 /// Developer mode on for `device` in the open store, or the typed refusal. Reads the store's record.
-pub(super) fn require_dev_mode(app: &AppHandle, device: &str) -> Result<()> {
+pub(super) fn require_dev_mode(app: &AppHandle, device: &devmode::Here) -> Result<()> {
     let state = app.state::<AppState>();
     let conn = state.conn().map_err(|_| ModsError::no_store())?;
     if devmode::is_on(&conn, device).map_err(ModsError::internal)? {
@@ -94,6 +99,7 @@ pub async fn dev_mode_state(webview: Webview) -> Result<DevModeState> {
         }
         let device = match this_device(&app) {
             Ok(d) => d,
+            Err(e) if e.code == Code::NoStore => return Err(e),
             Err(_) => {
                 return Ok(DevModeState {
                     on: false,

@@ -52,8 +52,8 @@ use crate::mods::{safety, store};
 
 /// What an unsigned install is checked against.
 pub struct UnsignedOptions<'a> {
-    /// This device's id (`tab::device::device_id`): developer mode is per device.
-    pub device: &'a str,
+    /// This device in the open vault (`devmode::Here`): developer mode is per device and per vault.
+    pub device: &'a devmode::Here,
     /// The cached safety list, for the catalogue's ids and the blacklist.
     pub index: Option<&'a Index>,
 }
@@ -150,6 +150,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
             }));
         }
         // Developer mode, read here by Rust for this device, in the open store.
+        self.bound_to(opts.device)?;
         if !self.with_conn(|c| Ok(devmode::is_on(c, opts.device)?))? {
             return Err(Refusal::DevModeOff.into());
         }
@@ -237,6 +238,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
             .map_err(LedgerError::Disk)?;
         let installed = InstalledMod::from_package(pkg, placed.dir()).map_err(LedgerError::Disk)?;
         let expected = current.as_ref().map(|c| &c.pinned);
+        self.bound_to(opts.device)?;
         let Committed { state, consented } =
             self.with_conn(|c| commit_unsigned(c, &write, opts.device, expected))?;
         placed.keep();
@@ -269,7 +271,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
 pub(super) fn commit_unsigned(
     conn: &mut Connection,
     w: &RowWrite<'_>,
-    device: &str,
+    device: &devmode::Here,
     expected: Option<&Pinned>,
 ) -> Result<Committed, LedgerError> {
     let tx = conn.transaction()?;
