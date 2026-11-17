@@ -65,6 +65,16 @@ fn tool_dir() -> tempfile::TempDir {
     tool_dir_with(|_, _| {})
 }
 
+/// The fixture with the one key slot [`give_it_things`] stores a key for (`token`).
+fn declare_the_token_slot(m: &mut Value, _files: &mut BTreeMap<String, Vec<u8>>) {
+    m["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "internet", "why": "Fetches things."}));
+    m["internetHosts"] = json!(["api.example.com"]);
+    m["secrets"] = json!([{"name": "token", "host": "api.example.com", "header": "Authorization"}]);
+}
+
 fn tool_dir_with(
     change: impl FnOnce(&mut Value, &mut BTreeMap<String, Vec<u8>>),
 ) -> tempfile::TempDir {
@@ -699,7 +709,8 @@ fn reload(w: &World, dir: &Path) -> Result<Reloaded, LedgerError> {
 fn a_reload_picks_up_an_edit_keeps_grants_and_install_id_and_restarts_the_frame() {
     let w = world();
     dev_on(&w);
-    let dir = tool_dir();
+    // The key's slot is still declared, so the reload keeps the key.
+    let dir = tool_dir_with(declare_the_token_slot);
     load(&w, dir.path(), None).unwrap();
     give_it_things(&w);
     let id_before = install_id(&w);
@@ -724,6 +735,35 @@ fn a_reload_picks_up_an_edit_keeps_grants_and_install_id_and_restarts_the_frame(
         serde_json::from_str(&w.sql::<String>("SELECT files FROM mods")).unwrap();
     let main = files.iter().find(|f| f.path == "app/main.js").unwrap();
     assert_eq!(main.size, "console.log('edited');".len() as u64);
+}
+
+/// A key whose slot the developer dropped goes with the reload: it would otherwise sit in the store
+/// where the person can neither see nor clear it. A key whose slot is kept stays.
+#[test]
+fn a_reload_that_drops_a_key_slot_deletes_the_key_and_one_that_keeps_it_does_not() {
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir_with(declare_the_token_slot);
+    load(&w, dir.path(), None).unwrap();
+    give_it_things(&w);
+    let keys = |w: &World| w.sql::<i64>("SELECT count(*) FROM mod_secrets");
+    // An edit elsewhere: the slot is the same, so is the key.
+    fs::write(dir.path().join("app/main.js"), "console.log('edited');").unwrap();
+    assert!(reload(&w, dir.path()).unwrap().changed);
+    assert_eq!(keys(&w), 1);
+    // The slot is dropped: asking for less, so the reload is allowed.
+    edit_manifest(dir.path(), |m| {
+        m["secrets"] = json!([]);
+    });
+    assert!(reload(&w, dir.path()).unwrap().changed);
+    assert_eq!(
+        keys(&w),
+        0,
+        "the orphaned key went in the reload's transaction"
+    );
+    // Nothing else of the mod's was touched.
+    assert_eq!(grants_of(&w, "acme.tool").len(), 1);
+    assert_eq!(things_left(&w), 2);
 }
 
 #[test]

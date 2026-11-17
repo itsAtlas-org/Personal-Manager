@@ -26,8 +26,15 @@
 //!   toward the cap until the month ends (plan decision 4): deleting it after N hours would turn a
 //!   crash into a way to unspend. Only the month roll, or the call itself, removes one.
 //! - **The month never rolls backwards.** A stored month later than today's (a fast laptop clock,
-//!   then corrected) never resets a cap, so a wrong clock cannot clear spend. A month that is
+//!   then corrected) never resets a cap, so a clock set BACK cannot clear spend. A month that is
 //!   missing or unreadable is adopted as the current one with the spend kept.
+//! - **A clock that runs FAST does clear the month early, and the ledger stays on that month.** PM
+//!   trusts its own clock: a forward jump (a laptop clock hours or a mistyped year ahead) rolls the
+//!   month at once, erasing the spend of the month it skipped, and the stored month then pins the
+//!   ledger to the future one until real time reaches it, carrying what was spent meanwhile. The
+//!   loss is bounded (one cap of spend, or a mod blocked until the date arrives); telling a real
+//!   month change from a skewed one needs a time source PM does not have, so this is the stated
+//!   limit of the cap, not a promise that a wrong clock can never clear spend.
 //! - **Settling never under-counts.** A local answer costs 0; else the cost the provider reported;
 //!   else tokens times the price of the model that served; else the whole booking counts as spent.
 //!   A call that may have reached the wire and ended without an answer (a timeout, a dropped
@@ -260,6 +267,10 @@ pub fn gate(cloud: bool, cap: Option<f64>, settled: f64, reserved: f64, new: f64
 /// it by value: a booking is settled once.
 #[derive(Debug)]
 pub struct Reservation {
+    /// `AppState::store_epoch` of the store the booking was made in. Booking ids are per-database
+    /// counters and mod ids repeat across vaults, so only this ties a booking to its own store: a
+    /// settle on any other store deletes and charges nothing.
+    epoch: u64,
     /// `None` for a free call, which booked nothing.
     id: Option<i64>,
     mod_id: String,
@@ -294,19 +305,21 @@ impl From<rusqlite::Error> for ReserveError {
 }
 
 /// Book `usd` against `mod_id`'s cap in its own IMMEDIATE transaction. A free call (`cloud` false)
-/// books nothing and touches nothing.
+/// books nothing and touches nothing. `epoch` is `AppState::store_epoch` read under the guard of
+/// the connection passed (so it is the epoch of THIS store): the booking is settled only there.
 pub fn reserve(
     conn: &mut Connection,
+    epoch: u64,
     mod_id: &str,
     month: &str,
     usd: f64,
     cloud: bool,
 ) -> Result<Reservation, ReserveError> {
     if !cloud {
-        return Ok(free(mod_id));
+        return Ok(free(mod_id, epoch));
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let outcome = reserve_in(&tx, mod_id, month, usd, cloud);
+    let outcome = reserve_in(&tx, epoch, mod_id, month, usd, cloud);
     // Commit on every outcome but a database error: a refused call still keeps the month roll it
     // made, which must not be undone by the refusal.
     match outcome {
@@ -318,8 +331,9 @@ pub fn reserve(
     }
 }
 
-fn free(mod_id: &str) -> Reservation {
+fn free(mod_id: &str, epoch: u64) -> Reservation {
     Reservation {
+        epoch,
         id: None,
         mod_id: mod_id.to_string(),
         usd: 0.0,
@@ -331,13 +345,14 @@ fn free(mod_id: &str) -> Reservation {
 /// one connection.
 pub fn reserve_in(
     conn: &Connection,
+    epoch: u64,
     mod_id: &str,
     month: &str,
     usd: f64,
     cloud: bool,
 ) -> Result<Reservation, ReserveError> {
     if !cloud {
-        return Ok(free(mod_id));
+        return Ok(free(mod_id, epoch));
     }
     if !(usd.is_finite() && usd >= 0.0) {
         return Err(ReserveError::BadAmount);
@@ -382,6 +397,7 @@ pub fn reserve_in(
                 params![mod_id, usd],
             )?;
             Ok(Reservation {
+                epoch,
                 id: Some(conn.last_insert_rowid()),
                 mod_id: mod_id.to_string(),
                 usd,
@@ -440,33 +456,65 @@ pub struct Settled {
     /// False when the mod was uninstalled during the call: no row took the charge (the history
     /// survives in `usage_log`).
     pub mod_present: bool,
+    /// True when the booking was made in another store (a vault switch, a lock, a restore mid-call):
+    /// nothing was deleted or charged here, because the ids in this store are not that booking's.
+    /// The booking stays behind in its own store and counts there, so the cap errs high, never low.
+    pub foreign_store: bool,
+}
+
+impl Settled {
+    fn foreign() -> Self {
+        Self {
+            charged_usd: 0.0,
+            mod_present: false,
+            foreign_store: true,
+        }
+    }
 }
 
 /// Swap the booking for `usd` in one IMMEDIATE transaction. A non-finite or negative `usd` counts
 /// the whole booking instead. The booking row may be gone (the month rolled, the mod went); the
-/// charge is still added to the mod's row if it exists.
-pub fn settle(conn: &mut Connection, res: Reservation, usd: f64) -> rusqlite::Result<Settled> {
+/// charge is still added to the mod's row if it exists. `epoch` is `AppState::store_epoch` read
+/// under the guard of `conn`; a booking from another store settles nothing ([`Settled::foreign_store`]).
+pub fn settle(
+    conn: &mut Connection,
+    epoch: u64,
+    res: Reservation,
+    usd: f64,
+) -> rusqlite::Result<Settled> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let out = settle_in(&tx, res, usd)?;
+    let out = settle_in(&tx, epoch, res, usd)?;
     tx.commit()?;
     Ok(out)
 }
 
 /// [`settle`] inside a transaction the caller holds.
-pub fn settle_in(conn: &Connection, res: Reservation, usd: f64) -> rusqlite::Result<Settled> {
+pub fn settle_in(
+    conn: &Connection,
+    epoch: u64,
+    res: Reservation,
+    usd: f64,
+) -> rusqlite::Result<Settled> {
+    if res.epoch != epoch {
+        return Ok(Settled::foreign());
+    }
     let charge = if usd.is_finite() && usd >= 0.0 {
         usd
     } else {
         res.usd
     };
     if let Some(id) = res.id {
-        conn.execute("DELETE FROM ai_reservations WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM ai_reservations WHERE id = ?1 AND mod_id = ?2",
+            params![id, res.mod_id],
+        )?;
     }
     // A free call booked nothing and costs nothing, so it never writes the mod's row.
     if res.id.is_none() && charge == 0.0 {
         return Ok(Settled {
             charged_usd: 0.0,
             mod_present: true,
+            foreign_store: false,
         });
     }
     let rows = conn.execute(
@@ -476,40 +524,51 @@ pub fn settle_in(conn: &Connection, res: Reservation, usd: f64) -> rusqlite::Res
     Ok(Settled {
         charged_usd: charge,
         mod_present: rows == 1,
+        foreign_store: false,
     })
 }
 
 /// A call that may have reached the wire and ended without an answer we can measure (a timeout, a
 /// dropped future, a failure after the request left): the booking counts as spent.
-pub fn settle_unknown(conn: &mut Connection, res: Reservation) -> rusqlite::Result<Settled> {
+pub fn settle_unknown(
+    conn: &mut Connection,
+    epoch: u64,
+    res: Reservation,
+) -> rusqlite::Result<Settled> {
     let usd = res.usd;
-    settle(conn, res, usd)
+    settle(conn, epoch, res, usd)
 }
 
 /// A call that provably never reached the wire (refused before any request was made): the booking
 /// is deleted and nothing is spent.
-pub fn release(conn: &mut Connection, res: Reservation) -> rusqlite::Result<()> {
-    settle(conn, res, 0.0).map(|_| ())
+pub fn release(conn: &mut Connection, epoch: u64, res: Reservation) -> rusqlite::Result<()> {
+    settle(conn, epoch, res, 0.0).map(|_| ())
 }
 
 /// A finished call: settle by the rules above, and write the call's `usage_log` row with the mod's
 /// id, whether or not the settle worked (an uninstalled mod's spend is still history; a failed
 /// settle leaves its booking, which counts, so the cap errs high). `model` is the served model, or
-/// the plan's primary when the server did not say. One call under the one connection guard.
+/// the plan's primary when the server did not say. One call under the one connection guard. A
+/// booking from another store writes no row here: it would put another vault's call in this one's
+/// history.
 pub fn settle_and_log(
     conn: &mut Connection,
+    epoch: u64,
     res: Reservation,
     completion: &Completion,
     meta: &CallMeta,
     model: Option<&str>,
 ) -> rusqlite::Result<Settled> {
+    if res.epoch != epoch {
+        return Ok(Settled::foreign());
+    }
     let served = completion
         .model
         .as_deref()
         .and_then(|m| model_price(conn, m));
     let (usd, _basis) = settle_amount(meta.provider, &completion.usage, served, res.usd);
     let mod_id = res.mod_id.clone();
-    let settled = settle(conn, res, usd);
+    let settled = settle(conn, epoch, res, usd);
     crate::commands::log_usage_as(
         conn,
         USAGE_KIND,
@@ -905,6 +964,43 @@ mod tests {
 
     // --- the ledger -----------------------------------------------------------------------------
 
+    /// Every store in these tests has this epoch unless a test says otherwise. These wrappers shadow
+    /// the real functions so the many one-store tests read as they did; the cross-store test calls
+    /// `super::` with two epochs.
+    const EPOCH: u64 = 7;
+
+    fn reserve(
+        conn: &mut Connection,
+        mod_id: &str,
+        month: &str,
+        usd: f64,
+        cloud: bool,
+    ) -> Result<Reservation, ReserveError> {
+        super::reserve(conn, EPOCH, mod_id, month, usd, cloud)
+    }
+
+    fn settle(conn: &mut Connection, res: Reservation, usd: f64) -> rusqlite::Result<Settled> {
+        super::settle(conn, EPOCH, res, usd)
+    }
+
+    fn settle_unknown(conn: &mut Connection, res: Reservation) -> rusqlite::Result<Settled> {
+        super::settle_unknown(conn, EPOCH, res)
+    }
+
+    fn release(conn: &mut Connection, res: Reservation) -> rusqlite::Result<()> {
+        super::release(conn, EPOCH, res)
+    }
+
+    fn settle_and_log(
+        conn: &mut Connection,
+        res: Reservation,
+        completion: &Completion,
+        meta: &CallMeta,
+        model: Option<&str>,
+    ) -> rusqlite::Result<Settled> {
+        super::settle_and_log(conn, EPOCH, res, completion, meta, model)
+    }
+
     fn with_mod(cap: Option<f64>) -> (tempfile::TempDir, Connection) {
         let (dir, conn) = store();
         insert_mod(&conn, &ModRow::signed("acme.tool", "second", &["ai"]));
@@ -987,7 +1083,8 @@ mod tests {
             out,
             Settled {
                 charged_usd: 0.0,
-                mod_present: true
+                mod_present: true,
+                foreign_store: false
             }
         );
         assert_eq!(spent(&conn, "acme.tool"), 0.0);
@@ -1077,7 +1174,8 @@ mod tests {
             out,
             Settled {
                 charged_usd: 0.1,
-                mod_present: true
+                mod_present: true,
+                foreign_store: false
             }
         );
         assert_eq!(reserved_usd(&conn, "acme.tool").unwrap(), 0.0);
@@ -1088,6 +1186,84 @@ mod tests {
             Err(ReserveError::CapReached)
         ));
         assert!(book(&mut conn, 0.9).is_ok());
+    }
+
+    /// Booking ids are per-database counters and mod ids repeat across vaults. A call that began in
+    /// one store and ends after a vault switch must not delete another store's booking (which would
+    /// free headroom that is in use) nor charge another store's mod.
+    #[test]
+    fn a_booking_settles_only_in_the_store_it_was_made_in() {
+        let (_dir_a, mut a) = with_mod(Some(1.0));
+        let (_dir_b, mut b) = with_mod(Some(1.0));
+        let done = completion(Some("a/m"), usage(Some(10), Some(5), Some(0.02)));
+        let foreign = Settled {
+            charged_usd: 0.0,
+            mod_present: false,
+            foreign_store: true,
+        };
+        // Same mod id, and the same booking id (1) in each store; B's is another call in flight.
+        let held_b = super::reserve(&mut b, 2, "acme.tool", NOV, 0.3, true).unwrap();
+        for how in 0..4 {
+            // AUTOINCREMENT does not reuse ids; start A's count again so each round collides.
+            a.execute(
+                "DELETE FROM sqlite_sequence WHERE name = 'ai_reservations'",
+                [],
+            )
+            .unwrap();
+            let res_a = super::reserve(&mut a, 1, "acme.tool", NOV, 0.5, true).unwrap();
+            assert_eq!(res_a.id, held_b.id, "the ids collide, which is the hazard");
+            let out = match how {
+                0 => super::settle(&mut b, 2, res_a, 0.5),
+                1 => super::settle_unknown(&mut b, 2, res_a),
+                2 => super::release(&mut b, 2, res_a).map(|()| foreign_marker()),
+                _ => super::settle_and_log(
+                    &mut b,
+                    2,
+                    res_a,
+                    &done,
+                    &meta(Provider::Cloud),
+                    Some("a/m"),
+                ),
+            }
+            .unwrap();
+            assert!(out.foreign_store, "{how}");
+            assert_eq!(out.charged_usd, 0.0, "{how}");
+            // B is exactly as it was: its booking stands, nothing was charged, nothing was logged.
+            assert_eq!(reserved_usd(&b, "acme.tool").unwrap(), 0.3, "{how}");
+            assert_eq!(spent(&b, "acme.tool"), 0.0, "{how}");
+            assert_eq!(
+                b.query_row("SELECT COUNT(*) FROM usage_log", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{how}"
+            );
+            // A's own booking stays where it was made (it counts there: errs high).
+            assert_eq!(reserved_usd(&a, "acme.tool").unwrap(), 0.5, "{how}");
+            a.execute("DELETE FROM ai_reservations", []).unwrap();
+        }
+        // A free call from another store is refused the same way, even with a charge attached.
+        let free_a = super::reserve(&mut a, 1, "acme.tool", NOV, 0.0, false).unwrap();
+        let out = super::settle(&mut b, 2, free_a, 0.4).unwrap();
+        assert_eq!(out, foreign);
+        assert_eq!(spent(&b, "acme.tool"), 0.0);
+        // In its own store it settles as always.
+        let own = super::reserve(&mut a, 1, "acme.tool", NOV, 0.5, true).unwrap();
+        let out = super::settle(&mut a, 1, own, 0.2).unwrap();
+        assert!(!out.foreign_store);
+        assert_eq!(spent(&a, "acme.tool"), 0.2);
+        assert_eq!(reserved_usd(&a, "acme.tool").unwrap(), 0.0);
+        let out = super::settle(&mut b, 2, held_b, 0.1).unwrap();
+        assert!(!out.foreign_store);
+        assert_eq!(spent(&b, "acme.tool"), 0.1);
+    }
+
+    /// `release` returns nothing; this stands in for its outcome in the loop above.
+    fn foreign_marker() -> Settled {
+        Settled {
+            charged_usd: 0.0,
+            mod_present: false,
+            foreign_store: true,
+        }
     }
 
     /// A call may cost more than its booking (a provider that ignores `max_tokens`, a price that
@@ -1126,7 +1302,8 @@ mod tests {
             out,
             Settled {
                 charged_usd: 0.3,
-                mod_present: true
+                mod_present: true,
+                foreign_store: false
             }
         );
         assert_eq!(spent(&conn, "acme.tool"), 0.3);
@@ -1220,6 +1397,33 @@ mod tests {
         assert!(book(&mut conn, 0.1).is_ok());
     }
 
+    /// The documented limit, pinned so it is deliberate: a clock that jumps FORWARD clears the
+    /// month's spend, and after the clock is corrected the ledger stays on the false month with the
+    /// spend made meanwhile (never more than one cap lost, never an unbounded charge).
+    #[test]
+    fn a_clock_that_ran_fast_clears_the_month_early_and_the_ledger_stays_on_it() {
+        let (_dir, mut conn) = with_mod(Some(1.0));
+        let a = book(&mut conn, 0.9).unwrap();
+        settle(&mut conn, a, 0.9).unwrap();
+        // December on a fast clock: November's 0.9 is gone.
+        let skewed = reserve(&mut conn, "acme.tool", DEC, 0.9, true).unwrap();
+        assert_eq!(spent(&conn, "acme.tool"), 0.0);
+        settle(&mut conn, skewed, 0.9).unwrap();
+        // The clock is corrected: still blocked, still December, the spend carries.
+        assert!(matches!(
+            book(&mut conn, 0.2),
+            Err(ReserveError::CapReached)
+        ));
+        assert_eq!(month_of(&conn, "acme.tool").as_deref(), Some(DEC));
+        assert_eq!(spent(&conn, "acme.tool"), 0.9);
+        // Real December arrives: no second reset, the carried spend still counts.
+        assert!(matches!(
+            reserve(&mut conn, "acme.tool", DEC, 0.2, true),
+            Err(ReserveError::CapReached)
+        ));
+        assert_eq!(spent(&conn, "acme.tool"), 0.9);
+    }
+
     #[test]
     fn a_missing_or_unreadable_month_is_adopted_with_the_spend_kept() {
         for stored in [None, Some("garbage")] {
@@ -1277,7 +1481,8 @@ mod tests {
             out,
             Settled {
                 charged_usd: 0.02,
-                mod_present: false
+                mod_present: false,
+                foreign_store: false
             }
         );
         let (mod_id, kind, cost): (String, String, f64) = conn

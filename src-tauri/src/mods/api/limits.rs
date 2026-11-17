@@ -109,8 +109,14 @@ pub const NET_FETCH_BURST: u64 = 20;
 /// A fetch's request body, in bytes.
 pub const MAX_FETCH_REQUEST_BYTES: usize = 256 << 10;
 /// A fetch's response body, in bytes, read to this and no further. Sent to the frame as text or
-/// base64, so it stays under [`MAX_RESULT_BYTES`] once encoded (a test holds that).
+/// base64. As base64 it is under [`MAX_RESULT_BYTES`]; as text it is sent only when its JSON form
+/// is within [`MAX_FETCH_TEXT_JSON_BYTES`] (escaping can grow text up to six times), else as base64,
+/// so a body within this cap always fits (a test holds both).
 pub const MAX_FETCH_RESPONSE_BYTES: usize = 4 << 20;
+/// The most a fetch's text body may weigh as a JSON string (quotes, backslashes and control
+/// characters escaped) before it is sent as base64 instead: above the base64 form of the largest
+/// body, below the answer cap with the headers' room.
+pub const MAX_FETCH_TEXT_JSON_BYTES: usize = 6 << 20;
 /// How long a fetch may take to connect, per hop.
 pub const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a whole fetch may take, redirects and body included.
@@ -769,6 +775,10 @@ mod tests {
             // A fetch's body, base64 encoded (4 bytes per 3) with its headers' room, is an answer
             // PM will send (MAX_RESULT_BYTES); the request is an argument PM will take.
             assert!(MAX_FETCH_RESPONSE_BYTES / 3 * 4 + (64 << 10) < MAX_RESULT_BYTES);
+            // The text form's budget holds the base64 form of the largest body (so a body is never
+            // sent as base64 only to be larger) and still leaves the headers' room.
+            assert!(MAX_FETCH_TEXT_JSON_BYTES >= MAX_FETCH_RESPONSE_BYTES.div_ceil(3) * 4);
+            assert!(MAX_FETCH_TEXT_JSON_BYTES + (64 << 10) < MAX_RESULT_BYTES);
             assert!(MAX_FETCH_REQUEST_BYTES < MAX_ARGS_BYTES);
             // The prompt and its messages fit in one call's arguments.
             assert!(MAX_AI_PROMPT_BYTES * 2 < MAX_ARGS_BYTES);

@@ -29,7 +29,13 @@
 //! header line is refused rather than escaped. No refusal echoes what the mod sent (D-25).
 //!
 //! **What a mod sees of the answer**: the status, an allowlist of headers (never `Set-Cookie`, never
-//! a header that names PM's network), and the body as text when it is valid UTF-8, else base64.
+//! a header that names PM's network), and the body as text when it is valid UTF-8 and its JSON form
+//! is not huge (escaping can make a 4 MiB body of newlines or NULs several times larger), else
+//! base64.
+//!
+//! **A key** ([`SlotSecret`]) travels with the host its slot is bound to, and [`build_request`]
+//! refuses to put it on the first hop of any other listed host: the person approved the key for one
+//! destination, and the list may hold several.
 
 // Nothing calls these until the `net.fetch` handler lands (X6); the tests below are their callers.
 #![allow(dead_code)]
@@ -246,26 +252,62 @@ pub fn check_body(method: Method, body: Option<&[u8]>) -> Result<(), ModError> {
     }
 }
 
+/// A stored key ready for one request: the host its slot is bound to, the header it goes in, the
+/// value. The host travels WITH the key so [`build_request`] can hold the first hop to it: a
+/// manifest may list several `internetHosts`, but the person approved the key for one.
+pub struct SlotSecret {
+    host: String,
+    header: String,
+    value: String,
+}
+
+// By hand: a derived Debug would print the key.
+impl std::fmt::Debug for SlotSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotSecret")
+            .field("host", &self.host)
+            .field("header", &self.header)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The key of a slot `host`/`name` holding `value`, as [`secret_header`] judges it.
+pub fn slot_secret(host: &str, name: &str, value: &str) -> Result<SlotSecret, ModError> {
+    let (header, value) = secret_header(name, value)?;
+    Ok(SlotSecret {
+        host: host.to_owned(),
+        header,
+        value,
+    })
+}
+
 /// A mod's request, every part checked: ready for `netfetch::fetch` with [`hop_check`] and
-/// `Policy::for_mods()`. `secret` is `(header, value)` from [`secret_header`]: it goes on the first
-/// hop only (D-7).
+/// `Policy::for_mods()`. `secret` goes on the first hop only (D-7), and only when the URL's host IS
+/// the slot's host: a key sent to another listed host is refused here, before anything is dialled,
+/// whatever the handler did or did not check.
 pub fn build_request(
     url: &str,
     method: &str,
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
     hosts: &[String],
-    secret: Option<(String, String)>,
+    secret: Option<SlotSecret>,
 ) -> Result<FetchRequest, ModError> {
     let method = parse_method(method)?;
     let url = parse_url(url, hosts).map_err(url_error)?;
-    let headers = check_headers(headers, secret.as_ref().map(|(n, _)| n.as_str()))?;
+    if let Some(s) = &secret {
+        // `parse_url` passed, so `domain()` is a name; compared exactly, as the list is.
+        if url.domain() != Some(s.host.as_str()) {
+            return Err(ModError::host_not_allowed());
+        }
+    }
+    let headers = check_headers(headers, secret.as_ref().map(|s| s.header.as_str()))?;
     check_body(method, body.as_deref())?;
     Ok(FetchRequest {
         method,
         url,
         headers,
-        first_hop_headers: secret.into_iter().collect(),
+        first_hop_headers: secret.into_iter().map(|s| (s.header, s.value)).collect(),
         body,
     })
 }
@@ -353,10 +395,38 @@ pub enum Body {
     Base64(String),
 }
 
+/// What `text` weighs as a JSON string (its quotes not counted), as `serde_json` writes it: `"`,
+/// `\` and the control characters are escaped (two bytes, or six for most controls), nothing else
+/// is. Stops counting once past `cap`, so a hostile body costs one pass and no allocation.
+fn json_string_len(text: &str, cap: usize) -> usize {
+    let mut n = 0usize;
+    for c in text.chars() {
+        n += match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if c < ' ' => 6,
+            c => c.len_utf8(),
+        };
+        if n > cap {
+            break;
+        }
+    }
+    n
+}
+
+/// Text when the body is valid UTF-8 AND its JSON form stays within
+/// [`limits::MAX_FETCH_TEXT_JSON_BYTES`]; else base64. The second condition keeps a body that was
+/// within the fetch cap from becoming an answer too large to send, because escaping (`\u0000` is
+/// six bytes for one) can grow text far past its length, while base64 is a fixed four for three.
 pub fn encode_body(bytes: Vec<u8>) -> Body {
     use base64::{engine::general_purpose::STANDARD, Engine};
     match String::from_utf8(bytes) {
-        Ok(text) => Body::Text(text),
+        Ok(text)
+            if json_string_len(&text, limits::MAX_FETCH_TEXT_JSON_BYTES)
+                <= limits::MAX_FETCH_TEXT_JSON_BYTES =>
+        {
+            Body::Text(text)
+        }
+        Ok(text) => Body::Base64(STANDARD.encode(text.into_bytes())),
         Err(e) => Body::Base64(STANDARD.encode(e.into_bytes())),
     }
 }
@@ -917,7 +987,7 @@ mod tests {
 
     #[test]
     fn a_request_is_built_checked_with_the_secret_on_the_first_hop_only() {
-        let declared = secret_header("X-Api-Key", "abc123").unwrap();
+        let declared = slot_secret("api.example.com", "X-Api-Key", "abc123").unwrap();
         let req = build_request(
             "https://api.example.com/v1/items?limit=2#x",
             "post",
@@ -990,7 +1060,7 @@ mod tests {
             &pairs(&[("X-API-KEY", "mine")]),
             None,
             &hosts(),
-            Some(("x-api-key".into(), "real".into())),
+            Some(slot_secret("api.example.com", "x-api-key", "real").unwrap()),
         );
         assert_eq!(with_secret.unwrap_err().code, Code::BadArgs);
     }
@@ -1098,6 +1168,46 @@ mod tests {
         assert!(worst.to_string().len() < limits::MAX_RESULT_BYTES);
     }
 
+    /// The same, for text: valid UTF-8 whose JSON form is far longer than the bytes (newlines are
+    /// two, a NUL is six). It must go as base64 and fit, not be sent as text and refused as too
+    /// large after the whole fetch ran.
+    #[test]
+    fn a_largest_text_body_that_escapes_long_is_sent_as_base64_and_fits() {
+        let headers: Vec<(String, String)> = PUBLIC_RESPONSE_HEADERS
+            .iter()
+            .map(|n| ((*n).to_owned(), "h".repeat(MAX_RESPONSE_HEADER_VALUE_BYTES)))
+            .collect();
+        for unit in ["\n", "\"", "\0", "\u{1}", "\\"] {
+            let body = unit.repeat(limits::MAX_FETCH_RESPONSE_BYTES).into_bytes();
+            assert_eq!(body.len(), limits::MAX_FETCH_RESPONSE_BYTES);
+            let out = reply_value(Reply {
+                status: 200,
+                headers: headers.clone(),
+                body: body.clone(),
+                url: Url::parse("https://cdn.example.com/").unwrap(),
+            });
+            assert!(out.get("bodyText").is_none(), "{unit:?}");
+            assert!(out.to_string().len() < limits::MAX_RESULT_BYTES, "{unit:?}");
+            // Nothing is lost: the base64 is the body.
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let back = STANDARD
+                .decode(out["bodyBase64"].as_str().unwrap())
+                .unwrap();
+            assert!(back == body, "{unit:?}");
+        }
+        // Text whose JSON form is within the budget stays text, including the biggest plain body,
+        // and its counted size is the size serde_json writes.
+        for sample in ["plain", "a\"b\\c\nd\te\r\u{8}\u{c}\u{1f}\u{7f}é€😀"] {
+            assert_eq!(
+                json_string_len(sample, usize::MAX),
+                serde_json::to_string(sample).unwrap().len() - 2,
+                "{sample:?}"
+            );
+        }
+        let plain = vec![b'a'; limits::MAX_FETCH_RESPONSE_BYTES];
+        assert!(matches!(encode_body(plain), Body::Text(_)));
+    }
+
     // ---- failures, as the sentences a mod gets -------------------------------------------------
 
     #[test]
@@ -1138,7 +1248,7 @@ mod tests {
     async fn mod_fetch(
         host: &TestHost,
         url: &str,
-        secret: Option<(String, String)>,
+        secret: Option<SlotSecret>,
     ) -> Result<Value, ModError> {
         let hosts = hosts();
         let request = build_request(url, "GET", &[], None, &hosts, secret)?;
@@ -1193,7 +1303,7 @@ mod tests {
                 Ok(scripted(200, &[], b"file"))
             }
         });
-        let declared = secret_header("X-Api-Key", "KEYVALUE").unwrap();
+        let declared = slot_secret("api.example.com", "X-Api-Key", "KEYVALUE").unwrap();
         let got = mod_fetch(&host, "https://api.example.com/start", Some(declared))
             .await
             .unwrap();
@@ -1204,6 +1314,37 @@ mod tests {
         assert!(!carried(1));
         // And not in anything the mod is given back.
         assert!(!got.to_string().contains("KEYVALUE"));
+    }
+
+    #[tokio::test]
+    async fn a_key_is_refused_on_any_listed_host_but_its_slots_and_nothing_is_dialled() {
+        // Both hosts are listed; the slot is bound to api only. The key must not reach cdn on the
+        // first hop, whatever the handler checked.
+        let host = scripted_host();
+        host.hops().answer(|_| Ok(scripted(200, &[], b"ok")));
+        let declared = slot_secret("api.example.com", "X-Api-Key", "KEYVALUE").unwrap();
+        let e = mod_fetch(&host, "https://cdn.example.com/x", Some(declared))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, Code::HostNotAllowed);
+        assert!(host.hops().seen().is_empty());
+        assert!(host.hops().looked_up().is_empty());
+        // The refusal does not quote the key, and the Debug of a key does not print it.
+        assert!(!format!("{e:?}").contains("KEYVALUE"));
+        let again = slot_secret("api.example.com", "X-Api-Key", "KEYVALUE").unwrap();
+        assert!(!format!("{again:?}").contains("KEYVALUE"));
+        // A key with no host binding at all cannot be made: a bad key is "not set".
+        assert_eq!(
+            slot_secret("api.example.com", "cookie", "v")
+                .unwrap_err()
+                .code,
+            Code::SecretNotSet
+        );
+        // Its own host still works.
+        let ok = slot_secret("api.example.com", "X-Api-Key", "KEYVALUE").unwrap();
+        assert!(mod_fetch(&host, "https://api.example.com/x", Some(ok))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
