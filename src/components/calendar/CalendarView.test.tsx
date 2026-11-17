@@ -196,6 +196,43 @@ const overview: CalendarOverview = {
 
 const today = dayKey(startOfDay(new Date()));
 
+/** For a describe whose tests open quick create: the clock reads the middle of the hours that are
+ *  `today` both here and in London, before 23:00 there. The file gives the device Europe/London, and
+ *  the box opens on London's today, or from 23:30 there on tomorrow (the next half hour is 00:00, as
+ *  Google's does), while `today` and the fixtures are this machine's. So the box opened on a day the
+ *  tests didn't expect when London was past 23:30 (CI at 23:35 UTC, 2026-11-16), and just after
+ *  London's midnight on a machine at UTC-10 or further west. Those hours overlap for at least nine
+ *  hours on any machine from UTC-12 to UTC+14. Only Date is faked, so waitFor's timers still run.
+ *  newEventSeed's own tests cover the rollover. */
+function clockMidTodayHereAndInLondon() {
+  const london = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const fits = (at: number) => {
+    const p = Object.fromEntries(london.formatToParts(at).map((part) => [part.type, part.value]));
+    return (
+      dayKey(new Date(at)) === today &&
+      `${p.year}-${p.month}-${p.day}` === today &&
+      `${p.hour}:${p.minute}` < "23:00"
+    );
+  };
+  // Every half hour from 14 hours before today's UTC midnight to 14 after its end.
+  const first = Date.parse(`${today}T00:00:00Z`) - 14 * 3_600_000;
+  const fitting = Array.from({ length: 105 }, (_, i) => first + i * 1_800_000).filter(fits);
+  const at = fitting[Math.floor(fitting.length / 2)];
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at);
+  });
+  afterEach(() => vi.useRealTimers());
+}
+
 const row = (over: Partial<CalendarEvent>): CalendarEvent => ({
   id: "e1",
   calendar_id: PERSONAL,
@@ -605,6 +642,8 @@ describe("CalendarView: dragging in Week", () => {
 });
 
 describe("CalendarView: a new event", () => {
+  clockMidTodayHereAndInLondon();
+
   // C16 critique C2-M9: a date typed in quick create that the view doesn't show moves the view to
   // it, as Google's does; the box opening on a day already shown moves nothing.
   it("a date typed in quick create off screen moves the week to it", async () => {
@@ -2707,16 +2746,7 @@ describe("CalendarView: Event | Task in quick create", () => {
   const title = () => within(quick()).getByLabelText<HTMLInputElement>("Title");
   const taskSeg = () => within(quick()).getByRole("button", { name: "Task" });
   const said = () => document.querySelector('[role="status"]')?.textContent ?? "";
-  // Noon today in London, the zone this file gives the device. The box opens on London's today,
-  // and from 23:30 there on tomorrow (the next half hour is 00:00, as Google's does), while `today`
-  // is this machine's date: at 23:35 UTC on 2026-11-16 CI's box opened on the 17th and two tests
-  // failed. Noon UTC is still today here on any machine from UTC-12 to UTC+11. Only Date is faked,
-  // so waitFor's timers still run. newEventSeed's own tests cover the 23:30 rollover.
-  beforeEach(() => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date(`${today}T12:00:00Z`));
-  });
-  afterEach(() => vi.useRealTimers());
+  clockMidTodayHereAndInLondon();
 
   it("Shift+C's box has the switch, on Event", async () => {
     await mount();
