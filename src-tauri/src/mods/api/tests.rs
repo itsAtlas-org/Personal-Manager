@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tauri::http::Request;
 
 use super::table::{Kind, Row};
-use super::test_support::{insert_mod, manifest, ModRow, TestHost};
+use super::test_support::{insert_mod, manifest, ModRow, OverHost, TestHost};
 use super::*;
 use crate::mods::ids::ModId;
 use crate::mods::runtime::{InstalledMod, ServedFile};
@@ -698,23 +698,6 @@ async fn a_call_in_flight_across_an_uninstall_commits_nothing() {
     let e = error(call(&host, &s, "storage.set", set_args("settings", json!(1), 0)).await);
     assert_eq!(e.code, Code::SessionEnded);
     assert!(kv_rows(&host, "atlas.map").is_empty());
-}
-
-/// The ledger's store over a test host's open store, with no vault to compare (the host has none).
-struct OverHost<'a>(&'a AppState);
-
-impl crate::mods::ledger::LedgerStore for OverHost<'_> {
-    fn with_conn<T>(
-        &self,
-        _layout: &crate::mods::disk::Layout,
-        f: impl FnOnce(&mut rusqlite::Connection) -> Result<T, crate::mods::ledger::LedgerError>,
-    ) -> Result<T, crate::mods::ledger::LedgerError> {
-        let mut conn = self
-            .0
-            .conn()
-            .map_err(|e| crate::mods::ledger::LedgerError::Store(e.to_string()))?;
-        f(&mut conn)
-    }
 }
 
 /// The signed list's blacklist applied to the host's mods (the real `Ledger::apply_blacklist`: cut

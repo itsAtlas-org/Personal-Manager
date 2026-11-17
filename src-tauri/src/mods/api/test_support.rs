@@ -140,6 +140,23 @@ pub fn live_session(host: &TestHost, m: &str, outbox: Arc<Outbox>) -> String {
     opened.session
 }
 
+/// The ledger's store over a test host's open store, with no vault to compare (the host has none).
+pub struct OverHost<'a>(pub &'a AppState);
+
+impl crate::mods::ledger::LedgerStore for OverHost<'_> {
+    fn with_conn<T>(
+        &self,
+        _layout: &crate::mods::disk::Layout,
+        f: impl FnOnce(&mut Connection) -> Result<T, crate::mods::ledger::LedgerError>,
+    ) -> Result<T, crate::mods::ledger::LedgerError> {
+        let mut conn = self
+            .0
+            .conn()
+            .map_err(|e| crate::mods::ledger::LedgerError::Store(e.to_string()))?;
+        f(&mut conn)
+    }
+}
+
 /// What a test hooks into a call in flight.
 pub type Hook = Arc<dyn Fn(&TestHost, Point) + Send + Sync>;
 

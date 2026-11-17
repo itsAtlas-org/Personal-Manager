@@ -50,6 +50,8 @@ mod documents;
 mod embeddings;
 pub mod error;
 pub mod events;
+#[cfg(test)]
+mod fixture_tests;
 pub mod grants;
 mod handlers;
 pub mod limits;

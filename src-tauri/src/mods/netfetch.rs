@@ -541,11 +541,24 @@ pub(crate) mod fake {
         looked_up: Mutex<Vec<(String, u16)>>,
         resolve_delay: Mutex<Duration>,
         send_delay: Mutex<Duration>,
+        /// Set by [`Self::forward_to`].
+        forward: Mutex<Option<u16>>,
     }
 
     impl ScriptedHops {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Send every hop to a plain-http server on this machine's loopback port instead of
+        /// answering it from the script, through the real edge ([`SystemHops`]): real request
+        /// bytes on a real socket. The lookup before it is unchanged (scripted names, the real
+        /// screen), and so is everything above the edge (URL rules, redirects, the key); only the
+        /// last step is swapped: a hop's `https://host/..` goes out as `http://host:PORT/..` to
+        /// `127.0.0.1:PORT`. This is a test module, so none of it is in a build.
+        pub fn forward_to(&self, port: u16) -> &Self {
+            *self.forward.lock().unwrap() = Some(port);
+            self
         }
 
         /// `host` resolves to `ips` (strings, so a test reads like the address it is about).
@@ -622,14 +635,45 @@ pub(crate) mod fake {
                 pinned: pinned.to_vec(),
             };
             let delay = *self.send_delay.lock().unwrap();
-            let result = match self.answer.lock().unwrap().as_ref() {
-                Some(answer) => answer(&seen),
-                None => Err(FetchError::Unavailable),
+            let forward = *self.forward.lock().unwrap();
+            let result = match (forward, self.answer.lock().unwrap().as_ref()) {
+                (None, Some(answer)) => answer(&seen),
+                _ => Err(FetchError::Unavailable),
             };
             self.seen.lock().unwrap().push(seen);
+            // Owned copies for the real edge, which is called inside the future so that nothing
+            // in it borrows the caller's request.
+            let real = forward.map(|port| {
+                (
+                    port,
+                    hop.method,
+                    hop.url.clone(),
+                    hop.headers.to_vec(),
+                    hop.body.map(<[u8]>::to_vec),
+                    *hop.policy,
+                    hop.timeout,
+                )
+            });
             async move {
                 tokio::time::sleep(delay).await;
-                result
+                let Some((port, method, mut url, headers, body, policy, timeout)) = real else {
+                    return result;
+                };
+                url.set_scheme("http").map_err(|()| FetchError::BadUrl)?;
+                url.set_port(Some(port)).map_err(|()| FetchError::BadUrl)?;
+                SystemHops::plain_http_for_tests()
+                    .send(
+                        &HopRequest {
+                            method,
+                            url: &url,
+                            headers: &headers,
+                            body: body.as_deref(),
+                            policy: &policy,
+                            timeout,
+                        },
+                        &[SocketAddr::from(([127, 0, 0, 1], port))],
+                    )
+                    .await
             }
         }
     }
