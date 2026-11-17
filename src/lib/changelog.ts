@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.183.2-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "The “Keep last” box under Automatic backups now has a clearly visible edge, like PM's other fields, and its edge changes colour when you click into it. The small buttons in Settings → Storage that take you to another tab keep a strong edge when you point at them, instead of fading in light themes.",
+    ],
+  },
+  {
     version: "3.183.1-alpha",
     date: "2026-11-17",
     highlights: [
