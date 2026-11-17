@@ -24,6 +24,7 @@
 import { useState } from "react";
 import { useModRows } from "../../lib/modRows";
 import { dismissModNote, useModActions } from "../../lib/modActions";
+import { isFolderScreen } from "../../lib/modInstall";
 import { useCatalogue } from "../../lib/useCatalogue";
 import { Button, Callout, Modal } from "../ui";
 import { AvailableMods } from "./AvailableMods";
@@ -45,7 +46,8 @@ export function ModsView() {
   const [turnOnId, setTurnOnId] = useState<string | null>(null);
 
   const turnOn = rows.find((r) => r.id === turnOnId && r.state.kind === "waiting-for-you");
-  const staged = screens.values().next().value;
+  // A test folder's screen is Settings → Developer's (lib/modInstall `isFolderScreen`).
+  const staged = [...screens.values()].find((s) => !isFolderScreen(s));
   // A dialog for a mod says its refusals itself, so its row doesn't repeat them.
   const dialogFor = uninstallId ?? staged?.id ?? null;
 

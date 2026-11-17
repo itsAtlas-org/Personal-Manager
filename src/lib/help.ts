@@ -455,8 +455,20 @@ export const HELP: Record<string, HelpEntry> = {
     body: "PM reads your memory, processor, and graphics card entirely on this device to work out which local models would run well, and how fast. Nothing about your hardware leaves the machine. PM's pick and every fit are worked out from this, using the memory that was free when the list was last sized.",
   },
   "settings-storage": {
-    title: "On-device components",
-    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they re-download when you need them again, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it.",
+    title: "Storage",
+    body: "What PM keeps on this device, in two sections you can fold: Built in, which is what PM downloaded, and Mods, which is what each installed mod keeps. PM remembers which you folded.",
+  },
+  "settings-storage-builtin": {
+    title: "Built in",
+    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they download again when you need them, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
+  },
+  "settings-storage-mods": {
+    title: "Mods in Storage",
+    body: "Each installed mod with the room it takes: its own files, which PM measures, and what it saved in PM's database, which is an estimate. 'Uninstall' runs the same uninstall as the Mods tab: it shows what goes and what stays first, and what the mod made in your tasks, milestones and notes is only deleted if you choose that. A mod from the catalogue can be installed again; a mod from a file or a folder needs its file or folder. What a mod saved can't be brought back.",
+  },
+  "settings-storage-mods-remove-all": {
+    title: "Remove all mods",
+    body: "Uninstalls every mod in the list, one after another, the way 'Uninstall' does for one. Everything they saved goes and can't be brought back. The tasks, milestones and notes they made stay in PM; to delete those too, uninstall the mod on its own and choose 'Also delete what it made'. If one mod can't be removed, it says why and the rest still go.",
   },
   "settings-memory-map": {
     title: "Memory map",
@@ -603,7 +615,27 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-developer": {
     title: "Developer mode",
-    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens; those never change your data. It also allows unsigned mods — installing a mod file nobody has signed, and loading a test mod from a folder — so it belongs to this computer only: a restored backup or a shared vault never turns it on elsewhere, and turning it off pauses every unsigned mod until it's on again. It's independent of the density preset and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle.",
+    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens; those never change your data. It also allows unsigned mods — installing a mod file nobody has signed, and loading a test mod from a folder — so it belongs to this computer only: a restored backup or a shared vault never turns it on elsewhere, and turning it off pauses every unsigned mod until it's on again. It's independent of the density preset and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle. While it's on, the sections below show what mod makers need to know, straight from PM.",
+  },
+  "settings-developer-api": {
+    title: "API version",
+    body: "The version of the mod API this PM serves, and how long older mods keep working: a mod built for an older version in the window still runs, marked 'built for an older PM'. Experimental methods are outside the freeze and may change in any minor version, so don't build anything lasting on them yet.",
+  },
+  "settings-developer-endpoints": {
+    title: "Endpoints",
+    body: "Everything a mod can ask PM for, and everything PM can tell a mod, with the permission each needs and the version it arrived, was deprecated or was removed in. It is read from PM's own table, so it can't differ from what PM actually does.",
+  },
+  "settings-developer-limits": {
+    title: "Limits",
+    body: "The fixed limits PM puts on every mod: how many calls a second, how big a call or an answer may be, how much a mod may store and how fast it may grow it, and how many events can be waiting for a mod that is slow. They are set when PM is built and the same for every mod.",
+  },
+  "settings-developer-running": {
+    title: "Running now",
+    body: "Whether PM's web engine is sealed (a mod's frame can't reach the network on its own) and, if not, why; how many connections the engine has refused since PM started; and each open mod frame with how many events PM sent it, how many it acknowledged and how many were dropped because it fell behind. 'Refresh' reads it again.",
+  },
+  "settings-developer-testmods": {
+    title: "Load a test mod",
+    body: "Try a mod straight from an unpacked folder while you build it. PM reads the folder where it is and never copies or changes it, shows the screen for a mod nobody has checked, and loads it once you type its id. It reloads when you save, lasts until PM restarts or developer mode goes off, and is left out of backups. 'Reload' reads the folder again, 'Unload' ends it now. A packed .pmmod file installs from the Mods tab.",
   },
 
   // Developer mode (issue #78) — read-only inspection

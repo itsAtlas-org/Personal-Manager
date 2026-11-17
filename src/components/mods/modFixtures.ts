@@ -7,6 +7,8 @@
 import type {
   ConsentPermission,
   ConsentScreen,
+  DevKitInfo,
+  KitEndpoint,
   ModInfo,
   ModPermission,
   ModStanding,
@@ -107,6 +109,55 @@ export function safety(extra: Partial<ModsSafetyStatus> = {}): ModsSafetyStatus 
     record: null,
     index: null,
     notices: [],
+    ...extra,
+  };
+}
+
+export const endpoint = (extra: Partial<KitEndpoint> = {}): KitEndpoint => ({
+  name: "documents.list",
+  kind: "call",
+  permission: "documents.meta",
+  class: "read",
+  added: "1.0",
+  deprecated: null,
+  removed: null,
+  experimental: false,
+  ...extra,
+});
+
+/** The Developer kit's answer, with every limit present. */
+export function devKit(extra: Partial<DevKitInfo> = {}): DevKitInfo {
+  return {
+    api: {
+      version: "1.0",
+      oldestMajor: 1,
+      window: "PM serves mod API 1.0 and nothing older.",
+      experimental: ["ai.complete"],
+    },
+    endpoints: [
+      endpoint(),
+      endpoint({ name: "theme.get", permission: null, class: "local" }),
+      endpoint({ name: "documents.added", kind: "event" }),
+    ],
+    limits: {
+      callsPerSecond: 50,
+      callBurst: 100,
+      maxInFlight: 16,
+      maxArgsBytes: 1 << 20,
+      maxResultBytes: 8 << 20,
+      maxBinaryResultBytes: 20 << 20,
+      maxDocsPerCall: 5000,
+      storageQuotaBytes: 50 << 20,
+      storageGrowthPerSecond: 4,
+      storageGrowthBurst: 40,
+      eventWindow: 256,
+      maxEventBytes: 64 << 10,
+      maxIdsPerEvent: 2000,
+      eventCoalesceMs: 250,
+      maxPendingIds: 100_000,
+    },
+    engine: { sealed: true, unsealedReasons: [], sinkholeAttempts: 0 },
+    sessions: [],
     ...extra,
   };
 }

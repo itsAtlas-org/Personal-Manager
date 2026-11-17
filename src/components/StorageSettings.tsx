@@ -10,6 +10,11 @@
 // The photo-OCR stack is also installed from here (its row offers Install when absent, and Install
 // beside Remove when an update left it on disk but not working), so the whole feature is
 // enabled/disabled in one place.
+//
+// Two folds (Mods spec §1.14), each remembered on this device (lib/foldPrefs): "Built in" is all of
+// the above, and "Mods" is what each installed mod keeps (StorageMods), uninstalled through the mod
+// runtime rather than the component teardown. The Local AI switch is NOT mirrored here ("one control,
+// one home"): Built in points at the Local AI tab, where the switch and the local models live.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -19,10 +24,14 @@ import {
   removeStorageComponent,
 } from "../lib/ipc";
 import type { StorageComponent, StorageReport } from "../lib/types";
+import { useRememberedFold } from "../lib/foldPrefs";
 import { formatBytes } from "../lib/format";
+import { localAiShown, useLocalAiSwitch } from "../lib/localAiSwitch";
+import { modsTotal } from "../lib/modStorage";
 import { prefersReducedMotion, scrollBehavior } from "../theme";
-import { Button, Callout, ConfirmDialog, SectionInfo } from "./ui";
+import { Button, Callout, Collapsible, ConfirmDialog, SectionInfo, SectionLabel } from "./ui";
 import { IngestProgress } from "./IngestProgress";
+import { StorageMods } from "./StorageMods";
 
 /** Human-friendly size; estimates are prefixed with "~". An *estimated* zero is unknown, not empty.
  *  The formatting itself is {@link formatBytes} — this is only the copy decision around it. The old
@@ -79,6 +88,10 @@ export function StorageSettings({ onNavigate }: { onNavigate: (tab: string) => v
   // row mid-download and `installFrac` (0..1, from the `ocr://install` progress event) drives its bar.
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [installFrac, setInstallFrac] = useState(0);
+  // Both folds are remembered on this device; a section nobody folded starts open.
+  const [builtInOpen, setBuiltInOpen] = useRememberedFold("settings.storage.builtIn", true);
+  const [modsOpen, setModsOpen] = useRememberedFold("settings.storage.mods", true);
+  const localAi = useLocalAiSwitch();
 
   const load = useCallback(() => {
     listStorageComponents()
@@ -138,43 +151,82 @@ export function StorageSettings({ onNavigate }: { onNavigate: (tab: string) => v
   }
 
   const copy = pending ? confirmCopy(pending) : null;
+  const pill =
+    "rounded-full border border-border2 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-accent";
 
   return (
     <div data-help="settings-storage">
-      <div className="flex items-baseline justify-between">
-        <h2 className="block text-sm font-medium text-ink2">On-device components</h2>
-        {report && (
-          <span className="shrink-0 font-mono text-xs text-ink3">
-            {formatSize(report.total_bytes, false)} total
-          </span>
-        )}
-      </div>
+      {error && <Callout className="mb-3">{error}</Callout>}
 
-      {error && <Callout className="mt-3">{error}</Callout>}
+      <Collapsible
+        open={builtInOpen}
+        onOpenChange={setBuiltInOpen}
+        title={<SectionLabel as="span">Built in</SectionLabel>}
+        meta={report ? formatSize(report.total_bytes, false) : undefined}
+      >
+        <div data-help="settings-storage-builtin">
+          <div className="mt-3 divide-y divide-border rounded-[var(--radius)] border border-border">
+            {report?.components.map((c) => (
+              <ComponentRow
+                key={c.id}
+                c={c}
+                busy={removingId === c.id}
+                installing={installingId === c.id}
+                frac={installFrac}
+                onRemove={() => setPending(c)}
+                onInstall={() => installComponent(c)}
+                onPill={scrollTo}
+                onManage={onNavigate}
+              />
+            ))}
+            {!report && <div className="px-4 py-6 text-center text-sm text-ink4">Scanning…</div>}
+          </div>
 
-      <div className="mt-3 divide-y divide-border rounded-[var(--radius)] border border-border">
-        {report?.components.map((c) => (
-          <ComponentRow
-            key={c.id}
-            c={c}
-            busy={removingId === c.id}
-            installing={installingId === c.id}
-            frac={installFrac}
-            onRemove={() => setPending(c)}
-            onInstall={() => installComponent(c)}
-            onPill={scrollTo}
-            onManage={onNavigate}
-          />
-        ))}
-        {!report && <div className="px-4 py-6 text-center text-sm text-ink4">Scanning…</div>}
-      </div>
+          {/* A pointer, not a mirror of the switch: Local AI's switch and its models live in the
+              Local AI tab, and unknown (the switch hasn't answered) says nothing. */}
+          {localAi !== null && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink4">
+              <span>
+                {localAiShown(localAi)
+                  ? "Models you run on this computer with Local AI take their own space and aren't counted here."
+                  : "Local AI is off, so PM isn't using a model on this computer."}
+              </span>
+              <button
+                type="button"
+                onClick={() => onNavigate(localAiShown(localAi) ? "localai" : "ai")}
+                className={pill}
+              >
+                {localAiShown(localAi) ? "Local AI →" : "AI & Models →"}
+              </button>
+            </div>
+          )}
 
-      <SectionInfo>
-        <p>
-          What PM has downloaded to this device, and what you can safely remove. Everything here
-          re-downloads on demand if you need it again.
-        </p>
-      </SectionInfo>
+          <SectionInfo>
+            <p>
+              What PM has downloaded to this device, and what you can safely remove. The built-in
+              components download again when you need them. Mods are different: see Mods below.
+            </p>
+          </SectionInfo>
+        </div>
+      </Collapsible>
+
+      <Collapsible
+        className="mt-6"
+        open={modsOpen}
+        onOpenChange={setModsOpen}
+        title={<SectionLabel as="span">Mods</SectionLabel>}
+        meta={report ? modsTotal(report.mods) : undefined}
+      >
+        <div className="mt-3">
+          {report ? (
+            <StorageMods mods={report.mods} reload={load} />
+          ) : (
+            <div className="rounded-[var(--radius)] border border-border px-4 py-6 text-center text-sm text-ink4">
+              Scanning…
+            </div>
+          )}
+        </div>
+      </Collapsible>
 
       <ConfirmDialog
         open={pending != null}

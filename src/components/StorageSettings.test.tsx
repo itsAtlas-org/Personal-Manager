@@ -23,6 +23,10 @@ vi.mock("../lib/ipc", () => ({
   removeStorageComponent: (id: string) => removeStorageComponent(id),
   installOptionalOcr: () => installOptionalOcr(),
   onOcrInstall: () => Promise.resolve(() => {}),
+  // The Local AI pointer and the Mods section (StorageMods.test.tsx covers them) read these.
+  getLocalAiSwitch: () => Promise.reject(new Error("unknown")),
+  uninstallPreview: () => Promise.reject(new Error("not here")),
+  uninstallMod: () => Promise.reject(new Error("not here")),
 }));
 
 // The primitives reach for `useTheme`; the real provider pulls in IPC.

@@ -12,24 +12,28 @@
 // and folds on this device, saying what was removed) belongs to the action, not to this component.
 
 import { useEffect, useState } from "react";
-import { uninstallMod, uninstallPreview } from "../../lib/ipc";
+import { uninstallPreview } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
-import { addModNote, clearModError, runModAction, useModActions } from "../../lib/modActions";
-import { pruneAfterUninstall } from "../../lib/modFolds";
+import { clearModError, useModActions } from "../../lib/modActions";
 import { failureText, type UninstallPreview } from "../../lib/modsTypes";
 import { Button, Callout, Dialog } from "../ui";
 import { modText } from "./modText";
+import { uninstallAction } from "./uninstallActions";
 import { plural, uninstallNote } from "./uninstallNote";
 
 export function UninstallDialog({
   modId,
   onClose,
   refresh,
+  onDone,
 }: {
   modId: string;
   onClose: () => void;
   /** Read the rows again (the Mods tab's shared read). */
   refresh: () => Promise<void>;
+  /** Called with what happened once the uninstall has worked, for a caller that has a place to say
+   *  it (Settings → Storage, where the Mods tab's notes aren't on screen). */
+  onDone?: (note: { warning: boolean; text: string }) => void;
 }) {
   const [preview, setPreview] = useState<UninstallPreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -92,20 +96,12 @@ export function UninstallDialog({
   function confirm() {
     if (!preview) return;
     const name = modText(preview.name);
-    void runModAction(
-      modId,
-      "Uninstalling",
-      "PM couldn't uninstall this mod.",
-      () => uninstallMod(modId, made > 0 && alsoDelete),
-      (done) => {
-        // Before anything is drawn again, and whether or not this dialog is still on screen.
-        pruneAfterUninstall(modId, done.prune);
-        const note = uninstallNote(name, done);
-        addModNote(note.warning ? "warning" : "info", note.text);
-      },
-    ).then((r) => {
+    void uninstallAction(modId, name, made > 0 && alsoDelete).then((r) => {
       void refresh();
-      if (r.ok) onClose();
+      if (r.ok) {
+        onDone?.(uninstallNote(name, r.value));
+        onClose();
+      }
     });
   }
 

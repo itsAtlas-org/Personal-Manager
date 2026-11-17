@@ -18,10 +18,13 @@ import {
 import {
   DEV_MODE_OFF_TEXT,
   FILE_KEY,
+  FOLDER_KEY,
   finishInstall,
+  isFolderScreen,
   restartScreen,
   startCatalogueInstall,
   startFileInstall,
+  startFolderLoad,
 } from "./modInstall";
 import type { InstallResult } from "./modsTypes";
 
@@ -30,8 +33,10 @@ const installUnsignedFile = vi.fn();
 const installFromCatalogue = vi.fn();
 const installModConsented = vi.fn();
 const devModeState = vi.fn();
+const loadTestMod = vi.fn();
 
 vi.mock("./ipc", () => ({
+  loadTestMod: (p: string) => loadTestMod(p),
   installModFile: (p: string) => installModFile(p),
   installUnsignedFile: (p: string) => installUnsignedFile(p),
   installFromCatalogue: (id: string) => installFromCatalogue(id),
@@ -322,5 +327,82 @@ describe("finishing an install", () => {
     expect(note.text).toContain(
       "Clean Name was installed, but PM couldn't save your answers: Busy.",
     );
+  });
+});
+
+describe("loading a test folder", () => {
+  const folder = consentScreen({
+    id: "acme.dev",
+    token: "tok-f",
+    tier: "third",
+    kind: "fresh",
+    from: "folder",
+    unsigned: {
+      confirmId: "acme.dev",
+      reinstall: false,
+      engineSealed: true,
+      readOrInternet: null,
+      testFolder: "/home/dev/acme",
+    },
+  });
+
+  it("reads the folder, loads nothing, and stages the screen with a way to start again", async () => {
+    loadTestMod.mockResolvedValue(folder);
+    const r = await startFolderLoad("/home/dev/acme");
+    expect(r).toEqual({ ok: true, value: folder });
+    expect(loadTestMod).toHaveBeenCalledWith("/home/dev/acme");
+    expect(installModConsented).not.toHaveBeenCalled();
+    const snap = getSnapshotForTest();
+    expect(snap.screens.get("acme.dev")).toEqual(folder);
+    // Starting again reads the SAME folder again.
+    await snap.restarts.get("acme.dev")!();
+    expect(loadTestMod).toHaveBeenCalledTimes(2);
+    expect(loadTestMod).toHaveBeenLastCalledWith("/home/dev/acme");
+  });
+
+  it("is busy under its own key while it reads, and a second ask waits for the first", async () => {
+    let read!: (s: typeof folder) => void;
+    loadTestMod.mockReturnValue(new Promise((r) => (read = r)));
+    const first = startFolderLoad("/a");
+    expect(getSnapshotForTest().busy.get(FOLDER_KEY)).toBe("Reading the folder");
+    expect(await startFolderLoad("/b")).toEqual({ ok: false, error: null });
+    expect(loadTestMod).toHaveBeenCalledTimes(1);
+    read(folder);
+    await first;
+    expect(getSnapshotForTest().busy.has(FOLDER_KEY)).toBe(false);
+  });
+
+  it("keeps the backend's sentence when it refuses, and stages nothing", async () => {
+    loadTestMod.mockRejectedValue({
+      code: "dev-mode-off",
+      message: "Developer mode is off on this computer.",
+    });
+    const r = await startFolderLoad("/home/dev/acme");
+    expect(r).toEqual({ ok: false, error: "Developer mode is off on this computer." });
+    expect(getSnapshotForTest().errors.get(FOLDER_KEY)).toBe(
+      "Developer mode is off on this computer.",
+    );
+    expect(getSnapshotForTest().screens.size).toBe(0);
+  });
+
+  it("forgets the last refusal when it tries again", async () => {
+    loadTestMod.mockRejectedValueOnce(new Error("no"));
+    await startFolderLoad("/a");
+    expect(getSnapshotForTest().errors.has(FOLDER_KEY)).toBe(true);
+    loadTestMod.mockResolvedValueOnce(folder);
+    await startFolderLoad("/a");
+    expect(getSnapshotForTest().errors.has(FOLDER_KEY)).toBe(false);
+  });
+
+  it("a folder screen belongs to Settings, a file's or a catalogue's to the Mods tab", () => {
+    expect(isFolderScreen(folder)).toBe(true);
+    // Either mark alone is enough to keep it out of the Mods tab.
+    expect(isFolderScreen({ ...folder, from: "file" })).toBe(true);
+    expect(isFolderScreen({ ...folder, unsigned: { ...folder.unsigned!, testFolder: null } })).toBe(
+      true,
+    );
+    expect(isFolderScreen(stark)).toBe(false);
+    expect(isFolderScreen(signed)).toBe(false);
+    expect(isFolderScreen({ ...signed, from: "catalogue" })).toBe(false);
   });
 });

@@ -9,7 +9,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetModActions } from "../../lib/modActions";
+import { resetModActions, setModScreen } from "../../lib/modActions";
 import { ModRowsContext } from "../../lib/modRows";
 import type { Catalogue, ConsentScreen, InstallResult, ModsChanged } from "../../lib/modsTypes";
 import { consentPerm, consentScreen, safety } from "./modFixtures";
@@ -317,6 +317,23 @@ describe("from a file", () => {
     expect(
       (within(dialog).getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled,
     ).toBe(true);
+  });
+
+  it("leaves a test folder's screen to Settings → Developer, so it is never drawn twice", async () => {
+    render(view());
+    await screen.findByRole("button", { name: "Install Map" });
+    const folder = rawScreen({
+      id: "acme.dev",
+      from: "folder",
+      unsigned: { ...rawScreen().unsigned!, confirmId: "acme.dev", testFolder: "/home/dev/acme" },
+    });
+    act(() => setModScreen("acme.dev", folder));
+    // Still drawn for a screen of the Mods tab's own kind staged beside it.
+    act(() => setModScreen("acme.raw", rawScreen()));
+    const dialogs = await screen.findAllByRole("dialog");
+    expect(dialogs).toHaveLength(1);
+    expect(within(dialogs[0]).getByText(/Install Raw, which nobody has checked/)).toBeTruthy();
+    expect(screen.queryByText(/as a test mod/)).toBeNull();
   });
 
   it("the Install from file section sits last, after Available", async () => {

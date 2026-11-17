@@ -15,16 +15,34 @@ vi.mock("../../lib/capabilities", () => ({
   useDevMode: () => ({ devMode, setDevMode }),
 }));
 
+// The kit and the test mods read the backend only while developer mode is on.
+const devKitInfo = vi.fn();
+const listTestMods = vi.fn();
+vi.mock("../../lib/ipc", () => ({
+  devKitInfo: () => devKitInfo(),
+  listTestMods: () => listTestMods(),
+  onModsChanged: () => Promise.resolve(() => {}),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) }));
+
 vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
 
+import { HELP } from "../../lib/help";
 import { failureText } from "../../lib/modsTypes";
+import { devKit } from "../mods/modFixtures";
 import { DeveloperSettings } from "./DeveloperSettings";
+import { OFF_HINT } from "./kitWords";
+import { SETTINGS_TABS } from "./registry";
 
 beforeEach(() => {
   setDevMode.mockReset();
+  devKitInfo.mockReset();
+  listTestMods.mockReset();
+  devKitInfo.mockResolvedValue(devKit());
+  listTestMods.mockResolvedValue([]);
   devMode = false;
 });
 afterEach(cleanup);
@@ -107,5 +125,66 @@ describe("the copy", () => {
     expect(opened).toContain("unsigned mods");
     expect(opened).toContain("test mod from a folder");
     expect(opened).toContain("this computer only");
+  });
+});
+
+describe("the rest of the tab", () => {
+  const railIds = () => SETTINGS_TABS.find((t) => t.id === "developer")!.sections.map((s) => s.id);
+
+  it("has every anchor the rail names, whether or not developer mode is on", async () => {
+    for (const on of [false, true]) {
+      devMode = on;
+      const { unmount } = render(<DeveloperSettings />);
+      for (const id of railIds()) {
+        const el = document.getElementById(id);
+        expect(el, `${id} with developer mode ${on ? "on" : "off"}`).not.toBeNull();
+        expect(el?.hasAttribute("data-settings-section")).toBe(true);
+      }
+      await waitFor(() => expect(document.body.textContent).not.toContain("Reading…"));
+      unmount();
+    }
+  });
+
+  it("offers no test mods and asks the backend for nothing while it is off", () => {
+    render(<DeveloperSettings />);
+    expect(screen.queryByRole("button", { name: "Choose a folder…" })).toBeNull();
+    expect(devKitInfo).not.toHaveBeenCalled();
+    expect(listTestMods).not.toHaveBeenCalled();
+    const gated = document.getElementById("sec-dev-testmods")?.textContent?.includes(OFF_HINT);
+    expect(gated).toBe(true);
+  });
+
+  it("reads the kit and offers 'Load a test mod' once it is on", async () => {
+    devMode = true;
+    render(<DeveloperSettings />);
+    expect(await screen.findByRole("button", { name: "Choose a folder…" })).toBeTruthy();
+    await waitFor(() => expect(devKitInfo).toHaveBeenCalledTimes(1));
+    expect(listTestMods).toHaveBeenCalled();
+    expect(await screen.findByText("Calls per second, sustained")).toBeTruthy();
+  });
+
+  it("says turning it off unloads the test mods, as well as pausing the unsigned ones", () => {
+    render(<DeveloperSettings />);
+    expect(document.body.textContent).toContain("unloads every test mod for good");
+  });
+
+  it("gives every surface a help entry", async () => {
+    devMode = true;
+    render(<DeveloperSettings />);
+    await screen.findByText("Calls per second, sustained");
+    const ids = [...document.querySelectorAll("[data-help]")].map((e) =>
+      e.getAttribute("data-help")!,
+    );
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "settings-developer",
+        "settings-developer-api",
+        "settings-developer-endpoints",
+        "settings-developer-limits",
+        "settings-developer-running",
+        "settings-developer-testmods",
+      ]),
+    );
+    for (const id of ids) expect(HELP[id], `no help entry for ${id}`).toBeDefined();
   });
 });

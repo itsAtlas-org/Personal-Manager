@@ -19,6 +19,7 @@ import {
   installModConsented,
   installModFile,
   installUnsignedFile,
+  loadTestMod,
 } from "./ipc";
 import {
   addModNote,
@@ -79,6 +80,31 @@ export function startFileInstall(path: string): Promise<ModActionResult<ConsentS
   const read = () => screenForFile(path);
   return runModAction(FILE_KEY, "Reading the file", "PM couldn't read that file.", read, (screen) =>
     stage(screen, read),
+  );
+}
+
+/** The busy/error key of loading a test folder (the id isn't known until the folder is read). */
+export const FOLDER_KEY = "install:folder";
+
+/** A consent screen for a developer's test folder. Those belong to Settings → Developer, not to the
+ *  Mods tab: the Developer tab draws them and the Mods tab leaves them out, so a screen staged here is
+ *  never drawn twice (Settings is an overlay over a Mods tab that may still be mounted). This only
+ *  routes the screen to a surface; it grants nothing and decides no trust. */
+export function isFolderScreen(screen: ConsentScreen): boolean {
+  return screen.from === "folder" || (screen.unsigned?.testFolder ?? null) !== null;
+}
+
+/** Read the developer's folder at `path` and stage its stark screen. Nothing is loaded until the
+ *  screen's button; the backend checks developer mode itself, before it reads the folder. */
+export function startFolderLoad(path: string): Promise<ModActionResult<ConsentScreen>> {
+  clearModError(FOLDER_KEY);
+  const read = () => loadTestMod(path);
+  return runModAction(
+    FOLDER_KEY,
+    "Reading the folder",
+    "PM couldn't read that folder.",
+    read,
+    (screen) => stage(screen, read),
   );
 }
 
