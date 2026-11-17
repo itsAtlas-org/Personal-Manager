@@ -128,7 +128,7 @@ describe("ModRowsProvider", () => {
     expect(state()).toBe("not loaded||PM is locked.");
   });
 
-  it("a store that opens or is restored over forgets the old vault's notes, staged screens and refusals, and keeps work in flight", async () => {
+  it("a store that opens forgets the old vault's notes, staged screens and refusals, and keeps work in flight; the background recovery pass that follows keeps them", async () => {
     listMods.mockResolvedValue([row("acme.a")]);
     await mount();
     addModNote("info", "“X” was uninstalled.");
@@ -143,9 +143,11 @@ describe("ModRowsProvider", () => {
     expect(currentModActions().busy.has("acme.y")).toBe(true);
     addModNote("info", "again");
     setModScreen("acme.x", consentScreen({ id: "acme.x" }));
+    // `recovered` comes seconds after `loaded`, for the same vault: what the person staged since
+    // (a consent screen they are reading) is still valid in the backend and must not vanish.
     await act(async () => changed?.({ cause: "recovered" }));
-    expect(currentModActions().notes).toHaveLength(0);
-    expect(currentModActions().screens.size).toBe(0);
+    expect(currentModActions().notes).toHaveLength(1);
+    expect(currentModActions().screens.size).toBe(1);
   });
 
   it("is not loaded while the first read has failed, and says why", async () => {

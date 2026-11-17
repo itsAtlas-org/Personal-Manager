@@ -9,11 +9,14 @@
 //   a change can't overwrite the read the change caused.
 // - A failed read (the vault is locked, another PM window is the writer) keeps the rows it has and
 //   records why; the next `mods://changed` (the store opening sends `loaded`) reads again.
-// - A store that opens (`loaded`) or is restored over (`recovered`) is a different vault's data: this
-//   provider sits above the tree a lock or a vault switch replaces, so it is what remembers the old
-//   vault. `loaded` empties the rows (a failed read would otherwise keep the old vault's mods and
-//   their sidebar tabs), and both drop what the Mods tab remembered about the vault that went away
-//   (modActions `forgetVaultState`: its notes, staged install screens and refusals).
+// - A store that opens (`loaded`) may be a different vault's data: this provider sits above the tree
+//   a lock or a vault switch replaces, so it is what remembers the old vault. `loaded` empties the
+//   rows (a failed read would otherwise keep the old vault's mods and their sidebar tabs; `loaded:
+//   false` is also what tells App not to treat an open mod tab as gone while the rows are unknown),
+//   and drops what the Mods tab remembered about the vault that went away (modActions
+//   `forgetVaultState`: its notes, staged install screens and refusals). `recovered` is NOT a
+//   switch: the background pass sends it seconds after `loaded`, for the same vault, and the install
+//   screens staged meanwhile are still good, so it only reads again.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listMods, onModsChanged } from "./ipc";
@@ -51,9 +54,9 @@ export function ModRowsProvider({ children }: { children: ReactNode }) {
     void refresh();
     const stop = subscribeUntilCleanup(() =>
       onModsChanged((e) => {
-        if (e.cause === "loaded" || e.cause === "recovered") {
+        if (e.cause === "loaded") {
           forgetVaultState();
-          if (e.cause === "loaded") setRead({ rows: [], loaded: false, problem: null });
+          setRead({ rows: [], loaded: false, problem: null });
         }
         void refresh();
       }),

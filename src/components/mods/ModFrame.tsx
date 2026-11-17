@@ -565,6 +565,7 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
       )}
       {phase.kind === "open" && asking.length > 0 && (
         <ModPermissionPrompt
+          key={asking[0]}
           name={name}
           tier={tier}
           permission={asking[0]}

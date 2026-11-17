@@ -212,18 +212,30 @@ describe("placement changes", () => {
 describe("isReachable and isActiveEntry", () => {
   it("keeps a hidden tab reachable, and drops one that's gone", () => {
     const hidden = resolveNav(CORE_NAV, { hidden: ["graph"], pinned: [] }, STANDARD);
-    expect(isReachable("graph", CORE_NAV, hidden)).toBe(true);
-    expect(isReachable("teach", CORE_NAV, resolveNav(CORE_NAV, NONE, MINIMAL))).toBe(false);
-    expect(isReachable("dev", CORE_NAV, resolveNav(CORE_NAV, NONE, STANDARD))).toBe(false);
+    expect(isReachable("graph", CORE_NAV, hidden, true)).toBe(true);
+    expect(isReachable("teach", CORE_NAV, resolveNav(CORE_NAV, NONE, MINIMAL), true)).toBe(false);
+    expect(isReachable("dev", CORE_NAV, resolveNav(CORE_NAV, NONE, STANDARD), true)).toBe(false);
     expect(
-      isReachable("dev", CORE_NAV, resolveNav(CORE_NAV, NONE, { depth: "min", devMode: true })),
+      isReachable(
+        "dev",
+        CORE_NAV,
+        resolveNav(CORE_NAV, NONE, { depth: "min", devMode: true }),
+        true,
+      ),
     ).toBe(true);
   });
 
   it("always allows a view with no entry, and never a mod tab that isn't there", () => {
     const r = resolveNav(CORE_NAV, NONE, MINIMAL);
-    expect(isReachable("project", CORE_NAV, r)).toBe(true);
-    expect(isReachable("mod:atlas.map", CORE_NAV, r)).toBe(false);
+    expect(isReachable("project", CORE_NAV, r, true)).toBe(true);
+    expect(isReachable("mod:atlas.map", CORE_NAV, r, true)).toBe(false);
+  });
+
+  it("keeps a mod's tab while the mods haven't been read, but never one of PM's own that is gone", () => {
+    // The store re-opening empties the rows until the new read lands; the tab is unknown, not gone.
+    const r = resolveNav(CORE_NAV, NONE, MINIMAL);
+    expect(isReachable("mod:atlas.map", CORE_NAV, r, false)).toBe(true);
+    expect(isReachable("teach", CORE_NAV, r, false)).toBe(false);
   });
 
   it("lights Focus for an open project", () => {
@@ -316,10 +328,10 @@ describe("mods' own tabs", () => {
     const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
     const hidden = resolveNav(entries, { hidden: ["mod:acme.tool"], pinned: [] }, STANDARD);
     expect(ids(hidden.hidden)).toEqual(["mod:acme.tool"]);
-    expect(isReachable("mod:acme.tool", entries, hidden)).toBe(true);
+    expect(isReachable("mod:acme.tool", entries, hidden, true)).toBe(true);
     // Uninstalled (no row, so no entry): back to Focus.
     const gone = resolveNav(CORE_NAV, NONE, STANDARD);
-    expect(isReachable("mod:acme.tool", CORE_NAV, gone)).toBe(false);
+    expect(isReachable("mod:acme.tool", CORE_NAV, gone, true)).toBe(false);
   });
 
   it("pins, hides and shows like a core tab", () => {

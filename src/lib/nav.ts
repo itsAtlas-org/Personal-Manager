@@ -296,12 +296,16 @@ export function isActiveEntry(entry: NavEntryDef, view: View): boolean {
 
 /** Whether App may stay on `view`. A view with no entry of its own ("project") always may; an
  *  entry's view may while it's shown or hidden, since a hidden tab is still a Ctrl K away. One that
- *  is gone (developer mode off, Minimal's default, a mod that isn't there) sends App to Focus. */
+ *  is gone (developer mode off, Minimal's default, a mod that isn't there) sends App to Focus.
+ *  `modsKnown` is whether the installed mods have been read: while they haven't (the store has just
+ *  re-opened and the list is being read again) a mod's tab is unknown, not gone, so it stays. */
 export function isReachable(
   view: View,
   entries: readonly NavEntryDef[],
   resolved: ResolvedNav,
+  modsKnown: boolean,
 ): boolean {
+  if (isModView(view) && !modsKnown) return true;
   if (!isModView(view) && !entries.some((e) => e.id === view)) return true;
   return [...resolved.shown, ...resolved.hidden].some((e) => e.id === view);
 }

@@ -98,7 +98,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "mods-permission-prompt": {
     title: "A mod asks to do something",
-    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. You can change either answer any time in the Mods tab.",
+    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow and No switch on half a second after the window appears, so a click meant for the mod can't answer for you. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. You can change either answer any time in the Mods tab.",
   },
   "mods-consent": {
     title: "Approve an install or an update",

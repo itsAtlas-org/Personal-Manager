@@ -136,6 +136,9 @@ describe("App's routing", () => {
   });
 
   it("asks App's fallback the same question the sidebar answers: nav entries, then reachable", () => {
-    expect(appSource).toMatch(/isReachable\(view, navEntries, nav\)/);
+    // ...and tells it whether the mods have been read, so a mod tab open while the store re-opens
+    // (the provider empties the rows until the new read lands) isn't sent to Focus.
+    expect(appSource).toMatch(/const \{ loaded: modsLoaded \} = useModRows\(\)/);
+    expect(appSource).toMatch(/isReachable\(view, navEntries, nav, modsLoaded\)/);
   });
 });

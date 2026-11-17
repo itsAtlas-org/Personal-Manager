@@ -16,6 +16,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ModFrame, type ModTier } from "./ModFrame";
+import { PROMPT_GUARD_MS } from "./ModPermissionPrompt";
 import {
   FLOOD_BURST,
   INTERNAL_MESSAGE,
@@ -836,12 +837,77 @@ describe("the first-use question", () => {
     return got;
   }
   const settle = () => act(() => new Promise((r) => setTimeout(r, 20)));
-  const question = () => screen.findByRole("dialog", { name: "Let “Acme Tool” do this?" });
+  /** The dialog the moment it appears: Allow and No are still held (the pointer guard). */
+  const freshQuestion = () => screen.findByRole("dialog", { name: "Let “Acme Tool” do this?" });
+  /** The dialog once the guard has run out, as a person who has read it would find it. */
+  const question = async () => {
+    const dialog = await freshQuestion();
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    return dialog;
+  };
   const call = (port: MessagePort, id = 7) =>
     port.postMessage({ id, method: "calendar.events", args: null });
 
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     modPermissionDecide.mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("holds Allow and No for a moment after the question appears, so a click meant for the mod can't answer it", async () => {
+    // The mod picks when this dialog opens, so it can put "click twice" under where Allow will be.
+    modCall.mockResolvedValueOnce(NEEDS).mockResolvedValueOnce(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    const allow = within(dialog).getByRole("button", { name: "Allow" }) as HTMLButtonElement;
+    const no = within(dialog).getByRole("button", { name: "No" }) as HTMLButtonElement;
+    const later = within(dialog).getByRole("button", { name: "Not now" }) as HTMLButtonElement;
+    expect(allow.disabled).toBe(true);
+    expect(no.disabled).toBe(true);
+    // The leaving answer, which records nothing, is never held.
+    expect(later.disabled).toBe(false);
+    fireEvent.click(allow);
+    fireEvent.click(no);
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS - 50));
+    fireEvent.click(allow);
+    expect(modPermissionDecide).not.toHaveBeenCalled();
+    expect(got).toEqual([]);
+    // After the wait the same buttons answer.
+    act(() => void vi.advanceTimersByTime(50));
+    expect(allow.disabled).toBe(false);
+    fireEvent.click(allow);
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledTimes(1);
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "calendar.details", true);
+  });
+
+  it("starts the wait again for the next question", async () => {
+    // A second permission asked straight after the first must not arrive already armed.
+    const NEEDS_B = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "calendar.read" },
+    };
+    modCall.mockResolvedValueOnce(NEEDS).mockResolvedValueOnce(NEEDS_B).mockResolvedValue(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    listen(port);
+    call(port, 1);
+    call(port, 2);
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(2));
+    fireEvent.click(within(await question()).getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(modPermissionDecide).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("dialog").textContent).toContain("time, title"));
+    const allowNext = within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Allow",
+    }) as HTMLButtonElement;
+    expect(allowNext.disabled).toBe(true);
+    fireEvent.click(allowNext);
+    expect(modPermissionDecide).toHaveBeenCalledTimes(1);
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    expect(allowNext.disabled).toBe(false);
   });
 
   it("asks in PM's own words and holds the call; Allow records the yes and retries it once", async () => {

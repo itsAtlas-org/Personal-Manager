@@ -64,6 +64,7 @@ import { useFollowSignIns } from "./lib/signInPages";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
 import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
+import { useModRows } from "./lib/modRows";
 
 const LAST_SEEN_VERSION_KEY = "pm:lastSeenVersion";
 import {
@@ -250,10 +251,13 @@ export default function App() {
   // If the open tab goes away entirely — developer mode switched off, a Depth change that leaves it
   // out (Minimal's Review, Teach and Map) — fall back to Focus so the user is never stranded on a
   // view with no nav entry and no palette destination. A tab the user HID stays: it's still in Ctrl
-  // K, which is how they got there.
+  // K, which is how they got there. A mod's tab is only "gone" once the mods have been read: when the
+  // store re-opens the provider empties the rows until the new read lands, and the tab must survive
+  // that gap (ModTab draws its own Loading panel meanwhile).
+  const { loaded: modsLoaded } = useModRows();
   useEffect(() => {
-    if (!isReachable(view, navEntries, nav)) setView("focus");
-  }, [view, navEntries, nav]);
+    if (!isReachable(view, navEntries, nav, modsLoaded)) setView("focus");
+  }, [view, navEntries, nav, modsLoaded]);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [showWhatsNew, setShowWhatsNew] = useState(false);
   const [helpMode, setHelpModeState] = useState(false);

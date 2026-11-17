@@ -12,10 +12,19 @@
 // can't nag by calling in a loop). ModFrame holds the mod's call while this is open and retries it
 // once after an Allow.
 
+import { useEffect, useState } from "react";
 import { Button, Callout, Dialog } from "../ui";
 import { ModName } from "./ModName";
 import { permissionWords } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
+
+/** How long Allow and No stay off after the question appears. This is the one consent screen the
+ *  mod itself opens (by calling something), so it controls the moment it lands under the cursor: a
+ *  mod that draws "click here twice" over where Allow will be could have the second click granted.
+ *  Half a second is longer than a double-click and shorter than a person reading the question.
+ *  "Not now" is never held, it records nothing. The caller keys the prompt by permission, so each
+ *  new question starts its own wait. */
+export const PROMPT_GUARD_MS = 500;
 
 export function ModPermissionPrompt({
   name,
@@ -39,6 +48,12 @@ export function ModPermissionPrompt({
   onLater: () => void;
 }) {
   const words = permissionWords(permission);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setArmed(true), PROMPT_GUARD_MS);
+    return () => clearTimeout(t);
+  }, []);
+  const held = working || !armed;
   return (
     <Dialog
       open
@@ -55,10 +70,10 @@ export function ModPermissionPrompt({
           <Button variant="tertiary" onClick={onLater} disabled={working} data-autofocus>
             Not now
           </Button>
-          <Button variant="secondary" onClick={() => onAnswer(false)} disabled={working}>
+          <Button variant="secondary" onClick={() => onAnswer(false)} disabled={held}>
             No
           </Button>
-          <Button variant="primary" onClick={() => onAnswer(true)} disabled={working}>
+          <Button variant="primary" onClick={() => onAnswer(true)} disabled={held}>
             {working ? "Saving…" : "Allow"}
           </Button>
         </>
