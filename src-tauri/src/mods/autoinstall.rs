@@ -30,7 +30,8 @@
 //! deletes the old rows, verify-then-delete: the mod's `settings` key is read back before any old
 //! row goes, and an error anywhere rolls the whole install back, leaving the old rows and the marker
 //! for the next pass. What only the page can read (the per-device `pm.map.*` keys) is handed over by
-//! [`adopt_map_prefs`], which the page calls once and removes its keys only after it succeeds.
+//! [`adopt_map_prefs`], which the page calls while the flag is set; the page keeps its keys, because
+//! the mod's storage is per vault and every other vault on the device is owed them too.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -179,8 +180,15 @@ pub fn decide(
 // ---- What runs in the install's transaction ------------------------------------------------------
 
 /// The pilot's marker, its handover and its landed note, in the caller's transaction. Fails (so the
-/// transaction rolls back and the marker stays) when the mod's row isn't there.
+/// transaction rolls back and the marker stays) when the mod's row isn't there, and when the marker
+/// isn't there either: a pass plans against one store, then waits on a download, and "the active
+/// store" at the end may be another vault (a switch or a lock/unlock meanwhile). The marker, read
+/// in this very transaction, is what says *this* store asked for the install; without it nothing
+/// is installed here and no settings are touched.
 pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError> {
+    if get(conn, pilot.marker)?.is_none() {
+        return Err(policy::Refusal::Changed.into());
+    }
     let row: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM mods WHERE id = ?1)",
         [pilot.id],
@@ -291,7 +299,7 @@ impl From<rusqlite::Error> for AdoptRefusal {
 /// Merge the page's device-local Map prefs into the mod's `settings` key, only into fields it doesn't
 /// have yet (once the user has changed anything in the mod it holds all four, and nothing here
 /// overwrites that), then clear the flag. `Ok(false)` when there was nothing to hand over (another
-/// device did it first): the page may then drop its own keys. Nothing is written without the flag
+/// device did it first): the page keeps its keys either way. Nothing is written without the flag
 /// the handover sets, so this is dormant until a pilot has landed.
 pub fn adopt_map_prefs(
     conn: &mut Connection,

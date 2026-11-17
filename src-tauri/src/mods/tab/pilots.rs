@@ -76,7 +76,8 @@ pub async fn mods_handover_state(webview: Webview) -> Result<HandoverState> {
 
 /// Hand this device's Map view prefs (arrangement, cohesion, names) to the mod's storage, filling
 /// only what it doesn't hold yet. `true` when it did (or there was nothing left to hand over, which
-/// is the same to the page: it may now drop its own keys); an error leaves the page's keys alone.
+/// is the same to the page); the page keeps its keys either way, since another vault on the device
+/// is owed them too.
 #[tauri::command]
 pub async fn adopt_map_prefs(
     webview: Webview,

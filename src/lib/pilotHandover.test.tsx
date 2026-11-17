@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The page's half of a pilot's handover (PR B plan B8): the Map's per-device prefs go to the mod's
-// storage and leave this device only after PM says they were taken, and the sidebar rule runs once per
+// storage and stay on this device for the next vault, and the sidebar rule runs once per
 // device, only when the core Map tab is gone. Dormant: with nothing owed, nothing is read or written.
 
 import { act, cleanup, render, waitFor } from "@testing-library/react";
@@ -94,29 +94,39 @@ describe("the Map's device-local prefs", () => {
     expect(readDeviceMapPrefs()).toEqual({ layoutMode: "project", cohesion: 0, labels: false });
   });
 
-  it("go to the mod, and are removed from this device only after PM says it has them", async () => {
+  it("go to the mod and stay on this device, so the next vault to land here gets them too", async () => {
     setPrefs();
     let finish: (v: boolean) => void = () => {};
     adoptMapPrefs.mockReturnValueOnce(new Promise<boolean>((r) => (finish = r)));
     const done = applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
     await waitFor(() => expect(adoptMapPrefs).toHaveBeenCalledWith("semantic", 0.25, true));
-    // In flight: nothing is removed yet.
-    expect(localStorage.getItem(MAP_MODE_KEY)).toBe("semantic");
     finish(true);
     await done;
     for (const k of [MAP_MODE_KEY, MAP_COHESION_KEY, MAP_LABELS_KEY]) {
-      expect(localStorage.getItem(k), k).toBeNull();
+      expect(localStorage.getItem(k), k).not.toBeNull();
     }
+    // A second vault on this device lands later (the backend's flag is per vault): same values.
+    await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    expect(adoptMapPrefs).toHaveBeenCalledTimes(2);
+    expect(adoptMapPrefs).toHaveBeenLastCalledWith("semantic", 0.25, true);
   });
 
-  it("stay on this device when PM refuses, and the next try sends them again", async () => {
+  it("are sent again after PM refuses", async () => {
     setPrefs();
     adoptMapPrefs.mockRejectedValueOnce({ code: "not-installed", message: "No." });
     await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
     expect(localStorage.getItem(MAP_MODE_KEY)).toBe("semantic");
     await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
     expect(adoptMapPrefs).toHaveBeenCalledTimes(2);
-    expect(localStorage.getItem(MAP_MODE_KEY)).toBeNull();
+  });
+
+  it("are read from the keys the core Map writes (while the core Map exists)", async () => {
+    // pilotHandover keeps its own copies so removing the core Map can't take the handover with it;
+    // until then nothing else ties them to the real keys. B9 deletes this test with mapPrefs.
+    const real = await import("./mapPrefs");
+    expect(MAP_MODE_KEY).toBe(real.MAP_MODE_KEY);
+    expect(MAP_COHESION_KEY).toBe(real.MAP_COHESION_KEY);
+    expect(MAP_LABELS_KEY).toBe(real.MAP_LABELS_KEY);
   });
 
   it("aren't sent when PM says nothing waits, or when the device has none", async () => {
@@ -210,7 +220,8 @@ describe("the hook", () => {
     await waitFor(() => expect(changed).not.toBeNull());
     await act(async () => changed?.({ cause: "auto-installed" }));
     await waitFor(() => expect(adoptMapPrefs).toHaveBeenCalledWith("semantic", 0, false));
-    await waitFor(() => expect(localStorage.getItem(MAP_MODE_KEY)).toBeNull());
+    await waitFor(() => expect(readHandled()).toEqual(["atlas.map"]));
+    expect(localStorage.getItem(MAP_MODE_KEY)).toBe("semantic");
     expect(readHandled()).toEqual(["atlas.map"]);
   });
 

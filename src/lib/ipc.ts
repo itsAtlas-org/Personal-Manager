@@ -2418,8 +2418,8 @@ export const retryAutoInstall = () => invoke<ModsRetryResult>("retry_auto_instal
 export const modsHandoverState = () => invoke<ModsHandoverState>("mods_handover_state");
 
 /** Hand this device's Map view prefs to the Map mod's storage (it fills only what the mod lacks).
- *  Resolves true when it did or there was nothing left to hand over; remove the device's own keys
- *  only after this resolves. */
+ *  Resolves true when it did or there was nothing left to hand over. The device's own keys stay:
+ *  every vault on the device is owed them once. */
 export const adoptMapPrefs = (layoutMode: string, cohesion: number, labels: boolean) =>
   invoke<boolean>("adopt_map_prefs", { layoutMode, cohesion, labels });
 

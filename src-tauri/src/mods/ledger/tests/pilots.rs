@@ -401,6 +401,50 @@ fn a_mod_that_appeared_since_the_plan_is_never_updated_by_the_pass() {
     assert_eq!(w.plan(Some(&index)), vec![Step::Settle]);
 }
 
+/// What a store that never asked for the Map keeps: its own core rows, no landed or adopt note.
+fn assert_other_vault_untouched(w: &World) {
+    assert_eq!(w.setting("map").as_deref(), Some(r#"{"nodeCap":2500}"#));
+    assert!(w.setting("doc_layout_meta").is_some());
+    assert!(w.setting("project_layout_cache").is_some());
+    assert_eq!(w.setting(ADOPT_FLAG), None);
+    assert_eq!(w.setting(pilot().landed), None);
+    assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 0);
+}
+
+#[test]
+fn a_download_planned_in_one_vault_installs_nothing_in_a_vault_without_the_marker() {
+    let w = world();
+    let b = b_default();
+    let index = b.index();
+    w.seed_core_map(r#"{"nodeCap":2500}"#);
+    let Step::Download(d) = w.plan(Some(&index)).remove(0) else {
+        panic!()
+    };
+    // The user switched to a vault that never asked for the Map (or uninstalled it on purpose)
+    // while the file came down: the active store is now one with no marker.
+    w.exec(&format!("DELETE FROM settings WHERE key = '{MARKER}'"));
+    let landed = w
+        .ledger()
+        .land_pilot(pilot(), &d, &b.bytes, &b.keys, &index, list_now());
+    assert!(matches!(landed, PilotLanded::Failed(_)), "{landed:?}");
+    assert_eq!(w.rows(), 0, "no mods row");
+    assert!(w.installed_tree().is_empty(), "no files");
+    assert_other_vault_untouched(&w);
+}
+
+#[test]
+fn a_settle_planned_in_one_vault_settles_nothing_in_a_vault_without_the_marker() {
+    let w = world();
+    w.have("1.0.0");
+    w.seed_core_map(r#"{"nodeCap":2500}"#);
+    assert_eq!(w.plan(None), vec![Step::Settle]);
+    // The other vault holds a catalogue row for the mod but never had a marker.
+    w.exec(&format!("DELETE FROM settings WHERE key = '{MARKER}'"));
+    assert!(w.ledger().settle_pilot(pilot()).is_err());
+    assert_eq!(w.rows(), 1, "its own row is as it was");
+    assert_other_vault_untouched(&w);
+}
+
 #[test]
 fn an_older_copy_that_appeared_since_the_plan_is_not_updated_by_the_pass() {
     let w = world();

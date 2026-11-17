@@ -6,7 +6,8 @@
 //
 //   - the Map's per-device view prefs (arrangement, cohesion, names), kept in localStorage by the core
 //     Map. A sealed frame can't read them, so once the backend says they are waiting, they go to the
-//     mod's storage through `adoptMapPrefs` and are removed from this device only after it resolves;
+//     mod's storage through `adoptMapPrefs`. They stay on the device: the mod's storage is per vault,
+//     and every vault this device opens is owed them once;
 //   - the sidebar: the mod's tab is added to this device's hidden set once, when the core Map tab
 //     wasn't showing here (Minimal and not pinned), so installing it doesn't make a tab appear that
 //     this sidebar had left out (`placementAfterPilotLanded`).
@@ -58,14 +59,6 @@ function lsSet(key: string, value: string): boolean {
   }
 }
 
-function lsRemove(key: string): void {
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    /* best-effort */
-  }
-}
-
 export function readHandled(): string[] {
   try {
     const value: unknown = JSON.parse(lsGet(PILOT_HANDLED_KEY) ?? "[]");
@@ -99,12 +92,6 @@ export function readDeviceMapPrefs(): DeviceMapPrefs | null {
   };
 }
 
-function dropDeviceMapPrefs(): void {
-  lsRemove(MAP_MODE_KEY);
-  lsRemove(MAP_COHESION_KEY);
-  lsRemove(MAP_LABELS_KEY);
-}
-
 let running = false;
 
 /** Carry out what `state` says is owed on this device. Never throws: a failure leaves the device's
@@ -123,15 +110,18 @@ export async function applyHandover(state: ModsHandoverState, depth: Depth): Pro
       handled.push(id);
       lsSet(PILOT_HANDLED_KEY, JSON.stringify(handled.slice(-MAX_HANDLED)));
     }
-    // The Map's device-local prefs, removed from this device only after the mod holds them.
+    // The Map's device-local prefs go to the mod's per-vault storage. The device's keys are NEVER
+    // removed: they belong to the device, not to the vault that landed first, and a second vault on
+    // this device that lands later is owed the same arrangement (its own backend flag says so; each
+    // vault takes them once, only into fields it doesn't hold). Nothing writes the keys once the core
+    // Map is gone, so leaving them costs three short strings.
     if (state.adoptMapPrefs) {
       const prefs = readDeviceMapPrefs();
       if (prefs) {
         try {
           await adoptMapPrefs(prefs.layoutMode, prefs.cohesion, prefs.labels);
-          dropDeviceMapPrefs();
         } catch {
-          /* kept: tried again later */
+          /* the backend keeps its flag: tried again on the next change */
         }
       }
     }
