@@ -196,9 +196,11 @@ pip-audit:
     pip-audit --disable-pip -r sidecar/requirements.lock -r sidecar/requirements-ocr.lock -r sidecar/requirements-tsne.lock
 
 # JS dependency CVE audit against the npm lockfile. `moderate` (not `high`) so a moderate-rated
-# sanitizer / proto-pollution advisory in the render path can't pass green (L-7).
+# sanitizer / proto-pollution advisory in the render path can't pass green (L-7). The script runs
+# `npm audit` and lets through only an advisory listed in its ACCEPTED (dated, with the decision),
+# and only while a second audit of the shipped tree alone (`--omit=dev`) doesn't report it.
 npm-audit:
-    npm audit --audit-level=moderate
+    node scripts/npm-audit.mjs
 
 # Secret scan of the WHOLE working tree — including git-ignored files, so it's the
 # sole net for a secret in an ignored path (config: .gitleaks.toml). CI runs this

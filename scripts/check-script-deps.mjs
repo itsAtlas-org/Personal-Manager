@@ -154,6 +154,13 @@ const ALLOWED = [
       "vite is the repo-wide build tool on a `^` range, governed by the normal npm/Dependabot flow and used by the app's own build. A scripts/ test must not dictate its version.",
   },
   {
+    file: "scripts/npm-audit.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. The npm audit gate has one way out (a dated acceptance that holds only while the advisory stays out of the shipped tree), and each rule that keeps it shut fails silently in the passing direction if it drifts, so each is shown a report that breaks it; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
     file: "scripts/check-mods.test.mjs",
     specifier: "vitest",
     why: "The repo's existing test runner, on the same terms as the entries around it. check-mods decides whether a mod folder ships in the installer or a PM file reaches into a mod, and its D12 half decides whether a change owes PM's version bump at all; each rule fails silently in the passing direction if a pattern drifts, so each is shown a tree that breaks it, run over throwaway trees and git repos; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
