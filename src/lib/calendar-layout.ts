@@ -28,9 +28,9 @@ export function milestoneOverlayId(milestoneId: number): string {
   return `milestone:${milestoneId}`;
 }
 
-/** What a MET milestone's overlay summary starts with. The overlay is a synthetic event with no
- *  field to say "met", so its summary says it, and `isEventPast` reads it back: a met milestone
- *  recedes with the past, an unmet one never does, however late. */
+/** What a MET milestone's overlay summary starts with: the colour-independent cue that it is met.
+ *  Display only. Nothing reads it back; the overlay's `done` field is what `isEventPast` uses, so a
+ *  label that itself begins with a check mark cannot make an unmet milestone recede. */
 export const MILESTONE_MET_MARK = "✓ ";
 
 /** The pseudo-calendar carrying the pinboard overlay: dated entries from freeform (not-yet-linked)
@@ -411,7 +411,7 @@ export function timedSegments(ev: CalendarEvent, days: readonly Date[]): TimedSe
  *  as if it were finished, so they keep their full colour and stand out. */
 export function isEventPast(ev: CalendarEvent, now: Date): boolean {
   if (isTaskEvent(ev)) return false;
-  if (isMilestoneEvent(ev) && !ev.summary.startsWith(MILESTONE_MET_MARK)) return false;
+  if (isMilestoneEvent(ev) && !ev.done) return false;
   if (ev.all_day) {
     const span = eventDaySpan(ev);
     return !!span && span.endDay.getTime() < startOfDay(now).getTime();

@@ -30,7 +30,8 @@ const VARIANT: Record<IconButtonVariant, string> = {
   // through `className` does NOT replace the variant's own `text-ink4` — both survive and CSS
   // source order silently decides. That is #469, and it is why an ad-hoc pressed colour looks like
   // a control that does nothing.
-  pressed: "bg-accent text-accent-ink enabled:hover:brightness-110",
+  pressed:
+    "bg-accent text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)] enabled:hover:brightness-110",
 };
 
 export interface IconButtonProps extends Omit<ComponentPropsWithRef<"button">, "aria-label"> {

@@ -196,6 +196,43 @@ const overview: CalendarOverview = {
 
 const today = dayKey(startOfDay(new Date()));
 
+/** For a describe whose tests open quick create: the clock reads the middle of the hours that are
+ *  `today` both here and in London, before 23:00 there. The file gives the device Europe/London, and
+ *  the box opens on London's today, or from 23:30 there on tomorrow (the next half hour is 00:00, as
+ *  Google's does), while `today` and the fixtures are this machine's. So the box opened on a day the
+ *  tests didn't expect when London was past 23:30 (CI at 23:35 UTC, 2026-11-16), and just after
+ *  London's midnight on a machine at UTC-10 or further west. Those hours overlap for at least nine
+ *  hours on any machine from UTC-12 to UTC+14. Only Date is faked, so waitFor's timers still run.
+ *  newEventSeed's own tests cover the rollover. */
+function clockMidTodayHereAndInLondon() {
+  const london = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const fits = (at: number) => {
+    const p = Object.fromEntries(london.formatToParts(at).map((part) => [part.type, part.value]));
+    return (
+      dayKey(new Date(at)) === today &&
+      `${p.year}-${p.month}-${p.day}` === today &&
+      `${p.hour}:${p.minute}` < "23:00"
+    );
+  };
+  // Every half hour from 14 hours before today's UTC midnight to 14 after its end.
+  const first = Date.parse(`${today}T00:00:00Z`) - 14 * 3_600_000;
+  const fitting = Array.from({ length: 105 }, (_, i) => first + i * 1_800_000).filter(fits);
+  const at = fitting[Math.floor(fitting.length / 2)];
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at);
+  });
+  afterEach(() => vi.useRealTimers());
+}
+
 const row = (over: Partial<CalendarEvent>): CalendarEvent => ({
   id: "e1",
   calendar_id: PERSONAL,
@@ -605,6 +642,8 @@ describe("CalendarView: dragging in Week", () => {
 });
 
 describe("CalendarView: a new event", () => {
+  clockMidTodayHereAndInLondon();
+
   // C16 critique C2-M9: a date typed in quick create that the view doesn't show moves the view to
   // it, as Google's does; the box opening on a day already shown moves nothing.
   it("a date typed in quick create off screen moves the week to it", async () => {
@@ -2707,6 +2746,7 @@ describe("CalendarView: Event | Task in quick create", () => {
   const title = () => within(quick()).getByLabelText<HTMLInputElement>("Title");
   const taskSeg = () => within(quick()).getByRole("button", { name: "Task" });
   const said = () => document.querySelector('[role="status"]')?.textContent ?? "";
+  clockMidTodayHereAndInLondon();
 
   it("Shift+C's box has the switch, on Event", async () => {
     await mount();
@@ -2716,6 +2756,49 @@ describe("CalendarView: Event | Task in quick create", () => {
       "true",
     );
   });
+
+  /** The next tasks read, held until `release` is called with the list it brings. */
+  function holdNextTasksRead() {
+    let release: (list: Task[]) => void = () => {};
+    let fail: (e: Error) => void = () => {};
+    ipc.listTasks.mockImplementationOnce(
+      () =>
+        new Promise<Task[]>((resolve, reject) => {
+          release = resolve;
+          fail = reject;
+        }),
+    );
+    return { release: (list: Task[]) => release(list), fail: (e: Error) => fail(e) };
+  }
+  const savedGhost = () => {
+    const g = ghost();
+    return g && /^New task, saved: /.test(g.getAttribute("aria-label") ?? "") ? g : null;
+  };
+  /** The task's real chips (the ghost is a button too, but a draft). */
+  const chips = () =>
+    screen
+      .queryAllByRole("button", { name: /Pay rent/ })
+      .filter((el) => !el.hasAttribute("data-draft-event"));
+  /** The list's day section the ghost sits in, as its date reads. */
+  const ghostDay = () => ghost()?.closest("section")?.textContent ?? "";
+  const pickDay = (iso: string) => {
+    const day = within(quick()).getByLabelText<HTMLInputElement>("Day");
+    // The field commits on blur, so it holds focus while typed into.
+    act(() => day.focus());
+    fireEvent.change(day, { target: { value: isoToDisplay(iso) } });
+    act(() => title().focus());
+  };
+  /** Save on Task for `Pay rent`, with its tasks read held; returns that hold. */
+  async function saveTaskHeld(day?: string) {
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    if (day) pickDay(day);
+    ipc.addTask.mockResolvedValue(9);
+    const read = holdNextTasksRead();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    return read;
+  }
 
   it("a task made from the box lands on its day, leaves no event ghost, and shows as a chip", async () => {
     await mount();
@@ -2739,11 +2822,116 @@ describe("CalendarView: Event | Task in quick create", () => {
       lane: "foreground",
     });
     expect(ipc.createCalendarEvent).not.toHaveBeenCalled();
-    // No ghost waiting for an event row: the task's own chip is what's drawn, read again at once.
-    expect(ghost()).toBeNull();
-    expect(await screen.findByRole("button", { name: /Pay rent/ })).toBeTruthy();
+    // Once the read lands the chip is there, alone: the ghost never stays beside the real chip.
+    await waitFor(() => expect(ghost()).toBeNull());
+    await waitFor(() => expect(chips()).toHaveLength(1));
     expect(said()).toBe(`Task added: Pay rent, ${formatDateOnly(today)}.`);
     expect(document.activeElement).toBe(newEvent());
+  });
+
+  it("keeps a saved task's ghost until the read that follows the save brings its chip", async () => {
+    await mount();
+    const read = await saveTaskHeld();
+    // The box is gone and the read hasn't landed: the task is drawn as a saved ghost, not missing.
+    expect(savedGhost()?.getAttribute("aria-label")).toMatch(/^New task, saved: .*Pay rent$/);
+    expect(chips()).toHaveLength(0);
+    tasks = [made("Pay rent")];
+    await act(async () => read.release(tasks));
+    // The same update that brings the chip takes the ghost: never both, never neither.
+    expect(ghost()).toBeNull();
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("an older tasks read landing doesn't take the saved ghost: only one begun after the save does", async () => {
+    await mount();
+    // A read already in flight when the task is saved (a focus refresh, or the write's own event).
+    const older = holdNextTasksRead();
+    act(() => tasksChanged());
+    const read = await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    // The older one is superseded by the save's own read and applies nothing; the ghost stays.
+    await act(async () => older.release([]));
+    expect(savedGhost()).not.toBeNull();
+    tasks = [made("Pay rent")];
+    await act(async () => read.release(tasks));
+    expect(ghost()).toBeNull();
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("draws the saved ghost on today when the planned day has passed, where the chip will land", async () => {
+    await mount();
+    const read = await saveTaskHeld("2020-03-04");
+    expect(savedGhost()).not.toBeNull();
+    expect(ghostDay()).toContain(formatDateLocal(new Date()));
+    tasks = [{ ...made("Pay rent"), do_start: "2020-03-04" }];
+    await act(async () => read.release(tasks));
+    expect(ghost()).toBeNull();
+    // The chip is on today too, as the ghost said.
+    expect(chips()).toHaveLength(1);
+    expect(chips()[0].closest("section")?.textContent).toContain(formatDateLocal(new Date()));
+  });
+
+  it("draws the box's own ghost on today for a day that has passed", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    pickDay("2020-03-04");
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    expect(ghostDay()).toContain(formatDateLocal(new Date()));
+  });
+
+  it("draws no saved ghost when Tasks is hidden: nothing would draw the chip", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    await saveTaskHeld();
+    expect(ghost()).toBeNull();
+  });
+
+  it("drops the saved ghost when the read that should bring the chip fails", async () => {
+    await mount();
+    const read = await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    await act(async () => read.fail(new Error("db busy")));
+    expect(ghost()).toBeNull();
+  });
+
+  it("drops the saved ghost when a new box starts", async () => {
+    await mount();
+    await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    press("C", true);
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+    expect(savedGhost()).toBeNull();
+  });
+
+  it("never draws a task of an archived project while the archived names are still arriving", async () => {
+    let names: (n: string[]) => void = () => {};
+    ipc.listArchivedProjects.mockImplementation(
+      () =>
+        new Promise<string[]>((resolve) => {
+          names = resolve;
+        }),
+    );
+    tasks = [{ ...made("Shelved job"), project_name: "Old", do_start: today }];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("button", { name: /Standup/ });
+    await act(async () => {});
+    // The tasks read has landed but the archived names haven't: nothing is applied yet.
+    expect(screen.queryByRole("button", { name: /Shelved job/ })).toBeNull();
+    await act(async () => names(["Old"]));
+    expect(screen.queryByRole("button", { name: /Shelved job/ })).toBeNull();
+  });
+
+  it("keeps each list's last good value when its own read fails", async () => {
+    tasks = [made("Draft the deck")];
+    await mount();
+    expect(await screen.findByRole("button", { name: /Draft the deck/ })).toBeTruthy();
+    ipc.listTasks.mockRejectedValueOnce(new Error("db busy"));
+    ipc.listTaskStacks.mockResolvedValueOnce([]);
+    act(() => tasksChanged());
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: /Draft the deck/ })).toBeTruthy();
   });
 
   it("a task planned on a day that has passed is announced as showing on today", async () => {
@@ -2760,8 +2948,23 @@ describe("CalendarView: Event | Task in quick create", () => {
     await waitFor(() => expect(said()).toContain("Task added: Pay rent"));
     expect(ipc.addTask.mock.calls[0][0]).toMatchObject({ doStart: "2020-03-04" });
     expect(said()).toBe(
-      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. It shows on today.`,
+      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. It shows on today, ${formatDateOnly(today)}, until it's done.`,
     );
+  });
+
+  it("a passed day with Tasks hidden doesn't claim the task shows on today", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    pickDay("2020-03-04");
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Task added: Pay rent"));
+    expect(said()).toBe(
+      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. Tasks are hidden in your calendar list.`,
+    );
+    expect(said()).not.toContain("shows on today");
   });
 
   it("says when Tasks is hidden in the list that the new one won't show", async () => {
@@ -2815,6 +3018,82 @@ describe("CalendarView: Event | Task in quick create", () => {
     fireEvent.click(within(quick()).getByRole("button", { name: "Discard" }));
     press("C", true);
     expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+  });
+
+  // The tab's cached overview is what the remounted tab first sees, so editing is turned off on a
+  // refresh BEFORE the tab goes, as it would be by the time anyone is back.
+  async function editingOffThenLeave(first: Awaited<ReturnType<typeof mount>>) {
+    ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    first.unmount();
+    await act(async () => {});
+  }
+
+  it("a titled task draft isn't dropped when no calendar can take events: the task editor opens on it", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    await editingOffThenLeave(first);
+    await mount(first.View);
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Pay rent");
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    // Nothing was made from it: Cancel ends it, and focus lands somewhere on the tab, not the page.
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(
+      document.querySelector('[data-help="calendar-view"]')?.contains(document.activeElement),
+    ).toBe(true);
+  });
+
+  it("with no Google account at all, so no + New event, focus still lands on a named control in the header, not the page", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    ipc.calendarOverview.mockResolvedValue({
+      ...overview,
+      accounts: [],
+      calendars: [],
+      editing: {},
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    first.unmount();
+    await act(async () => {});
+    const View = first.View;
+    render(<View onOpenProject={vi.fn()} onOpenPinboard={vi.fn()} />);
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(screen.queryByRole("button", { name: "+ New event" })).toBeNull();
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Only the fallback can have taken focus: a named control in the header.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(
+      document.querySelector('[data-help="calendar-header"]')?.contains(document.activeElement),
+    ).toBe(true);
+  });
+
+  it("an event draft is kept, with a word to say so, until a calendar can take events again", async () => {
+    const first = await mount();
+    quickCreate("Dentist");
+    await editingOffThenLeave(first);
+    const second = await mount(first.View);
+    // Not opened, not lost: the polite live region says it is kept.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const allSaid = [...document.querySelectorAll('[role="status"]')].map((e) => e.textContent);
+    expect(allSaid).toContain("Your unsent event draft is kept until a calendar can take events.");
+    // Editing back on, back on the tab: the box opens on the draft.
+    second.unmount();
+    ipc.calendarOverview.mockResolvedValue(overview);
+    cleanup();
+    await act(async () => {});
+    await mount(first.View);
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy());
+    expect(title().value).toBe("Dentist");
   });
 
   it("a task chip's click still opens Edit task", async () => {

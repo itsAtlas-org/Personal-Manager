@@ -8,6 +8,7 @@
 // the same field), never its deadline.
 
 import { TASK_CALENDAR_ID } from "../calendar-layout";
+import { formatDateOnly } from "../format";
 import { emptyTaskInput } from "../tasks";
 import type { TaskInput, TimeDraft } from "../types";
 import type { EditorFields } from "./eventDraft";
@@ -39,31 +40,84 @@ export function quickTaskInput(draft: EditorFields): TaskInput {
   return emptyTaskInput(quickTaskDefaults(draft));
 }
 
-/** The ghost of the new task: one all-day day on its first plan day, as the tasks overlay draws one
- *  chip on one day and never a bar (`taskOverlayEvents`). A draft with no readable day is left as it
- *  is, so no ghost is drawn for it. */
-export function taskGhostFields(draft: EditorFields): EditorFields {
+/** The day a new task's chip draws on: its first plan day, or today once that has passed, as the
+ *  tasks overlay moves unfinished work on (`taskOverlayEvents`: it reads the first day alone, so a
+ *  stretch that is still running sits on today too). Both are `YYYY-MM-DD`. */
+export function taskShownDay(doStart: string, todayKey: string): string {
+  return doStart < todayKey ? todayKey : doStart;
+}
+
+/** The ghost of the new task: one all-day day, as the tasks overlay draws one chip on one day and
+ *  never a bar (`taskOverlayEvents`). It is on the first plan day, or, given `todayKey` (the grid
+ *  drawing it), on the day the chip will land (`taskShownDay`). A draft with no readable day is left
+ *  as it is, so no ghost is drawn for it. */
+export function taskGhostFields(draft: EditorFields, todayKey?: string): EditorFields {
   const days = taskDaysOf(draft.time);
   if (!days) return draft;
-  return { ...draft, time: { kind: "all_day", first_day: days.doStart, last_day: days.doStart } };
+  const day = todayKey === undefined ? days.doStart : taskShownDay(days.doStart, todayKey);
+  return { ...draft, time: { kind: "all_day", first_day: day, last_day: day } };
+}
+
+/** Why a task planned on days that have started to pass shows on today, in words, or null when its
+ *  first day has not passed. A stretch whose end is today or later is still running: only its first day has
+ *  passed. */
+function passedWords(
+  days: { doStart: string; doEnd: string | null },
+  todayKey: string,
+): string | null {
+  if (days.doStart >= todayKey) return null;
+  const shows = `the task shows on today, ${formatDateOnly(todayKey)}, until it's done.`;
+  if (days.doEnd === null) return `That day has passed, so ${shows}`;
+  if (days.doEnd >= todayKey) return `The first day has passed, so ${shows}`;
+  return `Those days have passed, so ${shows}`;
 }
 
 /** What the box says before Save that would otherwise make the new task look lost (the event side's
- *  `createNotes`): Tasks is hidden in the calendar list, or the day has passed, when the overlay draws
- *  the task on today until it's done. `doStart` and `todayKey` are `YYYY-MM-DD`. */
+ *  `createNotes`): Tasks is hidden in the calendar list, or the plan's first day has passed, when the
+ *  overlay draws the task on today until it's done. With Tasks hidden nothing draws, so the passed-day
+ *  line is left out. `todayKey` is `YYYY-MM-DD`. */
 export function quickTaskNotes(
   hidden: ReadonlySet<string>,
-  doStart: string | null,
+  days: { doStart: string; doEnd: string | null } | null,
   todayKey: string,
 ): string[] {
-  const notes: string[] = [];
   if (hidden.has(TASK_CALENDAR_ID)) {
-    notes.push(
+    return [
       "Tasks are hidden in your calendar list, so the new task won't show until you show Tasks again.",
-    );
+    ];
   }
-  if (doStart !== null && doStart < todayKey) {
-    notes.push("That day has passed, so the task shows on today until it's done.");
-  }
-  return notes;
+  const passed = days ? passedWords(days, todayKey) : null;
+  return passed ? [passed] : [];
+}
+
+/** The polite announcement after Save on Task: what was made and on which day, where its chip is when
+ *  that is not the day it was planned for (today, with its date, as the week on screen may not hold
+ *  today), and that Tasks is hidden when it is (then nothing draws,
+ *  so "shows on today" is left out). */
+export function taskAddedAnnouncement(
+  title: string,
+  days: { doStart: string; doEnd: string | null } | null,
+  hiddenTasks: boolean,
+  todayKey: string,
+): string {
+  const head = `Task added: ${title}${days ? `, ${formatDateOnly(days.doStart)}` : ""}.`;
+  if (hiddenTasks) return `${head} Tasks are hidden in your calendar list.`;
+  return days && days.doStart < todayKey
+    ? `${head} It shows on today, ${formatDateOnly(todayKey)}, until it's done.`
+    : head;
+}
+
+/** What coming back to the Calendar tab does with a titled quick-create draft that went with it:
+ *  "box" opens the box again (a calendar can take an event and "+ New event" is there to open
+ *  under); "task-editor" reopens a task draft in the task editor, as More options does, because a
+ *  task needs neither a calendar nor that button; "keep" leaves an event draft where it is until a
+ *  calendar can take events again, as it has nowhere to go and a titled draft is never lost. */
+export type ResumeAction = "box" | "task-editor" | "keep";
+
+export function resumeAction(
+  kind: "event" | "task" | undefined,
+  canOpenBox: boolean,
+): ResumeAction {
+  if (canOpenBox) return "box";
+  return kind === "task" ? "task-editor" : "keep";
 }

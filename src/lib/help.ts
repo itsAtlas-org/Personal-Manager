@@ -289,7 +289,7 @@ export const HELP: Record<string, HelpEntry> = {
   // The Event | Task switch in the quick box. Its own entry: the event's has no room left.
   "calendar-new-task": {
     title: "New task",
-    body: "Switch the quick box to Task to add a task to PM instead of an event. A task stays in PM and never goes to Google. It takes a day, not a time: the title carries over, the day you clicked is the day you plan to do it, a time clicked in Week is dropped, and days dragged across in Month keep the whole stretch. It shows on that day, or on today once that day has passed, until it's done; if Tasks is hidden in your calendar list it won't show on the calendar. More options opens the task editor, where you can give it a project or a deadline. The box always opens on Event, and switching back keeps your title.",
+    body: "Switch the quick box to Task to add a task to PM instead of an event. A task stays in PM and never goes to Google. It takes a day, not a time: the title carries over, the day you clicked is the day you plan to do it, a time clicked in Week is dropped, and days dragged across in Month keep the whole stretch. It shows on that day, or on today once that day has passed, until it's done; if Tasks is hidden in your calendar list it won't show on the calendar. The dashed copy that stands in for it while it saves is drawn in Day, Week, Month and the Agenda's List, not on the Runway, in the Year view or in the Terminal look. More options opens the task editor, where you can give it a project or a deadline. The box always opens on Event, and switching back keeps your title.",
   },
   // A change to a repeating event and its delete both ask here.
   "calendar-choices": {
