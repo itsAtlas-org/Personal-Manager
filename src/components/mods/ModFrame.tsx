@@ -375,13 +375,15 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
     });
   }, []);
 
-  async function answerQuestion(allow: boolean) {
+  async function answerQuestion(allow: boolean, capUsd?: number) {
     const permission = asking[0];
     if (permission === undefined || deciding) return;
     setDeciding(true);
     setDecideError(null);
     try {
-      await modPermissionDecide(modId, permission, allow);
+      // The money prompt's monthly limit rides with the yes, written in the same transaction.
+      if (capUsd === undefined) await modPermissionDecide(modId, permission, allow);
+      else await modPermissionDecide(modId, permission, allow, capUsd);
     } catch (e) {
       // Nothing was recorded: the question stays, with the backend's reason, and can be tried again
       // or left ("Not now").
@@ -595,12 +597,13 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
       {phase.kind === "open" && asking.length > 0 && (
         <ModPermissionPrompt
           key={asking[0]}
+          modId={modId}
           name={name}
           tier={tier}
           permission={asking[0]}
           working={deciding}
           error={decideError}
-          onAnswer={(allow) => void answerQuestion(allow)}
+          onAnswer={(allow, capUsd) => void answerQuestion(allow, capUsd)}
           onLater={() => settle(asking[0], "later")}
         />
       )}

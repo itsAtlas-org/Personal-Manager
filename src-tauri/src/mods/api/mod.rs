@@ -42,6 +42,8 @@
 
 mod ai;
 #[cfg(test)]
+mod ai_prompt_tests;
+#[cfg(test)]
 mod ai_tests;
 mod doc_storage;
 mod documents;
@@ -77,6 +79,11 @@ use tauri::{AppHandle, Manager};
 
 pub use error::{Code, ModError};
 pub use limits::Calls;
+
+#[cfg(test)]
+pub(crate) use ai::PromptRoute;
+/// The money prompt's facts about the route (`mod_ai_prompt_info`).
+pub(crate) use ai::{prompt_info, PromptInfo};
 
 use self::grants::ModFacts;
 use self::table::{Lookup, Row};

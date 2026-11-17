@@ -40,11 +40,13 @@ const modEventsAck = vi.fn();
 const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
 const modPermissionDecide = vi.fn();
+const modAiPromptInfo = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
-  modPermissionDecide: (id: string, permission: string, granted: boolean) =>
-    modPermissionDecide(id, permission, granted),
+  // Every argument is forwarded as it came, so a test sees whether a limit travelled with the yes.
+  modPermissionDecide: (...args: unknown[]) => modPermissionDecide(...args),
+  modAiPromptInfo: (modId: string) => modAiPromptInfo(modId),
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
@@ -1032,6 +1034,63 @@ describe("the first-use question", () => {
     expect(modCall).toHaveBeenCalledTimes(2);
     expect(modCall.mock.calls[1]).toEqual(modCall.mock.calls[0]);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("asks the money question on a paid route with a limit field, and the limit travels with the yes", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      model: "a/b",
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValueOnce(NEEDS_AI).mockResolvedValueOnce(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    const limit = await within(dialog).findByRole("textbox");
+    expect((limit as HTMLInputElement).value).toBe("1.00");
+    expect(modAiPromptInfo).toHaveBeenCalledWith("acme.tool");
+    fireEvent.change(limit, { target: { value: "2.50" } });
+    // Content arrived after the dialog opened: its own wait runs before the buttons answer.
+    const allow = within(dialog).getByRole("button", { name: "Allow" }) as HTMLButtonElement;
+    expect(allow.disabled).toBe(true);
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(allow);
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", true, 2.5);
+    expect(modCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("No on the money question sends no limit", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      model: "a/b",
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValue(NEEDS_AI);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    await within(dialog).findByRole("textbox");
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(within(dialog).getByRole("button", { name: "No" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", false);
   });
 
   it("No records the no and tells the mod it isn't granted, without a retry", async () => {

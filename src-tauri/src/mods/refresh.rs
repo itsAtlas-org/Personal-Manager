@@ -503,6 +503,8 @@ pub const CHANGED_TEST_MOD: &str = "test-mod";
 /// A mod's key was saved or removed (a bool on its row, never the key): the rows' `secrets` flags
 /// are read again.
 pub const CHANGED_SECRET: &str = "secret";
+/// A mod's monthly AI limit was set or taken away from its row: the rows' `aiCapUsd` is read again.
+pub const CHANGED_AI_CAP: &str = "ai-cap";
 
 /// What `mods://changed` carries.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -920,6 +922,7 @@ mod tests {
             CHANGED_DEV_MODE,
             CHANGED_TEST_MOD,
             CHANGED_SECRET,
+            CHANGED_AI_CAP,
         ];
         let source = include_str!("refresh.rs");
         let declared = source

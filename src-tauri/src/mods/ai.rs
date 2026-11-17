@@ -587,6 +587,137 @@ pub fn reserved_usd(conn: &Connection, mod_id: &str) -> rusqlite::Result<f64> {
     )
 }
 
+// --- the person's side of the cap ----------------------------------------------------------------
+
+/// The monthly limit the money prompt suggests (spec §1.6: "suggested $1"). A suggestion only: no
+/// mod has a limit until the person has written one.
+pub const SUGGESTED_CAP_USD: f64 = 1.0;
+
+/// The largest monthly limit PM stores, in dollars. Nobody means a bigger number; it is a guard
+/// against a typed exponent or a pasted figure, which would otherwise be a limit in name only.
+pub const MAX_CAP_USD: f64 = 100_000.0;
+
+/// Whether `x` can be a monthly limit: a finite number from 0 to [`MAX_CAP_USD`]. 0 is valid and
+/// means "no cloud spend" (D-17).
+pub fn valid_cap(x: f64) -> bool {
+    x.is_finite() && (0.0..=MAX_CAP_USD).contains(&x)
+}
+
+/// Why a limit could not be written.
+#[derive(Debug)]
+pub enum CapError {
+    /// Not a number [`valid_cap`] accepts. Nothing was written.
+    BadAmount,
+    /// No such mod (uninstalled): nothing was written.
+    ModGone,
+    Db(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for CapError {
+    fn from(e: rusqlite::Error) -> Self {
+        CapError::Db(e)
+    }
+}
+
+/// Write `mod_id`'s monthly limit; `None` takes it away, so the next paid call asks for one again.
+/// One UPDATE, so a caller already inside a transaction (the prompt's grant) writes both or
+/// neither. It touches nothing else: raising a limit is felt by the next call, and lowering it
+/// below what is spent refuses every paid call until the month rolls or the limit is raised (the
+/// gate reads the new number, not the old one). The month and the spend are the ledger's, never
+/// written from here.
+pub fn set_cap(conn: &Connection, mod_id: &str, cap: Option<f64>) -> Result<(), CapError> {
+    let cap = match cap {
+        // `+ 0.0` turns a negative zero into a plain one, so a stored 0 is always 0.
+        Some(c) if valid_cap(c) => Some(c + 0.0),
+        Some(_) => return Err(CapError::BadAmount),
+        None => None,
+    };
+    let rows = conn.execute(
+        "UPDATE mods SET ai_cap_usd = ?2 WHERE id = ?1",
+        params![mod_id, cap],
+    )?;
+    if rows == 0 {
+        return Err(CapError::ModGone);
+    }
+    Ok(())
+}
+
+/// What counts against a mod's limit now, and in which month (the Mods tab's "used").
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonthUse {
+    /// The month the number is for (`YYYY-MM`).
+    pub month: String,
+    /// Settled spend plus bookings still held, which is exactly what the gate adds up. A booking a
+    /// crash left counts too: it is real headroom the gate will not give back this month.
+    pub used_usd: f64,
+}
+
+/// [`MonthUse`] from the ledger's columns, by the same month rule the reserve applies
+/// ([`month_step`]), so the tab shows what the next call will be judged against: an earlier month
+/// has rolled (nothing used), a later one (the clock went back) still counts. Pure.
+pub fn month_use(
+    stored_month: Option<&str>,
+    settled: f64,
+    reserved: f64,
+    current: &str,
+) -> MonthUse {
+    // A number the gate would refuse is shown as the most it can be, never as 0.
+    let sum = settled + reserved;
+    let count = |x: f64| {
+        if x.is_finite() && x >= 0.0 {
+            x
+        } else {
+            f64::MAX
+        }
+    };
+    match month_step(stored_month, current) {
+        MonthStep::Keep => MonthUse {
+            month: stored_month.unwrap_or(current).to_owned(),
+            used_usd: count(sum),
+        },
+        MonthStep::Adopt => MonthUse {
+            month: current.to_owned(),
+            used_usd: count(sum),
+        },
+        MonthStep::Reset => MonthUse {
+            month: current.to_owned(),
+            used_usd: 0.0,
+        },
+    }
+}
+
+/// Every mod's limit and what counts against it now, by mod id: one read of `mods` and of the
+/// bookings. `current` is the month today falls in ([`civil_month`]).
+pub fn read_ledgers(
+    conn: &Connection,
+    current: &str,
+) -> rusqlite::Result<std::collections::BTreeMap<String, (Option<f64>, MonthUse)>> {
+    let mut held = std::collections::BTreeMap::<String, f64>::new();
+    let mut stmt = conn.prepare(
+        "SELECT mod_id, COALESCE(SUM(reserved_usd), 0) FROM ai_reservations GROUP BY mod_id",
+    )?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))? {
+        let (id, usd) = row?;
+        held.insert(id, usd);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT id, ai_cap_usd, ai_month, ai_spent_usd FROM mods")?;
+    for row in stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<f64>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, f64>(3)?,
+        ))
+    })? {
+        let (id, cap, month, settled) = row?;
+        let reserved = held.get(&id).copied().unwrap_or(0.0);
+        let used = month_use(month.as_deref(), settled, reserved, current);
+        out.insert(id, (cap, used));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1617,5 +1748,175 @@ mod tests {
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 8);
         let conn = crate::db::open(&path, DB_KEY).unwrap();
         assert_eq!(reserved_usd(&conn, "acme.tool").unwrap(), 1.0);
+    }
+
+    // --- the person's side of the cap (X7) -------------------------------------------------------
+
+    fn cap_of(conn: &Connection, id: &str) -> Option<f64> {
+        conn.query_row(
+            "SELECT ai_cap_usd FROM mods WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A limit is a finite number from 0 to the ceiling, and nothing else: no NaN or infinity (the
+    /// gate would refuse every call), nothing negative (the column's CHECK), nothing a typed
+    /// exponent made huge.
+    #[test]
+    fn a_limit_is_a_finite_number_from_zero_to_the_ceiling() {
+        for ok in [0.0, -0.0, 0.01, 1.0, 12.5, MAX_CAP_USD] {
+            assert!(valid_cap(ok), "{ok}");
+        }
+        for bad in [
+            -0.01,
+            -1.0,
+            MAX_CAP_USD + 0.01,
+            1e300,
+            f64::MAX,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(!valid_cap(bad), "{bad}");
+        }
+        assert!(
+            valid_cap(SUGGESTED_CAP_USD),
+            "the suggestion is a valid limit"
+        );
+    }
+
+    /// Writing a limit changes only the limit, replaces a number with a number, and `None` takes it
+    /// away. A refused number writes nothing, and a mod that is gone is told so.
+    #[test]
+    fn set_cap_writes_only_the_limit() {
+        let (_dir, conn) = with_mod(None);
+        insert_mod(&conn, &ModRow::signed("acme.other", "second", &["ai"]));
+        conn.execute(
+            "UPDATE mods SET ai_cap_usd = 2.0, ai_spent_usd = 0.75, ai_month = ?1 WHERE id = 'acme.tool'",
+            params![NOV],
+        )
+        .unwrap();
+        set_cap(&conn, "acme.tool", Some(5.0)).unwrap();
+        assert_eq!(cap_of(&conn, "acme.tool"), Some(5.0));
+        assert_eq!(spent(&conn, "acme.tool"), 0.75, "the spend is the ledger's");
+        assert_eq!(month_of(&conn, "acme.tool").as_deref(), Some(NOV));
+        assert_eq!(cap_of(&conn, "acme.other"), None, "another mod's limit");
+        // Zero is a limit (no cloud spend), and a negative zero is stored as a plain one.
+        set_cap(&conn, "acme.tool", Some(-0.0)).unwrap();
+        let stored = cap_of(&conn, "acme.tool").unwrap();
+        assert!(stored == 0.0 && stored.is_sign_positive());
+        set_cap(&conn, "acme.tool", None).unwrap();
+        assert_eq!(cap_of(&conn, "acme.tool"), None);
+        // Refused: nothing changes.
+        set_cap(&conn, "acme.tool", Some(3.0)).unwrap();
+        for bad in [-1.0, f64::NAN, f64::INFINITY, MAX_CAP_USD * 2.0] {
+            assert!(matches!(
+                set_cap(&conn, "acme.tool", Some(bad)),
+                Err(CapError::BadAmount)
+            ));
+            assert_eq!(cap_of(&conn, "acme.tool"), Some(3.0), "{bad}");
+        }
+        assert!(matches!(
+            set_cap(&conn, "nobody.here", Some(1.0)),
+            Err(CapError::ModGone)
+        ));
+        assert!(matches!(
+            set_cap(&conn, "nobody.here", None),
+            Err(CapError::ModGone)
+        ));
+    }
+
+    /// Lowering a limit below what is used refuses every paid call (and a free one still runs);
+    /// raising it is felt by the very next call.
+    #[test]
+    fn a_lowered_limit_stops_paid_calls_and_a_raised_one_frees_them() {
+        let (_dir, mut conn) = with_mod(Some(2.0));
+        // A paid call that spends exactly what it booked; whether it was let through.
+        let spend = |conn: &mut Connection, usd: f64| match book(conn, usd) {
+            Ok(r) => {
+                settle(conn, r, usd).unwrap();
+                true
+            }
+            Err(_) => false,
+        };
+        assert!(spend(&mut conn, 1.5));
+        assert_eq!(spent(&conn, "acme.tool"), 1.5);
+        set_cap(&conn, "acme.tool", Some(1.0)).unwrap();
+        assert!(!spend(&mut conn, 0.001), "below what is spent");
+        set_cap(&conn, "acme.tool", Some(1.5)).unwrap();
+        assert!(!spend(&mut conn, 0.001), "exactly spent leaves no headroom");
+        assert!(
+            book(&mut conn, 0.0).is_ok(),
+            "a call that costs nothing fits a limit that is exactly spent"
+        );
+        set_cap(&conn, "acme.tool", Some(2.0)).unwrap();
+        assert!(spend(&mut conn, 0.5), "raised: the next call fits");
+        // A free route never needed the limit.
+        set_cap(&conn, "acme.tool", Some(0.0)).unwrap();
+        assert!(reserve(&mut conn, "acme.tool", NOV, 0.0, false).is_ok());
+    }
+
+    /// What the tab shows as used is what the next call is judged against, by the same month rule.
+    #[test]
+    fn used_is_what_the_gate_would_count_for_this_month() {
+        let used =
+            |stored: Option<&str>, settled, reserved| month_use(stored, settled, reserved, NOV);
+        let m = |month: &str, used_usd| MonthUse {
+            month: month.into(),
+            used_usd,
+        };
+        // This month: settled spend and the bookings held both count.
+        assert_eq!(used(Some(NOV), 0.5, 0.25), m(NOV, 0.75));
+        // An earlier month has rolled (the next reserve clears it): nothing is used, bookings included.
+        assert_eq!(used(Some("2026-10"), 9.0, 3.0), m(NOV, 0.0));
+        // A later month (the clock went back) still counts, and says which month it is.
+        assert_eq!(used(Some(DEC), 4.0, 1.0), m(DEC, 5.0));
+        // No month, or one that can't be read, is adopted with the spend kept.
+        assert_eq!(used(None, 2.0, 0.5), m(NOV, 2.5));
+        assert_eq!(used(Some("garbage"), 2.0, 0.5), m(NOV, 2.5));
+        // A number the gate would refuse is shown as the most it can be, never as zero.
+        assert_eq!(used(Some(NOV), f64::NAN, 0.0).used_usd, f64::MAX);
+        assert_eq!(used(Some(NOV), -1.0, 0.0).used_usd, f64::MAX);
+    }
+
+    /// The tab's read of every mod's ledger: its limit, the month's use with the held bookings
+    /// added, per mod and not mixed between them, and a rolled month reads as nothing used.
+    #[test]
+    fn the_ledgers_are_read_per_mod() {
+        let (_dir, mut conn) = with_mod(Some(2.0));
+        insert_mod(&conn, &ModRow::signed("acme.other", "second", &["ai"]));
+        insert_mod(&conn, &ModRow::signed("acme.old", "second", &["ai"]));
+        conn.execute(
+            "UPDATE mods SET ai_spent_usd = 0.5, ai_month = ?1 WHERE id = 'acme.tool'",
+            params![NOV],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mods SET ai_cap_usd = 9.0, ai_spent_usd = 7.0, ai_month = '2026-09' WHERE id = 'acme.old'",
+            [],
+        )
+        .unwrap();
+        // A booking held for the first mod, and one for the old mod (a crash left it).
+        let held = reserve(&mut conn, "acme.tool", NOV, 0.25, true).unwrap();
+        conn.execute(
+            "INSERT INTO ai_reservations(mod_id, reserved_usd) VALUES ('acme.old', 1.0)",
+            [],
+        )
+        .unwrap();
+        let ledgers = read_ledgers(&conn, NOV).unwrap();
+        let tool = &ledgers["acme.tool"];
+        assert_eq!((tool.0, tool.1.used_usd), (Some(2.0), 0.75));
+        assert_eq!(tool.1.month, NOV);
+        let other = &ledgers["acme.other"];
+        assert_eq!((other.0, other.1.used_usd), (None, 0.0));
+        let old = &ledgers["acme.old"];
+        assert_eq!((old.0, old.1.used_usd), (Some(9.0), 0.0));
+        assert_eq!(old.1.month, NOV);
+        // Settling frees the held part and adds the real cost.
+        settle(&mut conn, held, 0.1).unwrap();
+        let tool = &read_ledgers(&conn, NOV).unwrap()["acme.tool"];
+        assert!((tool.1.used_usd - 0.6).abs() < 1e-12, "{}", tool.1.used_usd);
     }
 }

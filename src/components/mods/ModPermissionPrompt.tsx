@@ -11,9 +11,20 @@
 // (the mod is told it still needs permission, and isn't asked again until its next session, so a mod
 // can't nag by calling in a loop). ModFrame holds the mod's call while this is open and retries it
 // once after an Allow.
+//
+// **The money prompt** is this same dialog for `ai` (spec §1.6). It asks PM which route a call would
+// take (`mod_ai_prompt_info`: the person's own settings, not anything the mod said) and, when the
+// route can cost money, shows a monthly limit field that rides with the Allow, written in the same
+// transaction as the grant. A route that costs nothing asks for no limit, so a mod moved to a paid
+// route later is asked then (the call's own state check). Its sentences are in `aiMoneyWords`
+// (wording pending: Bobby).
 
-import { useEffect, useState } from "react";
-import { Button, Callout, Dialog } from "../ui";
+import { useEffect, useLayoutEffect, useState } from "react";
+import { modAiPromptInfo } from "../../lib/ipc";
+import type { AiPromptInfo } from "../../lib/modsTypes";
+import { Button, Callout, Dialog, Field, Input } from "../ui";
+import { formatUsd, parseCapUsd } from "./aiCap";
+import { MONEY_PROMPT_WORDS as WORDS } from "./aiMoneyWords";
 import { ModName } from "./ModName";
 import { permissionWords } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
@@ -23,10 +34,15 @@ import { TierBadge } from "./TierBadge";
  *  mod that draws "click here twice" over where Allow will be could have the second click granted.
  *  Half a second is longer than a double-click and shorter than a person reading the question.
  *  "Not now" is never held, it records nothing. The caller keys the prompt by permission, so each
- *  new question starts its own wait. */
+ *  new question starts its own wait; the wait also starts again whenever the dialog's content
+ *  changes under the cursor (the money prompt's route arrives after it opens, and adds a field). */
 export const PROMPT_GUARD_MS = 500;
 
+/** What the money prompt knows about the route. */
+type Route = { kind: "loading" } | { kind: "ready"; info: AiPromptInfo } | { kind: "failed" };
+
 export function ModPermissionPrompt({
+  modId,
   name,
   tier,
   permission,
@@ -35,6 +51,8 @@ export function ModPermissionPrompt({
   onAnswer,
   onLater,
 }: {
+  /** The mod's id, to ask PM about its route when the question is about money. */
+  modId: string;
   name: string;
   /** The backend's tier word; one PM doesn't know is treated as the least trusted, like the badge. */
   tier: string;
@@ -44,16 +62,52 @@ export function ModPermissionPrompt({
   working: boolean;
   /** Why recording the last answer failed, in the backend's words. */
   error: string | null;
-  onAnswer: (allow: boolean) => void;
+  /** `capUsd` is the monthly limit that goes with an Allow of `ai` on a route that can cost money. */
+  onAnswer: (allow: boolean, capUsd?: number) => void;
   onLater: () => void;
 }) {
   const words = permissionWords(permission);
-  const [armed, setArmed] = useState(false);
+  const money = permission === "ai";
+
+  const [route, setRoute] = useState<Route>({ kind: "loading" });
+  const [capText, setCapText] = useState("");
   useEffect(() => {
-    const t = setTimeout(() => setArmed(true), PROMPT_GUARD_MS);
+    if (!money) return;
+    let cancelled = false;
+    modAiPromptInfo(modId).then(
+      (info) => {
+        if (cancelled) return;
+        setCapText(formatUsd(info.suggestedCapUsd));
+        setRoute({ kind: "ready", info });
+      },
+      () => {
+        if (!cancelled) setRoute({ kind: "failed" });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [money, modId]);
+
+  // The hold (see PROMPT_GUARD_MS) belongs to what is on screen: it is armed for one content, and a
+  // new content (the route arriving, or failing) is unarmed until its own wait has passed. A layout
+  // effect, so the wait starts in the commit that paints the content, not a frame after it.
+  const content = money ? route.kind : "plain";
+  const [armedFor, setArmedFor] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    const t = setTimeout(() => setArmedFor(content), PROMPT_GUARD_MS);
     return () => clearTimeout(t);
-  }, []);
+  }, [content]);
+  const armed = armedFor === content;
+
+  const info = route.kind === "ready" ? route.info : null;
+  const needsCap = money && info !== null && info.paid;
+  const cap = needsCap ? parseCapUsd(capText) : null;
+  // A money question can be answered yes only once PM knows the route, and, on a route that can
+  // cost money, once the field holds a limit PM will store.
+  const canAllow = !money || (info !== null && (!needsCap || cap !== null));
   const held = working || !armed;
+
   return (
     <Dialog
       open
@@ -73,7 +127,11 @@ export function ModPermissionPrompt({
           <Button variant="secondary" onClick={() => onAnswer(false)} disabled={held}>
             No
           </Button>
-          <Button variant="primary" onClick={() => onAnswer(true)} disabled={held}>
+          <Button
+            variant="primary"
+            onClick={() => onAnswer(true, needsCap && cap !== null ? cap : undefined)}
+            disabled={held || !canAllow}
+          >
             {working ? "Saving…" : "Allow"}
           </Button>
         </>
@@ -87,6 +145,38 @@ export function ModPermissionPrompt({
         <p className="rounded-[var(--radius-sm)] border border-border p-2 font-medium text-ink">
           {words}
         </p>
+        {money && (
+          <div className="space-y-2" data-testid="money-prompt">
+            {route.kind === "loading" && <p className="text-ink3">{WORDS.checking()}</p>}
+            {route.kind === "failed" && <Callout size="md">{WORDS.failed()}</Callout>}
+            {info && (
+              <>
+                <p>{WORDS.intro()}</p>
+                <p>{WORDS.route(info)}</p>
+                <p>{WORDS.sends()}</p>
+                <p className="font-medium text-ink">{WORDS.cost(info)}</p>
+                {needsCap && (
+                  <Field
+                    label={WORDS.capLabel()}
+                    description={WORDS.capHelp()}
+                    error={cap === null ? WORDS.capInvalid() : undefined}
+                  >
+                    {(controlProps) => (
+                      <Input
+                        {...controlProps}
+                        inputMode="decimal"
+                        autoComplete="off"
+                        value={capText}
+                        disabled={working}
+                        onChange={(e) => setCapText(e.target.value)}
+                      />
+                    )}
+                  </Field>
+                )}
+              </>
+            )}
+          </div>
+        )}
         {tier !== "first" && tier !== "second" && (
           <p className="text-ink3">Nobody has checked this mod, so PM can&apos;t vouch for it.</p>
         )}

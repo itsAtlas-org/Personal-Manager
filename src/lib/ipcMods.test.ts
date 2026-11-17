@@ -97,6 +97,30 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     { modId: "atlas.map", permission: "internet", granted: false },
   ],
   [
+    "modPermissionDecide (with the money prompt's limit)",
+    () => ipc.modPermissionDecide("acme.tool", "ai", true, 2.5),
+    "mod_permission_decide",
+    { modId: "acme.tool", permission: "ai", granted: true, capUsd: 2.5 },
+  ],
+  [
+    "modAiPromptInfo",
+    () => ipc.modAiPromptInfo("acme.tool"),
+    "mod_ai_prompt_info",
+    { modId: "acme.tool" },
+  ],
+  [
+    "modAiCapSet",
+    () => ipc.modAiCapSet("acme.tool", 3),
+    "mod_ai_cap_set",
+    { modId: "acme.tool", capUsd: 3 },
+  ],
+  [
+    "modAiCapSet (taking the limit away)",
+    () => ipc.modAiCapSet("acme.tool", null),
+    "mod_ai_cap_set",
+    { modId: "acme.tool", capUsd: null },
+  ],
+  [
     "modSecretSave",
     () => ipc.modSecretSave("acme.tool", "token", "typed"),
     "mod_secret_save",

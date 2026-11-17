@@ -11,6 +11,8 @@
 
 use serde::Serialize;
 
+use super::consent::LimitRefusal;
+use crate::mods::ai::{CapError, MAX_CAP_USD};
 use crate::mods::api::grants::GrantError;
 use crate::mods::fetch::FetchError;
 use crate::mods::ledger::{ChangeRefusal, LedgerError};
@@ -210,6 +212,35 @@ impl From<secrets::Refused> for ModsError {
     }
 }
 
+/// A refused monthly limit, in fixed sentences. The number sent is never quoted back.
+impl From<CapError> for ModsError {
+    fn from(e: CapError) -> Self {
+        match e {
+            CapError::BadAmount => Self::bad_request(limit_words()),
+            CapError::ModGone => Self::not_installed(),
+            CapError::Db(e) => Self::internal(e),
+        }
+    }
+}
+
+impl From<LimitRefusal> for ModsError {
+    fn from(r: LimitRefusal) -> Self {
+        match r {
+            LimitRefusal::NotAnAmount => Self::bad_request(limit_words()),
+            LimitRefusal::NotWithThis => {
+                Self::bad_request("A monthly limit goes only with allowing the AI.")
+            }
+        }
+    }
+}
+
+fn limit_words() -> String {
+    format!(
+        "A monthly limit is an amount in dollars, from 0 to {}.",
+        MAX_CAP_USD as u64
+    )
+}
+
 impl From<FetchError> for ModsError {
     fn from(e: FetchError) -> Self {
         match e {
@@ -314,6 +345,24 @@ pub(crate) mod tests {
         .into();
         assert_eq!(e.code, Code::Internal);
         assert!(!e.message.contains("typed-text"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_refused_limit_is_a_fixed_sentence_that_quotes_no_number() {
+        for r in [LimitRefusal::NotAnAmount, LimitRefusal::NotWithThis] {
+            assert_eq!(code_of(r), Code::BadRequest);
+        }
+        assert_eq!(code_of(CapError::BadAmount), Code::BadRequest);
+        assert_eq!(code_of(CapError::ModGone), Code::NotInstalled);
+        let e: ModsError = CapError::BadAmount.into();
+        assert!(e.message.contains("0 to 100000"), "{}", e.message);
+        let e: ModsError = CapError::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(19),
+            Some("CHECK constraint failed: ai_cap_usd = -5".into()),
+        ))
+        .into();
+        assert_eq!(e.code, Code::Internal);
+        assert!(!e.message.contains("-5"), "{}", e.message);
     }
 
     #[test]
@@ -434,6 +483,41 @@ pub(crate) mod tests {
             .step_by(2)
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The money prompt reads the route's kind and the limit's ceiling from here: the page's union
+    /// and constant are the backend's exactly.
+    #[test]
+    fn the_pages_money_prompt_words_are_the_backends() {
+        use crate::mods::api::PromptRoute;
+        let mut rust: Vec<String> = [
+            PromptRoute::None,
+            PromptRoute::Local,
+            PromptRoute::Cloud,
+            PromptRoute::LocalThenCloud,
+            PromptRoute::CloudForPower,
+        ]
+        .iter()
+        .map(|r| {
+            serde_json::to_value(r)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+        let mut page = ts_union("AiPromptRoute");
+        rust.sort();
+        page.sort();
+        assert_eq!(rust, page);
+        let source = include_str!("../../../../src/lib/modsTypes.ts");
+        assert!(
+            source.contains(&format!(
+                "export const MAX_AI_CAP_USD = {};",
+                MAX_CAP_USD as u64
+            )),
+            "MAX_AI_CAP_USD in modsTypes.ts isn't mods::ai::MAX_CAP_USD"
+        );
     }
 
     #[test]

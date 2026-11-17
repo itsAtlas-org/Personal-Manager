@@ -12,11 +12,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::Utc;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::words::{self, RowFacts, Standing};
+use crate::mods::ai::{self as money, MonthUse};
 use crate::mods::api::grants::{self, Decision, Facts, Outcome, Refused};
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
 use crate::mods::index::Index;
@@ -34,7 +36,7 @@ pub const ICON_CAP: u64 = 256 << 10;
 /// has no use for the risk.
 pub const ICON_EXTENSIONS: [&str; 2] = ["png", "webp"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModDto {
     pub id: String,
@@ -57,6 +59,14 @@ pub struct ModDto {
     /// The key slots the manifest declares, each with its host, its header and whether a key is
     /// stored for it. Never the key.
     pub secrets: Vec<SlotStatus>,
+    /// The monthly AI limit in dollars, or none until the person sets one (a paid call asks first).
+    pub ai_cap_usd: Option<f64>,
+    /// What counts against the limit now: this month's settled spend plus the bookings still held
+    /// (a call in flight, or one a crash left, which counts to month end). The cap's own ledger,
+    /// not the Usage and cost table's best-effort log.
+    pub ai_spent_usd: f64,
+    /// The month that number is for (`YYYY-MM`, the person's own time zone).
+    pub ai_month: String,
     /// The sidebar tab's label, when the mod has one.
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
@@ -203,6 +213,9 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     };
     // Which slots have a key: names, hosts and headers only, never the value column.
     let bound = secrets::bound_pairs(conn)?;
+    // The limits and the month's use, by the cap's own rule for the month (`mods::ai::month_use`).
+    let month = money::civil_month(crate::commands::resolve_zone(conn), Utc::now());
+    let ledgers = money::read_ledgers(conn, &month)?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -212,8 +225,12 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                 own,
                 waiting.get(&row.id),
                 resumed.iter().rev().find(|r| r.id == row.id),
-                &held,
-                &bound,
+                &Shared {
+                    held: &held,
+                    bound: &bound,
+                    ledgers: &ledgers,
+                    month: &month,
+                },
                 ctx,
             )
         })
@@ -376,15 +393,33 @@ pub fn permission(
     })
 }
 
+/// What every row's DTO is built against, read once for the whole list.
+struct Shared<'a> {
+    /// D3's holdings of the unsigned set.
+    held: &'a [(PolicyTier, Class)],
+    /// The key slots that have a key (names and bindings, never a value).
+    bound: &'a BTreeSet<(String, String, String, String)>,
+    /// Each mod's monthly AI limit and what counts against it now.
+    ledgers: &'a BTreeMap<String, (Option<f64>, MonthUse)>,
+    /// The month today falls in, for a mod with no ledger row.
+    month: &'a str,
+}
+
 fn dto(
     row: &RawRow,
     decisions: Option<&BTreeMap<String, Decision>>,
     waiting: Option<&Waiting>,
     resumed: Option<&Resumed>,
-    held: &[(PolicyTier, Class)],
-    bound: &BTreeSet<(String, String, String, String)>,
+    shared: &Shared<'_>,
     ctx: &Ctx<'_>,
 ) -> ModDto {
+    let Shared {
+        held,
+        bound,
+        ledgers,
+        month,
+    } = shared;
+    let ledger = ledgers.get(&row.id);
     let m = read_manifest(&row.manifest);
     let tier = PolicyTier::of(row.signed, &row.tier);
     // Only the unsigned set is judged together; a signed tier has no exclusion to read.
@@ -437,6 +472,9 @@ fn dto(
         permissions,
         internet_hosts: m.internet_hosts.clone(),
         secrets: secrets::statuses(&row.id, &row.manifest, bound),
+        ai_cap_usd: ledger.and_then(|(cap, _)| *cap),
+        ai_spent_usd: ledger.map_or(0.0, |(_, used)| used.used_usd),
+        ai_month: ledger.map_or_else(|| (*month).to_owned(), |(_, used)| used.month.clone()),
         nav_tab: m.nav_tab.clone(),
         calendar_overlay: m.calendar_overlay.clone(),
         has_icon: icon_path(m.icon.as_deref(), &row.files).is_some(),
@@ -625,8 +663,15 @@ mod tests {
             "allowed"
         );
         // A first-use permission asks.
-        let p = show("ai", PolicyTier::First, None, &[], true);
+        let p = show("ai", PolicyTier::Second, None, &[], true);
         assert_eq!((p.access, p.when, p.class), ("asks", "first-use", "money"));
+        // A first-party mod's `ai` is allowed from the start; what asks is the limit, at the first
+        // paid use (the handler's rule, not the table's).
+        let p = show("ai", PolicyTier::First, None, &[], true);
+        assert_eq!((p.access, p.when, p.class), ("allowed", "auto", "money"));
+        // A no on record still refuses a first-party mod.
+        let p = show("ai", PolicyTier::First, Some(Decision::Denied), &[], true);
+        assert_eq!(p.access, "off");
         // D3: an unsigned mod's internet is off while another unsigned mod holds a read.
         let p = show(
             "internet",
@@ -781,6 +826,47 @@ mod tests {
         let (_d2, c2) = test_store();
         insert(&c2, &Row::default());
         assert!(list(&c2, &CTX).unwrap()[0].secrets.is_empty());
+    }
+
+    /// The row's monthly AI limit and what counts against it: this month's settled spend plus the
+    /// bookings held, per mod; an earlier month reads as nothing used (the next call rolls it).
+    #[test]
+    fn a_listed_mod_shows_its_ai_limit_and_what_it_has_used_this_month() {
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed[0].ai_cap_usd, None, "no limit until one is set");
+        assert_eq!(listed[0].ai_spent_usd, 0.0);
+        let now = money::civil_month(crate::commands::resolve_zone(&c), Utc::now());
+        assert_eq!(listed[0].ai_month, now);
+        c.execute(
+            "UPDATE mods SET ai_cap_usd = 2.0, ai_spent_usd = 0.5, ai_month = ?1",
+            [&now],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO ai_reservations(mod_id, reserved_usd) VALUES ('atlas.map', 0.25)",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.75)
+        );
+        let wire = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(wire["aiCapUsd"], json!(2.0));
+        assert_eq!(wire["aiSpentUsd"], json!(0.75));
+        assert_eq!(wire["aiMonth"], json!(now));
+        // Last month's spend has rolled.
+        c.execute("UPDATE mods SET ai_month = '2000-01'", [])
+            .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.0)
+        );
+        assert_eq!(listed[0].ai_month, now);
     }
 
     #[test]

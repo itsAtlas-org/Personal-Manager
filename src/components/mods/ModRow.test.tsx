@@ -24,8 +24,10 @@ const repairMod = vi.fn();
 const approveUpdate = vi.fn();
 const modPermissionDecide = vi.fn();
 const modIcon = vi.fn();
+const modAiCapSet = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
+  modAiCapSet: (id: string, cap: number | null) => modAiCapSet(id, cap),
   resumeMod: (id: string) => resumeMod(id),
   pauseMod: (id: string) => pauseMod(id),
   repairMod: (id: string) => repairMod(id),
@@ -561,6 +563,127 @@ describe("what the mod can do", () => {
     openDetails();
     fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
     expect(onUninstall).toHaveBeenCalledWith("acme.tool");
+  });
+});
+
+describe("the monthly AI limit", () => {
+  const withAi = (extra: Partial<ModInfo> = {}) =>
+    mod({
+      permissions: [perm("ai", { access: "asks", when: "first-use", class: "money" })],
+      ...extra,
+    });
+  const field = () => screen.getByRole("textbox") as HTMLInputElement;
+  const save = () =>
+    screen.getByRole("button", {
+      name: "Save the monthly AI limit for Acme Tool",
+    }) as HTMLButtonElement;
+
+  it("is shown for a mod that asks for the AI, with no number until one is set", () => {
+    draw(withAi());
+    openDetails();
+    expect(field().value).toBe("");
+    expect(screen.getByText(/No limit is set/)).toBeTruthy();
+    expect(save().disabled).toBe(true);
+    expect(screen.queryByText(/Used in/)).toBeNull();
+  });
+
+  it("is not shown for a mod that never asked for the AI, or one nobody has turned on or the safety list removed", () => {
+    draw(mod({ permissions: [perm("storage", { access: "allowed", when: "auto" })] }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    cleanup();
+    draw(withAi({ consented: false }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    cleanup();
+    draw(withAi({ state: standing("removed-by-safety-list", { fix: "uninstall" }) }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("shows the limit and what the ledger counts against it this month", () => {
+    draw(withAi({ aiCapUsd: 2, aiSpentUsd: 0.75, aiMonth: "2026-11" }));
+    openDetails();
+    expect(field().value).toBe("2.00");
+    expect(screen.getByText("Used in 2026-11: $0.75 of $2.00.")).toBeTruthy();
+    expect(screen.queryByText(/limit is reached/)).toBeNull();
+  });
+
+  it("says plainly when the limit is reached", () => {
+    draw(withAi({ aiCapUsd: 1, aiSpentUsd: 1, aiMonth: "2026-11" }));
+    openDetails();
+    expect(screen.getByText(/The limit is reached/)).toBeTruthy();
+    cleanup();
+    // Lowered below what is used: the same.
+    draw(withAi({ aiCapUsd: 0.5, aiSpentUsd: 0.75, aiMonth: "2026-11" }));
+    openDetails();
+    expect(screen.getByText(/The limit is reached/)).toBeTruthy();
+  });
+
+  it("Save sends the typed amount, and the rows are read again", async () => {
+    modAiCapSet.mockResolvedValue(undefined);
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "5" } });
+    expect(save().textContent).toBe("Save limit");
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenCalledWith("acme.tool", 5));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("0 is a limit, and an empty field takes the limit away", async () => {
+    modAiCapSet.mockResolvedValue(undefined);
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "0" } });
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenLastCalledWith("acme.tool", 0));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    cleanup();
+    resetModActions();
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "  " } });
+    expect(save().textContent).toBe("Remove limit");
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenLastCalledWith("acme.tool", null));
+  });
+
+  it("will not send a number PM would not store, or a limit that is already the stored one", () => {
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    expect(save().disabled).toBe(true);
+    for (const bad of ["abc", "-1", "1e3", "$2", "100001"]) {
+      fireEvent.change(field(), { target: { value: bad } });
+      expect(save().disabled, bad).toBe(true);
+      expect(screen.getByRole("alert").textContent).toContain("Type an amount");
+    }
+    fireEvent.change(field(), { target: { value: "2.00" } });
+    expect(save().disabled).toBe(true);
+    expect(modAiCapSet).not.toHaveBeenCalled();
+  });
+
+  it("shows the backend's refusal in the row when the limit can't be saved", async () => {
+    modAiCapSet.mockRejectedValue({ code: "bad-request", message: "Nope, fixed words." });
+    draw(withAi());
+    openDetails();
+    fireEvent.change(field(), { target: { value: "3" } });
+    fireEvent.click(save());
+    expect(await screen.findByText("Nope, fixed words.")).toBeTruthy();
+  });
+
+  it("a first-party mod's AI says what still comes instead of 'Allowed'", () => {
+    draw(
+      mod({
+        tier: "first",
+        permissions: [
+          perm("ai", { access: "allowed", when: "auto", class: "money", decision: null }),
+        ],
+      }),
+    );
+    openDetails();
+    expect(screen.queryByText("Allowed.")).toBeNull();
+    expect(screen.getByText(/asks for a monthly limit before it first costs money/)).toBeTruthy();
   });
 });
 

@@ -365,6 +365,90 @@ pub(super) async fn run<H: Host>(
     Ok(reply(text, truncated, model))
 }
 
+// --- what the money prompt is told ----------------------------------------------------------------
+
+/// The shape of the route a mod's call would take now, in the words' own terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptRoute {
+    /// Nothing can answer (Local AI off, no model picked), or the route may not carry a mod's text.
+    None,
+    /// A model on this machine or the person's own network.
+    Local,
+    /// The cloud, through the person's OpenRouter key.
+    Cloud,
+    /// A local model first, falling back to the cloud inside the call.
+    LocalThenCloud,
+    /// On battery, the request goes to the cloud instead of the local model.
+    CloudForPower,
+}
+
+/// What `mod_ai_prompt_info` tells the page about the route, for the money prompt: PM's own facts
+/// about the person's own settings, nothing the mod supplied.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptInfo {
+    pub route: PromptRoute,
+    /// The route has a cloud arm, so a call can cost money and the prompt asks for a monthly limit.
+    pub paid: bool,
+    /// PM cannot price the route (a public "local" endpoint, or no arm it can name): every call is
+    /// refused with "price unknown" (MOD-5005), so a limit would change nothing.
+    pub unpriced: bool,
+    /// The model the call would try first: the person's own setting.
+    pub model: Option<String>,
+    /// The limit the prompt starts from.
+    pub suggested_cap_usd: f64,
+}
+
+/// [`PromptInfo`] from the resolved route and the class of its local arm's address (the same rule
+/// the call itself prices by, so the prompt can never call a route free that the call would charge
+/// for). Pure.
+pub(crate) fn describe(plan: Option<&RoutePlan>, local_class: Option<EndpointClass>) -> PromptInfo {
+    let suggested_cap_usd = money::SUGGESTED_CAP_USD;
+    // A route that cannot carry a mod's text is no route: the call answers "pick a model".
+    let Some(plan) = plan.filter(|p| serves_a_mod(p)) else {
+        return PromptInfo {
+            route: PromptRoute::None,
+            paid: false,
+            unpriced: false,
+            model: None,
+            suggested_cap_usd,
+        };
+    };
+    let cost = money::RouteCost::of(plan, local_class);
+    let route = match plan {
+        RoutePlan::Cloud(_) => PromptRoute::Cloud,
+        RoutePlan::LocalOnly(_) => PromptRoute::Local,
+        RoutePlan::LocalThenCloud { .. } => PromptRoute::LocalThenCloud,
+        RoutePlan::CloudForPower { .. } => PromptRoute::CloudForPower,
+    };
+    PromptInfo {
+        route,
+        paid: cost.is_cloud(),
+        unpriced: cost == money::RouteCost::Unpriced,
+        model: Some(plan.primary_model_id().to_owned()).filter(|m| !m.is_empty()),
+        suggested_cap_usd,
+    }
+}
+
+/// What the prompt for `ai` needs: resolve the route as a call would (a blocking read of the store
+/// and the keychain), look up the local arm's address class off the DB lock under a deadline, and
+/// describe it. Reads only; contacts nothing but the local endpoint's name.
+pub(crate) async fn prompt_info<H: Host>(host: &H) -> Result<PromptInfo, ModError> {
+    let plan = {
+        let host = host.clone();
+        blocking(move || host.model().resolve().map_err(ModError::internal)).await?
+    };
+    let class = match plan.as_ref().and_then(local_url) {
+        Some(url) => tokio::time::timeout(PREP_TIMEOUT, host.model().local_class(url))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    Ok(describe(plan.as_ref(), class))
+}
+
 /// The local arm's endpoint, if the plan has one.
 fn local_url(plan: &RoutePlan) -> Option<&str> {
     match plan {

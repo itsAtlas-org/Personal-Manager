@@ -12,6 +12,7 @@ import type {
   DevKitInfo,
   DevModeState,
   DevSwitch,
+  AiPromptInfo,
   InstallResult,
   ModIcon,
   ModInfo,
@@ -2385,9 +2386,28 @@ export const consentMod = (modId: string, decisions: Record<string, boolean>) =>
   invoke<ModStandingAfter>("consent_mod", { modId, decisions });
 
 /** One permission toggled on a mod's row (or a first-use prompt's answer). Rejects with
- *  `grant-refused` where unsigned mods may not hold both reads and the internet. */
-export const modPermissionDecide = (modId: string, permission: string, granted: boolean) =>
-  invoke<void>("mod_permission_decide", { modId, permission, granted });
+ *  `grant-refused` where unsigned mods may not hold both reads and the internet.
+ *
+ *  `capUsd` is the monthly AI limit the money prompt's field held: only with a yes to `ai`, and
+ *  written in the same transaction as the grant (a refused grant leaves no limit, a refused limit
+ *  no grant). Anything else sends none. */
+export const modPermissionDecide = (
+  modId: string,
+  permission: string,
+  granted: boolean,
+  capUsd?: number,
+) => invoke<void>("mod_permission_decide", { modId, permission, granted, capUsd });
+
+/** What the money prompt says about the route a mod's AI call would take now (the person's own
+ *  settings). Reads only; rejects for a mod that is not installed or never asked for the AI. */
+export const modAiPromptInfo = (modId: string) =>
+  invoke<AiPromptInfo>("mod_ai_prompt_info", { modId });
+
+/** Set a mod's monthly AI limit from its row, or take it away with null (the next paid call then
+ *  asks for one). Raising it is felt at once; lowering it below what is used refuses further paid
+ *  calls. Rejects with fixed words for a number PM cannot use. */
+export const modAiCapSet = (modId: string, capUsd: number | null) =>
+  invoke<void>("mod_ai_cap_set", { modId, capUsd });
 
 /** Save the key the user typed for one of a mod's declared slots, in PM's encrypted store, bound to
  *  the slot's host and header. An empty value deletes it. Answers the mod's slots (a bool each,
