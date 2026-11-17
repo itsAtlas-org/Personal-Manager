@@ -232,6 +232,10 @@ pub struct Manifest {
     pub version: semver::Version,
     pub api: ApiRange,
     pub publisher: Publisher,
+    /// The people who made it, for credit (`authors`, 1 to 8 names; empty when absent). Display
+    /// only: never part of the publisher pin, an update check, the index match or the trusted
+    /// comment, which all speak of the `publisher`. Like the name, they are the mod's own claim.
+    pub authors: Vec<String>,
     pub permissions: Vec<Permission>,
     pub internet_hosts: Vec<String>,
     pub secrets: Vec<SecretSlot>,
@@ -371,6 +375,8 @@ struct RawManifest {
     version: String,
     api_version: RawApi,
     publisher: RawPublisher,
+    #[serde(default, deserialize_with = "present")]
+    authors: Option<Vec<String>>,
     licence: String,
     #[serde(default)]
     permissions: Vec<Permission>,
@@ -1148,6 +1154,7 @@ fn parse_manifest(
     let version = parse_version(&raw.version)?;
     let api = parse_api(&raw.api_version)?;
     let publisher = parse_publisher(&raw.publisher)?;
+    let authors = parse_authors(raw.authors.as_deref())?;
     if raw.licence != LICENCE {
         return Err(refuse(
             Refusal::Licence,
@@ -1271,6 +1278,7 @@ fn parse_manifest(
         version,
         api,
         publisher,
+        authors,
         permissions: raw.permissions,
         internet_hosts: raw.internet_hosts,
         secrets: raw.secrets,
@@ -1463,6 +1471,26 @@ fn parse_publisher(raw: &RawPublisher) -> Result<Publisher, PackageError> {
         source_repo: raw.source_repo.clone(),
         commit: raw.commit.clone(),
     })
+}
+
+/// How many people a manifest may credit.
+pub(super) const MAX_AUTHORS: usize = 8;
+
+/// `authors`: absent reads as none; present it holds 1 to [`MAX_AUTHORS`] names, each held to the
+/// rule `publisher.author` is (plain text, 64 characters). Credit only: nothing pins on it.
+fn parse_authors(raw: Option<&[String]>) -> Result<Vec<String>, PackageError> {
+    let Some(names) = raw else {
+        return Ok(Vec::new());
+    };
+    if names.is_empty() || names.len() > MAX_AUTHORS {
+        return Err(manifest_error(format!(
+            "authors must name 1 to {MAX_AUTHORS} people"
+        )));
+    }
+    for name in names {
+        plain_text("an author's name", name, 64, false, false)?;
+    }
+    Ok(names.to_vec())
 }
 
 /// A git commit as PM writes one: 40 lowercase hex digits (a SHA-1 object id).
@@ -2750,6 +2778,72 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn authors_are_optional_display_only_names_held_to_the_publishers_text_rule() {
+        // Absent is fine: it reads as nobody named.
+        assert!(Fixture::new().verify().unwrap().manifest.authors.is_empty());
+        // One to eight names read back in order.
+        for names in [
+            vec!["Bobby Yu"],
+            vec!["Bobby Yu", "Ramit", "Mats", "A", "B", "C", "D", "E"],
+        ] {
+            let f = with_manifest(|m| m["authors"] = json!(names));
+            assert_eq!(f.verify().unwrap().manifest.authors, names);
+        }
+        // Names are as long as a publisher's author may be, and no longer.
+        let longest = "a".repeat(64);
+        let f = with_manifest(|m| m["authors"] = json!([longest]));
+        assert!(f.verify().is_ok());
+        refused_manifest("65 characters", Refusal::Manifest, |m| {
+            m["authors"] = json!(["a".repeat(65)])
+        });
+        // None, nine, a non-list, a null, a non-text name.
+        refused_manifest("empty list", Refusal::Manifest, |m| {
+            m["authors"] = json!([])
+        });
+        refused_manifest("nine names", Refusal::Manifest, |m| {
+            m["authors"] = json!(["a", "b", "c", "d", "e", "f", "g", "h", "i"])
+        });
+        refused_manifest("a bare string", Refusal::Manifest, |m| {
+            m["authors"] = json!("Bobby Yu")
+        });
+        refused_manifest("null", Refusal::Manifest, |m| m["authors"] = json!(null));
+        refused_manifest("a number", Refusal::Manifest, |m| m["authors"] = json!([7]));
+        // Each name is refused (not cleaned) for what refuses a publisher's author.
+        for bad in [
+            "",
+            " Bobby",
+            "Bobby ",
+            "Bob\u{0}by",
+            "Bob\nby",
+            "A\u{202e}B",
+            "Bo\u{200b}b",
+            "Bob\tby",
+        ] {
+            refused_manifest(&format!("{bad:?}"), Refusal::Manifest, |m| {
+                m["authors"] = json!(["Fine", bad])
+            });
+        }
+        let five = ['\u{0301}', '\u{0302}', '\u{0303}', '\u{0304}', '\u{0305}'];
+        refused_manifest("stacked marks", Refusal::Manifest, |m| {
+            m["authors"] = json!([stacked('a', &five)])
+        });
+    }
+
+    /// The signed pin speaks of the publisher alone: credit names are in no part of the trusted
+    /// comment, so a package that names or changes them still verifies against the same signature
+    /// form, and its publisher is untouched.
+    #[test]
+    fn authors_are_no_part_of_the_signed_comment_or_the_publisher() {
+        let plain = Fixture::new().verify().unwrap().manifest;
+        let f = with_manifest(|m| m["authors"] = json!(["Bobby Yu", "Ramit"]));
+        let credited = f.verify().unwrap().manifest;
+        assert_eq!(credited.authors, ["Bobby Yu", "Ramit"]);
+        assert_eq!(credited.publisher, plain.publisher);
+        // The comment is built from the publisher alone (see `comment_for`).
+        assert!(!comment_for(&f.manifest).contains("Bobby"));
+    }
+
+    #[test]
     fn permissions_are_known_unique_and_explained() {
         refused_manifest("unknown", Refusal::Manifest, |m| {
             m["permissions"][0]["id"] = json!("everything")
@@ -3081,7 +3175,11 @@ pub(crate) mod tests {
         assert_eq!(m.id.as_str(), "atlas.map");
         assert_eq!(m.publisher.tier, Tier::First);
         assert_eq!(m.publisher.commit, "0".repeat(40));
-        assert_eq!(m.contributions.nav_tab.as_deref(), Some("Map"));
+        assert_eq!(m.name, "Document Map");
+        assert_eq!(m.contributions.nav_tab.as_deref(), Some("Document Map"));
+        // The publisher is the organisation (what pins updates); the person is credit only.
+        assert_eq!(m.publisher.author, "Atlas");
+        assert_eq!(m.authors, ["Bobby Yu"]);
         // The Map's help entries (B6) go through PM's own text rules here: the ids, the lengths, no
         // control or invisible character. The node side holds the same rules in manifest.test.ts.
         let help: Vec<&str> = m.contributions.help.iter().map(|h| h.id.as_str()).collect();

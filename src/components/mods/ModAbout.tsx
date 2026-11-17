@@ -26,10 +26,12 @@ export interface ModAboutProps {
   /** The mod's own description (the manifest's), as a plain line. */
   description: string;
   help: readonly ModHelpEntry[];
+  /** Who made it, already in `makerCredit`'s form ("Bobby Yu · Atlas"); empty to say nothing. */
+  credit?: string;
   onClose: () => void;
 }
 
-export function ModAbout({ description, help, onClose }: ModAboutProps) {
+export function ModAbout({ description, help, credit, onClose }: ModAboutProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const about = modText(description);
   // An entry with no body has nothing to say; one with no title still reads, under a plain heading.
@@ -63,6 +65,7 @@ export function ModAbout({ description, help, onClose }: ModAboutProps) {
         <p className="text-xs text-ink3">
           Written by the mod&apos;s maker, not by PM. PM shows it as plain text.
         </p>
+        {credit && <p className="break-words text-xs text-ink3">Made by {credit}</p>}
         {about && <p className="break-words text-sm text-ink2">{about}</p>}
         {entries.length === 0 && (
           <p className="text-sm text-ink3">This mod&apos;s maker hasn&apos;t written any help.</p>

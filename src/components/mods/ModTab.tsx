@@ -39,7 +39,7 @@ import { DevModeOffMark } from "./DevModeOffMark";
 import { ModFirstOpen } from "./ModFirstOpen";
 import { ModFrame } from "./ModFrame";
 import { ModName } from "./ModName";
-import { modText } from "./modText";
+import { makerCredit, modText } from "./modText";
 
 interface ModTabProps {
   /** The mod's id (the part of the view after `mod:`). */
@@ -193,7 +193,11 @@ function RunningMod({
       name={modText(mod.name) || mod.id}
       tier={mod.tier}
       onClosed={onClosed}
-      about={{ description: mod.description, help: mod.help }}
+      about={{
+        description: mod.description,
+        help: mod.help,
+        credit: makerCredit(mod.authors, mod.author),
+      }}
     />
   );
 }

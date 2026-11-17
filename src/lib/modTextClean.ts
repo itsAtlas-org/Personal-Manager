@@ -26,6 +26,27 @@ export function plainLine(text: string): string {
   return cleanModChars(text).replace(/ {2,}/g, " ").trim();
 }
 
+/** The most names a manifest may credit (`package.rs` `MAX_AUTHORS`); a longer list is cut to it. */
+const MAX_CREDITED = 8;
+
+/** Who made a mod, in the one short form every screen uses: the people the mod credits first, then
+ *  the publisher the signature and pin are about ("Bobby Yu, Ann Lee · Atlas"). With no people it
+ *  is the publisher alone, and with neither it is empty. All of it is the mod's own claim, cleaned
+ *  like its name (the badge beside it says who, if anyone, checked it). */
+export function makerCredit(authors: readonly string[] | undefined, publisher: string): string {
+  const people = (authors ?? [])
+    .slice(0, MAX_CREDITED)
+    .map(plainLine)
+    .filter((a) => a !== "");
+  return [people.join(", "), plainLine(publisher)].filter((part) => part !== "").join(" · ");
+}
+
+/** The line every screen draws for it: "Made by Bobby Yu · Atlas", or "Maker not named". */
+export function madeByLine(authors: readonly string[] | undefined, publisher: string): string {
+  const credit = makerCredit(authors, publisher);
+  return credit ? `Made by ${credit}` : "Maker not named";
+}
+
 const INVISIBLE_BUT_NEWLINE = /(?!\n)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 /** A mod's help text, which may have several lines: the same cleaning as {@link plainLine} but the

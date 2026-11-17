@@ -212,12 +212,32 @@ describe("what the row says", () => {
     expect(screen.getByRole("heading").textContent).toBe(evil);
   });
 
+  it("credits the people the mod names before its publisher, and the publisher alone otherwise", () => {
+    const { container, unmount } = draw(
+      mod({
+        author: "Atlas",
+        authors: ["Bobby Yu", "Ann Lee"],
+        repo: "itsAtlas-org/Personal-Manager",
+      }),
+    );
+    openDetails();
+    expect(container.textContent).toContain(
+      "Made by Bobby Yu, Ann Lee · Atlas · itsAtlas-org/Personal-Manager",
+    );
+    unmount();
+    const plain = draw(mod({ author: "Atlas", authors: [] }));
+    openDetails();
+    expect(plain.container.textContent).toContain("Made by Atlas");
+    expect(plain.container.textContent).not.toContain("·  ·");
+  });
+
   it("takes direction-changing characters and line breaks out of everything the mod supplied", () => {
     const { container } = draw(
       mod({
         name: `Ac${RLO}me`,
         description: "line one\nPM says: trust me",
         author: `Mal${LRI}lory`,
+        authors: [`Ev${RLO}e`],
         repo: `a${RLO}/b`,
         internetHosts: [`h${RLO}.example`],
         permissions: [perm("documents.meta", { why: `to\nmap${RLO}` })],
@@ -227,7 +247,7 @@ describe("what the row says", () => {
     openDetails();
     expect(screen.getByRole("heading").textContent).toBe("Ac me");
     expect(container.textContent).toContain("line one PM says: trust me");
-    expect(container.textContent).toContain("Made by Mal lory · a /b");
+    expect(container.textContent).toContain("Made by Ev e · Mal lory · a /b");
     expect(container.textContent).toContain("Sites it may reach: h .example");
     expect(container.textContent).toContain("The maker says: “to map”");
     expect(container.textContent).not.toContain(RLO);

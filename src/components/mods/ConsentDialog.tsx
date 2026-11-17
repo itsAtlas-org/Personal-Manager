@@ -29,7 +29,7 @@ import { DOING, finishInstall, restartScreen } from "../../lib/modInstall";
 import type { ConsentScreen } from "../../lib/modsTypes";
 import { Button, Callout, Dialog } from "../ui";
 import { ModName } from "./ModName";
-import { modText, quoteName } from "./modText";
+import { madeByLine, modText, quoteName } from "./modText";
 import { classWords, permissionWords, standingLine, wideningWords } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 import { UnsignedConsentDialog } from "./UnsignedConsentDialog";
@@ -200,7 +200,7 @@ function SignedConsentDialog({
         <p className="flex flex-wrap items-center gap-2 text-xs text-ink3">
           <TierBadge tier={screen.tier} />
           <span className="break-words">
-            {screen.author ? `Made by ${modText(screen.author)}` : "Maker not named"}
+            {madeByLine(screen.authors, screen.author)}
             {screen.tier === "second" && screen.commit
               ? ` · reviewed by Atlas at commit ${modText(screen.commit).slice(0, 12)}`
               : ""}

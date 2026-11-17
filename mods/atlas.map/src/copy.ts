@@ -61,7 +61,7 @@ export function noticeText(notice: ChangeNotice): string {
   return "Your documents changed while the map was open.";
 }
 
-export const TITLE = "Map";
+export const TITLE = "Document Map";
 export const NO_DOCUMENTS =
   "No documents yet. Ingest some in the Documents view and they'll appear here.";
 export const NOTHING_TO_PLACE =

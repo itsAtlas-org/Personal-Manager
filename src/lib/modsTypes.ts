@@ -202,7 +202,11 @@ export interface ModInfo {
   description: string;
   /** What the row says; an unsigned row is third party whatever it claims (`signed`). */
   tier: "first" | "second" | "third";
+  /** The publisher the signature and the update pin are about. */
   author: string;
+  /** The people the mod credits (its manifest's `authors`), in its order; empty when it names none.
+   *  Display only, and the mod's own claim like its name. Draw both through `makerCredit`. */
+  authors: string[];
   /** `owner/repo`. */
   repo: string;
   commit: string;
@@ -289,7 +293,11 @@ export interface ConsentScreen {
   name: string;
   description: string;
   version: string;
+  /** The publisher the signature and the update pin are about. */
   author: string;
+  /** The people the manifest credits, in its order; empty when it names none. The mod's own claim:
+   *  for a file or folder nobody has checked, so are the publisher and the repository. */
+  authors: string[];
   repo: string;
   /** The commit the maker's signed build came from (second party shows "reviewed at commit …"). */
   commit: string;

@@ -145,7 +145,7 @@ describe("the page's markup and stylesheet", () => {
   });
 
   it("has a title, a language and one app root", () => {
-    expect(indexHtml).toContain("<title>Map</title>");
+    expect(indexHtml).toContain("<title>Document Map</title>");
     expect(indexHtml).toContain('lang="en"');
     expect(indexHtml.match(/id="app"/g)).toHaveLength(1);
   });

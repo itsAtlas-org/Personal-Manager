@@ -39,7 +39,7 @@ import { DevModeOffMark } from "./DevModeOffMark";
 import { ModAiLimit } from "./ModAiLimit";
 import { ModIconView } from "./ModIconView";
 import { ModSecretFields } from "./ModSecretFields";
-import { modText } from "./modText";
+import { madeByLine, modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 
@@ -273,7 +273,7 @@ export function ModRow({
           <div className="space-y-3 pt-2 text-sm text-ink2">
             {mod.description && <p className="break-words">{modText(mod.description)}</p>}
             <p className="break-words text-xs text-ink3">
-              {mod.author ? `Made by ${modText(mod.author)}` : "Maker not named"}
+              {madeByLine(mod.authors, mod.author)}
               {mod.repo ? ` · ${modText(mod.repo)}` : ""}
               {mod.tier === "second" && mod.commit
                 ? ` · reviewed by Atlas at commit ${modText(mod.commit).slice(0, 12)}`

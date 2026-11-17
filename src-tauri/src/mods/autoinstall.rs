@@ -77,8 +77,8 @@ pub struct Pilot {
 pub const PILOTS: [Pilot; 1] = [Pilot {
     id: "atlas.map",
     marker: "mods_autoinstall_map",
-    name: "Map",
-    tab_label: "Map",
+    name: "Document Map",
+    tab_label: "Document Map",
     landed: "mods_pilot_landed_map",
     handover: hand_over_map,
 }];

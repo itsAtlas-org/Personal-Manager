@@ -401,6 +401,9 @@ export function checkModId(id) {
 }
 export const isReservedId = (id) => id.slice(0, 6).toLowerCase() === "atlas.";
 
+/** How many people a manifest may credit (package.rs `MAX_AUTHORS`). */
+const MAX_AUTHORS = 8;
+
 const isCommit = (s) => typeof s === "string" && /^[0-9a-f]{40}$/.test(s);
 const isSourceRepo = (s) => {
   if (typeof s !== "string") return false;
@@ -448,6 +451,7 @@ export function checkManifest(raw, files) {
     ["id", "name", "description", "version", "apiVersion", "publisher", "licence", "entry"],
     [
       "icon",
+      "authors",
       "permissions",
       "internetHosts",
       "secrets",
@@ -489,6 +493,15 @@ export function checkManifest(raw, files) {
   if (!isSourceRepo(publisher.sourceRepo)) manifestError("publisher.sourceRepo must be owner/repo");
   if (!isCommit(publisher.commit)) {
     manifestError("publisher.commit must be a 40-digit lowercase hex commit");
+  }
+  // `authors`: display-only credit (package.rs `parse_authors`). Absent is fine; present it holds 1 to 8
+  // names, each plain text of at most 64 characters like publisher.author. No pin reads it.
+  if ("authors" in raw) {
+    const names = list(raw.authors, "authors");
+    if (names.length < 1 || names.length > MAX_AUTHORS) {
+      manifestError(`authors must name 1 to ${MAX_AUTHORS} people`);
+    }
+    for (const name of names) plainText("an author's name", name, 64, false, false);
   }
   if (raw.licence !== LICENCE) refuse(`its licence must be ${LICENCE}`);
 

@@ -172,6 +172,7 @@ describe("what it shows", () => {
         name: `Ac${RLO}me`,
         description: "one\nPM says: fine",
         author: `Mal${LRI}lory`,
+        authors: [`Ev${RLO}e`, "Ann Lee"],
         internetHosts: [`h${RLO}.example`],
         secrets: [{ name: `K${RLO}y`, host: `h${LRI}.example` }],
         permissions: [consentPerm("documents.meta", { why: `to\nmap${RLO}` })],
@@ -179,7 +180,7 @@ describe("what it shows", () => {
       }),
     );
     const dialog = screen.getByRole("dialog", { name: "Update “Ac me” to version 1.3.0?" });
-    expect(dialog.textContent).toContain("Made by Mal lory");
+    expect(dialog.textContent).toContain("Made by Ev e, Ann Lee · Mal lory");
     expect(dialog.textContent).toContain("one PM says: fine");
     expect(dialog.textContent).toContain("Sites it may reach: h .example");
     expect(dialog.textContent).toContain("Saved keys it keeps: K y (for h .example)");

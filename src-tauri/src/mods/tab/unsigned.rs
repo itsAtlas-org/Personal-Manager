@@ -156,6 +156,7 @@ pub fn screen(
         description: m.description.clone(),
         version: m.version.to_string(),
         author: m.publisher.author.clone(),
+        authors: m.authors.clone(),
         repo: m.publisher.source_repo.clone(),
         commit: m.publisher.commit.clone(),
         tier: m.publisher.tier.as_str().to_owned(),
@@ -373,13 +374,14 @@ mod tests {
 
     #[test]
     fn the_screen_is_the_stark_one_and_says_what_the_file_claims() {
-        let m = manifest_of(|_| {});
+        let m = manifest_of(|m| m["authors"] = serde_json::json!(["Ann Lee", "Bo Chen"]));
         let s = screen(&m, false, None, &[], &"a".repeat(64), true);
         assert_eq!(
             (s.tier.as_str(), s.kind, s.from),
             ("third", "fresh", "file")
         );
         assert_eq!((s.author.as_str(), s.repo.as_str()), ("Acme", "acme/tool"));
+        assert_eq!(s.authors, ["Ann Lee", "Bo Chen"], "the file's own claim");
         let u = s.unsigned.as_ref().unwrap();
         assert_eq!(u.confirm_id, "acme.tool");
         assert!(s.widening.is_empty() && s.token.is_empty());

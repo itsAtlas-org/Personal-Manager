@@ -122,7 +122,7 @@ export interface ModFrameProps {
   onClosed?: (reason: string | null) => void;
   /** What the mod's maker wrote about it (the manifest's description and help). When there is
    *  something to show, the band offers "About this mod". */
-  about?: { description: string; help: readonly ModHelpEntry[] };
+  about?: { description: string; help: readonly ModHelpEntry[]; credit?: string };
 }
 
 export function ModFrame(props: ModFrameProps) {
@@ -655,7 +655,12 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
         // the band is drawn again so the panel still sits under PM's own name-and-tier strip.
         <div className="absolute inset-0 z-10 flex min-h-0 flex-col bg-bg">
           <ModBand name={name} tier={tier} />
-          <ModAbout description={about.description} help={about.help} onClose={closeAbout} />
+          <ModAbout
+            description={about.description}
+            help={about.help}
+            credit={about.credit}
+            onClose={closeAbout}
+          />
         </div>
       )}
     </section>

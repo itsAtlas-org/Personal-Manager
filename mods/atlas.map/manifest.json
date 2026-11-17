@@ -1,6 +1,6 @@
 {
   "id": "atlas.map",
-  "name": "Map",
+  "name": "Document Map",
   "description": "Your documents, laid out on one map by meaning or by project.",
   "version": "1.0.0",
   "apiVersion": { "min": "1.0", "target": "1.0" },
@@ -10,6 +10,7 @@
     "sourceRepo": "itsAtlas-org/Personal-Manager",
     "commit": "0000000000000000000000000000000000000000"
   },
+  "authors": ["Bobby Yu"],
   "licence": "AGPL-3.0-or-later",
   "permissions": [
     { "id": "storage", "why": "Remembers your map settings and where it placed your documents." },
@@ -18,16 +19,16 @@
     { "id": "documents.vectors", "why": "Places similar documents near each other." }
   ],
   "contributions": {
-    "nav.tab": { "label": "Map" },
+    "nav.tab": { "label": "Document Map" },
     "help": [
       {
         "id": "map-overview",
-        "title": "Map",
+        "title": "Document Map",
         "body": "Your documents laid out on one map, in one of two arrangements. By project puts each project in the middle of its documents. Semantic puts documents that are about similar things close together.\nHover a document to see its details, or click it to read it."
       },
       {
         "id": "map-canvas",
-        "title": "Document map",
+        "title": "What the dots mean",
         "body": "Each dot is a document. Its size is how much content it holds (its number of chunks) and its colour is its project, matching the legend.\nA dashed ring means the document is still awaiting review, or is index-only (it lives in a connected source like Drive rather than on this device).\nIn the Semantic arrangement a faded dot has not been placed yet: it waits at its project's spot until the map is worked out again.\nHover a dot for its details, or click it to open the document in PM's reader."
       },
       {

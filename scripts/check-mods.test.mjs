@@ -252,6 +252,27 @@ describe("the manifest", () => {
     );
   });
 
+  // `authors` is display-only credit (package.rs `parse_authors`): optional, 1 to 8 names, each
+  // plain text of at most 64 characters like publisher.author, and no part of the pin above.
+  it("mirrors package.rs for the optional authors list, and pins nothing on it", () => {
+    const ok = (authors) => withMap((m) => (m.authors = authors));
+    expect(problemsOf(goodTree())).toEqual([]);
+    expect(problemsOf(ok(["Bobby Yu"]))).toEqual([]);
+    expect(problemsOf(ok(["a", "b", "c", "d", "e", "f", "g", "h"]))).toEqual([]);
+    expect(problemsOf(ok(["a".repeat(64)]))).toEqual([]);
+    // Any names pass the first-party pin: it speaks of the publisher.
+    expect(problemsOf(ok(["Someone Else Entirely"]))).toEqual([]);
+    expectRefused(ok([]), "authors must name 1 to 8 people");
+    expectRefused(ok(["a", "b", "c", "d", "e", "f", "g", "h", "i"]), "authors must name 1 to 8");
+    expectRefused(ok(["a".repeat(65)]), "longer than 64 characters");
+    expectRefused(ok("Bobby Yu"), "authors must be a list");
+    expectRefused(ok(null), "authors must be a list");
+    expectRefused(ok([7]), "must be text");
+    for (const bad of ["", " Bobby", "Bob\u0000by", "Bob\nby", "A\u202eB", "Bo\u200bb"]) {
+      expectRefused(ok(["Fine", bad]), "an author's name");
+    }
+  });
+
   it("does not hold a test fixture to the first-party publisher", () => {
     expect(HELLO_MANIFEST.publisher.author).not.toBe("Atlas");
     expect(problemsOf(goodTree())).toEqual([]);

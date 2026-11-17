@@ -31,7 +31,7 @@ import type { ModInfo } from "../../lib/modsTypes";
 import { useDisclaimerShowing } from "../../lib/useDisclaimerShowing";
 import { Button, Callout, Card, Collapsible } from "../ui";
 import { ModName } from "./ModName";
-import { modText } from "./modText";
+import { madeByLine, modText } from "./modText";
 import { ModsDisclaimer } from "./ModsDisclaimer";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
@@ -102,8 +102,7 @@ export function ModFirstOpen({
           <p className="flex flex-wrap items-center gap-2 text-xs text-ink3">
             <TierBadge tier={mod.tier} />
             <span className="break-words">
-              {mod.author ? `Made by ${modText(mod.author)}` : "Maker not named"} · version{" "}
-              {mod.version}
+              {madeByLine(mod.authors, mod.author)} · version {mod.version}
             </span>
           </p>
           {mod.description && (

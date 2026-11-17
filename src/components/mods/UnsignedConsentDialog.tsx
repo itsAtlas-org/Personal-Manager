@@ -25,7 +25,7 @@ import { clearModError, setModScreen, useModActions } from "../../lib/modActions
 import type { ConsentPermission, ConsentScreen } from "../../lib/modsTypes";
 import { Button, Callout, Dialog, Input, RadioChoice } from "../ui";
 import { ModName } from "./ModName";
-import { modText } from "./modText";
+import { makerCredit, modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 
@@ -179,7 +179,7 @@ export function UnsignedConsentDialog({
           </p>
           <ul className="space-y-0.5 text-ink2">
             <Claim label="Name" value={screen.name} />
-            <Claim label="Made by" value={screen.author} />
+            <Claim label="Made by" value={makerCredit(screen.authors, screen.author)} />
             <Claim label="Repository" value={screen.repo} />
             <Claim label="Commit" value={screen.commit} />
           </ul>

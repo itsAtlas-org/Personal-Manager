@@ -26,7 +26,7 @@ const text = (el: Element) => el.textContent ?? "";
 describe("buildShell", () => {
   it("builds the header, strips, stage and card, with every strip and the card hidden", () => {
     const shell = buildShell(document);
-    expect(text(shell.root.querySelector("h1") as Element)).toBe("Map");
+    expect(text(shell.root.querySelector("h1") as Element)).toBe("Document Map");
     for (const el of [
       shell.computing,
       shell.notice,

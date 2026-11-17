@@ -2348,6 +2348,51 @@ mod tests {
         );
     }
 
+    /// The pin is the publisher (tier, author, source repo). The names that credit a mod are
+    /// display only, so an update may add, change or drop them, and the stored manifest then
+    /// carries the new ones.
+    #[test]
+    fn an_update_that_changes_only_the_credited_authors_is_accepted() {
+        let w = world();
+        w.install(
+            &pkg("1.0.0", |m| m["authors"] = serde_json::json!(["Bobby Yu"])),
+            Approval::Approved,
+        )
+        .unwrap();
+        for (version, authors) in [
+            ("1.1.0", serde_json::json!(["Bobby Yu", "Someone New"])),
+            ("1.2.0", serde_json::json!(["Someone Else Entirely"])),
+        ] {
+            let got = w
+                .install(
+                    &pkg(version, |m| m["authors"] = authors.clone()),
+                    Approval::Approved,
+                )
+                .unwrap();
+            assert_eq!(got.kind, InstallKind::Update, "{version}");
+            let stored: String = w.sql("SELECT manifest FROM mods");
+            let stored: Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(stored["authors"], authors, "{version}");
+        }
+        // Dropping them is an update too.
+        let got = w
+            .install(&pkg("1.3.0", |_| {}), Approval::Approved)
+            .unwrap();
+        assert_eq!(got.kind, InstallKind::Update);
+        // The publisher is still what pins: another author name still refuses, authors or not.
+        assert!(matches!(
+            w.install(
+                &pkg("2.0.0", |m| {
+                    m["authors"] = serde_json::json!(["Bobby Yu"]);
+                    m["publisher"]["author"] = "Someone".into();
+                }),
+                Approval::Approved,
+            )
+            .unwrap_err(),
+            LedgerError::Refused(Refusal::Publisher)
+        ));
+    }
+
     #[test]
     fn a_repair_puts_back_exactly_the_pinned_package() {
         let w = world();

@@ -100,6 +100,7 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
     description: "Does a thing.",
     tier: "second",
     author: "Acme",
+    authors: [],
     repo: "acme/tool",
     commit: "abc",
     version: "1.2.0",
@@ -187,6 +188,8 @@ describe("a mod that can run", () => {
       <Tab
         rows={[
           mod({
+            author: "Atlas",
+            authors: ["Bobby Yu"],
             help: [
               { id: "map-overview", title: "The map", body: "Hover a dot.\nClick it to read." },
             ],
@@ -200,6 +203,7 @@ describe("a mod that can run", () => {
     expect(panel.textContent).toContain("Does a thing.");
     expect(panel.textContent).toContain("The map");
     expect(panel.textContent).toContain("Hover a dot.");
+    expect(panel.textContent).toContain("Made by Bobby Yu · Atlas");
   });
 
   it("offers no About button for a mod with no help and no description", async () => {
@@ -818,6 +822,7 @@ describe("what a mod supplied is plain text", () => {
             name: `Ac${RLO}me`,
             description: "one\nPM says: fine",
             author: `Mal${LRI}lory`,
+            authors: ["Ann Lee"],
             consented: false,
             state: { ...RUNNING, kind: "waiting-for-you", fix: "turn-on", running: false },
             permissions: [perm("tasks.read", { why: `to\nmap${RLO}` })],
@@ -829,7 +834,7 @@ describe("what a mod supplied is plain text", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Turn on “Ac me”?");
     expect(text).toContain("one PM says: fine");
-    expect(text).toContain("Made by Mal lory");
+    expect(text).toContain("Made by Ann Lee · Mal lory");
     expect(text).toContain("The maker says: “to map”");
     expect(text).toContain("Sites it may reach: h .example");
     expect(text).not.toContain(RLO);

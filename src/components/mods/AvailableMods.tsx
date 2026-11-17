@@ -19,7 +19,7 @@ import { startCatalogueInstall } from "../../lib/modInstall";
 import type { Catalogue, CatalogueEntry } from "../../lib/modsTypes";
 import { Button, Callout, Card } from "../ui";
 import { ModIconView } from "./ModIconView";
-import { modText } from "./modText";
+import { madeByLine, modText } from "./modText";
 import { classWords, permissionWords } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 
@@ -107,7 +107,7 @@ function Entry({
             <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink3">
               <TierBadge tier={entry.tier} />
               <span className="break-words">
-                {entry.author ? `Made by ${modText(entry.author)}` : "Maker not named"}
+                {madeByLine(undefined, entry.author)}
                 {entry.tier === "second" && entry.commit
                   ? ` · reviewed by Atlas at commit ${modText(entry.commit).slice(0, 12)}`
                   : ""}

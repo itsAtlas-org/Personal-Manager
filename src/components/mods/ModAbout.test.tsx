@@ -34,12 +34,12 @@ afterEach(cleanup);
 const HELP = [
   {
     id: "map-overview",
-    title: "Map",
+    title: "Document Map",
     body: "Your documents laid out on one map, in one of two arrangements. By project puts each project in the middle of its documents. Semantic puts documents that are about similar things close together.\nHover a document to see its details, or click it to read it.",
   },
   {
     id: "map-canvas",
-    title: "Document map",
+    title: "What the dots mean",
     body: "Each dot is a document. Its size is how much content it holds (its number of chunks) and its colour is its project, matching the legend.\nA dashed ring means the document is still awaiting review, or is index-only (it lives in a connected source like Drive rather than on this device).\nIn the Semantic arrangement a faded dot has not been placed yet: it waits at its project's spot until the map is worked out again.\nHover a dot for its details, or click it to open the document in PM's reader.",
   },
   {
@@ -88,6 +88,24 @@ describe("a Map-shaped mod's help in the About panel", () => {
 });
 
 describe("ModAbout", () => {
+  it("says who made the mod, in PM's own small line above the maker's words", () => {
+    render(
+      <ModAbout
+        description={DESCRIPTION}
+        help={HELP.slice(0, 1)}
+        credit="Bobby Yu · Atlas"
+        onClose={() => {}}
+      />,
+    );
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(within(panel).getByText("Made by Bobby Yu · Atlas")).toBeTruthy();
+  });
+
+  it("draws no credit line when the mod has none to show", () => {
+    render(<ModAbout description={DESCRIPTION} help={HELP.slice(0, 1)} onClose={() => {}} />);
+    expect(screen.queryByText(/^Made by/)).toBeNull();
+  });
+
   it("calls onClose from its button", () => {
     const onClose = vi.fn();
     render(<ModAbout description="" help={HELP.slice(0, 1)} onClose={onClose} />);

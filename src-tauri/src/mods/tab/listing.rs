@@ -50,7 +50,10 @@ pub struct ModDto {
     /// `first`, `second` or `third`: what the row says. Which tier PM *treats* it as is
     /// [`Self::signed`] first: an unsigned row is third party whatever its manifest claimed.
     pub tier: String,
+    /// The publisher the pin speaks of.
     pub author: String,
+    /// The people the manifest credits, in its order; empty when it names none. Display only.
+    pub authors: Vec<String>,
     /// The source repo, `owner/repo`.
     pub repo: String,
     pub commit: String,
@@ -287,6 +290,7 @@ fn pending_dto(pilot: &Pilot) -> ModDto {
         description: String::new(),
         tier: "first".to_owned(),
         author: String::new(),
+        authors: Vec::new(),
         repo: String::new(),
         commit: String::new(),
         version: String::new(),
@@ -338,6 +342,7 @@ fn read_decisions(
 #[derive(Debug, Default)]
 pub struct ManifestView {
     pub description: String,
+    pub authors: Vec<String>,
     pub icon: Option<String>,
     pub permissions: Vec<(String, String)>,
     pub internet_hosts: Vec<String>,
@@ -353,6 +358,9 @@ pub struct ManifestView {
 const HELP_ENTRIES_MAX: usize = 64;
 const HELP_TITLE_MAX: usize = 80;
 const HELP_BODY_MAX: usize = 2000;
+/// The same for `authors` (`package.rs`: 8 names of 64 characters).
+const AUTHORS_MAX: usize = 8;
+const AUTHOR_MAX: usize = 64;
 
 /// Read a stored manifest (pure). Anything missing or oddly shaped reads as absent: the verifier
 /// checked the manifest at install, so this only meets a hand-edited or damaged row.
@@ -373,6 +381,12 @@ pub fn read_manifest(manifest: &str) -> ManifestView {
         .map(|(min, target)| ApiRange { min, target });
     ManifestView {
         description: text(&v["description"]).unwrap_or_default(),
+        authors: list(&v["authors"])
+            .iter()
+            .filter_map(text)
+            .filter(|a| a.chars().count() <= AUTHOR_MAX)
+            .take(AUTHORS_MAX)
+            .collect(),
         icon: text(&v["icon"]),
         permissions: list(&v["permissions"])
             .iter()
@@ -555,6 +569,7 @@ fn dto(
         description: m.description.clone(),
         tier: row.tier.clone(),
         author: row.author.clone(),
+        authors: m.authors.clone(),
         repo: row.source_repo.clone(),
         commit: row.source_commit.clone(),
         version: row.version.clone(),
@@ -855,6 +870,39 @@ mod tests {
     }
 
     #[test]
+    fn the_listing_carries_the_credited_authors_beside_the_publisher() {
+        let (_dir, c) = test_store();
+        let mut manifest = manifest(&["storage"]);
+        manifest["authors"] = json!(["Bobby Yu", "Ann Lee"]);
+        insert(
+            &c,
+            &Row {
+                manifest,
+                ..Row::default()
+            },
+        );
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["authors"], json!(["Bobby Yu", "Ann Lee"]));
+        assert_eq!(wire["author"], "Atlas", "the publisher stays the pin's");
+        // None named lists an empty array, and a damaged or oversized value reads as less.
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["authors"], json!([]));
+        let long = "x".repeat(AUTHOR_MAX + 1);
+        let names: Vec<Value> = (0..AUTHORS_MAX + 3)
+            .map(|i| json!(format!("N{i}")))
+            .collect();
+        let m = read_manifest(&json!({"authors": names}).to_string());
+        assert_eq!(m.authors.len(), AUTHORS_MAX);
+        let m = read_manifest(&json!({"authors": ["Ok", long, 7, null]}).to_string());
+        assert_eq!(m.authors, ["Ok"]);
+        assert!(read_manifest(&json!({"authors": "Bobby"}).to_string())
+            .authors
+            .is_empty());
+    }
+
+    #[test]
     fn the_committed_map_manifests_help_reaches_the_listing_whole() {
         // B6's eight entries, through the same reader the listing uses: none is dropped by the
         // length limits or by the shape check.
@@ -878,6 +926,9 @@ mod tests {
             .help
             .iter()
             .all(|h| !h.title.is_empty() && !h.body.is_empty()));
+        // The mod is the Document Map (not the geographical kind), and it credits its maker.
+        assert_eq!(m.help[0].title, "Document Map");
+        assert_eq!(m.authors, ["Bobby Yu"]);
     }
 
     #[test]
@@ -963,7 +1014,7 @@ mod tests {
         assert!(map.pending);
         assert_eq!(
             (map.id.as_str(), map.name.as_str(), map.nav_tab.as_deref()),
-            ("atlas.map", "Map", Some("Map"))
+            ("atlas.map", "Document Map", Some("Document Map"))
         );
         // The existing "Installing" words, nothing to turn on, nothing to run, no permissions.
         assert_eq!(map.state.kind, words::Kind::Installing);
