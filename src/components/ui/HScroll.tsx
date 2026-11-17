@@ -11,7 +11,25 @@ import type { ReactNode } from "react";
  * (which used to hijack a plain vertical wheel into horizontal panning, contradicting that global
  * rule). Wrap any wide table/grid in this rather than a bare `overflow-x-auto` so the intent stays
  * self-documenting.
+ *
+ * `label` names the region and makes it a tab stop: a scroll container with nothing focusable inside
+ * can't be scrolled from the keyboard at all, so a table whose hidden columns matter passes one.
  */
-export function HScroll({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={`overflow-x-auto ${className ?? ""}`}>{children}</div>;
+export function HScroll({
+  children,
+  className,
+  label,
+}: {
+  children: ReactNode;
+  className?: string;
+  label?: string;
+}) {
+  return (
+    <div
+      className={`overflow-x-auto ${className ?? ""}`}
+      {...(label ? { role: "region", "aria-label": label, tabIndex: 0 } : {})}
+    >
+      {children}
+    </div>
+  );
 }

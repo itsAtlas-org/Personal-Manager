@@ -144,7 +144,21 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDef[] = [
   },
   {
     header: "Advanced",
-    tabs: [{ id: "developer", label: "Developer", Icon: DeveloperIcon, sections: [] }],
+    tabs: [
+      {
+        id: "developer",
+        label: "Developer",
+        Icon: DeveloperIcon,
+        sections: [
+          { id: "sec-dev-mode", label: "Developer mode" },
+          { id: "sec-dev-api", label: "API version" },
+          { id: "sec-dev-endpoints", label: "Endpoints" },
+          { id: "sec-dev-limits", label: "Limits" },
+          { id: "sec-dev-running", label: "Running now" },
+          { id: "sec-dev-testmods", label: "Load a test mod" },
+        ],
+      },
+    ],
   },
 ];
 

@@ -7,6 +7,27 @@ import { announceSettingSaved, isSettingWrite } from "./settingsSaved";
 import { pushLanding } from "./documentFeed";
 import type { RepairOutcome, VaultFault } from "./types";
 import type {
+  Catalogue,
+  ConsentScreen,
+  DevKitInfo,
+  DevModeState,
+  DevSwitch,
+  InstallResult,
+  ModIcon,
+  ModInfo,
+  ModNotice,
+  ModStandingAfter,
+  ModUninstalled,
+  ModsChanged,
+  ModsDisclaimerState,
+  ModsResetResult,
+  ModsSafetyStatus,
+  Reloaded,
+  Repaired,
+  TestModStatus,
+  UninstallPreview,
+} from "./modsTypes";
+import type {
   LocalGpuResidency,
   LocalReleaseSettings,
   AiProviderStatus,
@@ -120,6 +141,7 @@ import type {
   ReviewEvent,
   TagProposalRow,
   RestoreSummary,
+  SwitchOutcome,
   SemanticLayout,
   Settings,
   SharedDrive,
@@ -300,8 +322,9 @@ export const setTimeZone = (zone: string) => invoke<void>("set_time_zone", { zon
 export const getPref = (key: string) => invoke<string | null>("get_pref", { key });
 
 /** Persist a UI preference blob. The backend only accepts a fixed allowlist of keys
- *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `pinboard`, `dev_mode`, `map`, `project_ui`,
- *  `milestone_ui`, `calendar_ui`, `backup_ui`), so this can't touch schema-critical settings. */
+ *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `pinboard`, `map`, `project_ui`, `milestone_ui`,
+ *  `calendar_ui`, `backup_ui`), so this can't touch schema-critical settings. Developer mode is
+ *  not one of them: it is Rust's alone, per device (`devModeState` / `devModeSwitch`). */
 export const setPref = (key: string, value: string) => invoke<void>("set_pref", { key, value });
 
 /** Ordered preferred chat models (first = primary). */
@@ -1871,9 +1894,19 @@ export const restoreLocalBackup = (srcPath: string, passphrase: string) =>
 /** Point this profile at a restored vault folder and open it (uses the key seeded during restore). On a
  *  fresh machine the vault is adopted into the profile's home location; a restored passphrase
  *  ("shareable") vault is made private on this device when `makePrivate`, else kept passphrase-protected
- *  (ignored for a device-mode restore). */
+ *  (ignored for a device-mode restore). Resolves with what the reconcile couldn't do cleanly (warnings)
+ *  and where each restored mod ended up, read after the same-machine recovery has run. Developer mode
+ *  and connected apps are reset on the restored store before it opens (spec §1.11). */
 export const switchToVault = (folder: string, makePrivate: boolean) =>
-  invoke<void>("switch_to_vault", { folder, makePrivate });
+  invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+
+/** Whether backups also carry the mods' own saved data ("Also save mod data in my backups"). On
+ *  unless turned off. Mod secrets and connected apps never leave in any backup or export. */
+export const getBackupModData = () => invoke<boolean>("get_backup_mod_data");
+
+/** Turn "Also save mod data in my backups" on or off; applies to the next backup, every destination. */
+export const saveBackupModData = (enabled: boolean) =>
+  invoke<void>("save_backup_mod_data", { enabled });
 
 /** The current backup/restore snapshot — restores the progress UI on return + shows the last result. */
 export const backupStatus = () => invoke<BackupState>("backup_status");
@@ -2190,13 +2223,197 @@ export interface ModFrameOpened {
   session: string;
 }
 
-/** Mint a mod frame's entry URL and session. The URL is good for one load, within a minute. */
-export const modFrameOpen = (modId: string) => invoke<ModFrameOpened>("mod_frame_open", { modId });
+/** One event the backend sends a frame's session (spec §1.5 "Events"): already filtered by the mod's
+ *  grants in Rust, so every one that arrives here is one the mod may hear. `seq` counts from 1 per
+ *  session and is what the frame acknowledges; `missed` says how many were dropped just before this
+ *  one (the frame was too slow, or the event too large). modBridge.ts's `readEvent` reads it. */
+export interface ModEventMessage {
+  seq: number;
+  name: string;
+  payload: unknown;
+  missed?: number;
+}
+
+/** Mint a mod frame's entry URL and session. The URL is good for one load, within a minute. The
+ *  session's events come back on `onEvent` until the session ends; the backend keeps the channel with
+ *  the session and drops it with it. */
+export const modFrameOpen = (modId: string, onEvent: (message: ModEventMessage) => void) => {
+  const events = new Channel<ModEventMessage>();
+  events.onmessage = onEvent;
+  return invoke<ModFrameOpened>("mod_frame_open", { modId, events });
+};
+
+/** The frame of `session` has taken events up to `seq`: the window of events the backend may have
+ *  outstanding for it slides. The backend ignores a session it doesn't know and clamps a number past
+ *  what it sent. */
+export const modEventsAck = (session: string, seq: number) =>
+  invoke<void>("mod_events_ack", { session, seq });
+
+/** PM's theme changed as `session`'s frame sees it: `theme` is the snapshot `theme.get` answers with
+ *  (modTheme.ts). The backend tells that frame (`theme.changed`) if its mod may hear it, and answers
+ *  nothing either way. */
+export const modThemeChanged = (session: string, theme: unknown) =>
+  invoke<void>("mod_theme_changed", { session, theme });
 
 /** End a frame's session: on unmount, and when the frame navigates (its second `load`). Closing an
  *  ended session is fine. */
 export const modFrameClose = (session: string) => invoke<void>("mod_frame_close", { session });
 
-/** Relay one bridge call. The backend resolves the session to its mod; the frame never names one. */
-export const modCall = (session: string, method: string, args: unknown) =>
-  invoke<unknown>("mod_call", { session, method, args: args ?? null });
+/** Relay one bridge call: `args` is the JSON text the bridge measured, so the backend checks its size
+ *  before parsing it. The backend resolves the session to its mod (the frame never names one) and
+ *  always answers with a reply, `{kind: "value" | "page" | "error", …}`, which modBridge.ts reads;
+ *  every refusal comes back that way, with its `MOD-####` code. The one exception is the document
+ *  vectors, which come back as a raw `ArrayBuffer` (a raw IPC body, not JSON; modBridge.ts's
+ *  `readVectors` reads it). */
+export const modCall = (session: string, method: string, args: string) =>
+  invoke<unknown>("mod_call", { session, method, args });
+
+// --- Mods: the Mods tab (Mods spec §1.13) -------------------------------------------------------
+// Main window only, and every one refuses while the vault is locked or another PM window is the
+// writer. A refusal rejects with `{code, message}` (`modsErrorOf` in modsTypes.ts reads it): show the
+// message, branch on the code. The types are in modsTypes.ts; every sentence in them is the
+// backend's.
+
+/** Every installed mod: its standing and the sentence for it, its permissions (with the maker's
+ *  reason, the class, the decision and what is allowed now), an update waiting and why. */
+export const listMods = () => invoke<ModInfo[]>("list_mods");
+
+/** A mod's icon (PNG or WebP, from its verified files) for a `blob:` URL (`iconBlob`). */
+export const modIcon = (modId: string) => invoke<ModIcon>("mod_icon", { modId });
+
+/** The signed catalogue (Available), from the cached index. */
+export const listCatalogue = () => invoke<Catalogue>("list_catalogue");
+
+/** Read and verify the signed `.pmmod` at `path` and return what the consent screen shows,
+ *  installing nothing. An unsigned file rejects with the `unsigned` code. */
+export const installModFile = (path: string) => invoke<ConsentScreen>("install_mod_file", { path });
+
+/** Install what a consent screen's `token` staged, writing `decisions` (permission id to yes or no:
+ *  an answer for every permission the screen marked `answerRequired`) as grants. Good once. For an
+ *  unsigned file's screen (`screen.unsigned` set) `confirmId` must be the mod's id as the user typed
+ *  it, or this rejects with `confirm-mismatch`; developer mode is read again (`dev-mode-off`). A
+ *  signed screen ignores `confirmId`. */
+export const installModConsented = (
+  token: string,
+  decisions: Record<string, boolean>,
+  confirmId?: string,
+) => invoke<InstallResult>("install_mod_consented", { token, decisions, confirmId });
+
+/** Read and verify the UNSIGNED `.pmmod` at `path` (the one `installModFile` rejected with
+ *  `unsigned`) and return the stark screen, installing nothing. Rejects `dev-mode-off` while developer
+ *  mode is off for this device (PM reads that itself). Then `installModConsented` with the typed
+ *  id. */
+export const installUnsignedFile = (path: string) =>
+  invoke<ConsentScreen>("install_unsigned_file", { path });
+
+/** Whether developer mode is on for THIS device in this vault: PM's own record, the only authority
+ *  (`capabilities.tsx` keeps a cache of it). Rejects `no-store` until the vault is open. */
+export const devModeState = () => invoke<DevModeState>("dev_mode_state");
+
+/** Switch developer mode for this device and wait for the write. Off pauses every unsigned mod, on
+ *  resumes exactly those it paused. The answer is what it is now; a rejection means nothing changed. */
+export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch", { on });
+
+/** The Developer kit's readouts, all from Rust so the page keeps no copy that could drift: the API
+ *  version and its deprecation window, every row of the dispatch table, the build-time limits, the
+ *  web engine's seal, and each mounted frame's event counters. Read-only. Rejects `dev-mode-off`
+ *  while developer mode is off for this device. (The Test keys fields ship with `secrets.set`.) */
+export const devKitInfo = () => invoke<DevKitInfo>("dev_kit_info");
+
+/** Read the developer's unpacked folder at `path` (an absolute path) and return the stark screen,
+ *  loading nothing: the same screen as `installUnsignedFile`'s, with `from: "folder"`, `tier: "third"`
+ *  and `unsigned.testFolder` set. Rejects `dev-mode-off` while developer mode is off for this device
+ *  (PM reads that itself, before it reads the folder). Then `installModConsented` with the typed id:
+ *  it reads the folder again and loads it only if its manifest is still the one the screen showed
+ *  (otherwise `consent-expired`). A loaded folder is read in place (never copied, never written to)
+ *  and lasts until PM restarts, the store closes, or developer mode goes off. */
+export const loadTestMod = (path: string) => invoke<ConsentScreen>("load_test_mod", { path });
+
+/** Read a loaded test folder again and replace what it serves: the Reload button. The mod's grants,
+ *  install id and storage are kept, but only for a manifest that is the same mod from the same maker
+ *  asking for nothing more than the user approved; otherwise it rejects, the old files keep running
+ *  and the reason is on `listTestMods`'s entry (load the folder again to see the new screen). */
+export const reloadTestMod = (id: string) => invoke<Reloaded>("reload_test_mod", { id });
+
+/** End a loaded folder's session now: its row and what it stored go. Its files are never touched. */
+export const unloadTestMod = (id: string) => invoke<void>("unload_test_mod", { id });
+
+/** The folders loaded now, with why the last reload failed (if it did) and whether a save reloads. */
+export const listTestMods = () => invoke<TestModStatus[]>("list_test_mods");
+
+/** The page is alive: sent every 2 s while a mod frame is mounted, and at once when the page's
+ *  visibility changes (`modWatchdog.ts`). `visible` is whether the page is on screen. About 10 s
+ *  of silence with a frame mounted and the window shown makes PM pause the mod last active and
+ *  reload the page. */
+export const modsHeartbeat = (visible: boolean) => invoke<void>("mods_heartbeat", { visible });
+
+/** Subscribe to `mods://dev-mode`: developer mode was switched for this device, from any window. */
+export const onDevMode = (handler: (e: { on: boolean }) => void): Promise<UnlistenFn> =>
+  listen<{ on: boolean }>("mods://dev-mode", (e) => handler(e.payload));
+
+/** Download a catalogue mod and return its consent screen, installing nothing. */
+export const installFromCatalogue = (modId: string) =>
+  invoke<ConsentScreen>("install_from_catalogue", { modId });
+
+/** An update waiting for approval: download it and return the consent screen with what is new
+ *  marked, then `installModConsented`. */
+export const approveUpdate = (modId: string) => invoke<ConsentScreen>("approve_update", { modId });
+
+/** Put back exactly the installed version of a parked signed catalogue mod. */
+export const repairMod = (modId: string) => invoke<Repaired>("repair_mod", { modId });
+
+/** What uninstalling would take and what would stay (the tasks, milestones and documents it made). */
+export const uninstallPreview = (modId: string) =>
+  invoke<UninstallPreview>("uninstall_preview", { modId });
+
+/** Uninstall, deleting what the mod made only with `alsoDeleteGifts`. Show the preview first: the mod's
+ *  private storage goes with it. The answer says what to prune from `localStorage` (`prune`). */
+export const uninstallMod = (modId: string, alsoDeleteGifts: boolean) =>
+  invoke<ModUninstalled>("uninstall_mod", { modId, alsoDeleteGifts });
+
+/** Pause a running mod: its data stays. */
+export const pauseMod = (modId: string) => invoke<void>("pause_mod", { modId });
+
+/** Turn the user's own pause off. Rejects with the safety list's words while it names the mod, and
+ *  never lifts the safety list's or developer mode's pause. */
+export const resumeMod = (modId: string) => invoke<ModStandingAfter>("resume_mod", { modId });
+
+/** The first-open "Turn on" of an auto-installed mod (D17): the user's answers become grants, the mod
+ *  starts, and this counts as accepting the Mods disclaimer. */
+export const consentMod = (modId: string, decisions: Record<string, boolean>) =>
+  invoke<ModStandingAfter>("consent_mod", { modId, decisions });
+
+/** One permission toggled on a mod's row (or a first-use prompt's answer). Rejects with
+ *  `grant-refused` where unsigned mods may not hold both reads and the internet. */
+export const modPermissionDecide = (modId: string, permission: string, granted: boolean) =>
+  invoke<void>("mod_permission_decide", { modId, permission, granted });
+
+/** Whether this device has accepted the Mods disclaimer in this vault (per device AND per vault). */
+export const modsDisclaimerState = () => invoke<ModsDisclaimerState>("mods_disclaimer_state");
+
+/** "I understand". */
+export const acceptModsDisclaimer = () => invoke<void>("accept_mods_disclaimer");
+
+/** When the safety list was last checked ("not checked since …" after 30 days), whether this
+ *  machine's record of it is damaged, and the strips to draw. */
+export const modsSafetyStatus = () => invoke<ModsSafetyStatus>("mods_safety_status");
+
+/** Dismiss the "X is back on" strip. */
+export const dismissModResumed = (modId: string) => invoke<void>("dismiss_mod_resumed", { modId });
+
+/** Start the safety list over from a damaged record: it forgets the highest list seen and the keys
+ *  seen revoked until a list names them again, so ask first. Rejects `not-allowed` unless the record
+ *  really is unusable. Then fetches. */
+export const resetSafetyRecord = () => invoke<ModsResetResult>("reset_safety_record");
+
+/** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
+ *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows
+ *  again; a listener that missed one reads them on mount anyway. */
+export const onModsChanged = (handler: (e: ModsChanged) => void): Promise<UnlistenFn> =>
+  listen<ModsChanged>("mods://changed", (e) => handler(e.payload));
+
+/** Subscribe to `mods://notice`: the safety list paused, resumed or removed a mod, an update waits,
+ *  or the record is damaged. It may fire before the page listens, so draw the strips from
+ *  `modsSafetyStatus` too. */
+export const onModsNotice = (handler: (n: ModNotice) => void): Promise<UnlistenFn> =>
+  listen<ModNotice>("mods://notice", (e) => handler(e.payload));

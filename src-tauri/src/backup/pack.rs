@@ -42,6 +42,12 @@ pub struct PackInputs {
     pub db_key_hex: Secret,
     pub app_version: String,
     pub created_at: String,
+    /// This machine's cached mod safety list, for the manifest (`manifest::BackupManifest`).
+    pub mods_index: Option<manifest::ModsIndex>,
+    /// The mods the snapshot holds, read from the snapshot itself by [`super::strip`] so the list
+    /// and the rows can't disagree. `None` only for a pack that took no snapshot of a mods-aware
+    /// store (the tests that build a bare vault).
+    pub mods: Option<Vec<manifest::BackupMod>>,
 }
 
 /// One archive member: synthesized bytes (the manifest) or a file on disk.
@@ -174,15 +180,27 @@ pub(super) fn pack_as(
 
         let aead_w = zstd_w
             .finish()
-            .map_err(|e| Error::Other(format!("compression failed: {e}")))?;
+            .map_err(|e| finish_failed(e, "compression failed"))?;
         let file = aead_w.finish()?;
         file.sync_all()?;
     }
 
     tmp.persist(dest)
-        .map_err(|e| Error::Other(format!("could not save the backup file: {e}")))?;
+        .map_err(|e| finish_failed(e.error, "could not save the backup file"))?;
     report(BackupPhase::Pack, 1.0);
     Ok(())
+}
+
+/// A failure of the pack's last writes (the final zstd frame, sealed into the last chunk, and the
+/// rename into place), worded as `what` ... unless the disk was full. A full disk stays the I/O
+/// error so `strip::say_if_disk_full` can say it as one: the last chunk is as likely to hit it as
+/// any before it, and a string made of the error would hide its kind.
+fn finish_failed(e: std::io::Error, what: &str) -> Error {
+    if e.kind() == std::io::ErrorKind::StorageFull {
+        Error::Io(e)
+    } else {
+        Error::Other(format!("{what}: {e}"))
+    }
 }
 
 /// The ordered allow-list of archive members. The manifest goes first so a restore can
@@ -200,6 +218,8 @@ fn enumerate_sources(inputs: &PackInputs) -> Result<Vec<Source>> {
         source_markdown_encryption: md_str(inputs.meta.markdown.encryption).to_string(),
         app_version: inputs.app_version.clone(),
         created_at: inputs.created_at.clone(),
+        mods_index: inputs.mods_index.clone(),
+        mods: inputs.mods.clone(),
     };
     let mbytes = serde_json::to_vec(&m)
         .map_err(|e| Error::Other(format!("could not encode the backup manifest: {e}")))?;
@@ -253,6 +273,33 @@ fn enumerate_sources(inputs: &PackInputs) -> Result<Vec<Source>> {
         }
     }
     Ok(out)
+}
+
+/// The bytes an archive holds besides the database snapshot: the vault metadata, the sidecars and
+/// the whole Markdown tree, uncompressed (an upper bound on what they add to the archive). The
+/// free-space check ahead of a scheduled or cloud backup (`strip::check_space`), which packs into
+/// the same folder as the copy, counts them. It uses the same pieces the pack does
+/// ([`enumerate_sources`]); what it can't read counts as 0, since the pack itself refuses on it
+/// with its own error and a size that can't be measured is not a reason to refuse. Blocking: a
+/// metadata walk of the vault, off the runtime and off the DB lock.
+pub(crate) fn beside_db_bytes(vault_root: &Path, markdown_dir: &Path) -> u64 {
+    let mut out = Vec::new();
+    for name in [
+        vault::META_FILENAME,
+        crate::entities::RULES_FILENAME,
+        crate::index_only::MANIFEST_FILENAME,
+    ] {
+        let _ = push_optional(&mut out, &vault_root.join(name), name);
+    }
+    if std::fs::metadata(markdown_dir).is_ok_and(|m| m.is_dir()) {
+        let _ = collect_tree(&mut out, markdown_dir, "vault");
+    }
+    out.iter()
+        .map(|s| match s {
+            Source::File { len, .. } => *len,
+            Source::Bytes { .. } => 0,
+        })
+        .fold(0, u64::saturating_add)
 }
 
 fn push_required(out: &mut Vec<Source>, disk: &Path, name: &str) -> Result<()> {
@@ -331,5 +378,165 @@ fn key_mode_flag(mode: KeyMode) -> u16 {
     match mode {
         KeyMode::Device => 0,
         KeyMode::Passphrase => format::FLAG_SOURCE_KEY_MODE_PASSPHRASE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_disk_at_the_last_write_stays_a_full_disk_for_the_pack_s_caller() {
+        use std::io::{Error as IoError, ErrorKind};
+        let full = finish_failed(IoError::from(ErrorKind::StorageFull), "compression failed");
+        assert!(
+            matches!(&full, Error::Io(e) if e.kind() == ErrorKind::StorageFull),
+            "{full:?}"
+        );
+        // The wording the user sees is the full-disk one, whichever of the two writes hit it.
+        for what in ["compression failed", "could not save the backup file"] {
+            let said = crate::backup::strip::say_if_disk_full(
+                finish_failed(IoError::from(ErrorKind::StorageFull), what),
+                crate::backup::strip::Job::Backup,
+            );
+            assert!(said.to_string().contains("ran out of space"), "{said}");
+        }
+        // Any other failure keeps its own wording.
+        let other = finish_failed(
+            IoError::from(ErrorKind::PermissionDenied),
+            "compression failed",
+        );
+        assert!(
+            matches!(&other, Error::Other(m) if m.starts_with("compression failed: ")),
+            "{other:?}"
+        );
+    }
+
+    #[test]
+    fn the_manifest_carries_the_mod_list_the_snapshot_was_stripped_to() {
+        // `enumerate_sources` puts the manifest first; its `mods` is what the caller read out of the
+        // stripped snapshot (`strip::snapshot_for_leaving`), written for people and tools.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, b"db").unwrap();
+        let listed = vec![manifest::BackupMod {
+            id: "atlas.map".into(),
+            version: "1.0.0".into(),
+            tier: "first".into(),
+            source: "catalogue".into(),
+            signed: true,
+        }];
+        let manifest_of = |mods: Option<Vec<manifest::BackupMod>>| {
+            let inputs = PackInputs {
+                vault_root: dir.path().to_path_buf(),
+                db_snapshot: snap.clone(),
+                markdown_dir: dir.path().join("vault"),
+                meta: meta.clone(),
+                db_key_hex: Secret::from("00".repeat(32)),
+                app_version: "test".into(),
+                created_at: "2026-11-11T00:00:00Z".into(),
+                mods_index: None,
+                mods,
+            };
+            let sources = enumerate_sources(&inputs).unwrap();
+            let Source::Bytes { path, data } = &sources[0] else {
+                panic!("the manifest comes first");
+            };
+            assert_eq!(path, manifest::MANIFEST_ENTRY);
+            serde_json::from_slice::<manifest::BackupManifest>(data).unwrap()
+        };
+        assert_eq!(manifest_of(Some(listed.clone())).mods, Some(listed));
+        // "No mods installed" is written as an empty list, not left out.
+        assert_eq!(manifest_of(Some(Vec::new())).mods, Some(Vec::new()));
+        assert_eq!(manifest_of(None).mods, None);
+    }
+
+    #[test]
+    fn what_the_archive_holds_besides_the_database_is_counted_from_the_pack_s_own_sources() {
+        // The free-space check counts these bytes for a pack into the copy's own folder; they must
+        // be what `enumerate_sources` really packs besides the snapshot, the Markdown tree (nested
+        // folders too) and the sidecars included.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, vec![0u8; 5_000]).unwrap();
+        let md = dir.path().join("vault");
+        std::fs::create_dir_all(md.join("a/b")).unwrap();
+        std::fs::write(md.join("one.md"), vec![b'x'; 300]).unwrap();
+        std::fs::write(md.join("a/b/two.md"), vec![b'x'; 70]).unwrap();
+        std::fs::write(
+            dir.path().join(crate::entities::RULES_FILENAME),
+            vec![b'x'; 11],
+        )
+        .unwrap();
+        let inputs = PackInputs {
+            vault_root: dir.path().to_path_buf(),
+            db_snapshot: snap,
+            markdown_dir: md.clone(),
+            meta,
+            db_key_hex: Secret::from("00".repeat(32)),
+            app_version: "test".into(),
+            created_at: "2026-11-11T00:00:00Z".into(),
+            mods_index: None,
+            mods: None,
+        };
+        let packed_besides_the_db: u64 = enumerate_sources(&inputs)
+            .unwrap()
+            .iter()
+            .filter_map(|s| match s {
+                Source::File { path, len, .. } if path != vault::DB_FILENAME => Some(*len),
+                _ => None,
+            })
+            .sum();
+        let counted = beside_db_bytes(dir.path(), &md);
+        assert!(
+            counted >= 300 + 70 + 11,
+            "the tree and a sidecar: {counted}"
+        );
+        assert_eq!(counted, packed_besides_the_db);
+        // No Markdown folder yet loses exactly the tree; no vault folder at all, nothing, no error.
+        assert_eq!(
+            beside_db_bytes(dir.path(), &dir.path().join("nope")),
+            counted - 370
+        );
+        assert_eq!(
+            beside_db_bytes(&dir.path().join("gone"), &dir.path().join("nope")),
+            0
+        );
+    }
+
+    #[test]
+    fn a_pack_that_fails_leaves_the_file_already_at_the_destination_and_no_temporary() {
+        // The destination is where the user chose, and may hold their last backup: it is replaced
+        // only by the rename of a finished archive. A cancelled pack fails mid-stream, after the
+        // temporary beside it was made and written to.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = vault::ensure_device_meta(dir.path()).unwrap();
+        let snap = dir.path().join("snap.sqlite");
+        std::fs::write(&snap, vec![7u8; 50_000]).unwrap();
+        let inputs = PackInputs {
+            vault_root: dir.path().to_path_buf(),
+            db_snapshot: snap,
+            markdown_dir: dir.path().join("vault"),
+            meta,
+            db_key_hex: Secret::from("00".repeat(32)),
+            app_version: "test".into(),
+            created_at: "2026-11-12T00:00:00Z".into(),
+            mods_index: None,
+            mods: None,
+        };
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let dest = out.join("mine.pmbackup");
+        std::fs::write(&dest, b"my last backup").unwrap();
+        let cancel = AtomicBool::new(true);
+        pack(inputs, &dest, "a passphrase", |_, _| {}, &cancel).unwrap_err();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"my last backup");
+        let left: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("mine.pmbackup")]);
     }
 }

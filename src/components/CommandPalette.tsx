@@ -232,6 +232,8 @@ export function CommandPalette({
         id: `goto:${dest.id}`,
         kind: "goto" as const,
         label: dest.label,
+        // A mod's tab says so, as in the sidebar: its name is the mod's own.
+        sublabel: dest.source === "mod" ? "Mod" : undefined,
         search: `${dest.label} go to`.toLowerCase(),
         activate: () => {
           cbRef.current.onNavigate(dest.id);

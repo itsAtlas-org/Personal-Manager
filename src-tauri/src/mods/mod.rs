@@ -8,8 +8,17 @@
 //!   response headers; both are free of PM's crate so the sealed-frame regression app can include
 //!   them.
 //! - [`ids`]: the mod id grammar and the trust tiers. [`package`]: the `.pmmod` verifier.
+//! - [`keys`]: the embedded Atlas keys and the key-id gate. [`index`]: the signed index's format,
+//!   verification and acceptance rules; [`index_state`] the per-machine record of it (§1.10, D15).
+//! - [`fetch`]: the pinned, size- and time-capped download of the index and of packages, and the
+//!   6-hourly schedule. [`safety`]: what the accepted index decides (the install, serve and
+//!   unsigned checks, and the plan for applying the blacklist to an installed row). [`refresh`]:
+//!   the task that runs them, and what runs at launch and after a restore. [`updater`]: the
+//!   background update and the pinned-version repair download.
 //! - [`runtime`]: the installed-mod registry, the one-time entry URLs and the frame sessions, and
 //!   the serve decision. This file's three commands are its IPC surface.
+//! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
+//!   the handlers; `mod_call` hands it each call.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
@@ -40,15 +49,29 @@
 //! gives each the app's local data folder), so every window is built with PM's environment, or,
 //! when the main window couldn't be, every window without it.
 
+pub mod api;
+pub mod devmode;
 pub mod disk;
 pub mod engine;
+pub mod fetch;
+pub mod folder;
+pub mod folder_watch;
 pub mod headers;
 pub mod ids;
+pub mod index;
+pub mod index_state;
+pub mod keys;
 pub mod ledger;
+pub mod outbox;
 pub mod package;
 pub mod policy;
+pub mod refresh;
 pub mod runtime;
+pub mod safety;
 pub mod store;
+pub mod tab;
+pub mod updater;
+pub mod watchdog;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -204,20 +227,18 @@ impl EngineState {
     }
 
     /// Whether every switch the engine depends on took. Until the main window has been built and
-    /// sealed, it hasn't: unsealed is the starting state.
-    #[allow(dead_code)] // read by the grant check (spec §1.4 item 3, a later slice); the tests read it today
+    /// sealed, it hasn't: unsealed is the starting state. The grant check reads it (spec §1.4 item
+    /// 3): no read-class grant for an unsigned mod while it is false (`api::permissions`).
     pub fn engine_sealed(&self) -> bool {
         self.verdict().sealed
     }
 
     /// Why the engine isn't sealed; empty when it is.
-    #[allow(dead_code)] // read by the Developer tab (Mods PR-1, part 6); the tests read it today
     pub fn unsealed_reasons(&self) -> Vec<String> {
         self.verdict().reasons
     }
 
     /// Connections that reached the sinkhole since launch.
-    #[allow(dead_code)] // read by the Developer tab (Mods PR-1, part 6); the tests read it today
     pub fn sinkhole_attempts(&self) -> u64 {
         self.sinkhole.as_ref().map_or(0, Sinkhole::attempts)
     }
@@ -568,18 +589,58 @@ fn main_only_label(label: &str) -> Result<()> {
     }
 }
 
-/// Mint a one-time entry URL for a mod's frame and the session its bridge calls under.
+/// Mint a one-time entry URL for a mod's frame and the session its bridge calls under, bound to the
+/// store open now: its calls reach that store or none (`runtime`, "A call is current"). `events` is
+/// the channel the frame's events come back on: Rust keeps it with the session (`outbox`), filters
+/// every event by the mod's grants before sending it (`api::events`), and drops it when the session
+/// ends.
 #[tauri::command]
 pub fn mod_frame_open(
     webview: Webview,
     runtime: State<'_, ModRuntime>,
+    state: State<'_, crate::AppState>,
     mod_id: String,
+    events: tauri::ipc::Channel<outbox::EventMessage>,
 ) -> Result<FrameOpened> {
     main_only(&webview)?;
     let id = ModId::parse(&mod_id).map_err(|e| Error::Other(e.to_string()))?;
     runtime
-        .open_frame(&id)
+        .open_frame_in(&id, state.store_epoch(), outbox::Outbox::new(events))
         .map_err(|e| Error::Other(e.to_string()))
+}
+
+/// The frame of `session` has taken events up to `seq` (its port's `{ ack }`, relayed by PM's page):
+/// the window of events Rust may have outstanding for it slides (`outbox`). An unknown session or a
+/// number past what was sent counts for nothing.
+#[tauri::command]
+pub fn mod_events_ack(
+    webview: Webview,
+    runtime: State<'_, ModRuntime>,
+    session: String,
+    seq: u64,
+) -> Result<()> {
+    main_only(&webview)?;
+    runtime.ack(&session, seq);
+    Ok(())
+}
+
+/// PM's theme changed, as the page of `session`'s frame sees it: `theme` is the snapshot `theme.get`
+/// answers with. Rust tells that frame (`theme.changed`) if its mod holds `storage` and runs, and
+/// answers nothing either way, so the page learns nothing about the mod's grants. Async and off the
+/// runtime: the grant check reads the store.
+#[tauri::command]
+pub async fn mod_theme_changed(
+    webview: Webview,
+    session: String,
+    theme: serde_json::Value,
+) -> Result<()> {
+    main_only(&webview)?;
+    let app = webview.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        api::events::theme_changed(&app, &session, &theme);
+    })
+    .await
+    .map_err(|e| Error::Other(e.to_string()))
 }
 
 /// End a frame's session (its frame unmounted, or navigated). Ending an ended one is fine.
@@ -594,20 +655,28 @@ pub fn mod_frame_close(
     Ok(())
 }
 
-/// One call from a mod's frame, relayed by PM's page. The mod is the session's, never anything the
-/// frame said.
+/// One call from a mod's frame, relayed by PM's page, answered by the dispatcher (`api`). The mod is
+/// the session's, never anything the frame said. `args` is the JSON text the page measured, so the
+/// cap is checked before it is parsed. Async, so no call runs on the main thread; every refusal
+/// comes back as an `api::Reply::Error` with its `MOD-####` code, the main-window check included.
+///
+/// The answer is a raw IPC body: JSON (the page reads it as an object) for every reply but the
+/// vectors, whose bytes go out as they are (the page reads an `ArrayBuffer`, `modBridge.ts`'s
+/// `readReply`).
 #[tauri::command]
-pub fn mod_call(
+pub async fn mod_call(
     webview: Webview,
-    runtime: State<'_, ModRuntime>,
     session: String,
     method: String,
-    args: serde_json::Value,
-) -> Result<serde_json::Value> {
-    main_only(&webview)?;
-    runtime
-        .call(&session, &method, &args)
-        .map_err(|e| Error::Other(e.to_string()))
+    args: String,
+) -> tauri::ipc::InvokeResponseBody {
+    let caller = api::Caller::Frame {
+        window: webview.label().to_owned(),
+        session,
+    };
+    api::dispatch(webview.app_handle(), caller, &method, &args)
+        .await
+        .into_body()
 }
 
 /// Apply the engine switches to a freshly built window and settle what took

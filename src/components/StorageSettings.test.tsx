@@ -18,11 +18,17 @@ import type { StorageComponent, StorageReport } from "../lib/types";
 const listStorageComponents = vi.fn();
 const removeStorageComponent = vi.fn();
 const installOptionalOcr = vi.fn();
+const getLocalAiSwitch = vi.fn();
 vi.mock("../lib/ipc", () => ({
   listStorageComponents: () => listStorageComponents(),
   removeStorageComponent: (id: string) => removeStorageComponent(id),
   installOptionalOcr: () => installOptionalOcr(),
   onOcrInstall: () => Promise.resolve(() => {}),
+  // The Local AI pointer and the Mods section (StorageMods.test.tsx covers them) read these. The
+  // switch is unknown unless a test says otherwise.
+  getLocalAiSwitch: () => getLocalAiSwitch(),
+  uninstallPreview: () => Promise.reject(new Error("not here")),
+  uninstallMod: () => Promise.reject(new Error("not here")),
 }));
 
 // The primitives reach for `useTheme`; the real provider pulls in IPC.
@@ -50,6 +56,7 @@ const row = (over: Partial<StorageComponent>): StorageComponent => ({
 const report = (...components: StorageComponent[]): StorageReport => ({
   total_bytes: components.reduce((n, c) => n + c.size_bytes, 0),
   components,
+  mods: [],
 });
 
 const tsne = row({
@@ -75,6 +82,8 @@ const rowBox = (container: HTMLElement, id: string) =>
 beforeEach(() => {
   for (const f of [listStorageComponents, removeStorageComponent, installOptionalOcr])
     f.mockReset();
+  getLocalAiSwitch.mockReset();
+  getLocalAiSwitch.mockRejectedValue(new Error("unknown"));
 });
 afterEach(cleanup);
 
@@ -194,5 +203,28 @@ describe("the removal cascade", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn on/off in Memory map →" }));
     expect(onNavigate).toHaveBeenCalledWith("general");
+  });
+
+  it("draws every pill's edge in --ink4, the one that reaches 3:1; --border2 is about 1.6:1", async () => {
+    // A pointer is a control, and its outline is how it reads as one at default Contrast.
+    listStorageComponents.mockResolvedValue(report(tsne, sklearnHeld));
+    getLocalAiSwitch.mockResolvedValue({
+      on: false,
+      chat_needs_model: false,
+      background_needs_model: false,
+      server_saved: false,
+    });
+    render(<StorageSettings onNavigate={() => {}} />);
+    await screen.findByText("scikit-learn");
+    await screen.findByRole("button", { name: "AI & Models →" });
+    const pills = [
+      screen.getByRole("button", { name: "Remove the enhanced layout first →" }),
+      screen.getByRole("button", { name: "Turn on/off in Memory map →" }),
+      screen.getByRole("button", { name: "AI & Models →" }),
+    ];
+    for (const pill of pills) {
+      expect(pill.className, pill.textContent ?? "").toContain("border-ink4");
+      expect(pill.className).not.toContain("border-border2");
+    }
   });
 });

@@ -295,7 +295,10 @@ is limited and enumerable: the model API calls that power chat — to your cloud
 (OpenRouter) by default, or, if you configure one, to a local model server (a server on this
 machine sends nothing off it; a remote or LAN server receives the chats you route to it, and PM
 refuses to send a token and chats in the clear to a public address); a check for updates on launch
-(and the download if you accept one); a one-time first-run download of PM's on-device models
+(and the download if you accept one); a fetch of PM's signed mod safety list — two small files from
+the project's public `PM-Mods` GitHub release, at launch and every six hours, which send nothing but
+a generic `PM-mods/1` user agent and which PM accepts only if they carry the project's signature
+(and, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); a one-time first-run download of PM's on-device models
 and Python dependencies (your local model runner, if you use one, fetches model weights itself —
 PM does not); and — only if you turn them on — a calendar fetch (plus the event changes you make,
 if you turn on editing for a Google account), a read-only sync of the cloud accounts you connect

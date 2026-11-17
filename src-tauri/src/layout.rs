@@ -18,13 +18,17 @@
 //!   - The reducer is **PCA by default** (numpy-only, in the sidecar) and **t-SNE when the optional
 //!     component is installed** ([`install_optional_tsne`]). The reducer never holds the DB lock.
 
-use std::collections::{BTreeMap, HashMap};
-
-use rusqlite::{params, types::ValueRef, Connection};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::doc_vectors::{
+    capped_document_vectors, doc_set_hash, doc_signatures, DEFAULT_NODE_CAP, NODE_CAP_MAX,
+    NODE_CAP_MIN,
+};
+// The uncapped read, for the tests below: it is the reference the capped read is held to.
+#[cfg(test)]
+use crate::doc_vectors::document_vectors;
 use crate::error::{Error, Result};
 use crate::{db, AppState};
 
@@ -32,10 +36,8 @@ use crate::{db, AppState};
 /// init, scaling) without touching user data.
 const LAYOUT_VERSION: u32 = 1;
 
-/// Default cap on individually-projected nodes; user-adjustable within [[NODE_CAP_MIN], [NODE_CAP_MAX]].
-pub const DEFAULT_NODE_CAP: usize = 1000;
-const NODE_CAP_MIN: usize = 200;
-const NODE_CAP_MAX: usize = 5000;
+// The default cap on individually-projected nodes, and the range the user may adjust it within
+// (`DEFAULT_NODE_CAP`, `NODE_CAP_MIN`, `NODE_CAP_MAX`), are in `doc_vectors.rs` with the cap itself.
 
 /// `settings` key holding the layout fingerprint + the method actually used (see [`LayoutMeta`]).
 const META_KEY: &str = "doc_layout_meta";
@@ -142,160 +144,8 @@ pub struct TsneStatus {
     installed: bool,
 }
 
-// ---- vector assembly ------------------------------------------------------
-
-/// One document's averaged embedding, plus the inputs that rank it when the node cap bites.
-struct DocVec {
-    doc_id: i64,
-    vec: Vec<f32>,
-    leaf_count: usize,
-    importance_rank: u8,
-}
-
-fn rank_importance(s: Option<&str>) -> u8 {
-    match s {
-        Some("high") => 3,
-        Some("medium") => 2,
-        Some("low") => 1,
-        _ => 0,
-    }
-}
-
-/// Decode one `chunk_vec` row into `dim` `f32`s. sqlite-vec returns the vector as a compact `f32`
-/// blob; we also accept the JSON-text form it's written in, so this is robust either way.
-fn decode_vector(value: ValueRef<'_>, dim: usize) -> Result<Vec<f32>> {
-    match value {
-        ValueRef::Blob(b) => {
-            if b.len() != dim * 4 {
-                return Err(Error::Other(format!(
-                    "vector blob is {} bytes, expected {} for a {dim}-d vector",
-                    b.len(),
-                    dim * 4
-                )));
-            }
-            Ok(b.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| f32::from_le_bytes(*c))
-                .collect())
-        }
-        ValueRef::Text(t) => serde_json::from_slice::<Vec<f32>>(t)
-            .map_err(|e| Error::Other(format!("decode vector json: {e}"))),
-        _ => Err(Error::Other(
-            "unexpected vector value type in chunk_vec".into(),
-        )),
-    }
-}
-
-fn l2_normalize(v: &mut [f32]) {
-    let norm = v
-        .iter()
-        .map(|x| (*x as f64) * (*x as f64))
-        .sum::<f64>()
-        .sqrt();
-    if norm > 1e-12 {
-        for x in v.iter_mut() {
-            *x = (*x as f64 / norm) as f32;
-        }
-    }
-}
-
-/// Per-document importance rank (`high`>`medium`>`low`>none), for the node-cap selection.
-fn importance_ranks(conn: &Connection) -> Result<HashMap<i64, u8>> {
-    let mut stmt = conn.prepare("SELECT id, importance FROM documents")?;
-    let rows = stmt.query_map([], |r| {
-        let id: i64 = r.get(0)?;
-        let imp: Option<String> = r.get(1)?;
-        Ok((id, rank_importance(imp.as_deref())))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
-}
-
-/// Cheap signature of the document set (ids + leaf-chunk counts + a leaf-identity marker), without
-/// reading any vector blobs — so the freshness check on a warm cache stays fast. Archived documents
-/// (any source, chat included) are excluded here exactly as in [`document_vectors`], so archiving/
-/// un-archiving shifts the signature and invalidates the cache — the Map recomputes without the
-/// archived node.
-///
-/// The third column, `MAX(c.id)`, is the B4-1 fix: leaf `count` alone missed a *content* edit that
-/// re-chunked a document to the same number of leaves (common for small edits — same 256-token
-/// packing), so the Map kept placing that document by its old meaning forever. Re-ingest DELETEs then
-/// re-INSERTs a document's chunk rows, and `chunks.id` is `AUTOINCREMENT` (strictly monotonic, never
-/// reused), so the max leaf rowid always rises on re-ingest — flipping the hash even at constant leaf
-/// count. `MAX` (not `SUM`) also can't overflow the `i64` we read it back as.
-fn doc_signatures(conn: &Connection) -> Result<Vec<(i64, i64, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.document_id, count(*), MAX(c.id) \
-         FROM chunk_vec cv JOIN chunks c ON cv.rowid = c.id \
-         JOIN documents d ON d.id = c.document_id \
-         WHERE c.kind = 'leaf' AND d.importance IS NOT 'archive' \
-         GROUP BY c.document_id ORDER BY c.document_id",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn doc_set_hash(sigs: &[(i64, i64, i64)]) -> String {
-    let mut h = Sha256::new();
-    for (id, count, max_leaf_id) in sigs {
-        h.update(id.to_le_bytes());
-        h.update(count.to_le_bytes());
-        h.update(max_leaf_id.to_le_bytes());
-    }
-    hex::encode(h.finalize())
-}
-
-/// Average each document's leaf-chunk embeddings into one L2-normalised vector per document. Reads
-/// the dimension from the registry (no magic number); only leaves are embedded (`chunk_vec.rowid ==
-/// chunks.id`). This is the embedding-averaging the semantic map is built on — the expensive read, so
-/// it runs only on a real recompute, never for the freshness check.
-fn document_vectors(conn: &Connection) -> Result<Vec<DocVec>> {
-    let dim = db::vec0_dim(conn)?;
-    let importance = importance_ranks(conn)?;
-
-    // Archive-as-outcome (card F): an archived document — of ANY source, chat included — is hidden from the
-    // Map (`d.importance IS NOT 'archive'` also admits the NULL/untriaged case). It stays keyword-findable
-    // via FTS; only the semantic graph excludes it.
-    let mut acc: BTreeMap<i64, (Vec<f64>, usize)> = BTreeMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT c.document_id, cv.embedding \
-         FROM chunk_vec cv JOIN chunks c ON cv.rowid = c.id \
-         JOIN documents d ON d.id = c.document_id \
-         WHERE c.kind = 'leaf' AND d.importance IS NOT 'archive'",
-    )?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let doc_id: i64 = row.get(0)?;
-        let v = decode_vector(row.get_ref(1)?, dim)?;
-        let entry = acc.entry(doc_id).or_insert_with(|| (vec![0.0f64; dim], 0));
-        for (s, x) in entry.0.iter_mut().zip(v.iter()) {
-            *s += *x as f64;
-        }
-        entry.1 += 1;
-    }
-
-    let mut out = Vec::with_capacity(acc.len());
-    for (doc_id, (sum, n)) in acc {
-        if n == 0 {
-            continue;
-        }
-        let mut mean: Vec<f32> = sum.iter().map(|s| (*s / n as f64) as f32).collect();
-        l2_normalize(&mut mean);
-        out.push(DocVec {
-            doc_id,
-            vec: mean,
-            leaf_count: n,
-            importance_rank: *importance.get(&doc_id).unwrap_or(&0),
-        });
-    }
-    Ok(out)
-}
+// The vector assembly (decode, average, normalise, the node cap) and the freshness signature live in
+// `doc_vectors.rs`, shared with the mod API's `embeddings.*` calls.
 
 /// The `map` webview-writable pref blob (`{ nodeCap?, tsneEnabled? }`), or `None` if unset/malformed.
 fn read_map_pref(conn: &Connection) -> Option<serde_json::Value> {
@@ -416,18 +266,10 @@ async fn run_precompute(app: &AppHandle, force_recompute: bool, ignore_sync: boo
     let (ids, vectors) = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        let mut docs = document_vectors(&conn)?;
-        if docs.len() > fingerprint.node_cap {
-            // Keep the most important + most substantial documents; the rest fall to their project
-            // centroid on the frontend (still shown, grouped) without paying the reducer for the tail.
-            docs.sort_by(|a, b| {
-                b.importance_rank
-                    .cmp(&a.importance_rank)
-                    .then(b.leaf_count.cmp(&a.leaf_count))
-                    .then(a.doc_id.cmp(&b.doc_id))
-            });
-            docs.truncate(fingerprint.node_cap);
-        }
+        // The node cap keeps the most important + most substantial documents (the rest fall to their
+        // project centroid on the frontend, still shown, grouped, without paying the reducer for the
+        // tail); only the kept documents' vectors are read.
+        let docs = capped_document_vectors(&conn, None, fingerprint.node_cap)?;
         let ids: Vec<i64> = docs.iter().map(|d| d.doc_id).collect();
         let vectors: Vec<Vec<f32>> = docs.into_iter().map(|d| d.vec).collect();
         (ids, vectors)

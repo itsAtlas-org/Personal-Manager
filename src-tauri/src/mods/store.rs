@@ -5,16 +5,16 @@
 //! Every writer takes its strings from here, and a pin test in `db/migrations.rs` reads each set
 //! back out of v60's CHECKs, so the two can't drift. `mods.tier` is owned by [`super::ids::Tier`].
 //!
-//! The ledger (`ledger.rs`: install, update, uninstall, the startup load) and the dispatcher (slice
-//! 4) are the writers. Until the Mods tab calls install (slice 6) and the dispatcher lands, some of
-//! these have only test readers.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The ledger (`ledger.rs`: install, update, uninstall, the startup load, and the folder test-mod
+//! loader in `ledger/folder.rs`), the Mods tab's commands and the dispatcher are the writers.
 
 use super::package::DataClass;
 
 /// `mods.state`. `installing` until the files are written and verified; `parked` makes no calls
 /// (a closed room, missing files, an API major outside the window); `paused` is the user's, the
-/// blacklist's or dev mode's (spec §1.3, §1.10, §1.15).
+/// blacklist's or dev mode's (spec §1.3, §1.10, §1.15). The whole set is read by the pin tests
+/// (here and in `db/migrations.rs`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const STATES: [&str; 4] = [STATE_ACTIVE, STATE_PAUSED, STATE_PARKED, STATE_INSTALLING];
 pub const STATE_ACTIVE: &str = "active";
 pub const STATE_PAUSED: &str = "paused";
@@ -42,22 +42,81 @@ pub fn is_ledger_reason(reason: &str) -> bool {
     LEDGER_REASONS.contains(&reason)
 }
 
+/// `mods.state_reason` of a mod the user paused from the Mods tab. Only the user's own resume lifts
+/// it: the blacklist leaves such a row alone ([`super::safety::plan_row`]) and the ledger keeps it
+/// through an update ([`super::policy::state_after_install`]).
+pub const REASON_USER: &str = "user";
+/// `mods.state_reason` of a mod the frozen-page watchdog paused (`mods::watchdog`): PM's page stopped
+/// answering while this mod's frame was the last one active. Like [`REASON_USER`] it is lifted only
+/// by the user's own resume (the safety list and the ledger's loads leave it alone), and never by a
+/// restart or by dev mode: a mod that froze the page once must be turned back on by someone who
+/// knows.
+pub const REASON_FROZEN: &str = "frozen";
+/// `mods.state_reason` of an unsigned mod paused because developer mode is off (spec §1.15), until
+/// it is on again. Written by the ledger's load (`policy::dev_mode_state`), which pauses an active
+/// unsigned row while developer mode is off for this device and resumes exactly these rows when it
+/// is on; the Mods tab only words it.
+pub const REASON_DEV_MODE: &str = "dev-mode";
+
+/// `mods.state_reason` of a mod the signed index paused (Mods spec §1.10): stopped, its data kept.
+/// The index's own words are read from the cached index, not stored here, so a corrected reason
+/// reaches the strip.
+pub const REASON_BLACKLIST: &str = "blacklist";
+/// `mods.state_reason` of a mod the index removed: switched off, its grants revoked, its files and
+/// cache-class rows deleted. The row stays, in `paused`, until the user answers the uninstall
+/// dialog about what it made and the content it stored (I-16, I-31), so this is the typed
+/// "pending removal" state slice 6 reads. No install or update lands on it, and the startup load
+/// never looks for its files.
+pub const REASON_BLACKLIST_REMOVED: &str = "blacklist-removed";
+
+/// `settings` key: the mods the blacklist resumed, awaiting slice 6's "X is back on, fixed in
+/// version N" strip. A JSON array of `{id, version, at}`, one per mod, newest last; the strip's
+/// dismissal removes its entry.
+pub const SETTING_RESUMED: &str = "mods_resumed";
+/// `settings` key: background updates that wait for approval (they ask for more than was
+/// granted, or need a newer PM), a JSON object keyed by mod id, each value a
+/// [`super::ledger::Waiting`]: `{version, sha256, kind, widenings, needsApi}` (camelCase; `kind` is
+/// `approval` or `newer-pm`, which decides whether the strip asks for approval or says to update
+/// PM). Slice 6's "update waiting" reads it; an approved install or a newer update clears it.
+pub const SETTING_UPDATES_WAITING: &str = "mods_updates_waiting";
+
+/// `settings` key: which devices have accepted the Mods disclaimer in this vault, a JSON object
+/// `{"v": 1, "devices": ["<device id>", ...]}` (`tab::disclaimer`). The vault-side half of "per
+/// device AND per vault": a new machine, or a vault that has never heard of this one, asks again.
+pub const SETTING_DISCLAIMER: &str = "mods_disclaimer";
+
+/// `settings` key: which devices have developer mode on in this vault, a JSON object
+/// `{"v": 1, "devices": ["<device id>", ...]}` (`mods::devmode`). Developer mode is per device AND
+/// per vault, so a restore onto another machine or a joined shared vault never inherits it, and
+/// switching it never reaches another machine using the same vault. Not in the webview's pref
+/// allow-list: only Rust reads or writes it, and unsigned installs trust nothing else.
+pub const SETTING_DEV_DEVICES: &str = "mods_dev_devices";
+// The pre-per-device boolean row (`dev_mode`) is never read; `mods::devmode` alone names it, to
+// write it off in the restore reset (a private constant there).
+
 /// `mods.installed_from`: the signed catalogue, a `.pmmod` file (the Mods tab's "Install from
 /// file"), or a developer's unpacked test folder, which has no package sha256 and is left out of
-/// backups (§1.15).
+/// backups (§1.15). The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const INSTALLED_FROM: [&str; 3] = [FROM_CATALOGUE, FROM_FILE, FROM_FOLDER];
 pub const FROM_CATALOGUE: &str = "catalogue";
 pub const FROM_FILE: &str = "file";
+/// Written by the folder test-mod loader (`ledger/folder.rs`): a session-only row whose files are
+/// the developer's own folder, never copied. No startup serves one, every writer open deletes any a
+/// crash left, and a backup strips them (spec §1.15; plan decision 8).
 pub const FROM_FOLDER: &str = "folder";
 
 /// `mod_grants.decision`. No row means the permission hasn't been asked yet (a first-use grant).
+/// The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const DECISIONS: [&str; 2] = [GRANTED, DENIED];
 pub const GRANTED: &str = "granted";
 pub const DENIED: &str = "denied";
 
 /// `mod_kv.class`: the manifest's class for the key. Content is the user's (kept on update, asked
 /// about on uninstall, in backups by default, counted as user data); cache is rebuildable and
-/// stripped from backups (D4).
+/// stripped from backups (D4). The whole set is read by the pin tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const KV_CLASSES: [&str; 2] = [KV_CONTENT, KV_CACHE];
 pub const KV_CONTENT: &str = "content";
 pub const KV_CACHE: &str = "cache";

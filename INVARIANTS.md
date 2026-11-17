@@ -585,6 +585,256 @@ through `ledger::remove_deleted_vault` (the shared-vault delete and its acknowle
 that deletes one store and keeps the vault (the re-homed restore's pristine home) removes that store's
 folder through `ledger::remove_vacated_store`.
 
+### I-31 · The safety list's seen seq only rises and lives outside the DB, and a remote list never deletes user content — **Held**
+
+The signed mod index (Mods spec §1.10) is accepted only through `mods::index::verify_index` (both
+files capped, the signature checked before the JSON is parsed, the JSON parsed strictly, the trusted
+comment equal to the JSON's seq, expiry and revocations, and only the rollover key revoking a key)
+and `index::judge` (no seq below the release's `MIN_INDEX_SEQ`, below the seen one, or equal to it
+with other bytes). What a machine has accepted lives in one per-machine file,
+`data_dir/mods-index.json` (`mods/index_state.rs`), never in the vault DB: the seen seq and its
+index's sha256, the Atlas key ids seen revoked, the last good fetch and the cached index pair. Its
+seq never goes down and a revocation is never undone (`index_state::plan`), with one exception: an
+unexpired, rollover-signed index that revokes a key the machine still trusts sets its own seq,
+whatever was seen. Reading fails closed: no file is a first run, with the floor at `MIN_INDEX_SEQ`;
+a file that is there but unusable (unreadable, damaged, a format this PM doesn't read) is a fault,
+and its second copy, `mods-index.json.bak` (written after every save, part of the record), stands in
+when whole; with neither whole, no fetched index is taken at all, and nothing is downloaded, never
+"nothing seen", which would let a replayed authentic index roll the seq back. Every signature PM checks for a mod, a package's or the index's, is checked against
+`keys::KeyRing::trusted` with the recorded revocations, never against the embedded keys as they
+are. A blacklist entry only restricts: "paused" stops a mod and keeps its data; "removed" deletes
+its files and its cache-class rows, and its content-class storage and its gifts wait for the user's
+confirmation (I-16). Tests pin every acceptance rule, the revocation gate, the file's atomic write
+and its corruption handling.
+
+**Why.** A `.pmbackup` restore copies the DB verbatim, so a seq kept there would roll back with it,
+and an old but authentic index would then lift a pause or un-revoke a removal. A seq that could go
+down for any other reason is the same replay. A leaked main key that signed a huge seq would lock
+every machine out of the real index for good without the rotation exception. And a "removed" entry
+that deleted user content, by mistake or from a leaked key, would wipe data on every machine at
+once, with no way back.
+
+**Co-signers.** The fetcher records an index through `index_state::accept` with `Origin::Fetched`,
+off the async runtime and never under the DB lock. A restore commit runs the backup's copy of the
+index pair through `accept` with `Origin::Restored`, never writing a seq from a backup on its own.
+Whatever applies a blacklist entry goes through the ledger (`Ledger::apply_blacklist`, planned by
+the pure `safety::plan_row`): the registry is cut first, then the row is written, then the files go,
+so a failed write never leaves a restricted mod running, and a "removed" row stays `paused` with
+`state_reason = blacklist-removed` until the user answers the uninstall dialog. It deletes the
+mod's folder, its grants and its rebuildable rows (cache-class `mod_kv`, `mod_doc_data`,
+`mod_overlay`), and leaves content-class `mod_kv` rows, `mod_ledger` gifts and the secrets for the
+user's confirmation; nothing installs onto, loads or copies back a removed row. An expired index
+restricts but never resumes, installs or updates. The backup manifest carries the cached index
+*pair* (`mods_index`), never a bare seq, so what a restore feeds the acceptance rules is
+authenticated. A dev build's test key and index URL come only
+from `keys::dev_setting`, which needs `PM_DATA_DIR`, so a test index never reaches the real data
+folder. The release that ships the mods raises `MIN_INDEX_SEQ` to the live index's seq, never above
+it. A later index format goes out as a new asset beside `index.json`, so an older PM keeps its
+blacklist.
+
+### I-32 · A copy of the store leaves the computer only through the strip, and a restored store is reset before it serves — **Held** (one gate: `backup::strip`'s site scan)
+
+Every file that carries the database off the live store (the typed `.pmbackup`, the scheduled and
+cloud backups that share `run_backup`, and the export zip) takes its snapshot through
+`backup::strip::snapshot_for_leaving`: a `VACUUM INTO` copy, then, on the COPY's own connection,
+`secure_delete` on, the deletes of D4 (`mod_secrets`, `mcp_clients`, `mod_doc_data`, cache-class
+`mod_kv`, every `installed_from = 'folder'` mod and the rows hanging off it, and content-class
+`mod_kv` when "Also save mod data in my backups" is off), a folder mod's name taken out of what
+outlives its row (its gifts' `mod_ledger` attribution blanked to "a test mod", its
+`usage_log.mod_id` set to NULL, its overlay out of the calendar's hidden set), then a `VACUUM INTO`
+the file that leaves (no temporary database: the bundled SQLCipher keeps those in RAM) and a check
+of each step on that file, so nothing is left in a page or a free page. A snapshot whose strip
+fails is deleted and the backup fails, with an error; no archive that might hold a secret is
+written. The copies are made under `data_dir/copies-in-progress/` (`strip::WORK_DIR`), on disk,
+never the OS temp dir (tmpfs, RAM, on many Linux desktops); a run's folder goes when it ends, and
+the boot sweep and the wipe take what a crash left. A run creates only that one folder, never the
+data folder itself (a wiped PM creates nothing), and refuses before the first copy when the volume
+has less than twice the store free, plus, for a scheduled or cloud backup (which packs its archive
+into that same folder), the vault's Markdown and sidecars (`pack::beside_db_bytes`); a typed
+backup packs into the destination the user chose and an export zips there, so they count the
+store only. The check is an estimate taken once, before the copy: a pack that still hits a full
+disk says so (`strip::say_if_disk_full`, also for the last zstd frame and the rename, which keep
+the OS error's kind) rather than failing with a raw I/O error. A Proton or Drive restore downloads
+its archive into a folder of the same place (`restore_scratch_dir`), for the same reason (not out
+of RAM); that download is NOT space-checked, its size isn't known to the command, and neither is
+the unpacking nor the export zip's write, so a full disk in any of them fails the run, said as a
+full disk (`Job::Restore`, `Job::Export`; the Proton CLI's own stderr is recognised by the OS's
+wording of it). The copy is opened with the key the live store
+was opened with, read from the open session under the same DB guard as the copy, never re-resolved
+from the keychain. A new place that copies the store out calls the same function;
+`every_site_that_copies_the_store_out_goes_through_the_strip` fails on any other `vacuum_into` in
+the app outside `vault/migrate.rs` (its rollback copy never leaves the vault folder) and the test
+fixtures. The test reads every page of the stripped file decrypted (free pages included), so a
+value left in the file is found where grepping the encrypted bytes could not. A restore's commit
+(`switch_to_vault`) runs `backup::adopt_mods::reset_for_adopt`: developer mode off for EVERY device
+(`devmode::all_devices_off`: an empty per-device record, and the old row written `"false"` for an
+older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, MCP off (PR C's switch), all in one
+transaction, before the store is attached, so before the first load of its mods; that load pauses
+each active unsigned mod with the reason `dev-mode` (I-34), the same state switching developer mode
+off leaves. A reset that fails refuses the switch. Joining a shared vault (`adopt_shared_vault`)
+writes nothing: developer mode is per device (I-34), so the joiner's device has no entry in the
+record and reads as off while the vault's other devices keep theirs, and the connected apps are per
+device too; the store is the vault's, in use by its other accounts and machines. The join has no
+developer-mode step at all (an earlier design sealed an empty record at the join, to stop a
+carry-over from the old row; the carry-over is gone, so the seal is too, and a joiner's first open
+can never be handed an "on"): `a_join_names_no_developer_mode_code_and_a_restore_resets_before_it_attaches`
+reads the join's source and fails on any mention of developer mode, the old row, the record or the
+restore's reset in it, and on any caller of `all_devices_off` but the restore's. **Only
+`mods/devmode.rs` names the old row, and only to write it off** (`all_devices_off`; the constant is
+private to it): `the_old_dev_mode_row_is_named_only_by_devmode_and_only_to_write_it_off` fails the
+moment any other Rust code names it, or `devmode.rs` uses it in any way but that one `UPDATE`.
+Nothing reads it: not a carry-over, not a migration, not the Dev tab (its value shows redacted).
+The copy is refused when the open store isn't the store the caller
+read its metadata and Markdown folder from (`snapshot_for_leaving`'s `Origin`: the vault id AND the
+vault folder, because a restore keeps the vault id and its copy sits beside the original as a
+second store of one vault; vault switching doesn't take the backup run's busy flag), so an archive
+never pairs one store's metadata and notes with another's database.
+
+**Held to the limit of what the store records.** What names a mod outside the `mods` cascade is
+blanked for every folder mod AND for every unsigned mod whose row is already gone (an uninstalled
+test mod keeps its ledger rows and spend, I-29, and the ledger has no column for how a mod was
+installed, so an unsigned mod is treated as one: it is not in the catalogue, so its name, author
+and repository are unpublished work). A gift of an uninstalled unsigned file mod therefore also
+reads "a test mod" in a copy that leaves, and a restore of that copy can't match it to a
+reinstall. The same holds for spend alone: a `usage_log.mod_id` with no `mods` row and no signed
+ledger row (a mod that spent and never made a gift) is blanked too, so an uninstalled signed mod's
+spend with no signed gift also reads as PM's own in a copy that leaves. Recording the origin at
+install would need a migration and would lift this limit.
+
+**Why.** A backup is portable and carries the database key, so whatever is in `pm.sqlite` is as
+readable as the passphrase is guessable, and a plain `DELETE` leaves a row's bytes in the page.
+Mod secrets are the user's typed credentials and the connected apps' tokens belong to the device
+that issued them; neither may travel. A restored store arrives with the other place's developer-mode
+record, which would otherwise let unsigned installs run where nobody chose them. A joined store is
+not another place's copy but the same store its other users are using: resetting it at a join would
+switch dev mode off for them and disconnect their apps, which is why the join writes nothing about
+developer mode or the apps (I-32).
+
+**Co-signers.** A change to the mod tables adds the new table to `strip` (the child-table guard
+test fails on a table that references `mods` and isn't listed) or says why it is safe; a new place
+that names a mod outside the `mods` cascade (mod-made documents' `source_id`, for one) blanks a
+folder mod's name there too. The strip doesn't touch `documents.source_id` (`mod:<id>:<key>`) or a
+mod-made note's file name (`mod-<id>-<key>.md`) today because nothing writes them yet: the Host
+API change that does decides, in that same change, whether a folder mod's id is rewritten there
+(it is a rebuild key and in the vault's front-matter, so a rewrite must reach both) or held as a
+limit here, and adds the column to `leftover` either way. PR C adds the MCP switch's off value to `adopt_mods::switch_mcp_off`
+and makes `adopt_mods::joiner_accepts_only_its_own_clients` true (clients bound to a device). A
+change that needs developer mode asks `mods::devmode` (I-34), never the old row.
+
+### I-33 · A signed mod installs only the bytes its consent screen showed, and only on its user's answer — **Held**
+
+A signed install from the Mods tab (a picked file, a catalogue download, an approved update) is two
+commands, never one: `install_mod_file`, `install_from_catalogue` or `approve_update` verify the
+package, run every check the install would (`Ledger::preview`: the verifier, the signed list, the
+publisher pin, the API range) and return the consent screen *without installing*; then
+`install_mod_consented` installs what the first staged. The staged bytes live in memory under a
+single-use, ten-minute token bound to their sha256 (`tab::stage`), and the second command never
+reads the path or the URL again, so a file swapped on disk, or a release replaced, between the
+screen and "Install" can't install anything the user wasn't shown. It verifies once more with the
+keys trusted *now*, so a key revoked while the screen waited is refused. The user's answers are
+turned into a grant plan before anything is written (`tab::consent::plan`): one answer for every
+permission asked at install, none for a permission the mod didn't declare, so a page can't write a
+grant for something else; a yes writes a `mod_grants` row only for what is asked at install (a
+first-use permission waits for its prompt), a no is always recorded. D3 and the sealed-engine rule
+run at grant time, so a forbidden pair can't be recorded either. A signed install or repair is
+refused outright while this machine's record of the safety list is unusable (`tab::commands`'s
+`View::for_install`): with the revoked keys unknown, a revoked key could still sign. The
+auto-installed pilot's first-open "Turn on" (D17) sets `consented_at`, writes its grants and records
+the disclaimer in one transaction.
+
+**Why.** A consent screen is only worth anything if what is installed is what it described. And an
+installer that trusts a page-supplied list of grants, or one that can install without the safety
+list's revocations, turns "the user agreed" into whatever the page, or a leaked key, says.
+
+**Co-signers.** Any new install path (the unsigned file install of slice 6, part 3, the folder test
+loader) shows its own screen first and installs from staged bytes through the same token, never from
+a path. Anything that writes `mod_grants` goes through `tab::consent` or `api::grants`, so D3 is
+asked at the write. The unsigned path has its own screen and its own rules (D3 across all unsigned
+mods); it doesn't borrow this one's.
+
+### I-34 · An unsigned mod installs and runs only while developer mode is on for this device, and only Rust says whether it is — **Held**
+
+Developer mode is "on for this device in this vault" (`mods::devmode`: the `mods_dev_devices`
+settings record, a list of one-way `credential`s of the device ids named by
+`data_dir/mods-device-id`: **no raw device id is stored in any database row**, because anyone who
+can write the store, such as a hostile member of a shared vault, can read every row and would
+otherwise copy an id from one record (the Mods disclaimer's) into this one; the disclaimer's list
+holds a differently-separated value, `tab::device::credential`, and a record in the old raw form
+reads as off), never a vault-wide switch, so a restore onto another machine, a joined shared vault or a copied database carries no
+"on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
+or writes it, and **nothing but a record that lists the device switches it on, ever**: asking
+(`devmode::is_on`) is a pure read, so a vault with no record is off for every device, and a record
+that is deleted (by a member of a shared vault, who holds the store key) leaves everyone off. The
+old webview-written `dev_mode` row is out of the page's allow-list and is **never read** (an earlier
+build carried an old "on" over to the first device that asked, which made a deleted record plus a
+written old row switch a victim's device on with no click: unsigned mods the victim had paused
+resumed and the install gate opened; removed, so upgrading turns developer mode off once and each
+person switches it on again in Settings > Developer). Rust writes the old row in one place only: the
+restore reset (`devmode::all_devices_off`, which also writes an empty record) sets it `"false"` for
+an older PM sharing the vault. A shared-vault join writes nothing (I-32). **Known limit:** a
+listed credential is a bearer value (a one-way hash of the device id, no device-held secret), so a
+store writer who has ever read this device's credential (it sits in the record while the device is
+on; an old copy of the store keeps it) can write it back after the device was switched off or
+reset, and the device is on again with no click. The record is trustworthy only against a writer who
+has never seen this device's credential. A keyed MAC over each entry would not close that (a
+replayed entry still verifies); the device itself must remember whether it is on, so closing it
+means keeping the on/off answer on the device (`data_dir`, per vault) instead of in the store, an
+open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+cache for first paint and never wins. The one function that switches it for this device
+(`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
+**ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row
+with the reason `dev-mode` whenever the registry's copy of the switch (`ModRuntime::unsigned_allowed`,
+false until the writer's open has looked it up, and again whenever the store closes) is off, and
+resumes exactly the rows it paused when it is on (asking the cached safety list first). So there is
+no path that reloads the registry (a startup, a resume, a recovery, a restore's open) and serves an
+unsigned mod while developer mode is off. The unsigned install reads the record itself, before the
+file is parsed, in the preview, and again inside the commit's transaction, so a switch-off while
+the files were staging wins; it refuses a package that carries a signature, a manifest that isn't
+third party, every `atlas.` id, a catalogue id, a file the blacklist names, and an id held by
+anything but an earlier unsigned file install. A reinstall of the same id is a fresh install (a new
+install id, grants and secrets reset, stored content kept, I-16).
+
+**Why.** Unsigned mods are the only mods nobody has checked, so the switch that lets them in is the
+switch that must not be carried in by a restore, written by a page, or left half applied: a
+vault-wide boolean the webview could write would make "dev mode" mean whatever the last backup or
+the page said.
+
+### I-35 · A developer's test folder is a session of the store that loaded it: read in place, never copied, never kept — **Held**
+
+A folder loaded through `load_test_mod` (developer mode on for this device, the unsigned install's
+stark screen and typed id, D3 across the unsigned set) lives in two places only: a `mods` row
+(`installed_from = 'folder'`, `package_sha256` NULL, `signed = 0`, tier `third` whatever its manifest
+says) and a session in memory (`ModRuntime::folders`). The dispatcher reads the row on every call
+and grants reference it, so the row exists for the session, but **the row alone never serves**: the
+ledger's load serves a folder row only through its session. The session is forgotten whenever the
+store closes (`ModRuntime::clear`), the mod is uninstalled or unloaded, or developer mode goes off,
+and every writer's open deletes every folder row (and what cascades from it) before it reads any
+(`ledger::folder::purge_rows`), so a crash's leftover is never served and is gone at the next open.
+PM only reads the folder: nothing is copied into PM's mods folder, written to the folder or deleted
+from it, only the package layout (`manifest.json`, `LICENCE.txt`, `NOTICE.txt`, `app/`) is opened,
+and a link, device or FIFO anywhere in it refuses the folder (`folder::scan`). Served files are
+hashed as scanned, so one edited since is refused until the reload reads it. A reload keeps the
+grants only for the same mod from the same maker asking for nothing more than the user approved
+(`policy::decide_reload`); anything else leaves the old one running. No package, signed or not,
+installs over a folder's id (`policy::decide` on the NULL pin), a folder never replaces a mod any
+other source installed, and the updater, the sweep, the recovery and the repair all skip a folder
+row. An `atlas.` folder loads only where `cfg!(debug_assertions)`.
+
+**Why.** A test mod is code nobody has checked, loaded from a path the user typed. If its row
+survived a restart, rode a backup to another machine, or could be told apart from a real install
+only by the page, "developer mode" would stop being the thing that stands between that code and the
+user's data.
+
+**Co-signers.** The backup's strip (`.pmmod` list, snapshot and export) deletes `folder` rows from
+its copy, with foreign keys on so what cascades from them goes too; a restore's commit goes through
+the writer's open, which purges any that remain. A restore swaps the store under the registry
+without closing it first (`open_session`, then the engage): every frame of the old store still ends,
+because the engage reaches either `ModRuntime::clear` (not the writer: silent) or the writer's open
+(`startup` forgets every session, deletes the new store's folder rows, and the load that follows
+ends the frames of whatever it no longer serves). A new path that swaps the store engages the same
+way, or forgets the sessions and calls `ledger::folder::purge_rows` itself. A new place that copies the `mods` table out of
+the live database either strips them or says why it can't carry one.
+
 ---
 
 ## 6. Build tooling and dependencies

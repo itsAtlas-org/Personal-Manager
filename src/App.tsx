@@ -31,9 +31,12 @@ import { LockScreen } from "./components/LockScreen";
 import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
+import { ModsRoute } from "./components/mods/ModsRoute";
+import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsView } from "./components/SettingsView";
+import type { SettingsTab } from "./components/settings/registry";
 import { SettingsPendingProvider } from "./lib/settingsPending";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { VaultCurtain } from "./components/VaultCurtain";
@@ -61,7 +64,8 @@ import { useExternalLinks } from "./lib/useExternalLinks";
 import { useFollowSignIns } from "./lib/signInPages";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
-import { isModView, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
+import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
+import { useModRows } from "./lib/modRows";
 
 const LAST_SEEN_VERSION_KEY = "pm:lastSeenVersion";
 import {
@@ -179,6 +183,13 @@ export default function App() {
   // until the next relaunch surprises the user (issue #343). Fixed from Settings → Vault.
   const [vaultFaultNotice, setVaultFaultNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // The Settings page the next open lands on. Every way in names one (`openSettings`), so a deep link
+  // (a mod paused for developer mode points at "developer") never leaves the NEXT plain open there.
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const openSettings = (tab: SettingsTab = "general") => {
+    setSettingsTab(tab);
+    setShowSettings(true);
+  };
   const [view, setView] = useState<View>("focus");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   /** A file to highlight when the project opens (set by the command palette). */
@@ -247,10 +258,13 @@ export default function App() {
   // If the open tab goes away entirely — developer mode switched off, a Depth change that leaves it
   // out (Minimal's Review, Teach and Map) — fall back to Focus so the user is never stranded on a
   // view with no nav entry and no palette destination. A tab the user HID stays: it's still in Ctrl
-  // K, which is how they got there.
+  // K, which is how they got there. A mod's tab is only "gone" once the mods have been read: when the
+  // store re-opens the provider empties the rows until the new read lands, and the tab must survive
+  // that gap (ModTab draws its own Loading panel meanwhile).
+  const { loaded: modsLoaded } = useModRows();
   useEffect(() => {
-    if (!isReachable(view, navEntries, nav)) setView("focus");
-  }, [view, navEntries, nav]);
+    if (!isReachable(view, navEntries, nav, modsLoaded)) setView("focus");
+  }, [view, navEntries, nav, modsLoaded]);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [showWhatsNew, setShowWhatsNew] = useState(false);
   const [helpMode, setHelpModeState] = useState(false);
@@ -1128,6 +1142,10 @@ export default function App() {
             {/* A browser sign-in in progress, with its link for another browser. Settings shows it
                 itself while open, as its scrim covers this; renders nothing otherwise. */}
             {!showSettings && <SignInStrip />}
+            {/* The safety list's notices (a mod paused or removed), on every tab but the Mods tab,
+                which draws them itself. Settings draws its own copy while it is open, as its scrim
+                covers this one. */}
+            {!showSettings && <ModsAppStrips view={view} onOpenMods={() => setView("mods")} />}
             <div
               className={`relative flex flex-1 overflow-hidden ${leftBar.resizing ? "select-none" : ""}`}
             >
@@ -1166,7 +1184,7 @@ export default function App() {
                     newConversation();
                   }}
                   onNewProjectChat={projectChat.newChat}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                   onOpenWhatsNew={() => setShowWhatsNew(true)}
                   onOpenPalette={() => setShowPalette(true)}
                   chatModel={settings?.chat_models[0] ?? null}
@@ -1192,9 +1210,10 @@ export default function App() {
                   that crashes ProjectView would poison the next project opened (`view` alone stays
                   "project").
 
-                  A mod's tab (`mod:<id>`) draws nothing here yet: ModFrame comes in a later slice,
-                  no entry can open one until then, and the fallback effect sends a stray one to
-                  Focus. It must never fall through to the last branch, which is the chat's. */}
+                  A mod's tab (`mod:<id>`) goes through ModTab, which puts the mod's frame in it when
+                  the mod can run and PM's own panel when it can't; the frame dies with the tab (the
+                  `view` key above remounts it). A `mod:` view must never fall through to the last
+                  branch, which is the chat's. */}
               <ErrorBoundary key={`${view}:${selectedProject ?? ""}`} what="This view">
                 {view === "focus" ? (
                   <main className="flex h-full flex-1 flex-col">
@@ -1234,7 +1253,7 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <ReviewView
                       onChanged={refreshReviewCount}
-                      onOpenSettings={() => setShowSettings(true)}
+                      onOpenSettings={() => openSettings()}
                     />
                   </main>
                 ) : view === "teach" ? (
@@ -1256,7 +1275,17 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <DevView />
                   </main>
-                ) : isModView(view) ? null : (
+                ) : isModsRoute(view) ? (
+                  // The Mods tab and every mod's own tab. min-w-0 for the frame's sake: its width
+                  // is the mod's to ask for, and must not push the sidebar.
+                  <main className="flex h-full min-w-0 flex-1 flex-col">
+                    <ModsRoute
+                      view={view}
+                      onOpenMods={() => setView("mods")}
+                      onOpenSettings={(tab) => openSettings(tab)}
+                    />
+                  </main>
+                ) : (
                   <main className="flex h-full flex-1 flex-col">
                     {chat.error && (
                       <Callout variant="strip" size="md" className="font-ui">
@@ -1345,6 +1374,7 @@ export default function App() {
                 <SettingsPendingProvider>
                   <SettingsView
                     onboarding={false}
+                    initialTab={settingsTab}
                     onClose={() => {
                       setShowSettings(false);
                       refreshSettings();
@@ -1381,7 +1411,7 @@ export default function App() {
                     setView("calendar");
                   }}
                   onNavigate={setView}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                 />
               )}
             </div>

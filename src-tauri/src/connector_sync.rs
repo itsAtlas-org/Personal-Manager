@@ -518,6 +518,9 @@ pub fn apply_connector_actions(
         if !document.reviewed {
             let _ = app.emit(ingest::DOCUMENT_LANDED, document);
         }
+        // The same arrival, told to the mods that may know of documents (their own narrow shape;
+        // `mods::api::events`), reviewed or not: a mod mirrors the list, not the review queue.
+        crate::mods::api::events::document_landed(app, document.id);
     }
     Ok(applied.dirtied)
 }

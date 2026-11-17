@@ -531,6 +531,13 @@ fn commit_session_index_mode(
     )?;
 
     tx.commit()?;
+    // A chat document born now is a new document to the mods that may read documents (its later
+    // turns change only its chunks). Noted after the commit; the announcement is made from the row.
+    if plan.document_id.is_none() {
+        if let Some(id) = doc_id {
+            crate::mods::api::events::note_landed(&[id]);
+        }
+    }
     Ok((doc_id, appended, reclassified))
 }
 
@@ -606,6 +613,8 @@ fn reevaluate_on_append(tx: &Connection, doc_id: i64, scope: &str) -> Result<boo
             "UPDATE documents SET importance = 'high', reviewed = 1 WHERE id = ?1",
             params![doc_id],
         )?;
+        // Off the shelf: a landing, as far as a mod is concerned.
+        crate::mods::api::events::note_listing_change(tx, doc_id, false);
         Ok(true)
     } else if archived {
         // General chat: clear the archive shelving and send it back through review.
@@ -613,6 +622,7 @@ fn reevaluate_on_append(tx: &Connection, doc_id: i64, scope: &str) -> Result<boo
             "UPDATE documents SET importance = NULL, reviewed = 0 WHERE id = ?1",
             params![doc_id],
         )?;
+        crate::mods::api::events::note_listing_change(tx, doc_id, false);
         Ok(true)
     } else if !is_project && reviewed {
         // Already-filed general chat: re-open review so the new turns can re-file it.
@@ -901,6 +911,66 @@ mod tests {
             0,
             "no orphan documents row survives the raced delete",
         );
+    }
+
+    #[test]
+    fn a_birth_and_an_unarchive_tell_the_mods_and_an_ordinary_append_does_not() {
+        // A chat document is a document: its birth is a landing to the mods that read documents
+        // (a chat doesn't pass through the two `DOCUMENT_LANDED` emit points), and a new turn on a
+        // shelved one takes it off the shelf, which is a landing too. A turn on a document the
+        // mods already have adds only chunks.
+        use crate::mods::api::events::testing::{record, Noted};
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open_db(dir.path());
+        let conv = new_session(&conn, "general");
+        let notes = record();
+        let at = |n: u32| format!("2026-06-28T10:00:0{n}.000Z");
+
+        let p = plan(&conn, conv);
+        let (doc_id, _, _) = commit_session_index(
+            &mut conn,
+            &p,
+            &[segment(2, &at(1), "**You:** hi")],
+            2,
+            &at(1),
+        )
+        .unwrap();
+        let doc_id = doc_id.unwrap();
+        assert_eq!(notes.take(), [Noted::Joined(vec![doc_id])]);
+
+        let p = plan(&conn, conv);
+        commit_session_index(
+            &mut conn,
+            &p,
+            &[segment(4, &at(2), "**You:** more")],
+            4,
+            &at(2),
+        )
+        .unwrap();
+        assert_eq!(notes.take(), [], "an append is not a landing");
+
+        // Shelved, then another turn: it comes back, for a general chat as for a project one.
+        conn.execute(
+            "UPDATE documents SET importance = 'archive' WHERE id = ?1",
+            params![doc_id],
+        )
+        .unwrap();
+        let p = plan(&conn, conv);
+        commit_session_index(
+            &mut conn,
+            &p,
+            &[segment(6, &at(3), "**You:** again")],
+            6,
+            &at(3),
+        )
+        .unwrap();
+        assert_eq!(notes.take(), [Noted::Joined(vec![doc_id])]);
+        let project = new_project_session(&conn, "Atlas - PM");
+        let (importance, _) = append_after(&mut conn, project, Some("archive"), false);
+        assert_eq!(importance.as_deref(), Some("high"));
+        let noted = notes.take();
+        assert_eq!(noted.len(), 2, "its birth, then its return: {noted:?}");
+        assert!(matches!(noted[1], Noted::Joined(_)));
     }
 
     #[test]
