@@ -80,8 +80,9 @@ build-frontend:
 # manifest: Vite builds it into dist/app (mods/vite.config.ts), `pack-mod --stage` puts manifest,
 # licence and notice beside it (dist/ is then a folder the developer-mode loader opens), `pack-mod`
 # writes dist/<id>-<version>.pmmod stamped with this checkout's commit, and `pack-mod --verify` reads
-# that file back with the independent check (no inline script or style, no module script, no
-# `crossorigin`, which the hygiene job cannot do: it has no build). The file is NOT signed: Atlas's
+# that file back with the independent check (an author's lint, the frame's CSP is the guard: no
+# inline script or style, no module script, no `crossorigin`, which the hygiene job cannot do: it
+# has no build). The file is NOT signed: Atlas's
 # only signer is the pm-mods pipeline. Fails when there is no mod to build, so a moved folder cannot
 # leave this a green step that built nothing.
 build-mods:

@@ -228,6 +228,10 @@ describe("constants agree with package.rs", () => {
     expect([...body.matchAll(/"([^"]+)"/g)].map((m) => m[1])).toEqual(pack.PERMISSIONS);
   });
 
+  it("the most combining marks one letter may carry", () => {
+    expect(Number(rust(/const MAX_STACKED_MARKS: usize = (\d+);/))).toBe(pack.MAX_STACKED_MARKS);
+  });
+
   it("headers a secret may not go in", () => {
     const body = rust(/const FORBIDDEN_SECRET_HEADERS: &\[&str\] = &\[([^\]]*)\]/);
     const rustList = [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
@@ -1744,6 +1748,65 @@ describe("verifyArchive", () => {
   });
 });
 
+// package.rs `a_run_of_more_than_four_combining_marks_is_refused`, the same cases: --verify must
+// never accept a manifest Rust refuses.
+describe("combining marks stacked on one letter", () => {
+  const stacked = (base, marks) => base + marks.join("");
+  const vietnamese = stacked("a", ["̣", "̂", "́"]);
+  const hebrew = stacked("ב", ["ּ", "ָ", "֥", "֮"]);
+  const thai = stacked("ก", ["ุ", "้", "์"]);
+  const five = ["́", "̂", "̃", "̄", "̅"];
+  const fault = (s) => pack.plainTextFault(s, 40, false, false);
+  const files = new Set(["app/index.html"]);
+  const check = (over) => pack.checkManifest(baseManifest(over), files);
+
+  it("passes the real scripts that stack three or four marks", () => {
+    for (const s of [vietnamese, hebrew, thai]) {
+      expect(fault(s), s).toBeNull();
+      expect(() => check({ name: s }), s).not.toThrow();
+    }
+    // the run is of marks, not of marked letters
+    const many = `${hebrew}${hebrew}${vietnamese}${thai} ${hebrew}`;
+    expect(fault(many)).toBeNull();
+    expect(() => check({ name: many })).not.toThrow();
+    expect(() =>
+      check({
+        description: `${hebrew}\n${hebrew}`,
+        publisher: { ...baseManifest().publisher, author: hebrew },
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses five or more in a row, whatever the kind of mark and wherever they sit", () => {
+    const mixedKinds = ["́", "⃝", "ः", "้", "ּ"];
+    for (const [what, text] of [
+      ["five accents", stacked("a", five)],
+      ["mixed kinds (Mn, Me, Mc)", stacked("a", mixedKinds)],
+      ["thirty-nine", stacked("M", Array(39).fill("́"))],
+      ["after a good letter", hebrew + stacked("e", five)],
+      ["at the end", `Map ${stacked("e", five)}`],
+      ["on a mark-first name", five.join("")],
+    ]) {
+      expect(fault(text), what).toBe("has too many accent marks stacked on one letter");
+      refused(() => check({ name: text }), "too many accent marks");
+      refused(() => check({ description: `Line one.\n${text}` }), "too many accent marks");
+      refused(
+        () => check({ publisher: { ...baseManifest().publisher, author: text } }),
+        "too many accent marks",
+      );
+    }
+    refused(
+      () => check({ permissions: [{ id: "ui.tab", why: stacked("a", five) }] }),
+      "too many accent marks",
+    );
+  });
+
+  it("counts a run, not the total: a letter between two runs of four passes", () => {
+    const split = stacked("a", five.slice(0, 4)) + stacked("b", five.slice(0, 4));
+    expect(fault(split)).toBeNull();
+  });
+});
+
 describe("built-output rules", () => {
   const page = (inner, head = "") =>
     `<!doctype html><html><head>${head}</head><body>${inner}</body></html>`;
@@ -1751,7 +1814,10 @@ describe("built-output rules", () => {
 
   it("accepts a page that is one external classic script and one stylesheet", () => {
     expect(() => html(PAGE)).not.toThrow();
-    expect(() => html(`<!-- SPDX header with <script> inside a comment -->${PAGE}`)).not.toThrow();
+    // A comment that names no tag, like the SPDX header a mod's index.html starts with, is fine.
+    expect(() => html(`<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->${PAGE}`)).not.toThrow();
+    expect(() => html(`${PAGE.replace("<script", "<SCRIPT")}`)).not.toThrow();
+    expect(() => html(page("", '<script src="a.js">\n  </script>'))).not.toThrow();
     expect(() => html(page("<p>text with <b>markup</b></p>"))).not.toThrow();
     expect(() =>
       html(page("", '<script src="a.js" type="text/javascript"></script>')),
@@ -1865,44 +1931,81 @@ describe("built-output rules", () => {
     refused(() => html(page(inner)), why);
   });
 
-  it("refuses markup that a comment-looking prefix would hide from a plain `-->` search", () => {
-    // To a browser `<!-->` and `<!--->` are whole comments and `--!>` ends one, so what follows runs.
-    for (const open of ["<!-->", "<!--->", "<!-- x --!>"]) {
-      refused(() => html(`${open}<script>alert(1)</script><!-- end -->`), "inline script");
-    }
-    // A real comment still hides what it holds.
-    expect(() => html(page("<!-- <script>x</script> --><p>ok</p>"))).not.toThrow();
+  // There is NO comment handling: a stripper is what three review rounds kept finding holes in, and
+  // the CSP (not this lint) is the guard. Whatever fake comment opener precedes it, an inline
+  // script is seen.
+  it.each([
+    ["a comment-looking prefix `<!-->`", "<!--><script>alert(1)</script><!-- end -->"],
+    ["a comment-looking prefix `<!--->`", "<!---><script>alert(1)</script><!-- end -->"],
+    ["a comment closed by `--!>`", "<!-- x --!><script>alert(1)</script><!-- end -->"],
+    ["an end tag with an attribute", '<p>x</p x="<!--"><script>alert(1)</script><!-- -->'],
+    ["a bogus comment `<!x`", "<!x <!-- ><script>alert(1)</script> -->"],
+    ["a bogus comment `<?x`", "<?x <!-- ><script>alert(1)</script> -->"],
+    [
+      "a DOCTYPE with a quoted identifier",
+      '<!DOCTYPE html PUBLIC "<!--"><script>alert(1)</script><!-- -->',
+    ],
+    ["a bogus comment `</ `", "</ <!-- ><script>alert(1)</script> -->"],
+    ["a title holding a comment opener", "<title><!--</title><script>alert(1)</script>-->"],
+    [
+      "a textarea holding a comment opener",
+      "<textarea><!--</textarea><script>alert(1)</script>-->",
+    ],
+    [
+      "a noscript holding a comment opener",
+      "<NoScript><!--</noscript><script>alert(1)</script>-->",
+    ],
+    ["an unclosed title", "<title><!--<script>alert(1)</script>"],
+    [
+      "a quoted attribute value holding a comment opener",
+      '<a title="<!--"><script>alert(1)</script><a title="-->">',
+    ],
+  ])("refuses an inline script behind %s", (_what, text) => {
+    refused(() => html(text), "inline script");
+    refused(() => html(page(text)), "inline script");
   });
 
-  it("does not let a comment opener inside a raw-text element hide the markup after it", () => {
-    // In <title> and <textarea> (RCDATA) a `<!--` is plain text, so the element ends at its own end
-    // tag and the script that follows runs.
-    // noscript is raw text too, because the frame runs scripts.
-    for (const tag of ["title", "textarea", "TITLE", "title\n", "noscript", "NoScript"]) {
-      refused(
-        () => html(`<${tag}><!--</${tag.trim()}><script>alert(1)</script>-->`),
-        "inline script",
-      );
+  it("refuses a tag named only inside a comment or a quoted value, on purpose", () => {
+    // The rules read the raw text: a comment that mentions the markup is refused too, and the
+    // message says to remove the comment. Vite's built output carries no such comment.
+    for (const [text, why] of [
+      ["<!-- <script>x</script> --><p>ok</p>", "inline script"],
+      ["<!-- the <script> tag goes last --><p>ok</p>", "remove a comment"],
+      ["<!-- <style>p{}</style> --><p>ok</p>", "inline style element"],
+      ["<!-- crossorigin --><p>ok</p>", "crossorigin"],
+      ["<!-- type=module --><p>ok</p>", "type=module"],
+      ["<title>a</title><!-- <script>x</script> -->", "inline script"],
+      ['<a title="<script>">x</a>', "remove a comment"],
+    ]) {
+      refused(() => html(page(text)), why);
     }
-    // The same text in a real comment, or after a closed element, is still a comment.
     expect(() => html(page("<!-- <title> --><p>ok</p>"))).not.toThrow();
-    expect(() => html(page("<title>a</title><!-- <script>x</script> -->"))).not.toThrow();
-    // An unclosed raw element keeps the rest of the file in view.
-    refused(() => html("<title><!--<script>alert(1)</script>"), "inline script");
   });
 
-  it("does not read a comment opener inside a quoted attribute value as a comment", () => {
-    // `<!--` in an attribute value is plain text to a browser, so the script after the tag runs.
-    for (const q of ['"', "'"]) {
-      refused(
-        () => html(`<a title=${q}<!--${q}><script>alert(1)</script><a title=${q}-->${q}>`),
-        "inline script",
-      );
+  it("refuses a script however the tag is spelled", () => {
+    for (const [text, why] of [
+      ["<SCRIPT>alert(1)</SCRIPT>", "inline script"],
+      ["<ScRiPt\n>alert(1)</sCrIpT>", "inline script"],
+      ['<script src="a.js">alert(1)</script>', "inline script"],
+      ['<script src="a.js"> x </script>', "inline script"],
+      ['<script src="a.js"></script x>', "inline script"],
+      ['<script src="a.js"></ script>', "unclosed script"],
+      ["<script/src=a.js>x</script>", "inline script"],
+      ["<scripts>x</scripts>", "isn't a script tag"],
+      ["<script-x></script-x>", "isn't a script tag"],
+      ['<script src="a.js"><script src="b.js"></script></script>', "inline script"],
+      ['<script src="a.js"></script><script>alert(1)</script>', "inline script"],
+      ["<script src=a.js type = 'module'></script>", "type"],
+      ['<script type="MODULE" src=a.js></script>', "type"],
+      ['<p data-x="type = module"></p>', "type=module"],
+      ['<link rel="stylesheet" href="a.css" CrossOrigin>', "crossorigin"],
+      ["<STYLE>p{}</STYLE>", "inline style element"],
+      ["<style\n>p{}</style>", "inline style element"],
+    ]) {
+      refused(() => html(page(text)), why);
     }
-    // A real comment after such a tag, and an attribute value that only looks like one, still work.
-    expect(() => html(page('<a title="<!--">x</a><!-- <script>x</script> -->'))).not.toThrow();
-    // An unterminated value keeps the rest of the file in view.
-    refused(() => html('<a title="<!--><script>alert(1)</script>'), "never ends");
+    refused(() => html("<p>ok</p><script"), "never ends");
+    refused(() => html("<p>ok</p><script src=a.js"), "never ends");
   });
 
   it("refuses a tag the text ends inside", () => {

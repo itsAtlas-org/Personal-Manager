@@ -24,8 +24,9 @@
 //   node scripts/pack-mod.mjs --verify <file>
 //       checks a `.pmmod` against the rules src-tauri/src/mods/package.rs applies, plus the rules for
 //       built output (no inline script or style, no module script, no `crossorigin`, no script or
-//       link that loads from off-folder). Those are slip-catchers: the frame's CSP is the control
-//       that holds at run time. It cannot check the signature itself: the trusted keys are embedded
+//       link that loads from off-folder). Those are an author's lint, read broadly off the raw text
+//       (a comment that mentions `<script` is refused too): the frame's CSP is the guard that holds
+//       at run time. It cannot check the signature itself: the trusted keys are embedded
 //       in PM, and only PM verifies against them.
 //
 // TWO IMPLEMENTATIONS OF ONE FORMAT. package.rs is the verifier that counts; the checks here are a
@@ -344,7 +345,17 @@ const INVISIBLE = [
   [0xe0000, 0xe0fff],
 ];
 
-/** package.rs `plain_text_fault`: bounded, trimmed, no control, hidden or direction characters. */
+/**
+ * package.rs `MAX_STACKED_MARKS`: the most combining marks (category M) one letter may carry. Real
+ * scripts stack three or four; more than this in a row is refused.
+ */
+export const MAX_STACKED_MARKS = 4;
+const MARK_RUN = new RegExp(`\\p{M}{${MAX_STACKED_MARKS + 1}}`, "u");
+
+/**
+ * package.rs `plain_text_fault`: bounded, trimmed, no control, hidden or direction characters, and
+ * no run of more than `MAX_STACKED_MARKS` combining marks.
+ */
 export function plainTextFault(s, maxChars, newlines, mayBeEmpty) {
   if (s === "") return mayBeEmpty ? null : "is empty";
   if ([...s].length > maxChars) return `is longer than ${maxChars} characters`;
@@ -360,6 +371,7 @@ export function plainTextFault(s, maxChars, newlines, mayBeEmpty) {
       return "has a hidden or control character";
     }
   }
+  if (MARK_RUN.test(s)) return "has too many accent marks stacked on one letter";
   return null;
 }
 function plainText(what, s, max, newlines, mayBeEmpty) {
@@ -990,69 +1002,63 @@ function urlText(value) {
 }
 
 /**
- * HTML text with its comments dropped. `<!-->` and `<!--->` are complete comments to a browser, and
- * `--!>` closes one: a plain `-->` search would swallow the markup after them and never look at it.
- * Inside a raw-text or RCDATA element (title, textarea, style, script, ...) `<!--` is plain text and
- * the element ends at its own end tag, so a comment opener there hides nothing: that content is kept
- * whole, and the tags after it are still read. noscript is in the list because the frame runs
- * scripts, and with scripting on a browser reads noscript's content as raw text. A start tag is read
- * whole (`readStartTag`), because `<!--` inside a quoted attribute value is text too.
+ * Said with every refusal of a raw-text rule below: those rules read the file as plain text, with no
+ * notion of a comment (a hand-rolled comment stripper is what three review rounds kept finding holes
+ * in), so a comment that merely mentions the markup is refused too. That is deliberate.
  */
-const RAW_TEXT = new Set([
-  "title",
-  "textarea",
-  "style",
-  "script",
-  "xmp",
-  "iframe",
-  "noembed",
-  "noframes",
-  "noscript",
-]);
-function stripComments(text) {
-  const re = /<!--(?:-?>|[\s\S]*?--!?>)|<([a-zA-Z][^\s/>]*)/g;
-  let out = "";
-  let from = 0;
-  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-    if (m[1] === undefined) {
-      out += text.slice(from, m.index);
-      from = re.lastIndex;
-      continue;
+const RAW_RULE =
+  "this check reads the raw text, comments included: remove a comment that mentions it";
+
+/**
+ * The script rule, on the RAW text: every `<script` (any case, anywhere, inside a comment or a quoted
+ * value too) must be the one shape a Vite build emits after the mods' own rewrite: a classic script
+ * with a `src`, nothing inside it, and `</script>` right after (whitespace allowed between). Anything
+ * else, however it is dressed up, is refused rather than interpreted.
+ */
+function checkScripts(html, where) {
+  const re = /<script/gi;
+  for (let m = re.exec(html); m !== null; m = re.exec(html)) {
+    const after = html[m.index + 7];
+    if (after !== undefined && !/[\s/>]/.test(after)) {
+      where(`has a "<script" that isn't a script tag (${RAW_RULE})`);
     }
-    const name = m[1].toLowerCase();
-    let end = readStartTag(text, re.lastIndex).end;
-    if (RAW_TEXT.has(name)) {
-      const close = new RegExp(`</${name}[\\s/>]`, "i").exec(text.slice(end));
-      end = close ? end + close.index : text.length;
+    const tag = readStartTag(html, m.index + 7);
+    if (!tag.closed) where("has a script tag that never ends");
+    const close = /^\s*<\/script>/i.exec(html.slice(tag.end));
+    if (!close) {
+      where(
+        /<\/script/i.test(html.slice(tag.end))
+          ? `has an inline script (${RAW_RULE})`
+          : `has an unclosed script tag (${RAW_RULE})`,
+      );
     }
-    out += text.slice(from, end);
-    from = end;
-    re.lastIndex = end;
+    const all = (name) => tag.attrs.filter((a) => a.name === name).map((a) => a.value);
+    if (all("src").length === 0) where(`has an inline script (a script with no src; ${RAW_RULE})`);
+    // The first `type` is the one a browser reads; an allow-list, so anything odd is refused.
+    const type = (all("type")[0] ?? "").toLowerCase();
+    if (!["", "text/javascript", "application/javascript"].includes(type)) {
+      where(`has a script of type ${quote(type)} (only classic scripts load in the frame)`);
+    }
+    re.lastIndex = tag.end + close[0].length;
   }
-  return out + text.slice(from);
 }
 
-/** The rules for one HTML file (`checkBuiltFile` calls it). */
-function checkBuiltHtml(text, where) {
-  const html = stripComments(text);
+/**
+ * The rules for one HTML file (`checkBuiltFile` calls it): raw-text rules first (`checkScripts`,
+ * then a `<style`, `crossorigin` or `type=module` anywhere in the text), then the start tags.
+ */
+function checkBuiltHtml(html, where) {
+  checkScripts(html, where);
+  if (/<style/i.test(html)) where(`has an inline style element (${RAW_RULE})`);
+  if (/crossorigin/i.test(html)) where(`has a crossorigin attribute (${RAW_RULE})`);
+  if (/type\s*=\s*["']?\s*module/i.test(html)) {
+    where(`has a type=module (only classic scripts load in the frame; ${RAW_RULE})`);
+  }
   for (const tag of startTags(html)) {
     if (!tag.closed) where("has a tag that never ends");
     const all = (name) => tag.attrs.filter((a) => a.name === name).map((a) => a.value);
     const names = tag.attrs.map((a) => a.name);
-    if (tag.name === "script") {
-      const close = /<\/script[\s/>]/i.exec(html.slice(tag.end));
-      if (!close) where("has an unclosed script tag");
-      const body = html.slice(tag.end, tag.end + close.index);
-      if (!names.includes("src") || body.trim() !== "") where("has an inline script");
-      // The first `type` is the one a browser reads; an allow-list, so anything odd is refused.
-      const type = (all("type")[0] ?? "").toLowerCase();
-      if (!["", "text/javascript", "application/javascript"].includes(type)) {
-        where(`has a script of type ${quote(type)} (only classic scripts load in the frame)`);
-      }
-    }
-    if (tag.name === "style") where("has an inline style element");
     if (names.includes("style")) where("has an inline style attribute");
-    if (names.includes("crossorigin")) where("has a crossorigin attribute");
     if (names.some((a) => a.startsWith("on"))) where("has an inline event handler");
     if (all("rel").some((v) => v.toLowerCase().split(/\s+/).includes("modulepreload"))) {
       where("preloads a module");
@@ -1075,12 +1081,15 @@ function checkBuiltHtml(text, where) {
 }
 
 /**
- * Rules for built output, which package.rs does not have (a package is data to it) but the frame
- * does. They catch a build that went wrong or an author's slip, and the frame's CSP is what holds
- * against a hostile page: this is a slip-catcher, not the security control. HTML is tokenized (see
- * `startTags`) after its comments are dropped (`stripComments`, which leaves raw-text elements and
- * quoted attribute values alone); it does not model the rest of a browser's parser. CSS and JS are
- * text rules.
+ * An AUTHOR'S LINT for built output, not a security boundary. package.rs does not look at HTML (a
+ * package is data to it), and what stops inline script and style in every engine is the frame's CSP
+ * (src-tauri/src/mods/headers.rs: script-src and style-src are the mod's own app/ folder, no
+ * 'unsafe-inline'). This catches a build that went wrong or an author's slip before it ships and
+ * then fails silently. So it is broad and fails closed instead of modelling a browser: for HTML the
+ * script, style, crossorigin and type=module rules read the RAW text with no comment handling at all
+ * (a comment that mentions `<script` is refused on purpose: Vite's built output carries no comment
+ * with a tag in it, so remove the comment), and only the per-attribute rules use a small start-tag
+ * tokenizer (`startTags`). CSS and JS are text rules.
  */
 export function checkBuiltFile(path, bytes) {
   const where = (why) => refuse(`${quote(path)} ${why}`);
