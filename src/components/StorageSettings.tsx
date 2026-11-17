@@ -153,7 +153,7 @@ export function StorageSettings({ onNavigate }: { onNavigate: (tab: string) => v
   const copy = pending ? confirmCopy(pending) : null;
   // A small control's edge is --ink4 (3:1), not --border2 (~1.6:1): the outline is how it reads as one.
   const pill =
-    "rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-accent";
+    "rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-ink2";
 
   return (
     <div data-help="settings-storage">
@@ -297,7 +297,7 @@ function ComponentRow({
                   key={b.anchor}
                   type="button"
                   onClick={() => onPill(b.anchor)}
-                  className="rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-accent"
+                  className="rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-ink2"
                 >
                   {b.label} →
                 </button>
@@ -306,7 +306,7 @@ function ComponentRow({
                 <button
                   type="button"
                   onClick={() => onManage(c.manage!.tab)}
-                  className="rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-accent"
+                  className="rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3 transition hover:text-ink hover:border-ink2"
                 >
                   {c.manage.label} →
                 </button>

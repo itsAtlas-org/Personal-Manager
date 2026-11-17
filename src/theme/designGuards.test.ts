@@ -325,6 +325,7 @@ describe("form-control edges use --ink4, not --border2", () => {
       ["src/components/calendar/ZoneGutter.tsx", ["zones.length === 0 &&"]],
       ["src/components/DevView.tsx", ["bg-surface px-2 py-1 text-sm text-ink"]],
       ["src/components/RemovePmData.tsx", ["cursor-pointer border-"]],
+      ["src/components/backup/AutomaticBackupsSection.tsx", ["w-20 rounded-[var(--radius-sm)]"]],
     ];
     for (const [path, anchors] of SITES) {
       const lines = (SOURCES.find(([p]) => p === path)?.[1] ?? "").split("\n");
@@ -348,6 +349,41 @@ describe("form-control edges use --ink4, not --border2", () => {
     }
     const button = SOURCES.find(([p]) => p === "src/components/ui/Button.tsx")?.[1] ?? "";
     expect(button).toContain("border border-ink4");
+  });
+
+  // The Mods screens, the Developer kit, Storage and the backup panels. They hold hand-styled
+  // controls next to panels (a bare `border-border`/`border-border2` is right on a card or a list
+  // frame), so the rule is read off the control's own tag, not the file: a text-like <input> must
+  // carry --ink4 and focus --accent-text; a pill-shaped <button> must carry --ink4 and hover to
+  // --ink2 (a `hover:border-accent` edge is weaker than the resting one on a pale accent).
+  // Checkboxes and radios are the browser's own widgets (their own edge), so they are exempt.
+  it("hand-styled inputs and pill buttons in the Mods, Storage and backup files keep an --ink4 edge", () => {
+    const SCOPE =
+      /^src\/components\/(mods\/|settings\/(Developer|TestMods)|backup\/|Storage(Settings|Mods)\.tsx)/;
+    const offenders: string[] = [];
+    let inputs = 0;
+    for (const [path, text] of SOURCES) {
+      if (!SCOPE.test(path)) continue;
+      for (const m of text.matchAll(/<input\b[^>]*?\/>|<input\b[\s\S]*?\n\s*\/>/g)) {
+        if (/type="(checkbox|radio)"/.test(m[0])) continue;
+        inputs += 1;
+        if (!m[0].includes("border-ink4") || !m[0].includes("focus:border-accent-text"))
+          offenders.push(`${path}: <input> without border-ink4 + focus:border-accent-text`);
+      }
+      text.split("\n").forEach((line, i) => {
+        if (/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(line)) return;
+        if (/rounded-full/.test(line) && /(?<![\w:-])border\b/.test(line)) {
+          // A pill with an edge: a badge (a status label, not operated) is told apart by a
+          // non-interactive tag; the pills in these files that ARE buttons use `hover:`.
+          if (/hover:border-accent\b(?!-)/.test(line))
+            offenders.push(`${path}:${i + 1} hover:border-accent`);
+          if (/hover:/.test(line) && !/(?<![\w:-])border-ink4/.test(line))
+            offenders.push(`${path}:${i + 1} pill button without border-ink4`);
+        }
+      });
+    }
+    expect(inputs, "the scan should find the Keep last field").toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
   });
 });
 // ===== END form-control edges (#1105) =======================================================
