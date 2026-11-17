@@ -1,6 +1,6 @@
 # cargo-audit configuration (run `cargo audit` from `src-tauri/`).
 #
-# Mirror src-tauri/deny.toml. Both ids are transitive advisories in Tauri's gtk-rs 0.18 (Linux
+# Mirror src-tauri/deny.toml. The first two ids are transitive advisories in Tauri's gtk-rs 0.18 (Linux
 # WebKit) stack whose affected code PM never reaches; no fix is reachable until Tauri moves to
 # gtk 0.19 / glib 0.22 or gtk4. Ignoring them keeps `cargo audit` green *and intentional*, so a
 # real advisory still fails the run. See the 2026-06-17 and 2026-10-07 DECISIONS entries.
@@ -8,4 +8,7 @@
 ignore = [
     "RUSTSEC-2024-0429", # glib 0.18 VariantStrIter unsound (gtk-rs stack; API never called)
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained (via glib-macros 0.18; build-time only)
+    # Unmaintained since 2026-11-17, no fixed version; see the note in deny.toml.
+    "RUSTSEC-2026-0543", # chrono unmaintained (direct; also via rrule and zxcvbn)
+    "RUSTSEC-2026-0555", # chrono-tz unmaintained (direct; also via rrule)
 ]

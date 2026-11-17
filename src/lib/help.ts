@@ -52,6 +52,94 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Dev",
     body: "Developer mode's inspection tab: read-only views of PM's internal state — raw tables, row counts, the corrections log, and system & build info. For debugging and watching how PM works; nothing here changes your data. Turn it on or off under Settings → Developer.",
   },
+  "nav-mods": {
+    title: "Mods",
+    body: "Mods are small add-ons made by other people. This is where you see which ones are installed, turn one off and on again, remove one, or add another. A mod that has a screen of its own gets its own tab in this list. The Mods tab is always here and can't be hidden.",
+  },
+  "nav-mod-tab": {
+    title: "A mod's tab",
+    body: "A tab an installed mod added, marked 'mod' because the mod chose its name. What's inside is the mod's own page, running in a sealed box: it can only use what you allowed it. Right-click it to pin it to the top or hide it. A hidden mod tab is still reachable with Ctrl K and from the Mods tab.",
+  },
+  "mods-view": {
+    title: "Mods",
+    body: "Mods are small add-ons made by people, not part of PM itself. PM checks that a mod is the one its maker published and keeps it in a sealed box, but it can't check that a mod is good. The sections here show what's installed, what's on offer, and how to install a file.",
+  },
+  "mod-tab-status": {
+    title: "A mod that isn't running",
+    body: "This mod's tab can't show the mod right now. PM says why in plain words and, where there's something you can do about it, offers it here. Whatever the mod saved stays put while it's off. The Mods tab has the full picture and can remove the mod.",
+  },
+  "mod-first-open": {
+    title: "Turning on a mod for the first time",
+    body: "PM installed this mod for you, so it asks before the mod runs. The screen says what mods are, lists what this one wants to do, and lets you say yes or no to each thing it asks to do. Nothing of the mod runs until you press Turn on. Pressing it also counts as accepting the Mods notice on this computer.",
+  },
+  "mod-dev-mode-off": {
+    title: "Developer mode is off",
+    body: "PM paused this mod because it is one you loaded yourself (a test mod, or a file nobody has signed), and those only run while developer mode is on for this computer. Nothing it saved is lost. Open Settings, then Developer, switch developer mode on, and you can use it again.",
+  },
+  "mod-first-open-notice": {
+    title: "The Mods notice",
+    body: "What mods are, what PM checks and what it can't. It is shown in full every time you turn on a mod, and from the second time it has a box, 'Don't show this again', that you can tick if you would rather have it folded away.",
+  },
+  "mod-first-open-hide": {
+    title: "Don't show this again",
+    body: "Ticking it, and then pressing Turn on, folds the Mods notice to one line the next time a mod asks to be turned on, here on this computer and in this vault. It is not there the first time you see the notice, so you read it at least twice before you can fold it. It changes nothing else: what a mod asks to do is always listed, and nothing runs until you press Turn on. If you don't press Turn on, nothing changes.",
+  },
+  "mod-first-open-about": {
+    title: "The Mods notice, folded",
+    body: "You chose not to see the whole Mods notice again, so it is one line here. Press it to read the whole notice. What this mod asks to do, and the Turn on button, are never folded.",
+  },
+  "mods-disclaimer": {
+    title: "Before you use mods",
+    body: "A short notice you read once on this computer in this vault. Mods are made by people, PM checks what it can (the signature, the safety list, the sealed box) and can't check whether a mod is any good. 'I understand' saves that you've read it; a new computer, or a vault you join, asks again.",
+  },
+  "mods-safety": {
+    title: "The safety list",
+    body: "PM keeps a list of known problems with mods and can pause or remove a mod on it. A paused mod keeps its data and turns back on by itself when the fix arrives; a removed one is switched off and its files go, and what it saved and made waits for you to uninstall it. These notices show at the top of the app on every tab, and inside Settings, so you see a pause or a removal wherever you are. They also say when PM hasn't been able to check the list for over 30 days, or when its record of the list on this computer is damaged: 'Reset the safety list' clears that record and downloads the list again.",
+  },
+  "mods-reset-safety": {
+    title: "Reset the safety list",
+    body: "Clears PM's note on this computer of the newest safety list it has seen and of any maker keys that list has switched off, then downloads the list again. Until that finishes PM can't tell an old list from a new one, which is why it asks first. Your mods and their data are not touched.",
+  },
+  "mods-installed": {
+    title: "Installed mods",
+    body: "Every mod on this computer, with whether it's on, paused or waiting for you, and who made it. Open Details to see what it may do, allow or turn off each thing one at a time, or uninstall it.",
+  },
+  "mods-installed-row": {
+    title: "An installed mod",
+    body: "The badge says who vouches for it: first party (the Atlas team), reviewed by Atlas, or third party (nobody has checked it). 'Test' marks a mod loaded from a developer's folder, which goes away when PM restarts. The sentence beside it says why it isn't running if it isn't, with the one button that fixes it. Pause stops it and keeps what it saved. Everything the mod says about itself, its name, description and reasons, is the mod's own words.",
+  },
+  "mods-permissions": {
+    title: "What a mod can do",
+    body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. For something sensitive PM asks you the first time the mod uses it; 'Allow now' answers that question ahead of time.",
+  },
+  "mods-permission-prompt": {
+    title: "A mod asks to do something",
+    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow and No switch on half a second after the window appears, so a click meant for the mod can't answer for you. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. You can change either answer any time in the Mods tab.",
+  },
+  "mods-consent": {
+    title: "Approve an install or an update",
+    body: "Lists everything the mod asks for, in PM's words with the maker's reason beside each, and nothing is installed until you press the button. For an update, what's new is marked and the old version keeps running meanwhile. A mod from Atlas says who made it; one Atlas has looked over says 'reviewed by Atlas' and at which version of its code. Untick anything you don't want it to have. This screen lasts ten minutes.",
+  },
+  "mods-consent-unsigned": {
+    title: "A mod nobody has checked",
+    body: "This mod comes from a file or folder nobody has signed or reviewed. Its name, maker and repository are only what the file says about itself. Each thing it asks for starts at no, and you allow only what you want. A mod like this may read your data or use the internet, never both, counting your other unchecked mods too (the screen says so whatever this file asks for, because another mod may already hold one side). To install it you type its id exactly, so it can't happen by accident.",
+  },
+  "mods-consent-expired": {
+    title: "A screen that ran out of time",
+    body: "An install screen works once and only for ten minutes: locking PM or switching vaults ends it sooner, and so does a try that fails (the screen then says what went wrong). Nothing was installed. 'Start again' reads the file or downloads the mod again and shows a fresh screen.",
+  },
+  "mods-available": {
+    title: "Available mods",
+    body: "Mods published through Atlas, from the catalogue PM keeps. Each one says who made it and everything it asks to do before you install anything. 'Install' downloads it, checks it is the one the catalogue lists, and then shows the screen where you say yes or no to each thing it asks. If PM's safety list is out of date, the catalogue is shown but nothing installs from it until the list is refreshed.",
+  },
+  "mods-from-file": {
+    title: "Install from a file",
+    body: "The one place to install a mod from a .pmmod file. A file signed by Atlas is checked and then shown on the same screen as a catalogue mod. A file nobody has signed can't be checked by anyone, so PM takes it only when developer mode is on (Settings, then Developer), and then makes you type its id to confirm.",
+  },
+  "mods-uninstall": {
+    title: "Uninstall a mod",
+    body: "Shows what goes (what the mod saved, its files, its tab) and what stays (the tasks, milestones and notes it made, which are yours). 'Also delete what it made' is off unless you turn it on, and can't be undone. What the mod saved is removed either way and can't be brought back.",
+  },
   "conversations-list": {
     title: "Projects & Global chats",
     body: "Two foldable lists. 'Projects' is every project PM knows about, with how many chats each one holds — click through to open that project, where its files sit beside a chat that searches only it. 'Global chats' is your chats that belong to no project, which search everything; click one to reopen it, or '+ New' to start another. Moving a chat into a project with the 📁 button takes it out of this list and into that project's own history.",
@@ -400,8 +488,20 @@ export const HELP: Record<string, HelpEntry> = {
     body: "PM reads your memory, processor, and graphics card entirely on this device to work out which local models would run well, and how fast. Nothing about your hardware leaves the machine. PM's pick and every fit are worked out from this, using the memory that was free when the list was last sized.",
   },
   "settings-storage": {
-    title: "On-device components",
-    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they re-download when you need them again, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it.",
+    title: "Storage",
+    body: "What PM keeps on this device, in two sections you can fold: Built in, which is what PM downloaded, and Mods, which is what each installed mod keeps. PM remembers which you folded.",
+  },
+  "settings-storage-builtin": {
+    title: "Built in",
+    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they download again when you need them, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
+  },
+  "settings-storage-mods": {
+    title: "Mods in Storage",
+    body: "Each installed mod with the room it takes: its own files, which PM measures, and what it saved in PM's database, which is an estimate. 'Uninstall' runs the same uninstall as the Mods tab: it shows what goes and what stays first, and what the mod made in your tasks, milestones and notes is only deleted if you choose that. A mod from the catalogue can be installed again; a mod from a file or a folder needs its file or folder. What a mod saved can't be brought back.",
+  },
+  "settings-storage-mods-remove-all": {
+    title: "Remove all mods",
+    body: "Uninstalls every mod in the list, one after another, the way 'Uninstall' does for one. Everything they saved goes and can't be brought back. The tasks, milestones and notes they made stay in PM; to delete those too, uninstall the mod on its own and choose 'Also delete what it made'. If one mod can't be removed, it says why and the rest still go.",
   },
   "settings-memory-map": {
     title: "Memory map",
@@ -538,13 +638,37 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Encrypted backup",
     body: "Beyond a one-off backup, PM can run them on a schedule and keep the last few for you. Scheduled backups only fire when it's safe and unobtrusive — PM unlocked and idle for a few minutes, a passphrase set, and nothing else syncing. Point it at more than one place (say a folder plus Google Drive) and each backup is packed once and copied to all of them; a destination that can't be reached right then is simply retried next run. Older backups beyond the number you keep are pruned automatically.",
   },
+  "settings-backup-mod-data": {
+    title: "Mods in your backups",
+    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
+  },
   "settings-license": {
     title: "License",
     body: "PM is free and open-source software under the GNU AGPL v3 — you're free to use, study, share, and modify it, and any networked version must offer its source. The link opens the full project source on GitHub.",
   },
   "settings-developer": {
     title: "Developer mode",
-    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens. It's strictly read-only (it never changes your data), independent of the density preset, and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle.",
+    body: "A plainly-labelled switch for technical and curious users. When on, it adds a read-only Dev tab and shows PM's internals in place — raw rows, ids, and confidence values — so a problem is diagnosable where it happens; those never change your data. It also allows unsigned mods — installing a mod file nobody has signed, and loading a test mod from a folder — so it belongs to this computer only: a restored backup or a shared vault never turns it on elsewhere, and turning it off pauses every unsigned mod until it's on again. It's independent of the density preset and off by default. 'Build' shows whether this is a dev or release build; 'runtime' is your toggle. While it's on, the sections below show what mod makers need to know, straight from PM.",
+  },
+  "settings-developer-api": {
+    title: "API version",
+    body: "The version of the mod API this PM serves, and how long older mods keep working: a mod built for an older version in the window still runs, marked 'built for an older PM'. Experimental methods are outside the freeze and may change in any minor version, so don't build anything lasting on them yet.",
+  },
+  "settings-developer-endpoints": {
+    title: "Endpoints",
+    body: "Everything a mod can ask PM for, and everything PM can tell a mod, with the permission each needs and the version it arrived, was deprecated or was removed in. It is read from PM's own table, so it can't differ from what PM actually does.",
+  },
+  "settings-developer-limits": {
+    title: "Limits",
+    body: "The fixed limits PM puts on every mod: how many calls a second, how big a call or an answer may be, how much a mod may store and how fast it may grow it, and how many events can be waiting for a mod that is slow. They are set when PM is built and the same for every mod.",
+  },
+  "settings-developer-running": {
+    title: "Running now",
+    body: "Whether PM's web engine is sealed (a mod's frame can't reach the network on its own) and, if not, why; how many connections the engine has refused since PM started; and each open mod frame with how many events PM sent it, how many it acknowledged and how many were dropped because it fell behind. 'Refresh' reads it again.",
+  },
+  "settings-developer-testmods": {
+    title: "Load a test mod",
+    body: "Try a mod straight from an unpacked folder while you build it. PM reads the folder where it is and never copies or changes it, shows the screen for a mod nobody has checked, and loads it once you type its id. It reloads when you save, lasts until PM restarts or developer mode goes off, and is left out of backups. 'Reload' reads the folder again, 'Unload' ends it now. A packed .pmmod file installs from the Mods tab.",
   },
 
   // Developer mode (issue #78) — read-only inspection

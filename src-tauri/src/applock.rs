@@ -188,9 +188,45 @@ mod platform {
 
 pub use platform::{available, verify};
 
+/// Set once the OS has said it can verify, and never cleared.
+static EVER_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`available`], asked once while it keeps answering yes. For the mod dispatcher's lock check,
+/// which runs on every mod call and event: Windows' probe spawns a COM thread and waits on a WinRT
+/// round trip, and a probe that fails transiently reads as "can't verify", which would read as
+/// "not locked". Once the OS has said it can verify, a later failure of the probe can't open the
+/// lock. (Linux and macOS never answer yes, so they never remember anything and the stub is free.)
+pub fn available_remembered() -> bool {
+    remember(&EVER_AVAILABLE, available)
+}
+
+/// `probe`'s answer, unless `seen` already holds a yes (then `probe` is not asked); a yes is kept.
+fn remember(seen: &std::sync::atomic::AtomicBool, probe: impl FnOnce() -> bool) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if seen.load(Relaxed) {
+        return true;
+    }
+    let yes = probe();
+    if yes {
+        seen.store(true, Relaxed);
+    }
+    yes
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_lock;
+    use super::{remember, should_lock};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn a_yes_from_the_os_is_kept_and_a_no_is_asked_again() {
+        let seen = AtomicBool::new(false);
+        // A no is not remembered: the probe is asked every time.
+        assert!(!remember(&seen, || false));
+        assert!(remember(&seen, || true));
+        // After a yes the probe isn't asked, so a transient failure can't read as "can't verify".
+        assert!(remember(&seen, || panic!("asked again after a yes")));
+    }
 
     #[test]
     fn locks_only_when_enabled_available_and_unverified() {

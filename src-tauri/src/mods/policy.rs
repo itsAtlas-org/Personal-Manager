@@ -80,7 +80,6 @@ pub struct Pinned {
 
 /// Who made a gift, as its `mod_ledger` row keeps it, or who an installed mod is, as its `mods` row
 /// has it (v60).
-#[cfg_attr(not(test), allow(dead_code))] // slice 4's "only its own" check reads it
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Maker {
     pub mod_id: String,
@@ -98,7 +97,6 @@ pub struct Maker {
 /// any file can copy, so its gifts are that install's alone: the same install id, which a fresh
 /// install never keeps (§1.1: an unsigned file with the same id is a fresh install, its grants and
 /// secrets reset).
-#[cfg_attr(not(test), allow(dead_code))] // slice 4's "only its own" check calls it
 pub fn made_it(maker: &Maker, current: &Maker) -> bool {
     if maker.mod_id != current.mod_id || maker.signed != current.signed {
         return false;
@@ -155,6 +153,32 @@ pub enum Refusal {
     NeedsApproval(Vec<Widening>),
     /// The row changed between the checks and the commit (another install, or a vault switch).
     Changed,
+    /// The signed index removed this mod and the row waits for the user's answer about what it
+    /// made and stored (I-16): nothing installs onto it until it is uninstalled.
+    RemovedPending,
+    /// A background install of a mod that isn't installed: unattended work only ever updates or
+    /// repairs, so a mod uninstalled while its update downloaded stays uninstalled.
+    NothingToUpdate,
+    /// An unsigned file while developer mode is off for this device (the install reads the store's
+    /// record itself; a page can't say it is on).
+    DevModeOff,
+    /// An unsigned file whose id is held by an installed mod that didn't come from an unsigned file
+    /// (a signed mod, or a test folder): only its own kind of install can replace it.
+    OtherInstallHoldsId,
+    /// A signed install, or any other install that goes by a package, over an id a loaded test
+    /// folder holds: a folder row has no package to pin (its sha256 is NULL), so nothing about it
+    /// can be an update or a repair. The developer unloads the folder first.
+    TestFolderHoldsId,
+    /// A test folder's reload whose manifest now asks for more than the user approved (a permission,
+    /// an internet host, a secret slot or a contribution it didn't have): the old one keeps
+    /// running, and loading the folder again shows the user the new screen.
+    ReloadWidens(Vec<Widening>),
+    /// A test folder's reload whose manifest names another mod, author or repository: that is a
+    /// different mod (or maker) than the one the user saw, so it is loaded as one.
+    ReloadChangedId,
+    /// An unsigned file or test folder over an earlier one of the same id from another author or
+    /// repository: the install would inherit the first one's stored data. Uninstall it first.
+    MakerChanged,
 }
 
 impl fmt::Display for Refusal {
@@ -185,7 +209,173 @@ impl fmt::Display for Refusal {
             }
             Self::NeedsApproval(_) => f.write_str("this update asks for more and waits for you"),
             Self::Changed => f.write_str("the installed mods changed while it was installing"),
+            Self::RemovedPending => f.write_str(
+                "PM's safety list removed the installed mod with this id: uninstall it first",
+            ),
+            Self::NothingToUpdate => f.write_str("the mod it would update is no longer installed"),
+            Self::DevModeOff => f.write_str(
+                "developer mode is off on this computer, and an unsigned file installs only while \
+                 it is on",
+            ),
+            Self::OtherInstallHoldsId => f.write_str(
+                "a mod with this id is installed that didn't come from an unsigned file: uninstall \
+                 it first",
+            ),
+            Self::TestFolderHoldsId => f.write_str(
+                "a test folder with this id is loaded, and a loaded folder has no package to \
+                 update: unload it first",
+            ),
+            Self::ReloadWidens(wider) => write!(
+                f,
+                "its manifest now asks for more than you approved ({}): load the folder again to \
+                 see what it asks",
+                wider
+                    .iter()
+                    .map(Widening::words)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::MakerChanged => f.write_str(
+                "an installed mod with this id names another author or repository, and it would \
+                 inherit what that mod stored: uninstall the installed one first",
+            ),
+            Self::ReloadChangedId => f.write_str(
+                "its manifest names another mod, or another author or repository, than the one \
+                 that was loaded: load the folder again",
+            ),
         }
+    }
+}
+
+impl Widening {
+    /// What the widening is, for a sentence.
+    pub fn words(&self) -> String {
+        match self {
+            Self::Permission(p) => format!("permission {p}"),
+            Self::Host(h) => format!("host {h}"),
+            Self::Secret(s) => format!("secret {s}"),
+            Self::Contribution(c) => format!("contribution {c}"),
+        }
+    }
+}
+
+/// What an installed row looks like to an unsigned file with its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldBy<'a> {
+    pub signed: bool,
+    pub installed_from: &'a str,
+    pub reason: Option<&'a str>,
+    /// Who the row says made it (an unsigned file's own claim).
+    pub author: &'a str,
+    pub source_repo: &'a str,
+}
+
+/// Who a file or folder says made it: the author and repository its manifest names.
+pub type Claimed<'a> = (&'a str, &'a str);
+
+/// A reinstall keeps the mod's stored data (I-16), so it may only come from the maker that data
+/// belongs to: another author or repository claiming the id would be served the first one's private
+/// storage. The developer uninstalls first and chooses what happens to the data. Pure.
+fn same_maker(h: &HeldBy<'_>, maker: Claimed<'_>) -> Result<(), Refusal> {
+    if (h.author, h.source_repo) == maker {
+        Ok(())
+    } else {
+        Err(Refusal::MakerChanged)
+    }
+}
+
+/// An unsigned file against the row that holds its id: always a fresh install. With no row it is
+/// plain; over a row left by an earlier unsigned file of the same maker it is a fresh install again
+/// (the caller mints a new install id and resets the grants and secrets, spec §1.1); over anything
+/// else it is refused. There is no version rule: a developer reinstalls the version they are
+/// working on. Pure.
+pub fn decide_unsigned(
+    held: Option<HeldBy<'_>>,
+    maker: Claimed<'_>,
+) -> Result<InstallKind, Refusal> {
+    let Some(h) = held else {
+        return Ok(InstallKind::Fresh);
+    };
+    if h.reason == Some(store::REASON_BLACKLIST_REMOVED) {
+        return Err(Refusal::RemovedPending);
+    }
+    if h.signed || h.installed_from != store::FROM_FILE {
+        return Err(Refusal::OtherInstallHoldsId);
+    }
+    same_maker(&h, maker)?;
+    // An earlier unsigned file's row: the install over it is a fresh one.
+    Ok(InstallKind::Fresh)
+}
+
+/// A test folder against the row that holds its id (module doc of `ledger/folder.rs`): a fresh load
+/// when nothing holds the id, and again over an earlier loaded folder of the same id (a developer
+/// loads the mod they are working on again: a fresh install id, grants and secrets reset, stored data
+/// kept for the session). Anything else is refused, so a folder can't take over a mod another source
+/// installed. Pure.
+pub fn decide_folder(held: Option<HeldBy<'_>>, maker: Claimed<'_>) -> Result<InstallKind, Refusal> {
+    let Some(h) = held else {
+        return Ok(InstallKind::Fresh);
+    };
+    if h.reason == Some(store::REASON_BLACKLIST_REMOVED) {
+        return Err(Refusal::RemovedPending);
+    }
+    if h.signed || h.installed_from != store::FROM_FOLDER {
+        return Err(Refusal::OtherInstallHoldsId);
+    }
+    same_maker(&h, maker)?;
+    Ok(InstallKind::Fresh)
+}
+
+/// Whether a loaded test folder's files, read again after a change, may replace what is running
+/// (pure): the same mod from the same maker (the author and repository the stored row shows, which
+/// the user saw on the screen), asking for nothing the user hasn't seen. `old_manifest` is the stored
+/// manifest verbatim, `granted` the permissions the user granted.
+pub fn decide_reload(
+    id: &str,
+    author: &str,
+    source_repo: &str,
+    old_manifest: &str,
+    new: &Manifest,
+    granted: &BTreeSet<String>,
+) -> Result<(), Refusal> {
+    if new.id.as_str() != id
+        || new.publisher.author != author
+        || new.publisher.source_repo != source_repo
+    {
+        return Err(Refusal::ReloadChangedId);
+    }
+    let wider = widening(old_manifest, new, granted);
+    if wider.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::ReloadWidens(wider))
+    }
+}
+
+/// What the load does to a row about developer mode (pure): `None` leaves it. `allowed` is whether
+/// developer mode is on for this device in this vault; `state` and `reason` are the row's after
+/// the load's own parks and unparks. A signed row is never touched.
+/// - **Off:** an active unsigned row is paused, `dev-mode`. Another owner's stop (the user's, the
+///   safety list's, a park) is left as it is: it serves nothing already.
+/// - **On:** a row paused `dev-mode` is resumed, and nothing else is: exactly what developer mode
+///   being off had stopped. The caller asks the safety list first.
+pub fn dev_mode_state(
+    signed: bool,
+    allowed: bool,
+    state: &str,
+    reason: Option<&str>,
+) -> Option<(&'static str, Option<&'static str>)> {
+    if signed {
+        return None;
+    }
+    match (allowed, state, reason) {
+        (false, store::STATE_ACTIVE, _) => {
+            Some((store::STATE_PAUSED, Some(store::REASON_DEV_MODE)))
+        }
+        (true, store::STATE_PAUSED, Some(store::REASON_DEV_MODE)) => {
+            Some((store::STATE_ACTIVE, None))
+        }
+        _ => None,
     }
 }
 
@@ -200,6 +390,13 @@ pub fn decide(
     let Some(p) = pinned else {
         return Ok(InstallKind::Fresh);
     };
+    // A NULL pin is a loaded test folder (v60: only `folder` rows have no package sha256). It has
+    // no package to be repaired from and no release line to be updated along, so no package, signed
+    // or not, may install over it, whatever its version and publisher say: an `atlas.*` folder in a
+    // development build must not be turned into a "real" Map by the catalogue's.
+    if p.package_sha256.is_none() {
+        return Err(Refusal::TestFolderHoldsId);
+    }
     if p.tier != publisher.tier.as_str()
         || p.author != publisher.author
         || p.source_repo != publisher.source_repo
@@ -432,9 +629,10 @@ mod tests {
             package_sha256: None,
             ..p.clone()
         };
+        // A NULL pin is a loaded test folder: never a repair, never an update, whatever the file.
         assert_eq!(
             decide(Some(&unsigned_pin), &v("1.2.0"), "aa", &atlas),
-            Err(Refusal::SameVersionDifferentFile),
+            Err(Refusal::TestFolderHoldsId),
             "no pinned file is never a repair"
         );
         let garbled = Pinned {
@@ -694,5 +892,289 @@ mod tests {
         let mut signed = maker(true, first);
         signed.tier = "third".into();
         assert!(!made_it(&maker(false, first), &signed));
+    }
+
+    #[test]
+    fn an_unsigned_file_is_always_a_fresh_install_and_only_over_its_own_kind_of_row() {
+        let held = |signed, installed_from, reason| {
+            decide_unsigned(
+                Some(HeldBy {
+                    signed,
+                    installed_from,
+                    reason,
+                    author: "Ann",
+                    source_repo: "ann/tool",
+                }),
+                ("Ann", "ann/tool"),
+            )
+        };
+        assert_eq!(
+            decide_unsigned(None, ("Ann", "ann/tool")),
+            Ok(InstallKind::Fresh)
+        );
+        // Another author or repository claiming the id would inherit what the first one stored.
+        for maker in [("Bob", "ann/tool"), ("Ann", "bob/tool"), ("", "")] {
+            assert_eq!(
+                decide_unsigned(
+                    Some(HeldBy {
+                        signed: false,
+                        installed_from: "file",
+                        reason: None,
+                        author: "Ann",
+                        source_repo: "ann/tool",
+                    }),
+                    maker
+                ),
+                Err(Refusal::MakerChanged),
+                "{maker:?}"
+            );
+        }
+        // Over an earlier unsigned file install, whatever state it is in, and with any version.
+        assert_eq!(held(false, "file", None), Ok(InstallKind::Fresh));
+        assert_eq!(held(false, "file", Some("user")), Ok(InstallKind::Fresh));
+        assert_eq!(
+            held(false, "file", Some("dev-mode")),
+            Ok(InstallKind::Fresh)
+        );
+        // Over a signed mod, a catalogue or folder install: refused, so an id can't be taken over.
+        for (signed, from) in [
+            (true, "file"),
+            (true, "catalogue"),
+            (false, "folder"),
+            (false, "catalogue"),
+        ] {
+            assert_eq!(
+                held(signed, from, None),
+                Err(Refusal::OtherInstallHoldsId),
+                "{signed} {from}"
+            );
+        }
+        // A row the safety list removed waits for its uninstall, whoever made it.
+        assert_eq!(
+            held(false, "file", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+        assert_eq!(
+            held(true, "catalogue", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+    }
+
+    #[test]
+    fn developer_mode_pauses_an_active_unsigned_row_and_resumes_only_what_it_paused() {
+        use store::{REASON_DEV_MODE, STATE_ACTIVE, STATE_PARKED, STATE_PAUSED};
+        let off_paused = Some((STATE_PAUSED, Some(REASON_DEV_MODE)));
+        // Off: an active unsigned row is paused for developer mode.
+        assert_eq!(dev_mode_state(false, false, STATE_ACTIVE, None), off_paused);
+        // Off: everything else is left (it serves nothing already, and it is another owner's).
+        for (state, reason) in [
+            (STATE_PAUSED, Some("user")),
+            (STATE_PAUSED, Some("blacklist")),
+            (STATE_PAUSED, Some("blacklist-removed")),
+            (STATE_PAUSED, Some(REASON_DEV_MODE)),
+            (STATE_PARKED, Some("files-missing")),
+            ("installing", None),
+        ] {
+            assert_eq!(
+                dev_mode_state(false, false, state, reason),
+                None,
+                "{state} {reason:?}"
+            );
+        }
+        // On: exactly the rows developer mode paused come back; nothing else is resumed.
+        assert_eq!(
+            dev_mode_state(false, true, STATE_PAUSED, Some(REASON_DEV_MODE)),
+            Some((STATE_ACTIVE, None))
+        );
+        for (state, reason) in [
+            (STATE_PAUSED, Some("user")),
+            (STATE_PAUSED, Some("blacklist")),
+            (STATE_PAUSED, None),
+            (STATE_ACTIVE, None),
+            (STATE_PARKED, Some("files-missing")),
+        ] {
+            assert_eq!(
+                dev_mode_state(false, true, state, reason),
+                None,
+                "{state} {reason:?}"
+            );
+        }
+        // A signed row is never touched, in either direction.
+        assert_eq!(dev_mode_state(true, false, STATE_ACTIVE, None), None);
+        assert_eq!(
+            dev_mode_state(true, true, STATE_PAUSED, Some(REASON_DEV_MODE)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_loaded_test_folder_has_a_null_pin_and_no_package_ever_installs_over_it() {
+        // v60: only a folder row has no package sha256. It is neither an update's base nor a repair's.
+        let folder = Pinned {
+            package_sha256: None,
+            ..pinned("1.2.0", "aa")
+        };
+        let atlas = publisher(Tier::First, "Atlas", "itsAtlas-org/pm-mods");
+        for (version, sha) in [
+            ("1.3.0", "bb"),
+            ("1.2.0", "aa"),
+            ("1.2.0", ""),
+            ("1.0.0", "aa"),
+        ] {
+            assert_eq!(
+                decide(Some(&folder), &v(version), sha, &atlas),
+                Err(Refusal::TestFolderHoldsId),
+                "{version} {sha}"
+            );
+        }
+        // Even another publisher's file gets the same, plainer answer: the id is a folder's.
+        let other = publisher(Tier::Third, "Someone", "someone/else");
+        assert_eq!(
+            decide(Some(&folder), &v("9.0.0"), "aa", &other),
+            Err(Refusal::TestFolderHoldsId)
+        );
+        // A real pin is untouched by the rule.
+        assert_eq!(
+            decide(Some(&pinned("1.2.0", "aa")), &v("1.3.0"), "bb", &atlas),
+            Ok(InstallKind::Update)
+        );
+    }
+
+    #[test]
+    fn a_test_folder_loads_fresh_and_only_over_its_own_kind_of_row() {
+        let held = |signed, installed_from, reason| {
+            decide_folder(
+                Some(HeldBy {
+                    signed,
+                    installed_from,
+                    reason,
+                    author: "Ann",
+                    source_repo: "ann/tool",
+                }),
+                ("Ann", "ann/tool"),
+            )
+        };
+        assert_eq!(
+            decide_folder(None, ("Ann", "ann/tool")),
+            Ok(InstallKind::Fresh)
+        );
+        for maker in [("Bob", "ann/tool"), ("Ann", "bob/tool")] {
+            assert_eq!(
+                decide_folder(
+                    Some(HeldBy {
+                        signed: false,
+                        installed_from: "folder",
+                        reason: None,
+                        author: "Ann",
+                        source_repo: "ann/tool",
+                    }),
+                    maker
+                ),
+                Err(Refusal::MakerChanged),
+                "{maker:?}"
+            );
+        }
+        // Over an earlier loaded folder, in any state: a fresh load again.
+        for reason in [None, Some("user"), Some("frozen"), Some("blacklist")] {
+            assert_eq!(held(false, "folder", reason), Ok(InstallKind::Fresh));
+        }
+        // Never over a mod another source installed, signed or not.
+        for (signed, from) in [
+            (true, "catalogue"),
+            (true, "file"),
+            (false, "file"),
+            (false, "catalogue"),
+        ] {
+            assert_eq!(
+                held(signed, from, None),
+                Err(Refusal::OtherInstallHoldsId),
+                "{signed} {from}"
+            );
+        }
+        assert_eq!(
+            held(false, "folder", Some("blacklist-removed")),
+            Err(Refusal::RemovedPending)
+        );
+    }
+
+    #[test]
+    fn a_reload_replaces_only_the_same_mod_asking_for_nothing_new() {
+        let same = manifest(|_| {});
+        let reload = |id: &str, m: &Manifest| {
+            decide_reload(
+                id,
+                "Atlas",
+                "itsAtlas-org/pm-mods",
+                OLD,
+                m,
+                &BTreeSet::new(),
+            )
+        };
+        assert_eq!(reload("atlas.map", &same), Ok(()));
+        // Asking for less is fine.
+        let fewer = manifest(|m| {
+            m.permissions.pop();
+            m.internet_hosts.clear();
+        });
+        assert_eq!(reload("atlas.map", &fewer), Ok(()));
+        // Another id, author or repository is another mod or maker than the one the user saw.
+        assert_eq!(reload("acme.tool", &same), Err(Refusal::ReloadChangedId));
+        let other_author = manifest(|m| m.publisher.author = "Someone".into());
+        assert_eq!(
+            reload("atlas.map", &other_author),
+            Err(Refusal::ReloadChangedId)
+        );
+        let other_repo = manifest(|m| m.publisher.source_repo = "someone/else".into());
+        assert_eq!(
+            reload("atlas.map", &other_repo),
+            Err(Refusal::ReloadChangedId)
+        );
+        // A permission the user already granted is not a widening, though the old manifest lacked it.
+        let granted: BTreeSet<String> = ["documents.text".to_owned()].into();
+        let grown = manifest(|m| {
+            m.permissions.push(Permission {
+                id: "documents.text".into(),
+                why: String::new(),
+            })
+        });
+        assert_eq!(
+            decide_reload(
+                "atlas.map",
+                "Atlas",
+                "itsAtlas-org/pm-mods",
+                OLD,
+                &grown,
+                &granted
+            ),
+            Ok(())
+        );
+        // Each kind of widening stops it, naming what it is.
+        for (change, word) in [
+            (
+                Box::new(|m: &mut Manifest| {
+                    m.permissions.push(Permission {
+                        id: "documents.text".into(),
+                        why: String::new(),
+                    })
+                }) as Box<dyn FnOnce(&mut Manifest)>,
+                "permission documents.text",
+            ),
+            (
+                Box::new(|m| m.internet_hosts.push("evil.example.com".into())),
+                "host evil.example.com",
+            ),
+            (
+                Box::new(|m| m.secrets[0].host = "evil.example.com".into()),
+                "secret token",
+            ),
+            (
+                Box::new(|m| m.contributions.calendar_overlay = Some("Cal".into())),
+                "contribution calendar.overlay",
+            ),
+        ] {
+            let e = reload("atlas.map", &manifest(change)).unwrap_err();
+            assert!(matches!(e, Refusal::ReloadWidens(_)), "{word}: {e:?}");
+            assert!(e.to_string().contains(word), "{word}: {e}");
+        }
     }
 }

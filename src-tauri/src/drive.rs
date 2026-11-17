@@ -1349,6 +1349,8 @@ pub fn resolve_owned_swm_duplicate(
     // One transaction: the absorb and the purge commit together, so a failure between them can never
     // leave the duplicate deleted with its filing not yet carried across.
     let tx = conn.unchecked_transaction()?;
+    // The merged importance can shelve the survivor (or bring it back): news to mods.
+    let was_listed = crate::mods::api::events::is_listed(&tx, my_row);
     tx.execute(
         "UPDATE documents SET project = ?2, tags = ?3, importance = ?4, reviewed = ?5, \
              entity_id = ?6 WHERE id = ?1",
@@ -1361,6 +1363,7 @@ pub fn resolve_owned_swm_duplicate(
             merged.entity_id
         ],
     )?;
+    crate::mods::api::events::note_listing_change(&tx, my_row, was_listed);
     // Union the join rows (projects AND labels) before the doomed row cascades them away. Additive by
     // construction: a link the survivor already had is untouched, one only the duplicate had is kept,
     // and a home project that lost the tie above lands here as a linked project rather than vanishing.
@@ -3451,6 +3454,43 @@ mod tests {
         assert_eq!(
             resolve_owned_swm_duplicate(&conn, EMAIL, "ROOT", "F1").unwrap(),
             SwmDuplicate::Absent
+        );
+    }
+
+    #[test]
+    fn absorbing_a_swm_duplicate_tells_the_mods_when_it_shelves_or_unshelves_the_survivor() {
+        // The absorbed row's confirmed filing can carry the archive level onto the My-Drive row, or
+        // lift it off: either changes what a mod may read.
+        use crate::mods::api::events::testing::{record, Noted};
+        let run = |mine: (&str, i64), theirs: (&str, i64)| -> (i64, i64, Vec<Noted>) {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+            let insert = |sid: String, (importance, reviewed): (&str, i64)| -> i64 {
+                conn.execute(
+                    "INSERT INTO documents(source_type, source_id, title, project, tags, reviewed, \
+                         importance, vault_path, content_hash) \
+                     VALUES ('index_only', ?1, 't', 'Taxes', '[]', ?2, ?3, ?4, ?4)",
+                    params![sid, reviewed, importance, format!("v/{sid}")],
+                )
+                .unwrap();
+                conn.last_insert_rowid()
+            };
+            let my_row = insert(source_id_for(EMAIL, "F1"), mine);
+            let swm_row = insert(swm_source_id("ROOT", "F1"), theirs);
+            let notes = record();
+            let outcome = resolve_owned_swm_duplicate(&conn, EMAIL, "ROOT", "F1").unwrap();
+            assert!(matches!(outcome, SwmDuplicate::Merged(_)));
+            (my_row, swm_row, notes.take())
+        };
+        // The reviewed duplicate decides, and it is archived: the survivor goes on the shelf. (The
+        // duplicate itself was shelved, so its going is no news.)
+        let (mine, _, noted) = run(("high", 0), ("archive", 1));
+        assert_eq!(noted, [Noted::Left(vec![mine])]);
+        // The reviewed duplicate decides, readable, over a shelved survivor: it comes off.
+        let (mine, theirs, noted) = run(("archive", 0), ("high", 1));
+        assert_eq!(
+            noted,
+            [Noted::Joined(vec![mine]), Noted::Left(vec![theirs])]
         );
     }
 

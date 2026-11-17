@@ -22,6 +22,8 @@ vi.mock("../lib/capabilities", async (importOriginal) => ({
   useDevMode: () => ({ devMode: gates.devMode, setDevMode: () => {} }),
 }));
 
+import { ModRowsContext } from "../lib/modRows";
+import type { ModInfo } from "../lib/modsTypes";
 import { SidebarNav } from "./SidebarNav";
 import { ContextMenuHost } from "./ui/ContextMenuHost";
 
@@ -63,6 +65,7 @@ describe("SidebarNav", () => {
       "teach",
       "graph",
       "pinboard",
+      "mods",
     ]);
   });
 
@@ -102,7 +105,8 @@ describe("SidebarNav", () => {
 
     rightClick(screen.getByRole("button", { name: "Pinboard" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Unpin" }));
-    expect(last(tabs())).toBe("pinboard");
+    // Back in its own place, just before the Mods tab that follows it.
+    expect(tabs().slice(-2)).toEqual(["pinboard", "mods"]);
   });
 
   it("hides the learning tools together", () => {
@@ -127,7 +131,7 @@ describe("SidebarNav", () => {
   it("on Minimal, leaves the learning tools and Map out until shown, which pins", () => {
     gates.depth = "min";
     renderNav();
-    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "pinboard"]);
+    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
     rightClick(screen.getByRole("button", { name: "Focus" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Show Review and Teach" }));
     expect(tabs().slice(0, 2)).toEqual(["review", "teach"]);
@@ -148,5 +152,99 @@ describe("SidebarNav", () => {
     renderNav();
     rightClick(screen.getByRole("button", { name: "Map" }), { shiftKey: true });
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+// The mod tabs: installed mods' own entries, appended after PM's (spec §1.17) from the rows
+// `lib/modRows` shares, reachable from the same right-click menu as every other tab.
+describe("SidebarNav: mod tabs", () => {
+  const CORE = [
+    "focus",
+    "chat",
+    "calendar",
+    "documents",
+    "review",
+    "teach",
+    "graph",
+    "pinboard",
+    "mods",
+  ];
+  const row = (id: string, navTab: string | null, name = "Acme Tool"): ModInfo =>
+    ({ id, name, navTab }) as ModInfo;
+
+  function renderWithMods(rows: ModInfo[], onNavigate: (view: string) => void = () => {}) {
+    return render(
+      <ModRowsContext.Provider
+        value={{ rows, loaded: true, problem: null, refresh: () => Promise.resolve() }}
+      >
+        <SidebarNav view="focus" onNavigate={onNavigate} reviewCount={0} onNew={() => {}} />
+        <ContextMenuHost />
+      </ModRowsContext.Provider>,
+    );
+  }
+
+  it("appends an installed mod's tab after PM's own, marked as a mod's, and opens it", () => {
+    const onNavigate = vi.fn();
+    renderWithMods([row("acme.tool", "Acme Tool")], onNavigate);
+    expect(tabs()).toEqual([...CORE, "mod:acme.tool"]);
+    const tab = screen.getByRole("button", { name: /Acme Tool/ });
+    expect(tab.textContent).toContain("mod");
+    // The help id is the one literal every mod tab shares (help mode can't see inside a frame).
+    expect(tab.getAttribute("data-help")).toBe("nav-mod-tab");
+    fireEvent.click(tab);
+    expect(onNavigate).toHaveBeenCalledWith("mod:acme.tool");
+  });
+
+  it("gives a mod that names no tab none", () => {
+    renderWithMods([row("acme.quiet", null)]);
+    expect(tabs()).toEqual(CORE);
+  });
+
+  it("draws the name a mod chose as plain, cleaned text, so it can't pass for one of PM's", () => {
+    // A tab called "Settings" is still marked "mod"; a right-to-left override and a line break in the
+    // name can't reorder or split the row.
+    renderWithMods([row("acme.tool", "Sett‮ings\nnow")]);
+    const tab = document.querySelector('[data-nav-id="mod:acme.tool"] button') as HTMLElement;
+    expect(tab.textContent).toContain("Sett ings now");
+    expect(tab.textContent).not.toContain("‮");
+    expect(tab.textContent).toContain("mod");
+  });
+
+  it("pins and hides a mod's tab from its right-click menu, and shows it again from another's", () => {
+    renderWithMods([row("acme.tool", "Acme Tool")]);
+    rightClick(screen.getByRole("button", { name: /Acme Tool/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Pin to the top" }));
+    expect(tabs()[0]).toBe("mod:acme.tool");
+
+    rightClick(screen.getByRole("button", { name: /Acme Tool/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hide" }));
+    expect(tabs()).not.toContain("mod:acme.tool");
+
+    rightClick(screen.getByRole("button", { name: "Focus" }));
+    // Named as a mod's tab (quoted and marked), so it can't pass for one of PM's own.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show “Acme Tool” (mod)" }));
+    expect(tabs()).toContain("mod:acme.tool");
+  });
+
+  it("never offers to hide the Mods tab", () => {
+    renderWithMods([row("acme.tool", "Acme Tool")]);
+    rightClick(screen.getByRole("button", { name: "Mods" }));
+    const menu = screen.getByRole("menu", { name: "Mods tab" });
+    expect(within(menu).queryByRole("menuitem", { name: "Hide" })).toBeNull();
+    expect(within(menu).getByRole("menuitem", { name: "Pin to the top" })).toBeTruthy();
+  });
+
+  it("follows the rows as they change, with no provider drawing PM's own tabs alone", () => {
+    const { rerender } = renderWithMods([row("acme.tool", "Acme Tool")]);
+    expect(tabs()).toContain("mod:acme.tool");
+    rerender(
+      <ModRowsContext.Provider
+        value={{ rows: [], loaded: true, problem: null, refresh: () => Promise.resolve() }}
+      >
+        <SidebarNav view="focus" onNavigate={() => {}} reviewCount={0} onNew={() => {}} />
+        <ContextMenuHost />
+      </ModRowsContext.Provider>,
+    );
+    expect(tabs()).toEqual(CORE);
   });
 });

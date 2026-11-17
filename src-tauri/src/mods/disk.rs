@@ -349,7 +349,8 @@ pub fn failpoint(step: Step) -> io::Result<()> {
 
 // ---- Writing a package -------------------------------------------------------------------------
 
-fn random_name() -> io::Result<String> {
+/// 16 random lowercase hex digits (also the index state file's temp names, `index_state.rs`).
+pub(super) fn random_name() -> io::Result<String> {
     let mut buf = [0u8; STAGING_NAME_BYTES];
     getrandom::fill(&mut buf).map_err(|e| io::Error::other(format!("no randomness: {e}")))?;
     Ok(hex::encode(buf))
@@ -371,7 +372,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Flush a folder's entries, so a rename or a new file survives a crash as well as its bytes.
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(path: &Path) -> io::Result<()> {
     failpoint(Step::SyncDir)?;
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;

@@ -928,6 +928,9 @@ pub fn adopt_shared_vault(
         ));
     }
     let runtime = vault_runtime_for(&resolved, &meta, key.expose())?;
+    // The join writes nothing about developer mode: it is per device (`mods::devmode`), this
+    // device has no entry in the shared store's record so it reads off, and nothing but a record
+    // that lists a device ever switches it on (the old row is never read).
     // attach_profile_here → open_session clears any carried "vault unreachable" fault.
     attach_profile_here(&app, &state, root.clone(), conn, runtime)?;
     // A completed rejoin retires the breadcrumb: if this folder is the one the profile
@@ -940,6 +943,10 @@ pub fn adopt_shared_vault(
     }
     // M-3: if the meta was repaired on open, tell the user (non-blocking).
     emit_vault_meta_warning(&app, &state, &meta_report);
+    // Unlike a restore's commit, joining resets nothing else about mods in the store: it is the
+    // vault's, in use by its other accounts and machines, and connected apps are per device. The
+    // seam takes no store, so it cannot write one (`backup::adopt_mods`).
+    crate::backup::adopt_mods::joiner_accepts_only_its_own_clients();
     Ok(AdoptOutcome {
         active_writer: lock_session::status(&app).active,
         warnings,

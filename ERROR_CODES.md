@@ -45,8 +45,37 @@ Ranges: `1xxx` cross-platform · `2xxx` Windows · `3xxx` macOS · `4xxx` Linux.
 > means `sandbox-exec` applied the profile (network denied and the filesystem restricted together);
 > it has no degraded middle state — the profile applies whole, or the worker runs unconfined.
 
+## `MOD-####` — mod calls
+
+A mod asks PM for things (your documents' titles, its own saved settings, PM's theme) through PM's
+mod API. When PM refuses or can't complete one of those calls, the mod receives one of these codes
+with a short message, and a well-made mod tells you what happened. A mod may also show the code
+itself: quote it, with the mod's name, when you report a problem with a mod.
+
+Ranges: `1xxx` the call itself · `2xxx` permission · `3xxx` limits · `4xxx` the data · `5xxx` the
+state of PM or the mod · `9xxx` PM's own failure.
+
+| Code | What it means |
+|------|---------------|
+| `MOD-1001` | There is no call by that name in this version of PM. |
+| `MOD-1002` | The call was removed from PM's mod API; the mod needs an update. |
+| `MOD-1003` | The call's arguments aren't what it takes (a missing or unknown field, a malformed key). |
+| `MOD-2001` | The mod doesn't have the permission the call needs: it never asked for it, you turned it off, it wasn't granted at install, or a safety rule refuses it (unsigned mods may read your data or reach the internet, never both; and they can't read your data while PM's web engine isn't sealed). |
+| `MOD-2002` | The call needs a permission PM asks you for the first time it's used, and you haven't been asked yet. |
+| `MOD-3001` | The mod is calling PM too fast, or has too many calls running at once. |
+| `MOD-3002` | The call's arguments, or its answer, are larger than PM allows. |
+| `MOD-3003` | The mod's private storage is full. |
+| `MOD-4001` | The mod tried to save over a value that changed since it read it (another of its windows saved first); it should read it again. |
+| `MOD-4002` | Nothing was found, or nothing the mod is allowed to see (PM never tells the two apart). |
+| `MOD-5001` | PM is locked, or its data is closed (another profile has the vault open, or it's still locked). |
+| `MOD-5002` | The mod isn't running: it's paused, parked, still installing, or not turned on yet. |
+| `MOD-5003` | The mod's session ended before the call finished (its tab closed, it was updated or uninstalled, PM locked, or the vault changed). |
+| `MOD-9001` | PM couldn't complete the call. The details are in PM's log; the mod only gets this code. |
+
 ---
 
-*Maintainers: the authoritative list is the `sbx` module in
-[`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs). Keep this table in sync when you add a code,
-and **never renumber or reuse a shipped one** — they travel in logs and bug reports.*
+*Maintainers: the authoritative lists are the `sbx` module in
+[`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs) and `Code` in
+[`src-tauri/src/mods/api/error.rs`](src-tauri/src/mods/api/error.rs) (a test there fails when this
+`MOD` table and `Code` disagree). Keep the tables in sync when you add a code, and **never renumber
+or reuse a shipped one** — they travel in logs and bug reports, and mods branch on the `MOD` codes.*

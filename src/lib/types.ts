@@ -1345,6 +1345,39 @@ export interface RestoreSummary {
   app_version: string;
   created_at: string;
   target_dir: string;
+  /** The mods the backup held, all `pending` here: whether a mod's files are on this computer isn't
+   *  known until the vault is opened ({@link SwitchOutcome.mods} is the settled answer). */
+  mods: RestoredMod[];
+}
+
+/** Where a restored mod stands (mirrors the Rust `adopt_mods::Standing`). `pending`: the store isn't
+ *  open yet; `back`: it runs (the registry serves it, not merely an `active` row); `paused`: here but
+ *  switched off or held by the safety list; `parked`: it can't run, and `note` says what gets it
+ *  back; `installing`: an install that hadn't finished; `waiting`: on, but waiting for the user to
+ *  open it the first time. */
+export type RestoredModStanding =
+  "pending" | "back" | "paused" | "parked" | "installing" | "waiting";
+
+/** One mod a restore lists, with the words to show beside it. */
+export interface RestoredMod {
+  id: string;
+  name: string;
+  version: string;
+  tier: "first" | "second" | "third";
+  signed: boolean;
+  /** `catalogue` or `file`. */
+  source: string;
+  standing: RestoredModStanding;
+  /** What to do or what happened (spec §1.11's "Install X to get this back"), or null when the mod
+   *  is simply back, or still `pending` (nothing is known before the switch). */
+  note: string | null;
+}
+
+/** What `switch_to_vault` answers: the reconcile's warnings (it used to drop them) and the settled
+ *  standing of each restored mod, read after the open and the same-machine recovery have run. */
+export interface SwitchOutcome {
+  warnings: string[];
+  mods: RestoredMod[];
 }
 
 /** Whether the official `proton-drive` CLI is installed (for backing up to Proton Drive). PM
@@ -1613,9 +1646,21 @@ export interface StorageComponent {
   manage: StorageManage | null;
   note: string | null;
 }
+/** One installed mod's footprint (spec §1.14), for the Storage tab's Mods section. */
+export interface StorageMod {
+  id: string;
+  name: string;
+  version: string;
+  /** Real bytes of its files under `data/mods/<vault>/<store>/<id>`; 0 when it has none here. */
+  folder_bytes: number;
+  /** Approximate: the bytes of the values it stored in the database, not the file's growth. */
+  data_bytes: number;
+}
 export interface StorageReport {
+  /** The on-device components' total; the mods' footprint is in `mods`, not added to it. */
   total_bytes: number;
   components: StorageComponent[];
+  mods: StorageMod[];
 }
 
 /** Global progress for the semantic-layout precompute (fires regardless of which view started it). */

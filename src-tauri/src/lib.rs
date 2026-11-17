@@ -35,6 +35,7 @@ mod connector_sync;
 mod context_budget;
 mod cost;
 mod db;
+mod doc_vectors;
 mod drive;
 mod duplicates;
 mod entities;
@@ -82,6 +83,8 @@ mod milestones;
 mod model_gateway;
 // Mods (spec docs/mods-spec-2026-11-04.md): so far the sealed webview engine every window is built with.
 mod mods;
+// The public-internet screen: calendar feeds now, a mod's `net.fetch` later.
+mod net_screen;
 mod oauth_loopback;
 mod onedrive;
 mod openai_compat;
@@ -144,7 +147,7 @@ mod wipe;
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -173,6 +176,12 @@ pub struct VaultRuntime {
     /// sources we index but don't fully import). Same primitive as `rules_cipher`, a distinct AAD
     /// stem apart; sits next to the rules file at the vault root.
     pub manifest_cipher: index_only::ManifestCipher,
+    /// The key the open store was opened with (`vault::db_key_hex` of the master every open path
+    /// builds this runtime from). Private, and read only by [`AppState::session_db_key`] for a copy
+    /// of the store that leaves (`backup::strip`), which must open the copy with the live store's
+    /// own key: the keychain's cached copy can be missing while the store is open (a cache write
+    /// that failed at unlock, "Forget passphrase", a locked keyring).
+    db_key: secret::Secret,
 }
 
 impl VaultRuntime {
@@ -190,6 +199,7 @@ impl VaultRuntime {
             cipher: vault::MarkdownCipher::from_meta(meta, master),
             rules_cipher: entities::RulesCipher::from_master(&meta.vault_id, master),
             manifest_cipher: index_only::ManifestCipher::from_master(&meta.vault_id, master),
+            db_key: vault::db_key_hex(master),
         }
     }
 }
@@ -496,6 +506,12 @@ pub struct AppState {
     /// vault on a profile that hasn't unlocked it yet. Reach it via [`AppState::conn`],
     /// never by locking the mutex directly, so the locked case is handled uniformly.
     pub db: Mutex<Option<Connection>>,
+    /// Which store `db` holds: bumped by every swap of the connection ([`AppState::open_session`],
+    /// [`AppState::take_conn`]), always while `db`'s mutex is held, so a reader holding
+    /// [`AppState::conn`]'s guard reads the epoch of exactly the store it is using. A mod's frame
+    /// session is bound to the epoch it was opened under (`mods::runtime`), so a frame opened over
+    /// one vault's store never reads or writes another's (Mods spec §1.8).
+    store_epoch: AtomicU64,
     /// The active vault's Markdown dir + cipher, kept in lockstep with `db`: set
     /// together when the store opens, both `None` while locked. Reach it via
     /// [`AppState::markdown_io`].
@@ -702,6 +718,7 @@ impl AppState {
     ) -> Self {
         AppState {
             db: Mutex::new(db),
+            store_epoch: AtomicU64::new(0),
             vault: Mutex::new(vault),
             sidecar,
             app_unlocked: AtomicBool::new(false),
@@ -875,6 +892,9 @@ impl AppState {
                 .map_err(|_| error::Error::Other("vault lock poisoned".into()))?;
             *db = Some(conn);
             *vault = Some(runtime);
+            // Under `db`'s guard, so whoever holds the guard next sees the new store's epoch.
+            self.store_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The one choke point that heals fault state: every successful open path (retry,
         // unlock, adopt, repair, curtain take-over) lands here, so none can leave a stale
@@ -957,7 +977,16 @@ impl AppState {
             .db
             .lock()
             .map_err(|_| error::Error::Other("database lock poisoned".into()))?;
+        self.store_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(guard.take())
+    }
+
+    /// Which store is open: changes with every [`AppState::open_session`] and
+    /// [`AppState::take_conn`]. Read it while holding [`AppState::conn`]'s guard to know it is the
+    /// epoch of the store that guard reaches; read without it, it can only be stale, never ahead.
+    pub fn store_epoch(&self) -> u64 {
+        self.store_epoch.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Replace the active vault's Markdown runtime in place (the connection stays open).
@@ -996,6 +1025,24 @@ impl AppState {
     pub fn active_vault_id(&self) -> Option<String> {
         let guard = self.vault.lock().ok()?;
         guard.as_ref().map(|rt| rt.cipher.vault_id().to_owned())
+    }
+
+    /// The key the open store was opened with, for opening a copy of it (`backup::strip`: every
+    /// backup and the export). Taken from the session rather than the keychain, so a passphrase
+    /// vault whose key this account didn't cache (a failed cache write, "Forget passphrase", a
+    /// locked keyring) still backs up while it is open. Safe to call while holding
+    /// [`Self::conn`]'s guard (DB then vault, as [`Self::open_session`] takes them). The clone is a
+    /// zeroizing [`secret::Secret`]; callers keep it only for the copy.
+    pub(crate) fn session_db_key(&self) -> error::Result<secret::Secret> {
+        let guard = self
+            .vault
+            .lock()
+            .map_err(|_| error::Error::Other("vault lock poisoned".into()))?;
+        guard.as_ref().map(|rt| rt.db_key.clone()).ok_or_else(|| {
+            error::Error::Other(
+                "this vault's key isn't available on this device, so nothing was copied".into(),
+            )
+        })
     }
 
     /// Snapshot the active vault's Markdown dir + cipher, or a friendly error if the
@@ -1315,7 +1362,13 @@ pub fn run() {
         std::env::set_var("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1");
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS: a content process that died (a mod's frame can take it down) gets the frozen page's
+    // recovery: the mod last active is paused, and the page reloads (`mods::watchdog`). Not
+    // compiled on Linux; the one line of it that is here is this.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(mods::watchdog::on_renderer_terminated);
+    builder
         // Must be registered first. One instance only: a second launch (e.g. a
         // double-click or an updater relaunch overlap) focuses the running window
         // and exits, so two processes can't race to create the encrypted store
@@ -1341,8 +1394,23 @@ pub fn run() {
             // to build from tauri.conf.json just before calling this hook: it's built here now, from
             // that same entry, with the navigation guard, the init scripts and the download refusal.
             // The mod runtime goes in before the window too: its guard and the scheme handler ask it.
+            // So do the mod API's call limits, which every `mod_call` reaches.
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
+            app.manage(mods::api::Calls::default());
+            // The events a frame is told (spec §1.5): what waits out its interval, and the one
+            // place document writes are reported from (`ingest::delete_document`, the archive and
+            // landing notes: `mods::api::events::Note`).
+            app.manage(mods::api::events::Hub::default());
+            mods::api::events::install_notes(handle.clone());
+            // The consent screens waiting for their answer (`mods::tab::stage`).
+            app.manage(mods::tab::stage::Stage::default());
+            // The reload-on-change watcher for developer test folders (no thread until one loads)
+            // and the frozen-page watchdog (spec §1.4, plan decision 5): a heartbeat from the page
+            // while a mod frame is mounted, a tick here every second.
+            app.manage(mods::folder_watch::FolderWatch::default());
+            app.manage(mods::watchdog::Watchdog::default());
+            mods::watchdog::spawn(handle.clone());
             mods::build_main_window(handle)?;
             // One-time: move the Google Calendar token from the legacy shared keychain key to its
             // per-service key (the move to per-service connectors). Keychain-only, no vault needed;
@@ -1400,6 +1468,15 @@ pub fn run() {
             // a locked file just waits for the next boot. (F-25)
             if let Ok(data_dir) = paths::data_dir(handle) {
                 wipe::sweep_restore_staging(&data_dir, &resolved.vault_root);
+                // And the copies a backup or export makes before they leave
+                // (`backup::strip::WORK_DIR`): encrypted copies of a store whose run never finished.
+                // No backup or export can be in flight before the window exists.
+                let swept = backup::strip::sweep_work_dir(&data_dir);
+                if swept > 0 {
+                    eprintln!(
+                        "startup: cleared {swept} unfinished backup or export copy folder(s)"
+                    );
+                }
             }
 
             // Same idea, one directory over: PM's staging files in the OS temp dir. A connector
@@ -1572,6 +1649,12 @@ pub fn run() {
             // for the life of the app. A no-op for a device-only vault.
             lock_session::engage(handle)?;
             lock_session::spawn_watcher(handle.clone());
+
+            // The mod safety list (Mods spec §1.10, D6): fetched shortly after launch and every six
+            // hours, on its own, whatever the updater's check did and with or without an open vault.
+            // Quiet when offline. Release builds fetch only the public index; a dev build pointed at
+            // another data folder may override the URL and the test key.
+            mods::refresh::spawn_refresher(handle.clone());
 
             // After the writer lock is settled (so a stepped-back profile doesn't write), settle the
             // store launch opened exactly as every later open is settled: the rules file and the
@@ -2041,6 +2124,8 @@ pub fn run() {
             commands::backup_to_proton,
             commands::restore_from_proton,
             commands::get_backup_schedule,
+            commands::get_backup_mod_data,
+            commands::save_backup_mod_data,
             commands::set_backup_schedule,
             commands::set_backup_passphrase,
             commands::forget_backup_passphrase,
@@ -2062,6 +2147,46 @@ pub fn run() {
             mods::mod_frame_open,
             mods::mod_frame_close,
             mods::mod_call,
+            mods::mod_events_ack,
+            mods::mod_theme_changed,
+            // The Mods tab (spec §1.13): what is installed, installing from a file or the catalogue
+            // with the user's consent, uninstalling, pausing, permissions, the disclaimer and the
+            // safety list's status. Main window only.
+            mods::tab::commands::list_mods,
+            mods::tab::commands::mod_icon,
+            mods::tab::commands::list_catalogue,
+            mods::tab::commands::install_mod_file,
+            mods::tab::commands::install_mod_consented,
+            mods::tab::commands::install_from_catalogue,
+            mods::tab::commands::approve_update,
+            mods::tab::commands::repair_mod,
+            mods::tab::commands::uninstall_preview,
+            mods::tab::commands::uninstall_mod,
+            mods::tab::commands::pause_mod,
+            mods::tab::commands::resume_mod,
+            mods::tab::commands::consent_mod,
+            mods::tab::commands::mod_permission_decide,
+            mods::tab::commands::mods_disclaimer_state,
+            mods::tab::commands::accept_mods_disclaimer,
+            mods::tab::commands::mods_safety_status,
+            mods::tab::commands::dismiss_mod_resumed,
+            mods::tab::commands::reset_safety_record,
+            // Developer mode's switch, per device, and the unsigned file install's first step
+            // (Mods slice 6, part 3). Not the `commands_dev` readers below: those are harmless
+            // reads; these decide whether unsigned mods may be installed and run.
+            mods::tab::dev_commands::dev_mode_state,
+            mods::tab::dev_commands::dev_mode_switch,
+            mods::tab::dev_commands::install_unsigned_file,
+            // The Developer kit's readouts (API version, endpoints, limits, engine seal): read-only.
+            mods::tab::kit::dev_kit_info,
+            // Developer test folders (Mods slice 6, part 4): load (the stark screen's first step;
+            // the second is `install_mod_consented`), reload, unload, and what is loaded.
+            mods::tab::folder::load_test_mod,
+            mods::tab::folder::reload_test_mod,
+            mods::tab::folder::unload_test_mod,
+            mods::tab::folder::list_test_mods,
+            // The frozen-page watchdog's heartbeat, from the page while a mod frame is mounted.
+            mods::watchdog::mods_heartbeat,
             // Developer mode (issue #78) — read-only inspection. Always registered (the
             // commands are harmless reads); only the UI is gated by the runtime `devMode`.
             commands_dev::dev_system_info,

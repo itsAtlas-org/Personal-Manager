@@ -61,6 +61,8 @@ vi.mock("../lib/capabilities", async (importOriginal) => ({
 import { CommandPalette } from "./CommandPalette";
 import type { CalendarEvent } from "../lib/types";
 import { writeNavPlacement } from "../lib/nav";
+import { ModRowsContext, type ModRows } from "../lib/modRows";
+import type { ModInfo } from "../lib/modsTypes";
 
 const noop = () => {};
 
@@ -75,6 +77,13 @@ function renderPalette(onClose: () => void, onOpenEvent: (event: CalendarEvent) 
       onOpenSettings={noop}
     />,
   );
+}
+
+const onNavigate = vi.fn();
+const MODS: ModRows = { rows: [], loaded: true, problem: null, refresh: () => Promise.resolve() };
+/** An installed mod's row, as far as the sidebar reads it. */
+function modRow(id: string, navTab: string): ModInfo {
+  return { id, name: navTab, navTab } as ModInfo;
 }
 
 /** Something outside the palette to hold focus — the position a single Tab used to land on. */
@@ -127,6 +136,7 @@ describe("CommandPalette's Go to", () => {
       "Teach",
       "Map",
       "Pinboard",
+      "Mods",
       "Settings",
     ]);
   });
@@ -139,6 +149,7 @@ describe("CommandPalette's Go to", () => {
       "Calendar",
       "Documents",
       "Pinboard",
+      "Mods",
       "Settings",
     ]);
   });
@@ -153,9 +164,41 @@ describe("CommandPalette's Go to", () => {
       "Review",
       "Teach",
       "Map",
+      "Mods",
       "Calendar",
       "Settings",
     ]);
+  });
+
+  it("offers an installed mod's tab, marked as a mod's, and still offers it once hidden", async () => {
+    const withMod = () => (
+      <ModRowsContext.Provider value={{ ...MODS, rows: [modRow("acme.tool", "Acme Tool")] }}>
+        <CommandPalette
+          onClose={noop}
+          onOpenProject={noop}
+          onOpenConversation={noop}
+          onOpenEvent={noop}
+          onNavigate={onNavigate}
+          onOpenSettings={noop}
+        />
+      </ModRowsContext.Provider>
+    );
+    const { findByRole } = render(withMod());
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+    const group = await findByRole("group", { name: "Go to" });
+    const row = [...group.querySelectorAll('[role="option"]')].find((o) =>
+      o.textContent?.includes("Acme Tool"),
+    ) as HTMLElement;
+    // Marked, so a mod can't pass its tab off as one of PM's by what it calls it.
+    expect(row.textContent).toContain("Mod");
+    fireEvent.click(row);
+    expect(onNavigate).toHaveBeenCalledWith("mod:acme.tool");
+
+    cleanup();
+    writeNavPlacement({ hidden: ["mod:acme.tool"], pinned: [] });
+    const again = render(withMod());
+    const hiddenGroup = await again.findByRole("group", { name: "Go to" });
+    expect(hiddenGroup.textContent).toContain("Acme Tool");
   });
 
   it("offers Dev only in developer mode", async () => {

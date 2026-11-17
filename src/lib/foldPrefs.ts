@@ -31,6 +31,25 @@ export function writeFold(key: string, open: boolean): void {
   }
 }
 
+/** Forget every fold that is `prefix` itself or a section of it (`prefix:<section>`). The Mods tab
+ *  keys a mod's folds `mods.mod.<id>` and `mods.mod.<id>:<section>` and calls this when the mod is
+ *  uninstalled, so a mod installed again later starts folded as the tab would have it, not as the
+ *  last one was left. A `:` is required after the prefix, so `mods.mod.a` never takes `mods.mod.ab`. */
+export function pruneFolds(prefix: string): void {
+  if (prefix === "") return;
+  try {
+    const own = PREFIX + prefix;
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k !== null && (k === own || k.startsWith(own + ":"))) doomed.push(k);
+    }
+    for (const k of doomed) localStorage.removeItem(k);
+  } catch {
+    // Best-effort, like writeFold: a leftover fold is only a remembered choice.
+  }
+}
+
 /** A remembered fold for `key`, open by `fallback` until it's chosen. */
 export function useRememberedFold(
   key: string,

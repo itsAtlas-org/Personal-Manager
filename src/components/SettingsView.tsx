@@ -36,6 +36,7 @@ import { AccessibilitySettings } from "./settings/AccessibilitySettings";
 import { SearchSettings } from "./settings/SearchSettings";
 import { ModelListEditor } from "./ModelListEditor";
 import { OnboardingLocalConnect } from "./onboarding/OnboardingLocalConnect";
+import { ModsStrips } from "./mods/ModsStrips";
 import { SignInStrip } from "./SignInStrip";
 import { StorageSettings } from "./StorageSettings";
 import type { LanguageOptions } from "../lib/types";
@@ -67,6 +68,10 @@ interface Props {
   onClose: () => void;
   /** First-run onboarding requires a key before the app is usable. */
   onboarding: boolean;
+  /** The page Settings opens on (non-onboarding only); General when omitted. Read once, when
+   *  Settings opens: a page that isn't on the rail (Local AI while it is off) falls back like any
+   *  other vanished tab. */
+  initialTab?: SettingsTab;
   /** Jump to the Dev tab (issue #78) — closes Settings and navigates. Non-onboarding only. */
   onOpenDev?: () => void;
   /** Jump to the Teach tab — closes Settings and navigates (after an AI-memory import). */
@@ -83,6 +88,7 @@ interface Props {
 export function SettingsView({
   onClose,
   onboarding,
+  initialTab,
   onOpenDev,
   onOpenTeach,
   betterFit,
@@ -134,7 +140,7 @@ export function SettingsView({
   const [embedderId, setEmbedderId] = useState("");
   // Active tab (non-onboarding only). The scrolling content pane is reset to the top on a
   // tab change so each tab opens from its first section.
-  const [chosenTab, setTab] = useState<SettingsTab>("general");
+  const [chosenTab, setTab] = useState<SettingsTab>(initialTab ?? "general");
   // The tab on screen. A chosen tab can vanish under the reader — switching Local AI off from its
   // own tab is how — and they then stand on the first tab left in its group, AI & Models, where
   // the way back on is. Derived rather than written back, so no render ever shows a vanished tab;
@@ -587,6 +593,8 @@ export function SettingsView({
       {/* A browser sign-in started from a tab here, with its link for another browser. It has to
           be in here: the app's own strip is under this dialog's scrim. */}
       <SignInStrip />
+      {/* The safety list's notices (a mod paused or removed): App's copy is under this scrim too. */}
+      <ModsStrips variant="app" />
 
       <div className="flex min-h-0 flex-1">
         <nav className="w-52 shrink-0 overflow-y-auto border-r border-border p-3">

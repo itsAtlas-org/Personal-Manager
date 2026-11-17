@@ -522,6 +522,8 @@ fn fold_one(conn: &Connection, survivor: i64, doomed: i64) -> Result<()> {
     };
     let merged = crate::drive::merge_classification(survivor_class, &doomed_class);
     let tx = conn.unchecked_transaction()?;
+    // The merged importance can shelve the survivor (or bring it back): news to mods.
+    let was_listed = crate::mods::api::events::is_listed(&tx, survivor);
     tx.execute(
         "UPDATE documents SET project = ?2, tags = ?3, importance = ?4, reviewed = ?5, \
              entity_id = ?6 WHERE id = ?1",
@@ -534,6 +536,7 @@ fn fold_one(conn: &Connection, survivor: i64, doomed: i64) -> Result<()> {
             merged.entity_id
         ],
     )?;
+    crate::mods::api::events::note_listing_change(&tx, survivor, was_listed);
     // Union the join rows (projects AND labels) before the doomed row cascades them away. Additive:
     // a link the survivor already had is untouched, one only the duplicate had is kept, and a home
     // project that lost the tie above lands here as a LINKED project rather than vanishing.
@@ -1204,6 +1207,55 @@ mod tests {
             crate::db::get_setting(&conn, "index_only_manifest_stale").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_fold_that_shelves_or_unshelves_the_survivor_tells_the_mods() {
+        // The merged filing can carry the archive level onto the survivor, or lift it off: either
+        // changes what a mod may read, so the fold notes it (and the doomed row's own deletion, which
+        // is a listed document going).
+        use crate::mods::api::events::testing::{record, Noted};
+        let set = |conn: &Connection, id: i64, importance: &str, reviewed: bool| {
+            conn.execute(
+                "UPDATE documents SET importance = ?2, reviewed = ?3 WHERE id = ?1",
+                params![id, importance, reviewed as i64],
+            )
+            .unwrap();
+        };
+
+        // A reviewed, archived duplicate decides: the survivor is shelved.
+        let (_dir, conn) = open_store();
+        let owner = indexed(&conn, "gdrive:a@x.com:1AbC", "Unsorted", false);
+        let recipient = indexed(&conn, "gdrive:swm:rootB:1AbC", "Taxes", true);
+        set(&conn, recipient, "archive", true);
+        let notes = record();
+        assert_eq!(fold_by_identity(&conn).unwrap().folded, 1);
+        assert_eq!(
+            notes.take(),
+            [Noted::Left(vec![owner])],
+            "the shelved duplicate was never readable, so its going is no news"
+        );
+
+        // A reviewed, readable duplicate decides over a shelved survivor: it comes off the shelf.
+        let (_dir2, conn) = open_store();
+        let owner = indexed(&conn, "gdrive:a@x.com:1AbC", "Unsorted", false);
+        let recipient = indexed(&conn, "gdrive:swm:rootB:1AbC", "Taxes", true);
+        set(&conn, owner, "archive", false);
+        set(&conn, recipient, "high", true);
+        notes.take();
+        assert_eq!(fold_by_identity(&conn).unwrap().folded, 1);
+        assert_eq!(
+            notes.take(),
+            [Noted::Joined(vec![owner]), Noted::Left(vec![recipient])]
+        );
+
+        // Nothing moves across the shelf: nothing but the duplicate's own going is noted.
+        let (_dir3, conn) = open_store();
+        indexed(&conn, "gdrive:a@x.com:1AbC", "Unsorted", false);
+        let recipient = indexed(&conn, "gdrive:swm:rootB:1AbC", "Taxes", true);
+        notes.take();
+        assert_eq!(fold_by_identity(&conn).unwrap().folded, 1);
+        assert_eq!(notes.take(), [Noted::Left(vec![recipient])]);
     }
 
     #[test]

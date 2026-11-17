@@ -122,8 +122,59 @@ struct Component {
 
 #[derive(Serialize)]
 pub struct StorageReport {
+    /// The on-device components' total. The mods' own footprint is in `mods`, kept apart because
+    /// the Storage tab lists them in their own section (spec §1.14) and removes them through the
+    /// mod runtime, not through `remove_storage_component`.
     total_bytes: u64,
     components: Vec<Component>,
+    mods: Vec<ModStorage>,
+}
+
+/// One installed mod's footprint, for the Storage tab's Mods section (spec §1.14).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ModStorage {
+    id: String,
+    name: String,
+    version: String,
+    /// Real bytes under `data/mods/<vault_id>/<store_id>/<id>` (every version folder it holds).
+    /// Zero for a mod with no folder there: a developer's test folder, or files that aren't here.
+    folder_bytes: u64,
+    /// Approximate: the bytes of the values it stored in the database (`mod_kv` and
+    /// `mod_doc_data`). Row and index overhead isn't counted, so this is what the mod put in, not
+    /// what the database file grew by.
+    data_bytes: u64,
+}
+
+/// Every installed mod's database share (the folder size is measured separately, off the DB lock).
+fn read_mod_footprints(conn: &rusqlite::Connection) -> Result<Vec<ModStorage>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.name, m.version, \
+                COALESCE((SELECT sum(length(CAST(value AS BLOB))) FROM mod_kv \
+                           WHERE mod_id = m.id), 0) \
+              + COALESCE((SELECT sum(length(CAST(value AS BLOB))) FROM mod_doc_data \
+                           WHERE mod_id = m.id), 0) \
+         FROM mods m ORDER BY m.id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ModStorage {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            version: r.get(2)?,
+            folder_bytes: 0,
+            data_bytes: r.get::<_, i64>(3)?.max(0) as u64,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Fill in each mod's folder size under `layout`. File work: never under the DB lock.
+fn measure_mod_folders(mods: &mut [ModStorage], layout: &crate::mods::disk::Layout) {
+    for m in mods {
+        // An id that isn't the grammar's has no folder PM could have made.
+        if let Ok(id) = crate::mods::ids::ModId::parse(&m.id) {
+            m.folder_bytes = dir_size(&layout.mod_dir(&id));
+        }
+    }
 }
 
 // ---- the dependency cascade (pure, unit-tested) ---------------------------
@@ -542,6 +593,8 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
     StorageReport {
         total_bytes: total,
         components,
+        // The mods are the store's, not the venv's: `list_storage_components` fills them in.
+        mods: Vec::new(),
     }
 }
 
@@ -588,17 +641,38 @@ fn do_remove(app: &AppHandle, id: &str, venv: &Path) -> Result<()> {
 /// directory walk runs off the async runtime.
 #[tauri::command]
 pub async fn list_storage_components(app: AppHandle) -> Result<StorageReport> {
-    let embedder = {
+    // One short DB read for everything the store holds (the guard is dropped before any file is
+    // touched): the embedder, each mod's database share, and the store id that names its folder.
+    let (embedder, mut mods, store_id) = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        db::selected_embedder(&conn)?
+        // A report that can't list its mods is still a report: the Mods section shows none.
+        let mods = read_mod_footprints(&conn).unwrap_or_else(|e| {
+            eprintln!("storage: the mods' sizes couldn't be read ({e})");
+            Vec::new()
+        });
+        let store_id = crate::mods::ledger::read_store_id(&conn).ok().flatten();
+        (db::selected_embedder(&conn)?, mods, store_id)
     };
+    let vault_id = app.state::<AppState>().active_vault_id();
+    let data_dir = paths::data_dir(&app)?;
     let venv = paths::venv_dir(&app)?;
     // A marker read and a hash of the small OCR lock: cheap enough to take before the walk.
     let ocr_ready = app.state::<AppState>().sidecar.optional_ocr_ready();
-    tauri::async_runtime::spawn_blocking(move || build_report(&venv, &embedder, ocr_ready))
-        .await
-        .map_err(|e| Error::Other(format!("storage scan task panicked: {e}")))
+    tauri::async_runtime::spawn_blocking(move || {
+        // No store id means no mods folder was ever made for this store: every folder is zero.
+        if let Some(layout) = vault_id
+            .zip(store_id)
+            .and_then(|(v, s)| crate::mods::disk::Layout::new(&data_dir, &v, &s).ok())
+        {
+            measure_mod_folders(&mut mods, &layout);
+        }
+        let mut report = build_report(&venv, &embedder, ocr_ready);
+        report.mods = mods;
+        report
+    })
+    .await
+    .map_err(|e| Error::Other(format!("storage scan task panicked: {e}")))
 }
 
 /// Remove a component, enforcing the dependency cascade. For `openTSNE` it also recomputes the
@@ -853,6 +927,110 @@ mod tests {
         let report = build_report(&venv, &embedder, false);
         assert_eq!(row(&report, "venv"), 5);
         assert_eq!(report.total_bytes, 5 + estimate);
+    }
+
+    /// A store with mods that stored values, and the folders under the real layout they would have.
+    #[test]
+    fn the_report_lists_each_mods_folder_and_database_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("pm.sqlite"), &"ab".repeat(32)).unwrap();
+        let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (id, from) in [
+            ("atlas.board", "catalogue"),
+            ("friend.tool", "file"),
+            ("dev.sandbox", "folder"),
+        ] {
+            conn.execute(
+                "INSERT INTO mods(id, name, version, tier, author, source_repo, source_commit, \
+                                  signed, install_id, installed_from, package_sha256, manifest, files) \
+                 VALUES (?1, ?2, '1.2.3', 'first', 'a', 'r', 'c', 1, '0123456789abcdef', ?3, ?4, \
+                         '{}', '[]')",
+                rusqlite::params![
+                    id,
+                    format!("{id} name"),
+                    from,
+                    (from != "folder").then_some(sha)
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO documents(vault_path, content_hash) VALUES ('d.md', 'h')",
+            [],
+        )
+        .unwrap();
+        let doc = conn.last_insert_rowid();
+        // 5 + 4 bytes in kv ("é" is two bytes: bytes are counted, not characters), 7 in doc data.
+        for (key, value, class) in [("a", "12345", "content"), ("b", "ab\u{e9}", "cache")] {
+            conn.execute(
+                "INSERT INTO mod_kv(mod_id, key, class, value) VALUES ('atlas.board', ?1, ?3, ?2)",
+                rusqlite::params![key, value, class],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO mod_doc_data(mod_id, document_id, key, value) \
+             VALUES ('atlas.board', ?1, 'k', '1234567')",
+            [doc],
+        )
+        .unwrap();
+
+        let mut mods = read_mod_footprints(&conn).unwrap();
+        let shares: Vec<(&str, u64)> = mods.iter().map(|m| (m.id.as_str(), m.data_bytes)).collect();
+        assert_eq!(
+            shares,
+            [
+                ("atlas.board", 5 + 4 + 7),
+                ("dev.sandbox", 0),
+                ("friend.tool", 0)
+            ]
+        );
+
+        // The folders: two versions of one mod under <data>/mods/<vault>/<store>/<id>, another
+        // store's folder of the same mod (not this store's), and a mod with no folder at all.
+        let layout =
+            crate::mods::disk::Layout::new(dir.path(), "vault-one", "0123456789abcdef").unwrap();
+        let board = layout.mod_dir(&crate::mods::ids::ModId::parse("atlas.board").unwrap());
+        for (v, bytes) in [("1.0.0", 100usize), ("1.2.3", 250)] {
+            std::fs::create_dir_all(board.join(v).join("app")).unwrap();
+            std::fs::write(board.join(v).join("app").join("main.js"), vec![0u8; bytes]).unwrap();
+        }
+        std::fs::write(board.join("1.2.3").join("manifest.json"), vec![0u8; 50]).unwrap();
+        let other = dir
+            .path()
+            .join("mods")
+            .join("vault-one")
+            .join("fedcba9876543210");
+        std::fs::create_dir_all(other.join("atlas.board")).unwrap();
+        std::fs::write(other.join("atlas.board").join("x"), vec![0u8; 9999]).unwrap();
+        let tool = layout.mod_dir(&crate::mods::ids::ModId::parse("friend.tool").unwrap());
+        std::fs::create_dir_all(&tool).unwrap();
+        std::fs::write(tool.join("f"), vec![0u8; 7]).unwrap();
+
+        measure_mod_folders(&mut mods, &layout);
+        let folders: Vec<(&str, u64)> = mods
+            .iter()
+            .map(|m| (m.id.as_str(), m.folder_bytes))
+            .collect();
+        assert_eq!(
+            folders,
+            [("atlas.board", 400), ("dev.sandbox", 0), ("friend.tool", 7)],
+            "this store's folders only; a folder-installed test mod has none"
+        );
+        // The wire shape the TS type mirrors.
+        let json = serde_json::to_value(&mods[0]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"id": "atlas.board", "name": "atlas.board name", "version": "1.2.3",
+                               "folder_bytes": 400, "data_bytes": 16})
+        );
+    }
+
+    #[test]
+    fn a_store_with_no_mods_reports_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(&dir.path().join("pm.sqlite"), &"cd".repeat(32)).unwrap();
+        assert!(read_mod_footprints(&conn).unwrap().is_empty());
     }
 
     #[test]

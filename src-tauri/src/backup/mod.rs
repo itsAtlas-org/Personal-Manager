@@ -25,6 +25,7 @@
 //! Google Drive (via the Drive v3 REST API). Naming/validation/retention selection is shared
 //! (`naming`), so both destinations name and trim archives identically.
 
+pub mod adopt_mods;
 pub mod bundle;
 pub mod destination;
 pub mod format;
@@ -35,6 +36,7 @@ pub mod pack;
 pub mod proton;
 pub mod restore;
 pub mod schedule;
+pub mod strip;
 
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};

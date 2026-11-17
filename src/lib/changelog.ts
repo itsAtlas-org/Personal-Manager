@@ -31,6 +31,17 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
+    version: "3.183.0-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "A new Mods tab is the home for mods: add-ons that give PM a new tab or tool. Each mod runs walled off from the rest of PM and only gets what you allow. You see what it asks for before it's installed, and you can turn any permission off, pause it or uninstall it at any time. When you uninstall, PM asks whether to also delete what the mod made. There are no mods to install yet: the first ones, starting with the Map, arrive in coming updates.",
+      "PM keeps itself safe from bad mods. A few times a day it checks a safety list that Atlas signs. A mod on that list is paused or removed on its own, and PM tells you why. If the list can't be checked for a long time, the Mods tab says so.",
+      "Developer mode now also lets you install a mod nobody has checked, from a file or from a folder you are working on. A plain warning comes first, and you confirm by typing the mod's id, which the warning shows you. Developer mode is now set separately on each computer: restoring a backup or joining a shared vault turns it off, and it never reaches another computer using the same vault. If you had developer mode on, this update switches it off once; switch it on again in Settings > Developer.",
+      "Backups never include mods' passwords or keys, and a new switch decides whether mods' own data goes in too. A backup or export is now made on your disk instead of in memory, checks there is enough free space first, and says plainly when the disk is full. Settings → Storage now lists PM's own parts and your mods separately.",
+      "Calendar feeds that point inside your own network, or at addresses reserved for special uses, are now refused more consistently.",
+    ],
+  },
+  {
     version: "3.182.3-alpha",
     date: "2026-11-16",
     highlights: [

@@ -46,7 +46,15 @@ export function SidebarNav({ view, onNavigate, reviewCount, onNew }: Props) {
             active={isActiveEntry(entry, view)}
             onClick={() => onNavigate(entry.id)}
             helpId={entry.helpId}
-            trailing={entry.id === "review" ? <CountBadge count={reviewCount} /> : undefined}
+            trailing={
+              entry.id === "review" ? (
+                <CountBadge count={reviewCount} />
+              ) : entry.source === "mod" ? (
+                // A mod chose its own tab's name, so PM marks the row: a mod can't pass its tab
+                // off as one of PM's by calling it "Settings".
+                <span className="text-xs text-ink3">mod</span>
+              ) : undefined
+            }
             className={entry.id === "chat" ? "min-w-0 flex-1" : undefined}
           >
             {entry.label}

@@ -134,13 +134,23 @@ release remain the open post-v1 work.
     model path: INVARIANTS.md I-22). Everything fetched is untrusted DATA (rule #6).
   - **Backup** — `backup/`: portable passphrase-encrypted zstd `.pmbackup`; a
     `destination.rs` enum fans out to the Proton Drive CLI (`proton.rs`) + Google Drive REST
-    (`gdrive.rs`); `schedule.rs`.
+    (`gdrive.rs`); `schedule.rs`. `strip.rs` is the one way a copy of the store leaves (every
+    backup and the export: a snapshot stripped of mod secrets, connected apps and rebuildable mod
+    data, then vacuumed, made in `data_dir/copies-in-progress/`; INVARIANTS.md I-32) and
+    `adopt_mods.rs` what a restore's commit resets (developer mode off for every device, the
+    connected apps cleared; a developer's test folder never leaves, I-35), plus the mod list a
+    restore shows. Joining a shared vault resets and writes nothing: developer mode
+    (`mods/devmode.rs`) and the connected apps are per device, and developer mode is on only where
+    the per-device record lists that device (the old `dev_mode` row is never read; the restore's
+    reset only writes it off).
   - **Platform** — `secrets.rs` (OS keychain: API key + background key + DB key + OAuth
     tokens + feed URLs), `openrouter.rs` (streaming SSE + non-streaming `complete()`; the key
     stays in Rust), `cost.rs`, `applock.rs` / `lock_session.rs`, `components.rs` (the Storage
     manager), `sidecar.rs` / `python_fetch.rs`, `wipe.rs` (Remove-PM-data), `local_ai_switch.rs`
     (the Local AI switch, enforced in Rust), `tray.rs` / `popout.rs` (the briefing panel and
-    the pop-out Calendar windows).
+    the pop-out Calendar windows), `net_screen.rs` (the public-internet screen: an untrusted
+    URL's host is resolved, every address screened, and the survivors pinned onto the client;
+    calendar feeds use it, and a mod's `net.fetch` will).
   - **Mods** — `mods/` (the Mods spec). `engine.rs` seals the webview engine: the sinkhole proxy,
     the navigation guard, the init scripts and the per-engine switches, with no `crate::` path so
     the sealed-frame regression app can include it. `mod.rs` builds every window through
@@ -152,9 +162,58 @@ release remain the open post-v1 work.
     decisions and `MOD_API_VERSION`) and `disk.rs` (the only code under `data_dir/mods`,
     INVARIANTS.md I-30); `runtime.rs` the `pmmod` scheme's
     registry, one-time entry URLs and frame sessions, with `headers.rs` (crate-free, like
-    `engine.rs`) building every response header (INVARIANTS.md I-27). In the page,
+    `engine.rs`) building every response header (INVARIANTS.md I-27). `api/` is the one Host
+    API dispatcher (check order, grant model, call limits, the handlers, the events); the frame
+    relay (`mod_call`) and the later MCP caller both go through it, so a grant is checked nowhere
+    else. `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements); a
+    mod's readable set is the documents that aren't archived, so a writer of
+    `documents.importance` calls `events::note_listing_change` around its UPDATE and a writer of a
+    new document calls `events::note_landed` after its commit (a test pins the list of writers);
+    a frame is told what happened to it (`paused`, `uninstalled`, `replaced`) by which
+    `ModRuntime` call ends its session; and
+    `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
+    `embeddings.documentVectors` share. `keys.rs` embeds the two
+    Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
+    against; `index.rs` is the signed index's format, verification and acceptance rules, and
+    `index_state.rs` its per-machine record, `data_dir/mods-index.json` (INVARIANTS.md I-31).
+    `fetch.rs` downloads the index and packages (pinned URL prefix, redirects to GitHub's asset
+    hosts only, size and time caps) and owns the 6-hourly schedule; `safety.rs` is what the
+    accepted index decides (catalogue, serve and unsigned checks, the plan for a blacklist);
+    `ledger/blacklist.rs` carries a plan out on the rows and `ledger/updates.rs` is the
+    background updater's ledger half, with `updater.rs` its decisions; `refresh.rs` is the task
+    that runs them, and what runs at launch and at a restore. A dev override of the index URL or
+    the test key lives only in `cfg(debug_assertions)` code behind `PM_DATA_DIR`. In the page,
     `src/components/mods/ModFrame.tsx` draws the only iframe in `src/` (I-24), and `modBridge.ts`
-    is its bridge. `tests/sealed-frame/` is a regression app that never ships: it includes
+    is its bridge. `tab/` is the Mods tab's command surface (`tab/commands.rs`: main window only,
+    each command with an `ipc.ts` wrapper and a typed refusal, types in `src/lib/modsTypes.ts`):
+    `listing` and `words` say what a row is and what it offers, `install`/`stage`/`consent` are
+    the two-step signed install (INVARIANTS.md I-33), `uninstall` is the preview and the gifts,
+    `status` the safety list's strips, `disclaimer` and `device` the per-device-and-vault
+    disclaimer; `unsigned` and `dev_commands` are the unsigned file install (its own stark screen,
+    D3 judged before consent, `ledger/unsigned.rs`) and developer mode's commands: developer mode
+    is per device, only Rust reads it (`devmode.rs`, `ledger/dev_switch.rs`, INVARIANTS.md I-34),
+    and the page's `useDevMode` shows the backend's answer; the user's own pause, resume and "Turn
+    on" are `ledger/user.rs`, and every change
+    to the rows or the registry ends in one `mods://changed` (`refresh::emit_changed`). In the page
+    the installed mods are read once (`lib/modRowsProvider.tsx`, context in `lib/modRows.ts`) and
+    shared: `lib/nav.ts` turns the rows into the sidebar's mod tabs (`mod:<id>`, the one literal
+    help id `nav-mod-tab`), and `components/mods/ModTab.tsx` draws a mod's tab (the frame when the
+    row says it runs; PM's own panel for first open (D17), installing, paused, removed or missing).
+    The Mods tab itself is `components/mods/ModsView.tsx` (disclaimer gate, the safety list's
+    strips, one `ModRow` per mod, the uninstall and update dialogs): what is in flight (a pause,
+    an uninstall, a staged update screen) lives in `lib/modActions.ts`, not in the view, because
+    the tab router unmounts the view and the backend's work keeps going; every word a mod
+    supplied goes through `modText` first. Installing is `lib/modInstall.ts`: a START (Available's
+    Install, or Install from file, the ONLY home of file installs) returns a consent screen that
+    installs nothing and is staged in `modActions` with a way to start again; `ConsentDialog`
+    draws it (signed tiers, the stark `UnsignedConsentDialog` for `screen.unsigned`, or the
+    "ran out of time" screen after `consent-expired`) and its button is the FINISH. The page
+    only enables the stark screen's button for the typed id; Rust checks it. A developer's test
+    folder is Settings → Developer's (`settings/TestMods.tsx`; its screen is left out of the Mods tab by
+    `isFolderScreen`), beside the kit's readouts (`settings/DeveloperKit.tsx`, all from `dev_kit_info`),
+    and Settings → Storage's "Mods" fold (`StorageMods.tsx`) uninstalls through the same runtime action
+    (`mods/uninstallActions.ts`), never `removeStorageComponent`.
+    `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
 - **Sidecar** — `sidecar/pm_sidecar.py` + `requirements.txt` (committed code). A managed venv

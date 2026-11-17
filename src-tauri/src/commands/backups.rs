@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::backup::adopt_mods::{self, RestoredMod};
 use crate::backup::{
     self, destination::BackupDestination, BackupEvent, BackupKind, BackupPhase, BackupReport,
     RetentionOutcome,
@@ -78,11 +79,82 @@ pub struct RestoreSummary {
     pub created_at: String,
     /// Absolute path of the restored (not-yet-active) vault, for a follow-up "switch".
     pub target_dir: String,
+    /// The mods the backup held, all `pending`: the store isn't open yet, so whether a mod's files
+    /// are on this computer (a same-machine restore copies them back, after the open) isn't known.
+    /// [`SwitchOutcome::mods`] is the settled answer.
+    pub mods: Vec<RestoredMod>,
+}
+
+/// What [`switch_to_vault`] tells the page: what the reconcile couldn't do cleanly (the same kind of
+/// warnings the other vault commands return, which this one used to drop) and where each restored
+/// mod ended up, read after the open and the same-machine recovery have run.
+#[derive(Serialize)]
+pub struct SwitchOutcome {
+    pub warnings: Vec<String>,
+    pub mods: Vec<RestoredMod>,
+}
+
+/// Snapshot the live store into `snapshot` for a backup and strip it ([`backup::strip`], D4), on
+/// the blocking pool (F-42): the copy of a multi-GB store must not pin a tokio worker, and the DB
+/// lock is taken and dropped inside the closure (`DbGuard` is `!Send`) via a cloned handle. Both
+/// backup sites call this and nothing else. It returns the mods the snapshot holds and the key it
+/// is encrypted with, the open store's own (the archive carries it), so a passphrase vault whose
+/// key this account didn't cache in the keychain still backs up while it is open.
+///
+/// `resolved` and `vault_id` are the store the caller read its metadata and Markdown folder from:
+/// the copy is refused if the open store is another's by the time it is taken (another vault, or a
+/// restored copy of this one, which keeps its vault id). `packed_here`: whether the archive will be
+/// packed into the snapshot's own folder (the scheduled and cloud backups do; the typed backup packs
+/// into the user's chosen destination). The Markdown and sidecars of `resolved` are then measured
+/// here, off the runtime, so the free-space check ahead of the copy counts what the pack will hold
+/// on that volume.
+async fn snapshot_stripped(
+    app: &AppHandle,
+    vault_id: &str,
+    resolved: &vault::ResolvedVault,
+    snapshot: &std::path::Path,
+    packed_here: bool,
+) -> Result<backup::strip::Stripped> {
+    let app = app.clone();
+    let snapshot = snapshot.to_path_buf();
+    let from = backup::strip::Origin::of(vault_id, resolved);
+    let resolved = resolved.clone();
+    spawn_blocking_result("snapshot", move || {
+        let state = app.state::<AppState>();
+        let keep_content = backup::strip::keep_mod_data(&state)?;
+        let beside = if packed_here {
+            backup::pack::beside_db_bytes(&resolved.vault_root, &resolved.markdown_dir)
+        } else {
+            0
+        };
+        backup::strip::snapshot_for_leaving(
+            &state,
+            &from,
+            &snapshot,
+            keep_content,
+            beside,
+            backup::strip::Job::Backup,
+        )
+    })
+    .await
+}
+
+/// Report a backup step's failure to the detached progress feed (clearing the "running" state the
+/// run's first `Phase` set) and hand the error back for the caller to return.
+fn backup_failed(app: &AppHandle, e: Error) -> Error {
+    emit_backup_progress(
+        app,
+        BackupEvent::Failed {
+            message: e.to_string(),
+        },
+    );
+    e
 }
 
 /// Create an encrypted, portable `.pmbackup` at `dest_path`, protected by `passphrase`.
-/// The live DB is snapshotted with `VACUUM INTO` under the lock (folding WAL, preserving
-/// SQLCipher), then — off the lock, in a blocking task — the snapshot + Markdown vault +
+/// The live DB is snapshotted (folding WAL, preserving SQLCipher) and the snapshot is stripped of
+/// what must not leave the computer (mod secrets, connected apps, rebuildable mod data), then — off
+/// the lock, in a blocking task — the snapshot + Markdown vault +
 /// metadata are streamed through zstd and a chunked XChaCha20-Poly1305 STREAM. The
 /// archive embeds the DB key inside its encrypted layer, so it restores on any machine
 /// that has the passphrase (unlike `export_all_data`, which is same-machine only).
@@ -107,25 +179,27 @@ pub async fn create_local_backup(
     vault::kdf::validate_passphrase_strength(&passphrase)?;
     let _busy = begin_backup_run(&app, &state, BackupPhase::Snapshot)?;
 
-    // Consistent, encrypted DB snapshot under the lock; drop the guard before the slow work.
-    let tmp = tempfile::Builder::new()
-        .prefix("pm-backup-snap-")
-        .tempdir()?;
-    let snapshot = tmp.path().join(vault::DB_FILENAME);
-    {
-        // Snapshot on the blocking pool (F-42): a `VACUUM INTO` of a multi-GB store must not pin a
-        // tokio worker or hold the DB mutex on the async runtime. The guard is acquired and dropped
-        // inside the closure (DbGuard is !Send) via a cloned handle; `snapshot` is cloned in and the
-        // original flows into the pack inputs below.
-        let app = app.clone();
-        let snapshot = snapshot.clone();
-        spawn_blocking_result("snapshot", move || -> Result<()> {
-            let state = app.state::<AppState>();
-            let conn = state.conn()?;
-            vault::migrate::vacuum_into(&conn, &snapshot)
+    // A step that fails after the run began has to say so (see `run_backup`).
+    let fail = |e: Error| backup_failed(&app, e);
+    let resolved = vault::resolve(&app).map_err(fail)?;
+    let meta = vault::load_meta(&resolved.vault_root)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
+        .map_err(fail)?;
+
+    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4); the strip is the
+    // backup's gate: a snapshot that couldn't be stripped fails the whole backup. Made on disk in
+    // PM's own folder, never the OS temp dir (tmpfs, RAM, on many Linux desktops).
+    let tmp = paths::data_dir(&app)
+        .and_then(|dir| {
+            backup::strip::work_dir(&dir, "pm-backup-snap-", backup::strip::Job::Backup)
         })
-        .await?;
-    }
+        .map_err(fail)?;
+    let snapshot = tmp.path().join(vault::DB_FILENAME);
+    let backup::strip::Stripped { mods, key: db_key } =
+        snapshot_stripped(&app, &meta.vault_id, &resolved, &snapshot, false)
+            .await
+            .map_err(fail)?;
     emit_backup_progress(
         &app,
         BackupEvent::Phase {
@@ -134,11 +208,14 @@ pub async fn create_local_backup(
         },
     );
 
-    let resolved = vault::resolve(&app)?;
-    let meta = vault::load_meta(&resolved.vault_root)?
-        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))?;
-    let db_key = vault::current_db_key(&meta)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))?;
+    // The mod safety list's cached copy rides in the manifest (a small file read, off the runtime).
+    let mods_index = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::mods::refresh::backup_copy(&app))
+            .await
+            .ok()
+            .flatten()
+    };
     let inputs = backup::pack::PackInputs {
         vault_root: resolved.vault_root.clone(),
         db_snapshot: snapshot,
@@ -147,6 +224,8 @@ pub async fn create_local_backup(
         db_key_hex: db_key,
         app_version: app.package_info().version.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
+        mods_index,
+        mods: Some(mods),
     };
     let vault_id = meta.vault_id.clone();
     let dest = std::path::PathBuf::from(dest_path);
@@ -184,7 +263,7 @@ pub async fn create_local_backup(
             let msg = if state.backup_cancel.load(Ordering::SeqCst) {
                 "Backup cancelled.".to_string()
             } else {
-                e.to_string()
+                backup::strip::say_if_disk_full(e, backup::strip::Job::Backup).to_string()
             };
             emit_backup_progress(
                 &app,
@@ -230,6 +309,7 @@ pub async fn restore_local_backup(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&src, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
 
@@ -444,7 +524,7 @@ pub async fn switch_to_vault(
     state: State<'_, AppState>,
     folder: String,
     make_private: bool,
-) -> Result<()> {
+) -> Result<SwitchOutcome> {
     // L-5: `folder` is a webview string pointing at an existing vault folder — require a real,
     // absolute, well-formed location before we open `folder/pm.sqlite` and promote its key.
     pathguard::sanitize_source(&folder)?;
@@ -470,6 +550,19 @@ pub async fn switch_to_vault(
                 .into(),
         )
     })?;
+    // The restore commit's resets (§1.11), on the store's own connection BEFORE it is attached: dev
+    // mode off and the connected apps cleared, so a restore never revives them or enables unsigned
+    // installs on a machine whose owner didn't. Before the attach is also before the first engage,
+    // which loads the mods, so nothing serves from a store these haven't reached. A reset that
+    // fails refuses the switch: nothing is attached yet, and the restored folder stays as it was.
+    // (The cached safety list is applied by that engage, before the load and so before any frame can
+    // mount: `ledger::after_writer_open`; the restore already took the backup's copy of it.)
+    adopt_mods::reset_for_adopt(&conn).map_err(|e| {
+        Error::Other(format!(
+            "the restored vault couldn't be made safe to open on this computer ({e}); it was not \
+             switched to"
+        ))
+    })?;
     // A different vault from here on, so the previous one's tamper notice no longer applies.
     state.clear_meta_warning();
     state.note_meta_report(&report);
@@ -485,8 +578,7 @@ pub async fn switch_to_vault(
     // off the async runtime thread; it reads `AppState` back through the `AppHandle`, like the other
     // migration commands.
     let app2 = app.clone();
-    // Unreported, as before: this command returns no warnings to the page.
-    let _warnings = spawn_blocking_result("adopt", move || {
+    let (warnings, mods) = spawn_blocking_result("adopt", move || {
         let mut warnings = adopt_restored_vault(&app2, &root, &meta, &data_dir, make_private)?;
         // Re-engage the writer lock for the final (possibly relocated) vault — best-effort,
         // mirroring the other mode-change commands (a device vault needs none; a passphrase vault
@@ -494,7 +586,23 @@ pub async fn switch_to_vault(
         // same-machine restore's mods from the store it was made from, and this one's mod reload
         // waits at the ledger lock until that copy is done.
         engage_or_warn(&app2, &mut warnings);
-        Ok(warnings)
+        // That copy is what decides which mods come back, and it lands in the background. Finish it
+        // here (a repeat of work already done costs a look at each row), so the list below is read
+        // after the recovery and not at the instant the open returned.
+        crate::mods::ledger::recover_now(&app2);
+        // Each row against what the load made of it: "back" is a mod the registry serves, not an
+        // `active` row that waits for its first open or is held by the safety list.
+        let mods = match adopt_mods::settled(&app2) {
+            Ok(mods) => mods,
+            Err(e) => {
+                warnings.push(format!(
+                    "PM couldn't read back which mods came with the restore ({e}); the Mods tab \
+                     lists them."
+                ));
+                Vec::new()
+            }
+        };
+        Ok((warnings, mods))
     })
     .await?;
 
@@ -503,7 +611,22 @@ pub async fn switch_to_vault(
     if let Ok(mut snap) = state.backup_state.lock() {
         snap.pending_restore = None;
     }
-    Ok(())
+    Ok(SwitchOutcome { warnings, mods })
+}
+
+/// Whether backups also carry the mods' own saved data ("Also save mod data in my backups",
+/// Backup settings). On unless the user turned it off. What it drops is in [`backup::strip`].
+#[tauri::command]
+pub fn get_backup_mod_data(state: State<'_, AppState>) -> Result<bool> {
+    backup::strip::keep_mod_data(&state)
+}
+
+/// Turn "Also save mod data in my backups" on or off. Takes effect on the next backup, for every
+/// destination (typed, scheduled, Proton, Google Drive), since they all take one stripped snapshot.
+#[tauri::command]
+pub fn save_backup_mod_data(state: State<'_, AppState>, enabled: bool) -> Result<()> {
+    let conn = state.conn()?;
+    crate::db::set_bool(&conn, backup::strip::BACKUP_MOD_DATA_KEY, enabled)
 }
 
 /// Acknowledge the last run's outcome, so its banner stops coming back.
@@ -811,22 +934,28 @@ pub(crate) async fn run_backup(
     let state = app.state::<AppState>();
     let _busy = begin_backup_run(app, &state, BackupPhase::Snapshot)?;
 
-    let tmp = tempfile::Builder::new().prefix("pm-backup-").tempdir()?;
+    // A step that fails after the run began has to say so: the run's `Phase` events marked it
+    // running, and only `Finished` or `Failed` clears that (a bare `?` left the panel on a progress
+    // bar until PM restarted).
+    let fail = |e: Error| backup_failed(app, e);
+    // The snapshot, and the archive packed from it, are made on disk in PM's own folder, never the
+    // OS temp dir (tmpfs, RAM, on many Linux desktops); the folder goes when `tmp` drops.
+    let tmp = paths::data_dir(app)
+        .and_then(|dir| backup::strip::work_dir(&dir, "pm-backup-", backup::strip::Job::Backup))
+        .map_err(fail)?;
     let snapshot = tmp.path().join(vault::DB_FILENAME);
-    {
-        // Snapshot on the blocking pool (F-42): a `VACUUM INTO` of a multi-GB store must not pin a
-        // tokio worker or hold the DB mutex on the async runtime. The guard is acquired and dropped
-        // inside the closure (DbGuard is !Send) via a cloned handle; `snapshot` is cloned in and the
-        // original flows into the pack inputs below.
-        let app = app.clone();
-        let snapshot = snapshot.clone();
-        spawn_blocking_result("snapshot", move || -> Result<()> {
-            let state = app.state::<AppState>();
-            let conn = state.conn()?;
-            vault::migrate::vacuum_into(&conn, &snapshot)
-        })
-        .await?;
-    }
+    let resolved = vault::resolve(app).map_err(fail)?;
+    let meta = vault::load_meta(&resolved.vault_root)
+        .map_err(fail)?
+        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))
+        .map_err(fail)?;
+    // Consistent, encrypted DB snapshot, stripped of what must not leave (D4), the mods it holds
+    // and the open store's key it is encrypted with. A snapshot that couldn't be stripped fails
+    // the backup.
+    let backup::strip::Stripped { mods, key: db_key } =
+        snapshot_stripped(app, &meta.vault_id, &resolved, &snapshot, true)
+            .await
+            .map_err(fail)?;
     emit_backup_progress(
         app,
         BackupEvent::Phase {
@@ -834,18 +963,20 @@ pub(crate) async fn run_backup(
             fraction: 1.0,
         },
     );
-
-    let resolved = vault::resolve(app)?;
-    let meta = vault::load_meta(&resolved.vault_root)?
-        .ok_or_else(|| Error::Other("this vault has no metadata to back up".into()))?;
-    let db_key = vault::current_db_key(&meta)?
-        .ok_or_else(|| Error::Other("unlock the vault before backing it up".into()))?;
     let now = chrono::Utc::now();
     let archive_name = crate::backup::naming::archive_name(
         &meta.vault_id,
         &now.format("%Y%m%dT%H%M%SZ").to_string(),
     );
     let archive_path = tmp.path().join(&archive_name);
+    // The mod safety list's cached copy rides in the manifest (a small file read, off the runtime).
+    let mods_index = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::mods::refresh::backup_copy(&app))
+            .await
+            .ok()
+            .flatten()
+    };
     let inputs = backup::pack::PackInputs {
         vault_root: resolved.vault_root.clone(),
         db_snapshot: snapshot,
@@ -854,6 +985,8 @@ pub(crate) async fn run_backup(
         db_key_hex: db_key,
         app_version: app.package_info().version.to_string(),
         created_at: now.to_rfc3339(),
+        mods_index,
+        mods: Some(mods),
     };
     let vault_id = meta.vault_id.clone();
 
@@ -880,7 +1013,7 @@ pub(crate) async fn run_backup(
         let msg = if state.backup_cancel.load(Ordering::SeqCst) {
             "Backup cancelled.".to_string()
         } else {
-            e.to_string()
+            backup::strip::say_if_disk_full(e, backup::strip::Job::Backup).to_string()
         };
         emit_backup_progress(
             app,
@@ -1183,7 +1316,7 @@ pub async fn restore_from_proton(
     // `unwrap_restore_result` because they used to sit inside the same blocking task as the restore
     // itself: a failure here must still emit the detached `Failed` event and still read a
     // user-initiated Cancel as "Restore cancelled." rather than as the incidental IO error.
-    let dl = unwrap_restore_result(&app, &state, restore_scratch_dir(&dest))?;
+    let dl = unwrap_restore_result(&app, &state, restore_scratch_dir(&app, &dest))?;
     unwrap_restore_result(&app, &state, dest.download(&app, &name, dl.path()).await)?;
     emit_backup_progress(
         &app,
@@ -1202,6 +1335,7 @@ pub async fn restore_from_proton(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&local, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
     // Only now: `dl` owns the downloaded archive the task above just read.
@@ -1270,12 +1404,38 @@ fn restore_staging_target(app: &AppHandle) -> Result<std::path::PathBuf> {
 }
 
 /// A scratch directory for a remote restore to download into, named for the destination so a
-/// leftover temp folder is attributable. The archive must outlive the download, so the caller owns
-/// the `TempDir` and drops it only after the restore has read the file out of it.
-fn restore_scratch_dir(dest: &BackupDestination) -> Result<tempfile::TempDir> {
-    Ok(tempfile::Builder::new()
-        .prefix(&format!("pm-restore-{}-", dest.kind()))
-        .tempdir()?)
+/// leftover folder is attributable. The archive must outlive the download, so the caller owns
+/// the `TempDir` and drops it only after the restore has read the file out of it (and on every
+/// early return, which removes the folder too).
+///
+/// It is made in PM's own copies-in-progress folder ([`backup::strip::work_dir`]), never the OS
+/// temp dir: the archive can be as big as the vault, and on many Linux desktops the temp dir is
+/// tmpfs, which is RAM. That folder is swept at boot and by the wipe, so a crash leaves nothing.
+fn restore_scratch_dir(app: &AppHandle, dest: &BackupDestination) -> Result<tempfile::TempDir> {
+    restore_scratch_in(&paths::data_dir(app)?, dest)
+}
+
+/// [`restore_scratch_dir`] with the data folder passed in, so a test needs no app.
+fn restore_scratch_in(
+    data_dir: &std::path::Path,
+    dest: &BackupDestination,
+) -> Result<tempfile::TempDir> {
+    backup::strip::work_dir(
+        data_dir,
+        &format!("pm-restore-{}-", dest.kind()),
+        backup::strip::Job::Restore,
+    )
+}
+
+/// What a failed restore step tells the user: a cancel as a cancel, a full disk (the download into
+/// the scratch folder, or the unpacking into the staging one: neither size is checked ahead) as
+/// that, anything else as it came.
+fn restore_failure_message(cancelled: bool, e: Error) -> String {
+    if cancelled {
+        "Restore cancelled.".to_string()
+    } else {
+        backup::strip::say_if_disk_full(e, backup::strip::Job::Restore).to_string()
+    }
 }
 
 /// Unwrap a finished restore step's result: on failure, report a user-initiated cancel as a
@@ -1288,11 +1448,7 @@ fn restore_scratch_dir(dest: &BackupDestination) -> Result<tempfile::TempDir> {
 /// the async side.
 fn unwrap_restore_result<T>(app: &AppHandle, state: &AppState, result: Result<T>) -> Result<T> {
     result.map_err(|e| {
-        let msg = if state.backup_cancel.load(Ordering::SeqCst) {
-            "Restore cancelled.".to_string()
-        } else {
-            e.to_string()
-        };
+        let msg = restore_failure_message(state.backup_cancel.load(Ordering::SeqCst), e);
         emit_backup_progress(
             app,
             BackupEvent::Failed {
@@ -1324,6 +1480,9 @@ fn finalize_restore(
         app_version: outcome.app_version,
         created_at: outcome.created_at.clone(),
         target_dir,
+        // Pending: the store opens at the switch, and a mod whose files sit in another store on this
+        // computer comes back then. The switch's answer is the settled one.
+        mods: adopt_mods::pending(&outcome.mods),
     };
     if let Ok(mut snap) = state.backup_state.lock() {
         snap.pending_restore = Some(summary.clone());
@@ -1535,9 +1694,11 @@ pub async fn restore_from_gdrive(
     // event (leaving the panel on its last phase), and the download failure reports the raw error
     // even when the user pressed Cancel. Unifying them would change what this command emits, so it
     // is left for a fix that can carry a changelog line rather than folded into a refactor.
-    let dl = restore_scratch_dir(&dest)?;
+    let dl = restore_scratch_dir(&app, &dest)?;
     if let Err(e) = dest.download(&app, &name, dl.path()).await {
-        let msg = e.to_string();
+        // Not through `restore_failure_message`: that would also turn a Cancel into "cancelled",
+        // which is the divergence noted above; the full-disk wording is the only change here.
+        let msg = backup::strip::say_if_disk_full(e, backup::strip::Job::Restore).to_string();
         emit_backup_progress(
             &app,
             BackupEvent::Failed {
@@ -1563,6 +1724,7 @@ pub async fn restore_from_gdrive(
             emit_backup_progress(&app2, BackupEvent::Phase { phase, fraction });
         };
         backup::restore::restore(&local, &passphrase, &target2, report, &st.backup_cancel)
+            .inspect(|o| crate::mods::refresh::take_restored(&app2, o.mods_index.as_ref()))
     })
     .await?;
     drop(dl);
@@ -1630,6 +1792,144 @@ mod restore_adoption_tests {
 mod tests {
     use super::*;
     use crate::commands::shared::temp_db;
+
+    fn proton() -> BackupDestination {
+        BackupDestination::Proton {
+            cli: std::path::PathBuf::from("proton-drive"),
+        }
+    }
+
+    fn drive() -> BackupDestination {
+        BackupDestination::GoogleDrive {
+            token_key: "google_oauth_token_drive::me@x.com".into(),
+        }
+    }
+
+    #[test]
+    fn a_restore_that_runs_out_of_disk_says_so_and_a_cancel_still_reads_as_one() {
+        let full = || Error::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        // The Drive download's write and the unpacking fail as the OS's own error; the Proton CLI's
+        // arrives as its own text.
+        for e in [
+            full(),
+            Error::Other("proton-drive: ENOSPC: no space left on device".into()),
+            Error::Other(
+                "could not place the restored vault: No space left on device (os error 28) \
+                 (rename: Invalid cross-device link (os error 18))"
+                    .into(),
+            ),
+        ] {
+            let said = restore_failure_message(false, e);
+            assert!(said.starts_with("nothing was restored"), "{said}");
+            assert!(said.contains("ran out of space"), "{said}");
+        }
+        // Another failure keeps its own words, and a Cancel wins over whatever the pipeline hit.
+        let other = restore_failure_message(false, Error::Other("wrong passphrase".into()));
+        assert_eq!(other, "wrong passphrase");
+        assert_eq!(restore_failure_message(true, full()), "Restore cancelled.");
+    }
+
+    #[test]
+    fn a_cloud_restore_downloads_into_the_copies_folder_under_the_data_dir() {
+        // The archive is as big as the vault, so it goes on PM's disk (the copies-in-progress folder
+        // the boot sweep and the wipe already empty), not into the OS temp dir (RAM on many Linux
+        // desktops). The test's data dir is itself under the temp dir, so what is pinned is the
+        // exact folder, not "somewhere that isn't temp".
+        let data = tempfile::tempdir().unwrap();
+        let wanted = data.path().join(backup::strip::WORK_DIR);
+        for (dest, prefix) in [
+            (proton(), "pm-restore-proton-"),
+            (drive(), "pm-restore-gdrive-"),
+        ] {
+            let dl = restore_scratch_in(data.path(), &dest).unwrap();
+            assert_eq!(dl.path().parent().unwrap(), wanted, "{prefix}");
+            let name = dl
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(name.starts_with(prefix), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_cloud_restore_that_fails_or_is_cancelled_leaves_no_archive_behind() {
+        // The commands return early (`?`) when the download fails or is cancelled; the guard drop is
+        // the only cleanup, so a half-downloaded archive must go with it.
+        let data = tempfile::tempdir().unwrap();
+        let kept;
+        {
+            let dl = restore_scratch_in(data.path(), &proton()).unwrap();
+            std::fs::write(dl.path().join("half.pmbackup"), b"partial archive").unwrap();
+            kept = dl.path().to_path_buf();
+            assert!(kept.join("half.pmbackup").exists());
+        }
+        assert!(!kept.exists(), "the scratch folder outlived its run");
+        assert_eq!(
+            std::fs::read_dir(data.path().join(backup::strip::WORK_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_crashed_cloud_restore_is_swept_at_boot() {
+        // A kill mid-download skips the drop; the boot sweep of the same folder takes the archive.
+        let data = tempfile::tempdir().unwrap();
+        let dl = restore_scratch_in(data.path(), &drive()).unwrap();
+        std::fs::write(dl.path().join("a.pmbackup"), b"archive").unwrap();
+        let path = dl.path().to_path_buf();
+        std::mem::forget(dl); // the crash: nothing ran the guard
+        assert_eq!(backup::strip::sweep_work_dir(data.path()), 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_scratch_folder_that_cannot_be_made_is_an_error_not_a_fallback_to_temp() {
+        // The data dir's copies folder can't be created (a file sits where it must go): the restore
+        // stops with an error rather than quietly staging the archive somewhere else.
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(data.path().join(backup::strip::WORK_DIR), b"not a folder").unwrap();
+        assert!(restore_scratch_in(data.path(), &proton()).is_err());
+    }
+
+    #[test]
+    fn no_restore_or_import_path_stages_an_archive_in_the_os_temp_dir() {
+        // Source scan over the commands that move whole archives or stores (restore, backup, export,
+        // vault join): none may reach for the OS temp dir. `tempdir_in` / `tempfile_in` with an
+        // explicit folder are fine. New small, transient temps go elsewhere in the tree on purpose.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for rel in [
+            "commands/backups.rs",
+            "commands/export.rs",
+            "commands/vaults.rs",
+            "backup/restore.rs",
+            "backup/pack.rs",
+            "backup/destination.rs",
+            "backup/strip.rs",
+        ] {
+            let src = std::fs::read_to_string(root.join(rel)).unwrap();
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            let code: String = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for banned in [
+                "temp_dir()",
+                ".tempdir()",
+                ".tempfile()",
+                "tempfile::tempdir",
+            ] {
+                assert!(
+                    !code.contains(banned),
+                    "{rel} stages in the OS temp dir ({banned})"
+                );
+            }
+        }
+    }
 
     /// The predicate standing between a restore and an unbacked-up `delete_vault_artifacts`, and the
     /// two ways it can be wrong. Reading `documents` alone missed everything a user can build before
