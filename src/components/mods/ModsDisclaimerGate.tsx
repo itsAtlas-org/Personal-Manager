@@ -16,6 +16,7 @@ import { acceptModsDisclaimer, modsDisclaimerState, onModsChanged } from "../../
 import { runModAction, clearModError, useModActions } from "../../lib/modActions";
 import { failureText, type ModsDisclaimerState } from "../../lib/modsTypes";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
+import { useDisclaimerShowing } from "../../lib/useDisclaimerShowing";
 import { Button, Callout, Card } from "../ui";
 import { ModsDisclaimer } from "./ModsDisclaimer";
 
@@ -52,6 +53,11 @@ export function ModsDisclaimerGate({ children }: { children: ReactNode }) {
       stop();
     };
   }, [read]);
+
+  // The full text is on screen from the moment the backend says it isn't accepted yet, until it is.
+  // Each such stretch is one showing for the count behind a mod's "Don't show this again" (that box
+  // is never offered here: this screen is always in full).
+  useDisclaimerShowing(state !== null && !state.accepted, false);
 
   // A read that failed after one that said "accepted" keeps the acceptance: nothing changed.
   if (state?.accepted) return <>{children}</>;

@@ -30,6 +30,7 @@ vi.mock("../../lib/ipc", () => ({
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
+  vaultStatus: () => Promise.resolve({ vault_id: "vault-a" }),
   modCall: () => Promise.resolve({ kind: "value", value: null }),
   modEventsAck: () => Promise.resolve(),
   modThemeChanged: () => Promise.resolve(),
@@ -116,6 +117,12 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
   };
 }
 
+const pausedForDevMode = () =>
+  standing("paused-dev-mode", {
+    reason: "dev-mode",
+    text: "Paused because developer mode is off. Turn developer mode on to use it again.",
+  });
+
 const onOpenMods = vi.fn();
 const onOpenSettings = vi.fn();
 const refresh = vi.fn(() => Promise.resolve());
@@ -142,6 +149,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // The Mods tab's in-flight work and refusals are module-level (lib/modActions): nothing carries over.
   resetModActions();
+  localStorage.clear();
   faulted = null;
   changed = null;
   let n = 0;
@@ -379,6 +387,38 @@ describe("a mod waiting for its first open (D17)", () => {
     expect(screen.queryByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeNull();
   });
 
+  it("makes going from one waiting mod's tab to another's a new screen: counted, unticked, its own answers", async () => {
+    // The first ever showing is already counted, so the next one is the second and offers the box.
+    const KEY = "pm.mods.disclaimerShown.vault-a";
+    localStorage.setItem(KEY, JSON.stringify({ v: 1, shown: 1, hide: false }));
+    const a = mod({ ...waiting([perm("tasks.read")]), id: "a", name: "Mod A" });
+    const b = mod({ ...waiting([perm("documents.meta")]), id: "b", name: "Mod B" });
+    const stored = () => JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    const tabFor = (modId: string) => (
+      <ModRowsContext.Provider value={rowsValue([a, b])}>
+        <ModTab modId={modId} onOpenMods={onOpenMods} onOpenSettings={onOpenSettings} />
+      </ModRowsContext.Provider>
+    );
+    const view = render(tabFor("a"));
+    await waitFor(() => expect(stored().shown).toBe(2));
+    const box = await screen.findByRole("checkbox", { name: "Don't show this again" });
+    fireEvent.click(box);
+    expect((box as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Allow: Read your tasks/ }));
+
+    view.rerender(tabFor("b"));
+    expect(screen.getByRole("heading", { name: "Turn on “Mod B”?" })).toBeTruthy();
+    // Mod B's screen is its own showing (the third), with the box unticked.
+    await waitFor(() => expect(stored().shown).toBe(3));
+    const next = await screen.findByRole("checkbox", { name: "Don't show this again" });
+    expect((next as HTMLInputElement).checked).toBe(false);
+    // Turn on sends B's own answers, and A's tick was not carried over.
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    await waitFor(() => expect(consentMod).toHaveBeenCalledTimes(1));
+    expect(consentMod).toHaveBeenCalledWith("b", { "documents.meta": true });
+    expect(stored().hide).toBe(false);
+  });
+
   it("says why when the backend refuses, keeps the screen, and lets the user try again", async () => {
     consentMod.mockRejectedValueOnce({ code: "grant-refused", message: "That isn't allowed." });
     render(<Tab rows={[waiting([perm("tasks.read")])]} />);
@@ -547,6 +587,48 @@ describe("a mod that can't run", () => {
     expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("opens Settings on its Developer page, not on whatever page it was last on", () => {
+    render(<Tab rows={[mod({ tier: "third", state: pausedForDevMode() })]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledExactlyOnceWith("developer");
+  });
+
+  it("puts a 'Developer mode off' mark at the top, next to the mod's name", () => {
+    render(<Tab rows={[mod({ tier: "third", state: pausedForDevMode() })]} />);
+    const heading = screen.getByRole("heading", { level: 1, name: "Acme Tool" });
+    const mark = screen.getByText("Developer mode off");
+    // In the header row with the name, not in the body below it and not inside the name itself.
+    expect(mark.parentElement).toBe(heading.parentElement);
+    expect(mark.getAttribute("data-help")).toBe("mod-dev-mode-off");
+    expect(heading.contains(mark)).toBe(false);
+    expect(HELP["mod-dev-mode-off"]?.title).toBeTruthy();
+  });
+
+  it.each([
+    ["paused-by-you", "resume"],
+    ["paused-other", "none"],
+    ["paused-frozen", "resume"],
+    ["paused-by-safety-list", "none"],
+    ["removed-by-safety-list", "uninstall"],
+    ["files-missing", "repair"],
+    ["parked", "none"],
+    ["installing", "none"],
+  ] as const)("has no such mark, and no Open Settings, for a mod that is %s", (kind, fix) => {
+    render(<Tab rows={[mod({ state: standing(kind, { text: "Some sentence.", fix }) })]} />);
+    expect(screen.getByText("Some sentence.")).toBeTruthy();
+    expect(screen.queryByText("Developer mode off")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Settings" })).toBeNull();
+  });
+
+  it("has no such mark on a mod that is waiting to be turned on, or one that is running", async () => {
+    render(<Tab rows={[mod({ consented: false, state: standing("waiting-for-you") })]} />);
+    expect(screen.queryByText("Developer mode off")).toBeNull();
+    cleanup();
+    render(<Tab rows={[mod()]} />);
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    expect(screen.queryByText("Developer mode off")).toBeNull();
   });
 
   it("offers Repair for a mod whose files are missing, and reads the rows after", async () => {

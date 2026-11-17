@@ -104,7 +104,7 @@ export function ProjectPicker({
             className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs ${
               primary
                 ? "bg-accent-soft text-accent-text"
-                : "border border-border2 bg-surface text-ink3"
+                : "border border-ink4 bg-surface text-ink3"
             }`}
           >
             {primary && <span className="text-[0.625rem] uppercase tracking-wide">Primary</span>}

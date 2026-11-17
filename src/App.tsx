@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { CONNECTOR_POLL_MS, shouldIncludeSharedWithMe } from "./lib/connectorPoll";
-import { nextCheckDelay, shouldCheck } from "./lib/calendarPoll";
+import { useCalendarChangeCheck } from "./lib/useCalendarChangeCheck";
 import { isTypingTarget } from "./lib/calendarNavKey";
 import { isAnyDialogOpen } from "./lib/useDialogLayer";
 import { CalendarView } from "./components/calendar/CalendarView";
@@ -36,6 +36,7 @@ import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsView } from "./components/SettingsView";
+import type { SettingsTab } from "./components/settings/registry";
 import { SettingsPendingProvider } from "./lib/settingsPending";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { VaultCurtain } from "./components/VaultCurtain";
@@ -103,7 +104,6 @@ import {
   setHelpMode,
   startSemanticLayout,
   syncCalendar,
-  checkGoogleCalendars,
   vaultLockStatus,
   vaultStatus,
 } from "./lib/ipc";
@@ -183,6 +183,13 @@ export default function App() {
   // until the next relaunch surprises the user (issue #343). Fixed from Settings → Vault.
   const [vaultFaultNotice, setVaultFaultNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // The Settings page the next open lands on. Every way in names one (`openSettings`), so a deep link
+  // (a mod paused for developer mode points at "developer") never leaves the NEXT plain open there.
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const openSettings = (tab: SettingsTab = "general") => {
+    setSettingsTab(tab);
+    setShowSettings(true);
+  };
   const [view, setView] = useState<View>("focus");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   /** A file to highlight when the project opens (set by the command palette). */
@@ -756,41 +763,8 @@ export default function App() {
   // window is on screen, a cheap check asks Google which calendars changed and fetches only those
   // (the backend spaces checks out and skips while a sync runs). Hidden or in the tray it pauses;
   // coming back into view or into focus checks at once. The views re-read on `calendar://synced`.
-  useEffect(() => {
-    if (!aiReady) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stopped = false;
-    const check = () => {
-      if (!stopped && shouldCheck(document.visibilityState)) {
-        void checkGoogleCalendars().catch(() => {
-          // A provider being unreachable is surfaced by the full sync, not here.
-        });
-      }
-    };
-    const schedule = () => {
-      timer = setTimeout(() => {
-        check();
-        if (!stopped) schedule();
-      }, nextCheckDelay());
-    };
-    schedule();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") check();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", check);
-    const stop = () => {
-      stopped = true;
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", check);
-    };
-    const off = onTeardown(stop);
-    return () => {
-      stop();
-      off();
-    };
-  }, [aiReady]);
+  // (A hook of its own now: the pop-out Calendar runs the same check.)
+  useCalendarChangeCheck(aiReady, onTeardown);
 
   // Load the boot-primed conversation's messages the first time the user opens chat (F-09): cold
   // start primes the selection but defers this fetch off the first-paint path. Fires at most once.
@@ -1210,7 +1184,7 @@ export default function App() {
                     newConversation();
                   }}
                   onNewProjectChat={projectChat.newChat}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                   onOpenWhatsNew={() => setShowWhatsNew(true)}
                   onOpenPalette={() => setShowPalette(true)}
                   chatModel={settings?.chat_models[0] ?? null}
@@ -1279,7 +1253,7 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <ReviewView
                       onChanged={refreshReviewCount}
-                      onOpenSettings={() => setShowSettings(true)}
+                      onOpenSettings={() => openSettings()}
                     />
                   </main>
                 ) : view === "teach" ? (
@@ -1308,7 +1282,7 @@ export default function App() {
                     <ModsRoute
                       view={view}
                       onOpenMods={() => setView("mods")}
-                      onOpenSettings={() => setShowSettings(true)}
+                      onOpenSettings={(tab) => openSettings(tab)}
                     />
                   </main>
                 ) : (
@@ -1400,6 +1374,7 @@ export default function App() {
                 <SettingsPendingProvider>
                   <SettingsView
                     onboarding={false}
+                    initialTab={settingsTab}
                     onClose={() => {
                       setShowSettings(false);
                       refreshSettings();
@@ -1436,7 +1411,7 @@ export default function App() {
                     setView("calendar");
                   }}
                   onNavigate={setView}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                 />
               )}
             </div>

@@ -293,7 +293,6 @@ const SETTINGS_VALUE_SAFE: &[&str] = &[
     "google_last_sync",
     "chat_auto_switch",
     "background_auto_switch",
-    "dev_mode",
 ];
 
 /// The running vault's index-time + runtime facts for the Dev tab's System panel. The app

@@ -346,7 +346,7 @@ pub fn set_time_zone(state: State<'_, AppState>, zone: String) -> Result<()> {
 ///
 /// `dev_mode` is no longer one of them: developer mode is per device and decides whether unsigned
 /// mods may install and run, so the page can't write it (`mods::devmode`, the `dev_mode_state` and
-/// `dev_mode_switch` commands). The old row stays in the store, read once to carry an old "on" over.
+/// `dev_mode_switch` commands). The old row stays in the store, never read by anything.
 const WEBVIEW_PREFS: &[&str] = &[
     "appearance",
     "pinboard",

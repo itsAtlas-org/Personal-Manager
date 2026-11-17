@@ -29,7 +29,9 @@ const VARIANT: Record<ButtonVariant, string> = {
   primary:
     "bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint",
   secondary:
-    "bg-transparent text-ink2 border border-border2 enabled:hover:bg-surface disabled:text-faint",
+    // Edge `--ink4`, not `--border2` (1.33-1.84:1 at the default Contrast): a secondary button is
+    // marked out by its edge alone, so it owes 3:1 (WCAG 1.4.11). Disabled recedes to `--border2`.
+    "bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint",
   tertiary: "bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint",
   // Destructive — the confirm on a delete/reset/wipe. Five call sites had hand-tinted a
   // `variant="primary"` with an inline `--st-due` mix, which is the same drift `Callout` exists to

@@ -676,14 +676,14 @@ export function GraphView() {
               data-help="map-labels"
               className={`rounded-[var(--radius-sm)] border px-2.5 py-1.5 text-xs transition-colors ${
                 showLabels
-                  ? "border-accent bg-accent text-accent-ink"
-                  : "border-border text-ink3 hover:text-ink"
+                  ? "border-ink4 bg-accent text-accent-ink"
+                  : "border-ink4 text-ink3 hover:text-ink"
               }`}
             >
               Names
             </button>
             <div
-              className="flex rounded-[var(--radius-sm)] border border-border p-0.5 text-xs"
+              className="flex rounded-[var(--radius-sm)] border border-ink4 p-0.5 text-xs"
               data-help={toggleHelp}
             >
               <ModeButton
@@ -776,7 +776,9 @@ function ModeButton({
       type="button"
       onClick={onClick}
       className={`rounded-[calc(var(--radius-sm)-2px)] px-2.5 py-1 transition-colors ${
-        active ? "bg-accent text-accent-ink" : "text-ink3 hover:text-ink"
+        active
+          ? "bg-accent text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)]"
+          : "text-ink3 hover:text-ink"
       }`}
     >
       {children}
@@ -795,7 +797,7 @@ function NavControls({
   onReset: () => void;
 }) {
   const btn =
-    "flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-border bg-surface/85 text-ink2 backdrop-blur transition hover:text-ink hover:border-border2";
+    "flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-ink4 bg-surface/85 text-ink2 backdrop-blur transition hover:text-ink hover:border-ink2";
   return (
     <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-1.5" data-help="map-navigate">
       <button type="button" className={btn} onClick={onZoomIn} aria-label="Zoom in" title="Zoom in">

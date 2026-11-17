@@ -31,9 +31,11 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { onModsChanged, onVaultFault, repairMod, resumeMod } from "../../lib/ipc";
 import { runModAction, useModActions } from "../../lib/modActions";
 import { useModRows } from "../../lib/modRows";
-import type { ModInfo } from "../../lib/modsTypes";
+import { pausedForDevMode, type ModInfo } from "../../lib/modsTypes";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
+import type { SettingsTab } from "../settings/registry";
 import { Button, Callout } from "../ui";
+import { DevModeOffMark } from "./DevModeOffMark";
 import { ModFirstOpen } from "./ModFirstOpen";
 import { ModFrame } from "./ModFrame";
 import { ModName } from "./ModName";
@@ -44,8 +46,8 @@ interface ModTabProps {
   modId: string;
   /** Go to the Mods tab (the panels point there for what they can't do themselves). */
   onOpenMods: () => void;
-  /** Open Settings (developer mode's switch lives there). */
-  onOpenSettings: () => void;
+  /** Open Settings on this page (developer mode's switch is on the Developer page). */
+  onOpenSettings: (tab: SettingsTab) => void;
 }
 
 export function ModTab({ modId, onOpenMods, onOpenSettings }: ModTabProps) {
@@ -114,7 +116,10 @@ export function ModTab({ modId, onOpenMods, onOpenSettings }: ModTabProps) {
   }
 
   if (mod.state.kind === "waiting-for-you") {
-    return <ModFirstOpen mod={mod} onTurnedOn={refresh} />;
+    // Keyed by the mod: going from one waiting mod's tab to another's reuses this ModTab, and the
+    // screen's own state (its counted showing, the "Don't show this again" tick, the permission
+    // answers) belongs to one mod's screen, so each mod's screen is a new one.
+    return <ModFirstOpen key={mod.id} mod={mod} onTurnedOn={refresh} />;
   }
 
   if (mod.state.kind === "running" && mod.state.running) {
@@ -209,7 +214,7 @@ function StatusPanel({
   mod: ModInfo;
   refresh: () => Promise<void>;
   onOpenMods: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab: SettingsTab) => void;
 }) {
   const { kind, fix, text } = mod.state;
   // In flight in the shared store, keyed by the mod like its row in the Mods tab: a Resume pressed
@@ -238,6 +243,7 @@ function StatusPanel({
           name
         )
       }
+      mark={pausedForDevMode(mod) ? <DevModeOffMark /> : undefined}
     >
       <p className="break-words text-sm text-ink2">
         {text ||
@@ -276,7 +282,7 @@ function StatusPanel({
           </Button>
         )}
         {kind === "paused-dev-mode" && (
-          <Button variant="primary" onClick={onOpenSettings}>
+          <Button variant="primary" onClick={() => onOpenSettings("developer")}>
             Open Settings
           </Button>
         )}
@@ -299,15 +305,27 @@ function StatusPanel({
 
 // --- the shell ----------------------------------------------------------------------------------
 
-/** One panel PM draws where a mod's frame would be. `title` may be a mod's own name: plain text. */
-function Panel({ title, children }: { title: ReactNode; children: ReactNode }) {
+/** One panel PM draws where a mod's frame would be. `title` may be a mod's own name: plain text.
+ *  `mark` is a small mark of PM's beside the name (why the mod isn't running). */
+function Panel({
+  title,
+  mark,
+  children,
+}: {
+  title: ReactNode;
+  mark?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="h-full overflow-y-auto" data-help="mod-tab-status">
       <div className="mx-auto max-w-xl space-y-4 px-6 py-8">
-        {/* Clipped to its own box: whatever a name is made of can't paint over what is below. */}
-        <h1 className="overflow-hidden break-words font-head text-lg font-semibold text-ink">
-          {title}
-        </h1>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {/* Clipped to its own box: whatever a name is made of can't paint over what is below. */}
+          <h1 className="min-w-0 overflow-hidden break-words font-head text-lg font-semibold text-ink">
+            {title}
+          </h1>
+          {mark}
+        </div>
         {children}
       </div>
     </div>

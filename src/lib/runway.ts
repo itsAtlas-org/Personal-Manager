@@ -30,6 +30,9 @@ import {
   isDraftEvent,
   isMilestoneEvent,
   isTaskEvent,
+  MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
+  milestoneOverlayId,
   parseLocal,
   startOfDay,
   startOfWeek,
@@ -251,6 +254,62 @@ export function isDropColumn(column: RunwayColumn): boolean {
   return column.kind !== "past";
 }
 
+// --- remembered folds ------------------------------------------------------------------------------
+
+/** What a column's fold is remembered under. A fold belongs to the column, not to the days it holds
+ *  today: a default split by a named window (`rest`, then `rest:2`) folds together under `rest`,
+ *  and a stored `rest:2` could never fold an unrelated stretch on some later day. A window is
+ *  `window:<id>`, taken whole: its id is the part after the first colon, so splitting on ":" would
+ *  make every window "window". */
+export function foldKey(c: RunwayColumn): string {
+  if (c.kind === "past") return PAST_COLUMN_ID;
+  if (c.kind === "window") return `window:${c.windowId ?? c.id}`;
+  const colon = c.id.indexOf(":");
+  return colon === -1 ? c.id : c.id.slice(0, colon);
+}
+
+/** `folds` with `key` set folded or open, as a new set (a state setter must see a change). It is
+ *  told the state to reach rather than flipping the stored one: a window whose copy is stale (the
+ *  other webview folded this column since) must still do what its click said. */
+export function setFoldKey(folds: ReadonlySet<string>, key: string, folded: boolean): Set<string> {
+  const next = new Set(folds);
+  if (folded) next.add(key);
+  else next.delete(key);
+  return next;
+}
+
+/** `folds` less the folds of named windows that are gone. Only `window:` keys can go stale (a
+ *  window is deleted, or its days pass); a default column's key is always live, so it is kept. */
+export function keepLiveWindowFolds(
+  folds: ReadonlySet<string>,
+  liveWindowIds: readonly string[],
+): Set<string> {
+  const live = new Set(liveWindowIds);
+  const out = new Set<string>();
+  for (const k of folds) {
+    if (k.startsWith("window:") && !live.has(k.slice("window:".length))) continue;
+    out.add(k);
+  }
+  return out;
+}
+
+/** How many cards a column's two lanes hold, counting a stack's tasks (not the stack as one). The
+ *  rail's count on the board and the rule's count in the Terminal both say this. */
+export function cardCount(lanes: RunwayLanes): number {
+  let n = 0;
+  for (const c of [...lanes.foreground, ...lanes.background])
+    n += c.kind === "stack" ? c.tasks.length : 1;
+  return n;
+}
+
+/** The Runway readout's count: "3/7 done", plus " · 1 in progress" while any is started, or
+ *  "Nothing planned" when no task or milestone sits from today on (not "0/0 done", which reads as
+ *  a failure when it means an empty week). */
+export function runwayProgressWords(p: RunwayProgress): string {
+  if (p.total === 0) return "Nothing planned";
+  return `${p.done}/${p.total} done${p.doing > 0 ? ` · ${p.doing} in progress` : ""}`;
+}
+
 // --- cards -----------------------------------------------------------------------------------------
 
 export interface RunwayTaskCard {
@@ -327,6 +386,9 @@ export interface RunwayModel {
   /** The column each placed task sits in, by task id (parked and left-off tasks aren't here):
    *  where a drag or a move comes from. */
   columnOf: ReadonlyMap<number, string>;
+  /** How many done tasks and met milestones `hideDoneBefore` left out of Today and the later
+   *  columns (0 when it isn't set): what "Show done (N)" counts. */
+  hiddenDone: number;
 }
 
 export interface PlaceInput {
@@ -337,6 +399,13 @@ export interface PlaceInput {
   today: Date;
   /** Archived project names: their tasks and milestones are left off. */
   archived: ReadonlySet<string>;
+  /** Hide done (the Agenda's toggle) when set: a done task is left out of its column when it has
+   *  no `completed_at` or finished before this instant, and so is every met milestone. A task
+   *  finished at or after it stays, struck through, so one ticked while hiding doesn't vanish under
+   *  the pointer. Only Today and later are cut: "Before today" is the folded place to look back.
+   *  A left-out item still counts in `progress`, still joins its stack's chain and still has a
+   *  `columnOf` entry. */
+  hideDoneBefore?: Date | null;
 }
 
 /** The task cards in a lane's display order, stack members inline: what a reorder works over. */
@@ -349,8 +418,9 @@ export function laneTaskIds(cards: readonly RunwayCard[]): number[] {
   return ids;
 }
 
-/** A milestone that's reached (met, or its status done). */
-function milestoneDone(m: Milestone): boolean {
+/** A milestone that's reached (met, or its status done). The one test every surface asks: the
+ *  boards' strike-through, the overlay's check mark, and the Agenda's Hide done. */
+export function milestoneDone(m: Milestone): boolean {
   return m.state === "met" || m.status === "done";
 }
 
@@ -392,6 +462,11 @@ export function placeCards(input: PlaceInput): RunwayModel {
   const todayCol = columns.find((c) => c.today) ?? columnForDay(columns, tk);
   const past = columns.find((c) => c.kind === "past") ?? null;
   const stackById = new Map(stacks.map((s) => [s.id, s]));
+  const cutMs = input.hideDoneBefore ? input.hideDoneBefore.getTime() : null;
+  let hiddenDone = 0;
+  // The stacks Hide done took a member of out of a lane (`column/lane`): a stack whose done member
+  // is hidden keeps its card ("N left", the opening chain) for the members still shown.
+  const cutStacks = new Map<string, Set<number>>();
 
   type Placed = { card: RunwayTaskCard | RunwayMilestoneCard; lane: TaskLane };
   const at = new Map<string, Placed[]>();
@@ -490,7 +565,21 @@ export function placeCards(input: PlaceInput): RunwayModel {
       col = windowMatch(t) ?? columnForDay(columns, day);
       placed = card();
     }
-    put(col, placed);
+    // Hide done leaves a finished task out of Today and later, but it is still placed: it counts
+    // as done, joins its stack's chain and has a column, as a visible one does.
+    if (col && col.kind !== "past" && !open && cutMs !== null && !(finishedAt(t) >= cutMs)) {
+      hiddenDone += 1;
+      // Remember the stack it left this lane: its last visible member still gets the stack card.
+      const sid = t.stack_id;
+      if (sid !== null && stackById.has(sid)) {
+        const key = `${col.id}/${lane}`;
+        const cut = cutStacks.get(key);
+        if (cut) cut.add(sid);
+        else cutStacks.set(key, new Set([sid]));
+      }
+    } else {
+      put(col, placed);
+    }
     if (col) {
       columnOf.set(t.id, col.id);
       joinStack({ card: placed.card as RunwayTaskCard, columnId: col.id });
@@ -522,7 +611,12 @@ export function placeCards(input: PlaceInput): RunwayModel {
     } else {
       col = columnForDay(columns, due);
     }
-    put(col, { card: { kind: "milestone", milestone: m, late }, lane: "foreground" });
+    // A met milestone has no finishing time to keep it past a tick, so Hide done takes them all.
+    if (col && col.kind !== "past" && done && cutMs !== null) {
+      hiddenDone += 1;
+    } else {
+      put(col, { card: { kind: "milestone", milestone: m, late }, lane: "foreground" });
+    }
     if (col && col.kind !== "past") {
       progress.total += 1;
       if (done) progress.done += 1;
@@ -538,11 +632,13 @@ export function placeCards(input: PlaceInput): RunwayModel {
         placed.filter((p) => p.lane === "foreground").map((p) => p.card),
         stackById,
         stackMembers,
+        cutStacks.get(`${c.id}/foreground`),
       ),
       background: arrange(
         placed.filter((p) => p.lane === "background").map((p) => p.card),
         stackById,
         stackMembers,
+        cutStacks.get(`${c.id}/background`),
       ),
     };
   }
@@ -555,7 +651,14 @@ export function placeCards(input: PlaceInput): RunwayModel {
     progress,
     nextUp: n && info ? { title: n.title, deadlineText: info.text, tone: info.tone } : null,
     columnOf,
+    hiddenDone,
   };
+}
+
+/** When a task finished, as a time; NaN when it has no `completed_at` (or it doesn't parse), which
+ *  no cutoff comparison passes, so such a task counts as finished before any cutoff. */
+function finishedAt(t: Task): number {
+  return t.completed_at === null ? NaN : Date.parse(t.completed_at);
 }
 
 /** The local day a `completed_at` instant fell on, `YYYY-MM-DD`, or null. */
@@ -566,11 +669,13 @@ function completedDay(at: string | null): string | null {
 }
 
 /** One lane's cards: tasks in the global order (stacks of two or more folded into one card where
- *  the first of them is, counted over the whole stack), then milestones by date. */
+ *  the first of them is, counted over the whole stack), then milestones by date. `cut` names the
+ *  stacks Hide done took a member of out of this lane: one member left is still their card. */
 function arrange(
   cards: (RunwayTaskCard | RunwayMilestoneCard)[],
   stackById: Map<number, TaskStack>,
   stackMembers: Map<number, RunwayStackMember[]>,
+  cut?: ReadonlySet<number>,
 ): RunwayCard[] {
   const taskCards = cards
     .filter((c): c is RunwayTaskCard => c.kind === "task")
@@ -596,7 +701,7 @@ function arrange(
   for (const c of taskCards) {
     const sid = c.task.stack_id;
     const group = sid === null ? undefined : members.get(sid);
-    if (sid === null || !group || group.length < 2) {
+    if (sid === null || !group || (group.length < 2 && !cut?.has(sid))) {
       out.push(c);
       continue;
     }
@@ -854,6 +959,39 @@ export function taskOverlayEvents(
       all_day: true,
       html_link: null,
       uid: null,
+    });
+  }
+  return out;
+}
+
+/** The milestone overlay on the calendar: one all-day event per dated milestone that isn't already
+ *  drawn as a real event. PM-native (unlinked) ones, plus linked ones whose event is `event_missing`
+ *  (out of the mirror band / deselected / deleted), which nothing else shows; a linked, in-mirror
+ *  milestone is already its real event, so skipping it avoids a double. Dateless milestones have no
+ *  day to sit on. `done` carries "reached" (`milestoneDone`) for `isEventPast`, so a met milestone
+ *  recedes with the past and an unmet one never does, however its label reads. */
+export function milestoneOverlayEvents(milestones: readonly Milestone[]): CalendarEvent[] {
+  const out: CalendarEvent[] = [];
+  for (const m of milestones) {
+    if (!m.due_date) continue;
+    if (!(m.event_uid === null || m.event_missing)) continue;
+    const done = milestoneDone(m);
+    out.push({
+      id: milestoneOverlayId(m.id),
+      calendar_id: MILESTONE_CALENDAR_ID,
+      // Suffix the owning project so two milestones with similar labels in different projects are
+      // distinguishable on the all-day row (a milestone always belongs to exactly one project).
+      // The check mark is only the colour-independent cue that it is met. Nothing reads it back:
+      // `done` is what the logic uses, so a label that itself begins with a check mark means nothing.
+      summary: `${done ? MILESTONE_MET_MARK : ""}${m.label} · ${m.project_name}`,
+      description: null,
+      location: null,
+      start: m.due_date.slice(0, 10),
+      end: null,
+      all_day: true,
+      html_link: null,
+      uid: null,
+      done,
     });
   }
   return out;

@@ -125,6 +125,31 @@ describe("contrast axis — WCAG targets across every system × mode", () => {
         }
       });
 
+      // The segmented controls (SegmentedControl, the Calendar's RangeControl, the pressed IconButton,
+      // the Pinboard's list/timeline switch, the Map's By project / Semantic switch). Two things
+      // there failed 1.4.11, measured with the real themeVars over every System x Mode x accent x
+      // Contrast level (76 combinations):
+      //   - the group's edge in `--border2` (or `--border`): 1.33-1.84:1 against bg/panel/surface at
+      //     the default Contrast, and still 2.73-2.95:1 on light themes at High;
+      //   - the active segment's accent fill on a light theme with a pale accent: 1.32-3.03:1 (only
+      //     one of 18 coloured accents reaches 3:1), at BOTH levels because boost() never touches
+      //     --accent. The fill is the accent's own business, so the segment carries a 1px inset rim
+      //     in `--ink4` (Toggle's pattern) and the rim is the boundary.
+      // So the edge and the rim are both `--ink4`, read against all three surfaces the controls sit
+      // on. Measured minimum over the sweep: 4.73:1 (terminal/light, #7fe0b0, on --surface). The
+      // label on the fill is `--accent-ink` on `--accent` (text-xs, so the full 4.5:1; minimum 5.44).
+      it(`${system}/${mode}: a segmented control's edge and active rim clear 3:1 on every surface, at every level`, () => {
+        for (const contrast of ["aa", "high"] as const) {
+          for (const anyAccent of ACCENTS[system]) {
+            const v = themeVars(system, mode, anyAccent, false, contrast);
+            for (const against of TEXT_BGS) {
+              expect(ratioOf(v, "ink4", against)).toBeGreaterThanOrEqual(3);
+            }
+            expect(ratioOf(v, "accent-ink", "accent")).toBeGreaterThanOrEqual(4.5);
+          }
+        }
+      });
+
       // The semantic status colours are TEXT: the error banner's message, Field's role="alert", the
       // "Due soon" chip, every connector failure string. They render at text-xs, so the 3:1
       // large-text exemption never applies. They also sit OUTSIDE the contrast axis — boost() only
@@ -174,3 +199,128 @@ describe("contrast axis — WCAG targets across every system × mode", () => {
     expect(boost(lc, "ink4", "dark", "aa")).not.toEqual([...lc]);
   });
 });
+
+// The tokens measured above only protect the controls that actually use them. This reads the five
+// segmented-control sources (the way designGuards.test.ts reads the tree) and pins the classes the
+// measurement was made for: the group edge in `--ink4`, never `--border2`/`--border`, and the active
+// segment's inset `--ink4` rim.
+describe("segmented controls use the measured edge and rim", () => {
+  const RAW = import.meta.glob(
+    [
+      "../components/ui/SegmentedControl.tsx",
+      "../components/ui/IconButton.tsx",
+      "../components/calendar/RangeControl.tsx",
+      "../components/PinboardView.tsx",
+      "../components/GraphView.tsx",
+      "../components/calendar/edit/CustomRecurrenceDialog.tsx",
+      "../components/calendar/edit/GuestField.tsx",
+    ],
+    { query: "?raw", import: "default", eager: true },
+  ) as Record<string, string>;
+  const src = (name: string): string => {
+    const hit = Object.entries(RAW).find(([k]) => k.endsWith(name));
+    if (!hit) throw new Error(`${name} not found`);
+    return hit[1];
+  };
+  const RIM = "shadow-[inset_0_0_0_1px_var(--ink4)]";
+
+  it("SegmentedControl: ink4 edge, rimmed enabled active segment, no border2 edge", () => {
+    const t = src("ui/SegmentedControl.tsx");
+    expect(t).toContain("border border-ink4 p-0.5");
+    expect(t).not.toContain("border border-border2");
+    expect(t).toContain(`"bg-accent text-accent-ink font-medium ${RIM}"`);
+  });
+
+  it("RangeControl: the hand-copied group has the same edge and rim", () => {
+    const t = src("calendar/RangeControl.tsx");
+    expect(t).toContain("border border-ink4 p-0.5");
+    expect(t).not.toContain("border-border2");
+    expect(t).toContain(`"bg-accent ${RIM}"`);
+  });
+
+  it("IconButton: the pressed variant is rimmed", () => {
+    expect(src("ui/IconButton.tsx")).toContain(`"bg-accent text-accent-ink ${RIM} enabled:hover`);
+  });
+
+  it("Pinboard's list/timeline switch: the chosen icon is rimmed", () => {
+    expect(src("PinboardView.tsx")).toContain(`"bg-accent text-accent-ink ${RIM}"`);
+  });
+
+  it("Map's By project / Semantic switch: ink4 edge and a rimmed active button", () => {
+    const t = src("GraphView.tsx");
+    expect(t).toContain("rounded-[var(--radius-sm)] border border-ink4 p-0.5 text-xs");
+    expect(t).toContain(`"bg-accent text-accent-ink ${RIM}"`);
+  });
+
+  it("Custom repeat's weekday buttons: the rim is there on and off", () => {
+    const t = src("calendar/edit/CustomRecurrenceDialog.tsx");
+    expect(t).toContain(`"${RIM}",`);
+    expect(t).toContain(`on ? "bg-accent font-medium text-accent-ink"`);
+  });
+
+  it("A guest's Optional button: the rim is there pressed and not", () => {
+    const t = src("calendar/edit/GuestField.tsx");
+    expect(t).toContain(`bg-accent px-1.5 text-xs font-medium text-accent-ink ${RIM}`);
+    expect(t).toContain(`px-1.5 text-xs text-ink2 ${RIM}`);
+  });
+});
+
+// ===== BEGIN form-control edges (#1105) =====================================================
+// Own block, own describe: other PRs add cases to the file above and below this one.
+//
+// WCAG 1.4.11: an interactive control's edge is its visual boundary when nothing else marks it out,
+// so it owes 3:1 against whatever it sits on. A text field, dropdown, secondary button or chip is
+// exactly that case (`--surface` on `--panel` is 1.03-1.16:1, so the fill adds no boundary). The
+// ramp's "strong edge" `--border2` measures 1.33-1.84:1 at the default Contrast and 2.73-3.29:1
+// even at `high` in a light theme, so it was never an edge a person could see. Every control now
+// uses `--ink4`: 4.73:1 or better on every surface (measured minimum: terminal/light/#7fe0b0 on
+// --surface).
+//
+// The pairs are the ones the sweep found, by class:
+//   rest edge     border-ink4          on --bg / --panel / --surface  (fields sit on all three)
+//   hover edge    border-ink2          never weaker than rest (DocumentFolders, GraphView, RemovePmData)
+//   focus/hover   border-accent-text   not `--accent`: a pale accent in a light theme is 1.4:1
+//   invalid edge  border-st-due        already the text-status colour, so it clears 4.5:1 too
+// Disabled controls drop back to `--border2` on purpose (exempt from 1.4.11, and they should recede).
+// Swept over every accent and BOTH Contrast levels: the accent hue tints the surfaces.
+describe("form-control edges clear 3:1 on every surface (1.4.11)", () => {
+  const SURFACES = ["bg", "panel", "surface"] as const;
+  for (const system of SYSTEMS) {
+    for (const mode of MODES) {
+      it(`${system}/${mode}: rest, hover, focus and invalid edges, both Contrast levels`, () => {
+        for (const contrast of ["aa", "high"] as const) {
+          for (const anyAccent of ACCENTS[system]) {
+            // The invalid edge is --st-due, which the colour-blind axis swaps for its own palette.
+            for (const colorblind of [false, true]) {
+              const v = themeVars(system, mode, anyAccent, colorblind, contrast);
+              for (const against of SURFACES) {
+                for (const role of ["ink4", "ink2", "accent-text", "st-due"]) {
+                  expect(ratioOf(v, role, against)).toBeGreaterThanOrEqual(3);
+                }
+                // Hover is never a step down from rest.
+                expect(ratioOf(v, "ink2", against)).toBeGreaterThanOrEqual(
+                  ratioOf(v, "ink4", against),
+                );
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  it("the old edge really did fail, so this block is measuring something", () => {
+    // If --border2 ever reached 3:1 at the default Contrast this guard would be vacuous: say so.
+    let worst = Infinity;
+    for (const system of SYSTEMS) {
+      for (const mode of MODES) {
+        for (const anyAccent of ACCENTS[system]) {
+          const v = themeVars(system, mode, anyAccent, false, "aa");
+          for (const against of SURFACES) worst = Math.min(worst, ratioOf(v, "border2", against));
+        }
+      }
+    }
+    expect(worst).toBeLessThan(3);
+  });
+});
+// ===== END form-control edges (#1105) =======================================================

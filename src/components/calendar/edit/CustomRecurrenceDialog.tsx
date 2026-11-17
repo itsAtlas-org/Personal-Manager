@@ -53,7 +53,7 @@ const UNITS: { value: RepeatUnit; one: string; many: string }[] = [
 
 /** A small number field, in the editor's field tokens. */
 const NUMBER =
-  "w-16 rounded-[var(--radius-sm)] border border-border2 bg-surface px-2 py-1 text-sm text-ink2 outline-none transition focus:border-accent disabled:cursor-not-allowed disabled:bg-transparent disabled:text-ink3";
+  "w-16 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3";
 
 /** Rendered only while open (the parent mounts it), so its fields start afresh each time. */
 export function CustomRecurrenceDialog({ rule, startDate, earliestEnd, onDone, onClose }: Props) {
@@ -159,10 +159,10 @@ export function CustomRecurrenceDialog({ rule, startDate, earliestEnd, onDone, o
                     onClick={() => toggle(d.code)}
                     className={cn(
                       "inline-flex h-8 w-8 items-center justify-center rounded-full text-xs transition",
-                      // Off, the edge is `--ink4`: the contrast floor a control's own edge needs.
-                      on
-                        ? "bg-accent font-medium text-accent-ink"
-                        : "text-ink2 shadow-[inset_0_0_0_1px_var(--ink4)] hover:text-ink",
+                      // The edge is `--ink4` both ways: the contrast floor a control's own edge
+                      // needs (a pale accent fill alone is under 3:1 on a light theme).
+                      "shadow-[inset_0_0_0_1px_var(--ink4)]",
+                      on ? "bg-accent font-medium text-accent-ink" : "text-ink2 hover:text-ink",
                     )}
                   >
                     {d.name[0]}

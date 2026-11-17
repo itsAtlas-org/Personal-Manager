@@ -139,7 +139,7 @@ describe("LinkPanel", () => {
     expect(document.activeElement).toBe(link());
     // One primary button on screen is the editor's Save: Apply is drawn as a secondary one.
     const apply = screen.getByRole("button", { name: "Apply" }).className.split(" ");
-    expect(apply).toContain("border-border2");
+    expect(apply).toContain("border-ink4");
     expect(apply).not.toContain("bg-accent");
   });
 });

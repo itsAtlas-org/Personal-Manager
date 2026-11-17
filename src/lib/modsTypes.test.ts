@@ -8,6 +8,7 @@ import {
   failureText,
   iconBlob,
   modsErrorOf,
+  pausedForDevMode,
   type ModIcon,
   type ModsErrorCode,
 } from "./modsTypes";
@@ -94,5 +95,30 @@ describe("failureText: every code has a plain sentence", () => {
     expect(failureText(new Error("disk full"), "x")).toBe("disk full");
     expect(failureText(new Error(""), "x")).toBe("x");
     expect(failureText("nope", "x")).toBe("x");
+  });
+});
+
+describe("pausedForDevMode", () => {
+  it("is true for the standing the backend calls paused-dev-mode, and for no other", () => {
+    const kinds = [
+      "running",
+      "waiting-for-you",
+      "paused-by-you",
+      "paused-frozen",
+      "paused-by-safety-list",
+      "removed-by-safety-list",
+      "files-missing",
+      "files-changed",
+      "record-unreadable",
+      "api-unsupported",
+      "parked",
+      "installing",
+      "paused-other",
+      "from-the-future",
+    ];
+    expect(pausedForDevMode({ state: { kind: "paused-dev-mode" } })).toBe(true);
+    for (const kind of kinds) {
+      expect(pausedForDevMode({ state: { kind: kind as never } }), kind).toBe(false);
+    }
   });
 });

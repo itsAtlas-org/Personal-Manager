@@ -5,6 +5,9 @@ import { describe, it, expect } from "vitest";
 import {
   calendarNavKey,
   calendarUndoKey,
+  createKeyHint,
+  pageKeyHint,
+  todayKeyHint,
   type NavKeyEvent,
   type UndoKeyEvent,
 } from "./calendarNavKey";
@@ -64,11 +67,179 @@ describe("calendarNavKey", () => {
     expect(calendarNavKey(key("C", { shiftKey: true }), true)).toBeNull();
   });
 
+  // Month and Year run their periods down the screen, so ↑ and ↓ page them as ← and → do; the day
+  // grids and the agenda scroll with ↑ and ↓, so they get nothing.
+  it("pages with ↑ and ↓ only where the view says its periods run vertically", () => {
+    expect(calendarNavKey(key("ArrowUp"), false, true)).toBe("prev");
+    expect(calendarNavKey(key("ArrowDown"), false, true)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false)).toBeNull();
+    expect(calendarNavKey(key("ArrowDown"), false)).toBeNull();
+    expect(calendarNavKey(key("ArrowUp"), false, false)).toBeNull();
+    // ← and → are the same either way.
+    expect(calendarNavKey(key("ArrowLeft"), false, true)).toBe("prev");
+    expect(calendarNavKey(key("ArrowRight"), false, true)).toBe("next");
+  });
+
+  it("gives ↑ and ↓ the same gates as ← and →", () => {
+    for (const k of ["ArrowUp", "ArrowDown"]) {
+      expect(calendarNavKey(key(k, { target: el("BUTTON") }), true, true)).toBeNull();
+      expect(calendarNavKey(key(k, { metaKey: true }), false, true)).toBeNull();
+      expect(calendarNavKey(key(k, { ctrlKey: true }), false, true)).toBeNull();
+      expect(calendarNavKey(key(k, { altKey: true }), false, true)).toBeNull();
+      for (const tag of ["INPUT", "TEXTAREA", "SELECT"]) {
+        expect(calendarNavKey(key(k, { target: el(tag) }), false, true)).toBeNull();
+      }
+      expect(calendarNavKey(key(k, { target: el("DIV", true) }), false, true)).toBeNull();
+    }
+  });
+
+  // Google's keys: j or n for the next period, k or p for the previous, in every view ← and → page.
+  it("pages with Google's j n k p in every view, ↑ and ↓ or not", () => {
+    for (const vertical of [false, true]) {
+      for (const k of ["j", "n"]) expect(calendarNavKey(key(k), false, vertical)).toBe("next");
+      for (const k of ["k", "p"]) expect(calendarNavKey(key(k), false, vertical)).toBe("prev");
+    }
+    // Caps Lock types the capital, as it does for `t`.
+    expect(calendarNavKey(key("J"), false)).toBe("next");
+    expect(calendarNavKey(key("P"), false)).toBe("prev");
+  });
+
+  it("gives j n k p the same gates as the arrows", () => {
+    for (const k of ["j", "n", "k", "p"]) {
+      expect(calendarNavKey(key(k, { target: el("BUTTON") }), true)).toBeNull();
+      // Ctrl+K is the command palette's, Ctrl+N and Ctrl+P the system's.
+      expect(calendarNavKey(key(k, { ctrlKey: true }), false)).toBeNull();
+      expect(calendarNavKey(key(k, { metaKey: true }), false)).toBeNull();
+      expect(calendarNavKey(key(k, { altKey: true }), false)).toBeNull();
+      for (const tag of ["INPUT", "TEXTAREA", "SELECT"]) {
+        expect(calendarNavKey(key(k, { target: el(tag) }), false)).toBeNull();
+      }
+      expect(calendarNavKey(key(k, { target: el("DIV", true) }), false)).toBeNull();
+    }
+  });
+
+  it("leaves the other letters alone", () => {
+    for (const k of ["a", "d", "m", "w", "y", "x", "Tab", "ArrowUpX"]) {
+      expect(calendarNavKey(key(k), false, true)).toBeNull();
+    }
+  });
+
   it("reads Shift, not the letter's case, so Caps Lock doesn't change the surface", () => {
     // Caps Lock on: the key reads "C" with no Shift held.
     expect(calendarNavKey(key("C"), false)).toBe("create");
     // Caps Lock on and Shift held: the key reads "c".
     expect(calendarNavKey(key("c", { shiftKey: true }), false)).toBe("quick-create");
+  });
+});
+
+// What the ‹ and › buttons say of their keys is built from the same table the decision reads, so a
+// key they name always pages.
+describe("pageKeyHint", () => {
+  it("names the keys for a tooltip and for aria-keyshortcuts", () => {
+    expect(pageKeyHint("prev", false)).toEqual({
+      glyphs: "←, k or p",
+      shortcuts: "ArrowLeft k p",
+    });
+    expect(pageKeyHint("next", false)).toEqual({
+      glyphs: "→, j or n",
+      shortcuts: "ArrowRight j n",
+    });
+  });
+
+  it("adds ↑ and ↓ where the periods run down the screen", () => {
+    expect(pageKeyHint("prev", true)).toEqual({
+      glyphs: "←, ↑, k or p",
+      shortcuts: "ArrowLeft ArrowUp k p",
+    });
+    expect(pageKeyHint("next", true)).toEqual({
+      glyphs: "→, ↓, j or n",
+      shortcuts: "ArrowRight ArrowDown j n",
+    });
+  });
+
+  it("only names keys that page, in the direction named", () => {
+    for (const vertical of [false, true]) {
+      for (const nav of ["prev", "next"] as const) {
+        const { shortcuts } = pageKeyHint(nav, vertical);
+        for (const k of shortcuts.split(" ")) {
+          expect(calendarNavKey(key(k), false, vertical)).toBe(nav);
+        }
+      }
+    }
+  });
+});
+
+// WCAG 2.2 SC 2.1.4: with single-key shortcuts turned off (Settings → Accessibility → Keyboard) every
+// character-key shortcut does nothing, and the arrows, which are named keys, still page.
+describe("calendarNavKey with single-key shortcuts off", () => {
+  it("ignores t, c, Shift+C, j, k, n and p, in either case", () => {
+    for (const vertical of [false, true]) {
+      for (const k of ["t", "T", "c", "C", "j", "J", "k", "K", "n", "N", "p", "P"]) {
+        expect(calendarNavKey(key(k), false, vertical, false), k).toBeNull();
+        expect(calendarNavKey(key(k, { shiftKey: true }), false, vertical, false), k).toBeNull();
+      }
+    }
+  });
+
+  it("still pages with the arrows, and with ↑ and ↓ where the periods run down the screen", () => {
+    expect(calendarNavKey(key("ArrowLeft"), false, false, false)).toBe("prev");
+    expect(calendarNavKey(key("ArrowRight"), false, false, false)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false, true, false)).toBe("prev");
+    expect(calendarNavKey(key("ArrowDown"), false, true, false)).toBe("next");
+    expect(calendarNavKey(key("ArrowUp"), false, false, false)).toBeNull();
+    expect(calendarNavKey(key("ArrowDown"), false, false, false)).toBeNull();
+  });
+
+  it("is on unless told otherwise", () => {
+    expect(calendarNavKey(key("t"), false, false)).toBe("today");
+    expect(calendarNavKey(key("j"), false, true)).toBe("next");
+    expect(calendarNavKey(key("t"), false, false, true)).toBe("today");
+    expect(calendarNavKey(key("C", { shiftKey: true }), false, false, true)).toBe("quick-create");
+  });
+});
+
+describe("what Today and + New event say of their keys", () => {
+  it("names the letters while they are on", () => {
+    expect(todayKeyHint()).toEqual({ tip: "Jump to today · t", shortcuts: "t" });
+    expect(createKeyHint()).toEqual({
+      tip: "New event · c, or Shift+C for a quick event or task",
+      shortcuts: "c",
+    });
+  });
+
+  it("names nothing while they are off", () => {
+    expect(todayKeyHint(false)).toEqual({ tip: "Jump to today", shortcuts: undefined });
+    expect(createKeyHint(false)).toEqual({ tip: "New event", shortcuts: undefined });
+  });
+
+  it("only names a key that does something", () => {
+    expect(calendarNavKey(key(todayKeyHint().shortcuts!), false)).toBe("today");
+    expect(calendarNavKey(key(createKeyHint().shortcuts!), false)).toBe("create");
+  });
+});
+
+describe("pageKeyHint with single-key shortcuts off", () => {
+  it("names the arrows only", () => {
+    expect(pageKeyHint("prev", false, false)).toEqual({ glyphs: "←", shortcuts: "ArrowLeft" });
+    expect(pageKeyHint("next", false, false)).toEqual({ glyphs: "→", shortcuts: "ArrowRight" });
+    expect(pageKeyHint("prev", true, false)).toEqual({
+      glyphs: "← or ↑",
+      shortcuts: "ArrowLeft ArrowUp",
+    });
+    expect(pageKeyHint("next", true, false)).toEqual({
+      glyphs: "→ or ↓",
+      shortcuts: "ArrowRight ArrowDown",
+    });
+  });
+
+  it("only names keys that page", () => {
+    for (const vertical of [false, true]) {
+      for (const nav of ["prev", "next"] as const) {
+        for (const k of pageKeyHint(nav, vertical, false).shortcuts.split(" ")) {
+          expect(calendarNavKey(key(k), false, vertical, false)).toBe(nav);
+        }
+      }
+    }
   });
 });
 

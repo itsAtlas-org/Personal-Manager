@@ -14,6 +14,9 @@ interface Props {
   /** The flag printed after `cal --`, when it isn't the view's own name: `runway` for the Agenda's
    *  Runway layout. */
   flag?: string;
+  /** The filters that are on, printed after it as `--hide-done` and `--all-day`: the strip is where
+   *  the Terminal says what is being left out of the list below. */
+  filters?: readonly string[];
   /** The current period label, e.g. "July 2026". */
   label: string;
   /** Visible (non-hidden) event count, surfaced at Power depth. */
@@ -22,7 +25,7 @@ interface Props {
   noun?: "event" | "task";
 }
 
-export function TerminalChrome({ view, flag, label, count, noun = "event" }: Props) {
+export function TerminalChrome({ view, flag, filters = [], label, count, noun = "event" }: Props) {
   const { showPower } = useDepth();
   return (
     <div className="flex items-center gap-2 border-b border-rule bg-panel px-4 py-1 font-mono text-xs">
@@ -30,7 +33,10 @@ export function TerminalChrome({ view, flag, label, count, noun = "event" }: Pro
       <span aria-hidden className="text-ink3">
         ❯
       </span>
-      <span className="text-ink2">cal --{flag ?? view}</span>
+      <span className="text-ink2">
+        cal --{flag ?? view}
+        {filters.map((f) => ` --${f}`)}
+      </span>
       <span className="ml-auto truncate text-ink3">{label}</span>
       {showPower && (
         <span className="shrink-0 text-ink4">

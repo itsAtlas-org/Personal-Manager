@@ -136,6 +136,13 @@ export interface ModStanding {
   running: boolean;
 }
 
+/** Whether PM paused this mod because developer mode is off (the standing the backend calls
+ *  `paused-dev-mode`, state reason `dev-mode`). The page never works a standing out for itself, so a
+ *  mod paused for any other reason, or running, is never this. */
+export function pausedForDevMode(mod: { state: Pick<ModStanding, "kind"> }): boolean {
+  return mod.state.kind === "paused-dev-mode";
+}
+
 export type PermissionClass = "local" | "read" | "write" | "money" | "egress";
 export type PermissionWhen = "auto" | "install" | "install-then-first-use" | "first-use" | "ask";
 

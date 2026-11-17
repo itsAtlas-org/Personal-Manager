@@ -164,7 +164,7 @@ export function RetrievalExplainPanel({ messages, project, conversationId }: Pro
           onClick={toggle}
           data-help="chat-retrieval-explain"
           title="See which notes this chat retrieved and tune how deep it searches"
-          className="flex shrink-0 items-center gap-1 rounded-[var(--radius-sm)] border border-border2 px-2 py-1 text-xs text-ink4 hover:text-ink2"
+          className="flex shrink-0 items-center gap-1 rounded-[var(--radius-sm)] border border-ink4 px-2 py-1 text-xs text-ink4 hover:text-ink2"
           style={isOpen ? { color: "var(--ink2)" } : undefined}
         >
           <span aria-hidden="true">🔍</span>
@@ -184,7 +184,7 @@ export function RetrievalExplainPanel({ messages, project, conversationId }: Pro
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Query to explain…"
-            className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+            className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
           />
           <Button type="submit" variant="secondary" disabled={running || !query.trim()}>
             {running ? "Running…" : "Explain"}
@@ -261,7 +261,7 @@ export function RetrievalExplainPanel({ messages, project, conversationId }: Pro
               value={symptom}
               onChange={(e) => setSymptom(e.target.value)}
               placeholder="e.g. it keeps missing notes I know I wrote"
-              className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+              className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();

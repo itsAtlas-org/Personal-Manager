@@ -11,21 +11,38 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { getPref, setPref } from "./ipc";
 import {
+  calendarFiltersAreDefault,
+  readAgendaHideDone,
   readAgendaMode,
+  readEventKinds,
   readHidden,
   readLastCreate,
+  readRunwayFolded,
   readRunwayPastOpen,
   readRunwayWindows,
   readSwipeDays,
+  resetCalendarFilters,
+  gutterWidth,
+  localColWidth,
+  readZones,
+  rosterCount,
   swipeDays,
+  writeZones,
+  ZONES_KEY,
+  zoneColWidth,
+  toggleHiddenId,
+  writeAgendaHideDone,
   writeAgendaMode,
+  writeEventKinds,
   writeHidden,
   writeLastCreate,
+  writeRunwayFolded,
   writeRunwayPastOpen,
   writeRunwayWindows,
   writeSwipeDays,
 } from "./calendarPrefs";
 import { __resetStoredPrefs, hydrateStoredPrefs } from "./storedPrefs";
+import type { Calendar } from "./types";
 
 vi.mock("./ipc", () => ({
   getPref: vi.fn(async () => null),
@@ -126,6 +143,40 @@ describe("the Agenda's layout and the Runway (PA-2)", () => {
     expect(readRunwayPastOpen()).toBe(false);
   });
 
+  it("remembers the folded columns on this device, in the order they were folded", () => {
+    expect([...readRunwayFolded()]).toEqual([]);
+    writeRunwayFolded(["today", "window:w1"]);
+    expect(localStorage.getItem("pm.calendar.runwayFolded")).toBe('["today","window:w1"]');
+    expect([...readRunwayFolded()]).toEqual(["today", "window:w1"]);
+    // An empty set is a stored empty list, not a missing key's "nothing", and reads the same.
+    writeRunwayFolded([]);
+    expect([...readRunwayFolded()]).toEqual([]);
+  });
+
+  it("reads junk, non-strings and repeats in the folded key as what they are", () => {
+    for (const raw of ["not json", "{}", '"today"', "42", "null", ""]) {
+      localStorage.setItem("pm.calendar.runwayFolded", raw);
+      expect([...readRunwayFolded()]).toEqual([]);
+    }
+    localStorage.setItem(
+      "pm.calendar.runwayFolded",
+      JSON.stringify(["today", 7, null, "", "later", "today", { k: 1 }]),
+    );
+    // A repeat counts once, at the place it was last folded.
+    expect([...readRunwayFolded()]).toEqual(["later", "today"]);
+  });
+
+  it("keeps only the newest 64 folded columns, on write and on read", () => {
+    const keys = Array.from({ length: 70 }, (_, i) => `window:w${i}`);
+    writeRunwayFolded(keys);
+    const stored = JSON.parse(localStorage.getItem("pm.calendar.runwayFolded")!) as string[];
+    expect(stored).toHaveLength(64);
+    expect(stored[0]).toBe("window:w6");
+    expect(stored[63]).toBe("window:w69");
+    localStorage.setItem("pm.calendar.runwayFolded", JSON.stringify(keys));
+    expect([...readRunwayFolded()]).toEqual(keys.slice(-64));
+  });
+
   it("windows round-trip in calendar_ui beside hidden and last create", async () => {
     vi.mocked(getPref).mockImplementation(async (key: string) =>
       key === "calendar_ui"
@@ -181,5 +232,99 @@ describe("the Agenda's layout and the Runway (PA-2)", () => {
     );
     await hydrateStoredPrefs();
     expect(readRunwayWindows()).toEqual([]);
+  });
+});
+
+describe("the Agenda's Hide done and the All | All-day filter", () => {
+  it("shows everything until the user chooses otherwise, and remembers the choice", () => {
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+    writeAgendaHideDone(true);
+    writeEventKinds("all-day");
+    expect(localStorage.getItem("pm.calendar.agendaHideDone")).toBe("true");
+    expect(localStorage.getItem("pm.calendar.eventKinds")).toBe("all-day");
+    expect(readAgendaHideDone()).toBe(true);
+    expect(readEventKinds()).toBe("all-day");
+    writeAgendaHideDone(false);
+    writeEventKinds("all");
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+  });
+
+  it("reads anything it doesn't know as showing everything", () => {
+    localStorage.setItem("pm.calendar.agendaHideDone", "yes");
+    localStorage.setItem("pm.calendar.eventKinds", "timed-only");
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+  });
+
+  it("Reset turns both off and tells the open Calendar", () => {
+    writeAgendaHideDone(true);
+    writeEventKinds("all-day");
+    expect(calendarFiltersAreDefault()).toBe(false);
+    const told = vi.fn();
+    window.addEventListener("pm:settings-changed", told);
+    resetCalendarFilters();
+    window.removeEventListener("pm:settings-changed", told);
+    expect(readAgendaHideDone()).toBe(false);
+    expect(readEventKinds()).toBe("all");
+    expect(calendarFiltersAreDefault()).toBe(true);
+    expect(told).toHaveBeenCalledTimes(1);
+  });
+
+  it("either filter alone is not the default", () => {
+    writeAgendaHideDone(true);
+    expect(calendarFiltersAreDefault()).toBe(false);
+    writeAgendaHideDone(false);
+    writeEventKinds("all-day");
+    expect(calendarFiltersAreDefault()).toBe(false);
+  });
+});
+
+describe("the calendar list's two helpers, shared by the sidebar and the pop-out's popover", () => {
+  const cal = (id: string, selected: boolean) => ({ id, selected }) as Calendar;
+
+  it("toggleHiddenId hides a shown calendar and shows a hidden one, as a new set", () => {
+    const none = new Set<string>();
+    const one = toggleHiddenId(none, "a");
+    expect([...one]).toEqual(["a"]);
+    // The set passed in is left alone, so a state setter sees a change.
+    expect(one).not.toBe(none);
+    expect(none.size).toBe(0);
+    const back = toggleHiddenId(one, "a");
+    expect(back.size).toBe(0);
+    expect([...one]).toEqual(["a"]);
+    expect([...toggleHiddenId(one, "b")].sort()).toEqual(["a", "b"]);
+  });
+
+  it("rosterCount counts the calendars that sync, and of those the ones not hidden", () => {
+    const calendars = [cal("a", true), cal("b", true), cal("c", false), cal("d", true)];
+    expect(rosterCount(calendars, new Set())).toEqual({ shown: 3, total: 3 });
+    // A hidden selected calendar leaves the shown count; hiding an unselected one (it is never
+    // listed) or an overlay changes nothing.
+    expect(rosterCount(calendars, new Set(["b", "c", "pm:tasks"]))).toEqual({ shown: 2, total: 3 });
+    expect(rosterCount([], new Set())).toEqual({ shown: 0, total: 0 });
+  });
+});
+
+describe("the hour gutter's width", () => {
+  it("is one rem string: the local column plus one column per extra zone", () => {
+    // 60 px + 52 px per extra zone at the default text size.
+    expect(gutterWidth(0)).toBe("3.75rem");
+    expect(gutterWidth(1)).toBe("7rem");
+    expect(gutterWidth(2)).toBe("10.25rem");
+    expect(localColWidth).toBe("3.75rem");
+    expect(zoneColWidth).toBe("3.25rem");
+  });
+});
+
+describe("the extra timezones", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("round-trips through storage, capped, and skips ids the runtime rejects", () => {
+    writeZones(["Asia/Kolkata", "America/New_York", "Europe/Paris"]);
+    expect(readZones()).toEqual(["Asia/Kolkata", "America/New_York"]);
+    localStorage.setItem(ZONES_KEY, JSON.stringify(["Nope/Zone", "Asia/Kolkata", "Asia/Kolkata"]));
+    expect(readZones()).toEqual(["Asia/Kolkata"]);
   });
 });

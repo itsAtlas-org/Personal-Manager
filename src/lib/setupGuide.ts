@@ -68,14 +68,14 @@ export function guideFor(mode: SetupGuideMode, platform: SetupPlatform): SetupGu
     case "python_missing": {
       const summary =
         mode === "python_too_old"
-          ? "PM's document engine needs Python 3.11 or newer, and the Python on this computer is older. (macOS ships an old Python, so this is common on a fresh Mac.)"
-          : "PM's document engine needs Python 3.11 or newer, and PM couldn't find a suitable one on this computer.";
+          ? "PM's document engine needs Python 3.12, 3.13 or 3.14, and the Python on this computer is older. (macOS ships an old Python, so this is common on a fresh Mac.)"
+          : "PM's document engine needs Python 3.12, 3.13 or 3.14, and PM couldn't find a suitable one on this computer.";
       if (platform === "mac") {
         return {
           title: "PM needs a newer Python",
           summary,
           steps: [
-            "Install Python 3.11 or newer — run `brew install python@3.12`, or download it from python.org and run the installer.",
+            "Install Python 3.12 (3.13 and 3.14 work too) — run `brew install python@3.12`, or download a 3.12 to 3.14 release from python.org and run the installer.",
             "Click Retry below. PM checks the usual install locations automatically — you don't need the Terminal or any environment variables.",
             "Still stuck? Open Technical details below to see exactly what PM found.",
           ],
@@ -88,7 +88,8 @@ export function guideFor(mode: SetupGuideMode, platform: SetupPlatform): SetupGu
           title: "PM needs a newer Python",
           summary,
           steps: [
-            "Install Python 3.11 or newer with your package manager — Fedora: `sudo dnf install python3`; Debian/Ubuntu: `sudo apt install python3` (Ubuntu 22.04's is 3.10, so there: `sudo apt install python3.11 python3.11-venv`).",
+            "Install Python 3.12 (3.13 and 3.14 work too) with your package manager — Fedora: `sudo dnf install python3.12`; Debian 13 and Ubuntu 24.04 or newer: `sudo apt install python3 python3-venv`.",
+            "Older releases such as Debian 12 and Ubuntu 22.04 don't carry a new enough Python. Install 3.12 another way, for example `uv python install 3.12` or from python.org, and make sure it's on your PATH (or set PM_PYTHON).",
             "Click Retry below.",
             "Unusual setup? You can point PM at a specific interpreter with the PM_PYTHON environment variable.",
           ],
@@ -98,7 +99,7 @@ export function guideFor(mode: SetupGuideMode, platform: SetupPlatform): SetupGu
         title: "PM needs a newer Python",
         summary,
         steps: [
-          "Install Python 3.11 or newer from python.org — tick “Add python.exe to PATH” in the installer.",
+          "Install Python 3.12 (3.13 and 3.14 work too) from python.org, not a newer release — tick “Add python.exe to PATH” in the installer.",
           "Click Retry below.",
           "Unusual setup? You can point PM at a specific interpreter with the PM_PYTHON environment variable.",
         ],
@@ -111,7 +112,7 @@ export function guideFor(mode: SetupGuideMode, platform: SetupPlatform): SetupGu
       return {
         title: "PM couldn't download Python",
         summary:
-          "PM didn't find Python on this Mac, so it tried to download a private copy — but the download didn't finish. That's almost always a network problem, or a firewall/proxy blocking the download.",
+          "PM didn't find a Python it can use on this Mac (3.12 to 3.14; an older 3.11 doesn't count), so it tried to download a private copy — but the download didn't finish. That's almost always a network problem, or a firewall/proxy blocking the download.",
         steps: [
           "Check your internet connection.",
           "A VPN, proxy, or strict firewall can block the download (it comes from GitHub). Allow access or pause it, then click Retry.",

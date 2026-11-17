@@ -328,6 +328,44 @@ describe("a held delete", () => {
     expect(off.text).toMatch(/^“Dentist” wasn't deleted\. Editing isn't on/);
   });
 
+  // The pop-out Calendar edits too, and the backend tells EVERY window how a delete ended. The one
+  // that asked shows how it ended; the other only re-reads the mirror (CalendarView does, on
+  // `calendar://write-outcome`), so it has no notice, Undo or hidden row for it.
+  it("says nothing about a delete the other window asked for, and still tells its own", async () => {
+    deleteCalendarEvent.mockResolvedValue(held);
+    const { mod, hook, act } = await load();
+    act(() =>
+      settledHandler!({
+        undo_token: "from-the-other-window",
+        event_id: event.id,
+        result: { outcome: "saved", warnings: [] },
+      }),
+    );
+    expect(hook.result.current.notices).toEqual([]);
+    expect(hook.result.current.hiddenIds.size).toBe(0);
+    await act(() => mod.startDelete(event));
+    act(() =>
+      settledHandler!({
+        undo_token: "from-the-other-window",
+        event_id: event.id,
+        result: { outcome: "saved", warnings: [] },
+      }),
+    );
+    expect(hook.result.current.notices).toMatchObject([
+      { text: "Deleting “Dentist”.", undoToken: "t1" },
+    ]);
+    act(() =>
+      settledHandler!({
+        undo_token: "t1",
+        event_id: event.id,
+        result: { outcome: "saved", warnings: [] },
+      }),
+    );
+    expect(hook.result.current.notices).toEqual([
+      { id: 1, tone: "ok", text: "Deleted “Dentist”." },
+    ]);
+  });
+
   it("picks up deletes still waiting after the webview reloaded", async () => {
     listHeldDeletes.mockResolvedValue([
       { undo_token: "t9", event_id: event.id, summary: "Dentist", seconds_left: 5 },
@@ -516,7 +554,7 @@ describe("a held delete", () => {
 
   it("lets a finished notice go by itself, but keeps a failure up", async () => {
     deleteCalendarEvent.mockRejectedValue(
-      new Error("Calendar changes can only be made from PM's main window."),
+      new Error("Calendar changes can only be made from PM's main window or the pop-out Calendar."),
     );
     const { mod, hook, act } = await load();
     await act(() => mod.startDelete(event));

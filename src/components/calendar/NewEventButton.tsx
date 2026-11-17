@@ -8,11 +8,14 @@
 // stays the one primary button on screen.
 //
 // It has two homes, one per view and never both at once. In Week and Day it sits in the grid's
-// top-left corner, above the timezone control, where there's room for it (`compact`: "+ New", and a
-// click's reason drops below it, since the corner has no width to say it beside). In Month, Year,
-// Agenda and the Terminal views there is no corner, so it sits at the header's right end.
+// top-left corner, one line across the whole gutter and above the timezone row, where there's room
+// for it (`compact`: "+ New", and a click's reason drops below it, since the corner has no width to
+// say it beside). In Month, Year, Agenda and the Terminal views there is no corner, so it sits at
+// the header's right end.
 
 import { useEffect, useId, useState, type Ref } from "react";
+import { createKeyHint } from "../../lib/calendarNavKey";
+import { useCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { Button, Tooltip, VisuallyHidden, cn } from "../ui";
 
 interface Props {
@@ -30,6 +33,8 @@ const SAID_MS = 6000;
 
 export function NewEventButton({ onCreate, createReason, createRef, compact = false }: Props) {
   const reasonId = useId();
+  // The keys are named only while single-key shortcuts are on (Settings → Accessibility → Keyboard).
+  const keys = createKeyHint(useCharacterShortcuts());
   // A click while none can be made: the reason, said for a moment (a tooltip shows only on hover or
   // focus, and a click doesn't focus a button in WebKit). Counted (0 = not said), so another click
   // starts the moment over and says it again as new text.
@@ -44,18 +49,23 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
   }, [createReason]);
 
   return (
-    <div className={cn("flex items-center gap-2", compact && "relative")} data-no-create="">
-      <Tooltip label={createReason ?? "New event · c, or Shift+C for a quick one"}>
+    <div className={cn("flex items-center gap-2", compact && "relative w-full")} data-no-create="">
+      <Tooltip label={createReason ?? keys.tip} className={compact ? "w-full" : undefined}>
         <Button
           ref={createRef}
           variant="secondary"
           size={compact ? "xs" : "sm"}
           aria-disabled={createReason !== null || undefined}
           aria-describedby={createReason !== null ? reasonId : undefined}
-          aria-keyshortcuts="c"
+          aria-keyshortcuts={keys.shortcuts}
           // The same name in the corner, where only "+ New" fits on screen.
           aria-label={compact ? "+ New event" : undefined}
-          className="aria-disabled:cursor-not-allowed aria-disabled:text-ink4"
+          className={cn(
+            "aria-disabled:cursor-not-allowed aria-disabled:text-ink4",
+            // Across the whole gutter on one line: the corner is wide enough for "+ New" only if it
+            // never wraps.
+            compact && "w-full whitespace-nowrap",
+          )}
           onClick={() => {
             if (createReason !== null) setSaid((n) => n + 1);
             else onCreate();

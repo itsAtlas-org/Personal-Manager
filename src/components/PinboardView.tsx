@@ -1911,7 +1911,9 @@ function TimelineViewToggle({
       aria-label={label}
       title={label}
       className={`flex h-5 w-5 min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] ${
-        value === v ? "bg-accent text-accent-ink" : "text-ink4 hover:bg-surface hover:text-ink2"
+        value === v
+          ? "bg-accent text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)]"
+          : "text-ink4 hover:bg-surface hover:text-ink2"
       }`}
     >
       {icon}
@@ -2860,7 +2862,7 @@ function MilestoneRow({ m, onChanged, onError, showPower }: MilestoneItemProps) 
         onChange={(e) => setLabel(e.target.value)}
         onBlur={() => void persist()}
         placeholder="label"
-        className={`min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent focus:outline-none ${
+        className={`min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none ${
           met ? "text-ink4 line-through" : ""
         }`}
       />
@@ -3008,7 +3010,7 @@ function FreeformTimeline({
                 value={it.label ?? ""}
                 onChange={(e) => onUpdateItem(widget.id, it.id, { label: e.target.value })}
                 placeholder="what happens"
-                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent focus:outline-none"
+                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none"
               />
               <button
                 onClick={() => onRemoveItem(widget.id, it.id)}
@@ -3037,7 +3039,7 @@ function FreeformTimeline({
           value={projDraft}
           onChange={(e) => setProjDraft(e.target.value)}
           placeholder="Link a project…"
-          className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border2 bg-surface px-1 py-0.5 text-[0.6875rem] text-ink3 focus:border-accent focus:outline-none"
+          className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-1 py-0.5 text-[0.6875rem] text-ink3 focus:border-accent-text focus:outline-none"
         />
         <datalist id={listId}>
           {projects.map((p) => (

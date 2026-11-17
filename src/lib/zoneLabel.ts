@@ -63,9 +63,40 @@ function abbreviation(id: string, at: Date): string | null {
 function continentOf(id: string): string {
   return (id.split("/")[0] ?? id).replace(/_/g, " ");
 }
+/** The ICU legacy spellings runtimes still list, by the modern city name people know them by. A
+ *  runtime that lists Asia/Calcutta would otherwise label it "Calcutta" and make "kolkata" find
+ *  nothing. A small table of its own: timezones.ts's TZ_ALIASES is a coordinates table that covers
+ *  only some of these. */
+const LEGACY_CITY: Readonly<Record<string, string>> = {
+  "Asia/Calcutta": "Kolkata",
+  "Asia/Katmandu": "Kathmandu",
+  "Asia/Saigon": "Ho Chi Minh",
+  "Asia/Rangoon": "Yangon",
+  "Europe/Kiev": "Kyiv",
+  "America/Godthab": "Nuuk",
+};
+
 /** A zone's city, as its label ends it: "New York" for America/New_York. */
 export function cityOf(id: string): string {
-  return (id.split("/").pop() ?? id).replace(/_/g, " ");
+  return LEGACY_CITY[id] ?? (id.split("/").pop() ?? id).replace(/_/g, " ");
+}
+
+/** The short code over a gutter column: a real letter abbreviation (EST, EDT) when the platform has
+ *  one, else the runtime's own offset ("GMT+5:30", "GMT", "GMT+1"). Computed for `at`, not cached
+ *  like `zoneOption(...).code`, so it is right for the week on screen across a clock change. Empty
+ *  when the id or the runtime can't say; the caller still has the city for its title. */
+export function gutterZoneCode(id: string, at: Date): string {
+  const abbrev = abbreviation(id, at);
+  if (abbrev) return abbrev;
+  const raw = zonePart(id, "shortOffset", at);
+  if (!raw) return "";
+  // One spelling whichever ICU is behind the webview ("GMT+0" or "GMT", "GMT+05:30" or "GMT+5:30"), so
+  // a code reads the same on every platform.
+  const m = /^GMT([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(raw);
+  if (!m) return raw;
+  const hours = Number(m[2]);
+  const mins = m[3] && m[3] !== "00" ? `:${m[3]}` : "";
+  return hours === 0 && !mins ? "GMT" : `GMT${m[1]}${hours}${mins}`;
 }
 
 function build(id: string, at: Date): ZoneOption {
@@ -77,6 +108,7 @@ function build(id: string, at: Date): ZoneOption {
   // Drop the country segment when it just repeats the continent (Australia, Antarctica).
   const showCountry = country && country.toLowerCase() !== continent.toLowerCase() ? country : null;
   const label = showCountry ? `${continent} / ${showCountry} / ${city}` : `${continent} / ${city}`;
+  // The modern city joins the haystack beside the id's own words, so both spellings find it.
   const search = [id.replace(/[/_]/g, " "), continent, country ?? "", city, offset, abbrev ?? ""]
     .join(" ")
     .toLowerCase();

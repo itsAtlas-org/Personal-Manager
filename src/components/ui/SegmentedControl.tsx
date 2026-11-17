@@ -5,6 +5,12 @@
 // System / Mode / Depth pickers. Active segment = accent fill; the group is one token-bordered
 // strip.
 //
+// CONTRAST (WCAG 1.4.11, measured in theme/contrast.test.ts): the group's edge is `--ink4`, not
+// `--border2`, which is 1.33-1.84:1 against what the strip sits on at the default Contrast level.
+// And the accent fill alone is not a 3:1 boundary on a light theme with a pale accent (down to
+// 1.32:1), so the enabled active segment is also rimmed in `--ink4`: an inset shadow like Toggle's,
+// which takes no layout, so no segment moves. The rim is why the fill may stay pale.
+//
 // The group had NO way to be named until now, so 13 Settings groups shipped anonymous: a screen
 // reader on Appearance heard "Editorial, not pressed / Slate, not pressed / Terminal, not pressed"
 // with no hint the group is "System". `ariaLabel` is a string the author types; `aria-labelledby` /
@@ -63,7 +69,7 @@ export function SegmentedControl<T extends string>({
   return (
     <div
       className={cn(
-        "inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-border2 p-0.5",
+        "inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-ink4 p-0.5",
         className,
       )}
       role="group"
@@ -93,7 +99,7 @@ export function SegmentedControl<T extends string>({
               active
                 ? disabled
                   ? "bg-surface text-ink2 font-medium"
-                  : "bg-accent text-accent-ink font-medium"
+                  : "bg-accent text-accent-ink font-medium shadow-[inset_0_0_0_1px_var(--ink4)]"
                 : "text-ink3 enabled:hover:text-ink disabled:text-ink4",
             )}
           >

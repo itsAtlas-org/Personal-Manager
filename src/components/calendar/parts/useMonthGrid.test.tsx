@@ -170,6 +170,58 @@ describe("buildWeekRows (continuous stream)", () => {
   });
 });
 
+// The stream draws a slice of ten years of weeks: the slice is the full build's rows, with the lanes
+// packed over the whole range, so a band keeps its lane however much of the range is drawn.
+describe("buildWeekRows: only a slice", () => {
+  const start = weekStartMonday(new Date(2026, 6, 13));
+  const ev = (id: string, startIso: string, endIso: string, allDay = true) => ({
+    id,
+    calendar_id: "c",
+    summary: id,
+    description: null,
+    location: null,
+    start: startIso,
+    end: endIso,
+    all_day: allDay,
+    html_link: null,
+    uid: null,
+  });
+  const events = [
+    // Starts a week before the slice and runs two into it, over another band that begins inside.
+    ev("long", "2026-07-20", "2026-08-12"),
+    ev("short", "2026-08-03", "2026-08-05"),
+    ev("lunch", "2026-08-04T12:00:00", "2026-08-04T13:00:00", false),
+    ev("far", "2027-03-01", "2027-03-04"),
+    ev(DRAFT_EVENT_ID, "2026-08-04", "2026-08-06"),
+  ];
+
+  it("equals the full build's rows from..to, cells and band lanes alike", () => {
+    const full = buildWeekRows(start, 40, events);
+    const slice = buildWeekRows(start, 40, events, undefined, { from: 3, to: 9 });
+    expect(slice).toHaveLength(6);
+    expect(slice).toEqual(full.slice(3, 9));
+  });
+
+  it("keeps the lanes of a band that starts before the slice", () => {
+    // "long" begins in row 1; the slice from row 3 still has it in its lane, under what's packed with it.
+    const full = buildWeekRows(start, 40, events);
+    const slice = buildWeekRows(start, 40, events, undefined, { from: 3, to: 5 });
+    const inSlice = slice[0].bands.find((b) => b.ev.id === "long");
+    expect(inSlice).toBeDefined();
+    expect(inSlice?.continuesLeft).toBe(true);
+    expect(inSlice?.lane).toBe(full[3].bands.find((b) => b.ev.id === "long")?.lane);
+  });
+
+  it("clamps the slice to the rows there are, and a bare build is the whole range", () => {
+    const full = buildWeekRows(start, 12, events);
+    expect(buildWeekRows(start, 12, events, undefined, { from: -4, to: 99 })).toEqual(full);
+    expect(buildWeekRows(start, 12, events, undefined, { from: 5, to: 5 })).toEqual([]);
+    expect(buildWeekRows(start, 12, events, undefined, { from: 10, to: 99 })).toEqual(
+      full.slice(10),
+    );
+  });
+});
+
 describe("chipsShown", () => {
   const chip = (id: string) => ({
     id,

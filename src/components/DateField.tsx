@@ -185,8 +185,9 @@ export function DateField({
             }
           }}
           className={cn(
-            "min-w-0 flex-1 rounded-[var(--radius-sm)] border bg-surface outline-none transition placeholder:text-ink4 focus:border-accent",
-            invalid || refused ? "border-st-due" : "border-border2",
+            "min-w-0 flex-1 rounded-[var(--radius-sm)] border bg-surface outline-none transition placeholder:text-ink4 focus:border-accent-text",
+            // `--ink4`, not `--border2`: the edge is the field's boundary and owes 3:1 (WCAG 1.4.11).
+            invalid || refused ? "border-st-due" : "border-ink4",
             className,
           )}
         />

@@ -23,8 +23,10 @@ import {
 } from "../../lib/mapPrefs";
 import { focusViewPrefsAreDefault, resetFocusViewPrefs } from "../../lib/focusPrefs";
 import {
+  calendarFiltersAreDefault,
   readOpenOn,
   readSwipeDays,
+  resetCalendarFilters,
   SWIPE_DAYS_MAX,
   SWIPE_DAYS_MIN,
   writeOpenOn,
@@ -280,7 +282,16 @@ export function GeneralSettings() {
   // Which tabs the sidebar shows, and in what order. Pinned and hidden from a right-click on the tab
   // itself; only the Reset lives here. Live: the sidebar stays mounted behind this overlay.
   const sidebarIsDefault = navPlacementIsDefault(useNavPlacement());
-  const calendarIsDefault = !openOnLast && swipe === SWIPE_DAYS_MIN;
+  // The Agenda's Hide done and the All | All-day filter are set on the Calendar, not here, but Reset
+  // still turns them off: they hide data, so a forgotten one must be undoable from somewhere. Read
+  // again on the app-wide settings signal (which Reset sends), as the Focus prefs above are.
+  const [calendarFiltersDefault, setCalendarFiltersDefault] = useState(calendarFiltersAreDefault);
+  useEffect(() => {
+    const onChanged = () => setCalendarFiltersDefault(calendarFiltersAreDefault());
+    window.addEventListener("pm:settings-changed", onChanged);
+    return () => window.removeEventListener("pm:settings-changed", onChanged);
+  }, []);
+  const calendarIsDefault = !openOnLast && swipe === SWIPE_DAYS_MIN && calendarFiltersDefault;
   // The Chats-tab sidebar folds, same story as the Focus prefs above: the control lives beside what
   // it changes (one control, one home) and only the RESET lives here, so this needs the same live
   // subscription rather than a read at mount. There is no Chats section on this tab to hang a
@@ -332,6 +343,9 @@ export function GeneralSettings() {
     writeOpenOn("today");
     setSwipe(SWIPE_DAYS_MIN);
     writeSwipeDays(SWIPE_DAYS_MIN);
+    // Hide done and All-day, back to showing everything; the open Calendar follows on the signal.
+    resetCalendarFilters();
+    setCalendarFiltersDefault(true);
   }
   function resetGeneral() {
     resetAppearance();
@@ -871,9 +885,10 @@ export function GeneralSettings() {
           <>
             Restores appearance (System, Mode, Accent, Depth, Location), the memory-map view, the
             pinboard delete confirmation, the Focus tab (which panels it shows and where the
-            briefing appears), where the Calendar opens and how far a swipe moves it, the Chats
-            sidebar's folds, the chat Thinking button (back to off), the sidebar's tabs (nothing
-            pinned or hidden), and help mode to their defaults. Your time zone is left as-is.
+            briefing appears), where the Calendar opens, how far a swipe moves it and its Hide done
+            and All-day filters (off), the Chats sidebar's folds, the chat Thinking button (back to
+            off), the sidebar's tabs (nothing pinned or hidden), and help mode to their defaults.
+            Your time zone is left as-is.
           </>
         }
       />

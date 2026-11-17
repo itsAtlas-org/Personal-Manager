@@ -1206,7 +1206,7 @@ describe("costs", () => {
   ])("finding addresses in words is linear: %s", (_name, text) => {
     const started = performance.now();
     textLinks(text);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(performance.now() - started).toBeLessThan(3_000);
   });
 
   it.each([
@@ -1236,19 +1236,20 @@ describe("costs", () => {
     ["comments alone on lines", "<!-- a -->\n".repeat(100_000)],
     ["comments sharing an end", "<!-- a\n".repeat(100_000) + "-->"],
   ])("reading_is_linear: %s", (_name, description) => {
-    // Each pass timed on its own, so a busy machine running every suite at once keeps the margin a
-    // quadratic reader would blow through many times over.
+    // Each pass timed on its own. The budget is 3 s (6 s for the two reads) because a busy CI runner
+    // took 1065 ms on one pass on 2026-11-16, and the 1 s budget failed an unrelated PR. A quadratic
+    // reader takes tens of seconds on these inputs, far past 3 s, so the budget still catches one.
     const took = (work: () => unknown) => {
       const started = performance.now();
       work();
       return performance.now() - started;
     };
     let doc: DescDoc = [];
-    expect(took(() => (doc = parseDescription(description).doc))).toBeLessThan(1_000);
-    expect(took(() => serialiseDescription(doc))).toBeLessThan(1_000);
-    expect(took(() => replacementText(doc))).toBeLessThan(1_000);
+    expect(took(() => (doc = parseDescription(description).doc))).toBeLessThan(3_000);
+    expect(took(() => serialiseDescription(doc))).toBeLessThan(3_000);
+    expect(took(() => replacementText(doc))).toBeLessThan(3_000);
     // Two reads: the texts differ, so both are parsed.
-    expect(took(() => sameDescription(description, description + " "))).toBeLessThan(2_000);
+    expect(took(() => sameDescription(description, description + " "))).toBeLessThan(6_000);
   });
 
   it.each(["<a".repeat(250_000), "&#1".repeat(160_000), "&a".repeat(250_000), "<".repeat(500_000)])(
@@ -1256,7 +1257,7 @@ describe("costs", () => {
     (description) => {
       const started = performance.now();
       looksLikeHtml(description);
-      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(performance.now() - started).toBeLessThan(3_000);
     },
   );
 });

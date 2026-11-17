@@ -415,7 +415,7 @@ export function GuestField({
                       }
                       className={
                         g.optional
-                          ? "inline-flex min-h-[var(--tap-min,24px)] shrink-0 items-center rounded-[var(--radius-sm)] bg-accent px-1.5 text-xs font-medium text-accent-ink transition disabled:cursor-not-allowed disabled:bg-surface disabled:text-ink4"
+                          ? "inline-flex min-h-[var(--tap-min,24px)] shrink-0 items-center rounded-[var(--radius-sm)] bg-accent px-1.5 text-xs font-medium text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)] transition disabled:cursor-not-allowed disabled:bg-surface disabled:text-ink4"
                           : "inline-flex min-h-[var(--tap-min,24px)] shrink-0 items-center rounded-[var(--radius-sm)] px-1.5 text-xs text-ink2 shadow-[inset_0_0_0_1px_var(--ink4)] transition enabled:hover:text-ink disabled:cursor-not-allowed disabled:text-ink4"
                       }
                     >

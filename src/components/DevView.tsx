@@ -374,7 +374,7 @@ export function DevView() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Query to explain…"
-                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
               />
               <label className="flex items-center gap-1 text-xs text-ink3">
                 k
@@ -394,7 +394,7 @@ export function DevView() {
                     setTopK(next);
                     setTopKDraft(String(next));
                   }}
-                  className="w-14 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-sm text-ink"
+                  className="w-14 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-sm text-ink"
                 />
               </label>
               <Button type="submit" disabled={explaining || !query.trim()}>

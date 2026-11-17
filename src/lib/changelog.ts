@@ -24,6 +24,131 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.183.0-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "A new Mods tab is the home for mods: add-ons that give PM a new tab or tool. Each mod runs walled off from the rest of PM and only gets what you allow. You see what it asks for before it's installed, and you can turn any permission off, pause it or uninstall it at any time. When you uninstall, PM asks whether to also delete what the mod made. There are no mods to install yet: the first ones, starting with the Map, arrive in coming updates.",
+      "PM keeps itself safe from bad mods. A few times a day it checks a safety list that Atlas signs. A mod on that list is paused or removed on its own, and PM tells you why. If the list can't be checked for a long time, the Mods tab says so.",
+      "Developer mode now also lets you install a mod nobody has checked, from a file or from a folder you are working on. A plain warning comes first, and you confirm by typing the mod's id, which the warning shows you. Developer mode is now set separately on each computer: restoring a backup or joining a shared vault turns it off, and it never reaches another computer using the same vault. If you had developer mode on, this update switches it off once; switch it on again in Settings > Developer.",
+      "Backups never include mods' passwords or keys, and a new switch decides whether mods' own data goes in too. A backup or export is now made on your disk instead of in memory, checks there is enough free space first, and says plainly when the disk is full. Settings → Storage now lists PM's own parts and your mods separately.",
+      "Calendar feeds that point inside your own network, or at addresses reserved for special uses, are now refused more consistently.",
+    ],
+  },
+  {
+    version: "3.182.3-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "Under-the-hood tidying: routine updates to the building blocks underneath PM, bundled together. The library that runs PM's database on your computer is updated too, and your data stays encrypted exactly as before. The note editor's own building blocks pick up small fixes, one of which keeps it from holding on to extra memory on Windows. Everything else is the tools PM is built and tested with, plus the parts that write your backups and exports, watch your local folders and read your computer's hardware. Nothing changes in how you use PM.",
+    ],
+  },
+  {
+    version: "3.182.2-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "PM's document engine now needs Python 3.12 or newer, up from 3.11. After this update the engine sets itself up again once, the next time something needs it (or when you press Set it up now in Documents), and shows as not installed until then. On Windows and Linux that is quick, because the installers already bring their own Python 3.12 and nothing new is downloaded. On a Mac, PM still uses a Python of yours when it's new enough. If the engine was running on a Python 3.11, PM downloads its own Python 3.12 at that same moment and sets the engine up again, including any OCR or map add-ons you had installed. That needs internet access to GitHub; if the download is blocked, PM says so and offers Retry.",
+      "The list of parts the document engine is built from no longer carries older copies of a few of its libraries (one that reads web pages and two maths libraries), which were kept only for Python 3.11. The newer copies were already the ones in use on everything PM installs itself, so nothing about how your documents are read changes.",
+    ],
+  },
+  {
+    version: "3.182.1-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "Text fields, dropdowns, secondary buttons and other controls now have a clearly visible edge in every theme. At the default contrast they were too faint to make out against the background, and some looked like they had no edge at all. Their colours when you point at them or click into them are a touch stronger too.",
+    ],
+  },
+  {
+    version: "3.182.0-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "You can now turn off the Calendar's single-letter shortcuts in Settings → Accessibility → Keyboard. That's t for today, c for a new event, Shift+C for a quick one, and j, n, k and p for next and previous. It's useful with speech input, where an ordinary word can press a key, or when keys get pressed by accident. The arrow keys and all the buttons still work, the tooltips stop naming the letters while it's off, and it applies to the pop-out Calendar too. It starts on, so nothing changes unless you turn it off, and Reset in Accessibility turns it back on.",
+    ],
+  },
+  {
+    version: "3.181.1-alpha",
+    date: "2026-11-16",
+    highlights: [
+      'Finished milestones no longer disappear from a project page at Minimal depth. If you had unticked Completed at a higher depth, Minimal kept hiding them with no box to bring them back; now the choice only applies where the Completed box is on screen, and you keep the choice for when you return. If every milestone is finished and Completed is unticked, the list says how many are hidden and that ticking Completed shows them, instead of "No milestones yet".',
+      'A milestone you named starting with a check mark, like "✓ Ship beta", no longer fades as if it were finished once its date passes. A milestone fades only when it is really met. The check mark PM adds to a met milestone is still there.',
+      "In Day, Week, Month and the Agenda's List, Save on Task in the calendar's quick box no longer leaves a blank moment. The new task stays on the calendar as a dashed copy until the real one arrives, and if the day you picked has passed, it appears on today, where the task will land. While the box is open, the dashed copy for a passed day sits on today as well. The Runway, the Year view and the Terminal look don't draw the dashed copy.",
+      "A task you started in the quick box and left the Calendar tab with is no longer lost if you come back and Google editing is off or the calendar is gone: it reopens in the task editor. A half-typed event is kept until a calendar can take events again, and a screen reader is told so. Tasks of an archived project also no longer flash on the calendar for a moment when you first open it.",
+      "For a task planned on a day that has passed, the box and the message after Save now say it shows on today, with today's date, until it's done, and they also cover a task planned over several days that has already started. If Tasks is hidden in your calendar list, they say only that it's hidden.",
+      "Switches and pressed buttons are easier to see. The edge around the switches (Settings pickers, the Calendar's hours, the Map's By project | Semantic, and the Event | Task switch) is darker, and the chosen one has a thin outline, so it stands out even on a light theme with a pale accent. Pressed icon buttons, the Pinboard's list | timeline switch, the Map's Names button and the weekday buttons in a custom repeat get the same treatment.",
+    ],
+  },
+  {
+    version: "3.181.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "The time zones above the hours in Week and Day are readable now. Each column wears a short code, like GMT+5:30 over your extra zone and GMT over your own (or EST and EDT where there is one), worked out for the week you're looking at, so it stays right when the clocks change. Hover over the zone row to see their cities.",
+      "Click the zone row and one menu opens to add or remove a zone: the ones you've added with a Remove beside each, your own computer's zone, and a search for the next. With none added, the button reads + Zone. This replaces the small + and the ✕ that appeared when you hovered a zone. The columns are a little wider, and they grow with your Text size, so nothing is cut off at Large.",
+      '+ New is a single line across the whole corner, instead of squeezing onto two lines over one column. The little "0 events" line under each date is gone in Week and Day, which makes the top of the grid shorter. At Power depth, Month still shows each day\'s count beside its date.',
+      "A time zone you add in the pop-out Calendar now shows up in the main window too, and a change in one window no longer undoes the other's. Hide done and All | All-day follow between the two windows the same way, so Reset in Settings reaches an open pop-out too. Zones that older systems list under an old name, like Calcutta, now read and search as Kolkata.",
+    ],
+  },
+  {
+    version: "3.180.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "Click or drag on an empty spot in Month, Week or Day, or press Shift+C, and the little box that opens now has an Event | Task switch under the title. It always opens on Event, like Google Calendar's. Press Task and the same box makes a PM task: your title comes with you, and the day you clicked is the day you plan to do it. Switch back to Event and nothing is lost.",
+      "Tasks have a day, not a time, so a time you clicked in Week is dropped and the task lands on that day. Drag across several days in Month and the task is planned for the whole stretch. The new task shows on the calendar as a chip on its day, and on the Runway. If Tasks is hidden in your calendar list, or the day has already passed, the box tells you before you save where it will show up.",
+      "More options on a task opens the full task editor with the title and day filled in, for a project or a deadline. If you leave the Calendar tab with a task half-typed, it's waiting on Task when you come back. Tasks stay in PM and never go to Google, and you can add them from the pop-out Calendar too.",
+    ],
+  },
+  {
+    version: "3.179.0-alpha",
+    date: "2026-11-12",
+    highlights: [
+      "The Agenda has a Hide done button, beside Runway | List, to clear away what's finished: tasks you've ticked off, milestones you've met and events that are over, on the Runway and in the List alike. Open and late work always stays, and so does anything happening now or later today. While it's on, the button says how many it's hiding, like Show done (4), and one click brings them back. A task you tick while it's on stays, struck through, until you leave the Agenda or switch it off, so nothing vanishes under your pointer, and the Runway's 3/7 done still counts what's hidden.",
+      "A new All | All-day switch in Month, Year and the Agenda trims a busy calendar to its all-day events: holidays, birthdays, trips, days off. Your tasks, milestones and pinboard entries stay too. Week and Day always show everything, since that's where you plan your hours. On the Runway the switch shows while its events do.",
+      "Both choices are remembered on this device, and the pop-out Calendar picks them up when it opens. Reset on the General tab of Settings turns them both off.",
+      "Late work stands out now. A task's overdue Due: chip, and a milestone you haven't met by its date, used to fade like something finished once its day had passed. They now keep their full colour in every view.",
+    ],
+  },
+  {
+    version: "3.178.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "On the Agenda's Runway, the bar across the top of the Calendar now holds everything that used to sit in a row of its own: how many tasks are done (like 3/7), what's next up with its deadline, Hide events and + Window, right beside \"From today\". + Task is up there too, just before + New event. The Runway's columns start right under it, and it no longer scrolls away with them.",
+      'With nothing planned from today, the bar says "Nothing planned" instead of "0/0 done".',
+      "PM now remembers which Runway columns you've folded away: Today, Tomorrow, a window you named, any of them. They stay folded when you switch tabs, flip to List and back, switch looks or restart PM, and a fold made in the pop-out Calendar shows in the main window's Runway the next time it opens. When a window you named splits the rest of the week in two, folding one piece folds both.",
+    ],
+  },
+  {
+    version: "3.177.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Refresh is now two circular arrows in the calendar's top-right corner, in the main window and the pop-out alike, where your hand goes for it. Hover over it, or Tab to it, to see when it last synced; the arrows turn while it works, and a screen reader says when it starts and when it's done. Pop out is now a small window icon just beside it.",
+      "The pop-out Calendar has an Open PM button in its top bar, so when it's the only window you can see you can bring PM's main window back in one click, even from the locked screen. It leaves the pop-out where it is.",
+      "The pop-out also has a Calendars button, with how many are showing (like 5/7), that opens the same list of calendars the sidebar has, so you can show or hide them without going back to the main window. A tick in one window shows in the other at once.",
+      "The pop-out now picks up changes made in Google within about half a minute by itself, even while the main window is hidden in the tray.",
+      "Hover hints now also show when you Tab to a button, go away when you press Esc, stay put while you move onto them, and keep inside the window. The briefing's Refresh and Open PM buttons are now named by the words they show, so voice control can click them.",
+    ],
+  },
+  {
+    version: "3.176.0-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "The Month and Year calendars now scroll on without stopping. Before, a fast scroll, or a few flings in a row, ran into a wall a year or two out and you had to press ‹ or › to carry on. Now you can scroll ten years each way in Month and twenty-five in Year, as fast as you like, and a jump further than that (a search result, a date picked in the mini-calendar) lands where you asked.",
+      "↑ and ↓ now page the calendar a month in Month and a year in Year, as ← and → do. j and n go forward and k and p go back, as in Google Calendar, in every view with ‹ and › (Day, Week, Month, Year and the Agenda's List). Holding a key runs through the months smoothly. The keys stand down while you're typing, or while a menu, the date picker or a window is open over the calendar.",
+      "The ‹ and › buttons and Today now say their keys when you hover them or tab to them, and the calendar's help lists them.",
+      "Scrolling fast no longer loads every month you pass, only the ones you stop on, and the week you're looking at stays put when a note about loading appears above the grid or you resize the window.",
+    ],
+  },
+  {
+    version: "3.175.6-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Editing your events now works in the pop-out Calendar. It was promised there, but PM refused every change made in that window. You can now create, move, edit and delete events (with Undo) and reply to invitations in the pop-out, and a change shows in PM's main window too. Turning editing on is still done in Settings → Connectors, in the main window.",
+    ],
+  },
+  {
+    version: "3.175.5-alpha",
+    date: "2026-11-11",
+    highlights: [
+      "Two security fixes, and some under-the-hood tidying. SQLCipher, which encrypts PM's database on your computer, moves to version 4.20, fixing a flaw where a specially made pair of database files could make PM read back leftover bytes from its own memory. A component of the document engine's HTML reader is updated to fix a known flaw in a feature PM doesn't use. And two of the building blocks underneath the document engine are updated. The first time PM starts after this update it sets up its document engine again by itself, along with photo text recognition and the map's extra layout if you've added them. Your data stays encrypted exactly as before, and nothing changes in how you use PM.",
+    ],
+  },
+  {
     version: "3.175.4-alpha",
     date: "2026-11-06",
     highlights: [

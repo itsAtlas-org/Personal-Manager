@@ -14,6 +14,11 @@
 
 import { SectionInfo, SectionLabel, SegmentedControl, SettingRow, Toggle } from "../ui";
 import { useTheme, type FontScale, type Density, type Contrast } from "../../theme";
+import {
+  resetKeyboardPrefs,
+  useCharacterShortcuts,
+  writeCharacterShortcuts,
+} from "../../lib/keyboardPrefs";
 import { ResetLink, TabResetSection } from "./ResetControls";
 
 // The Text-size steps. Kept here (and mirrored inline in GeneralSettings' Appearance section) rather
@@ -56,6 +61,9 @@ export function AccessibilitySettings() {
     accessibilityIsDefault,
     resetAccessibility,
   } = useTheme();
+  // Per device, in localStorage rather than the theme: it is read at the key press, not applied to
+  // the document.
+  const characterShortcuts = useCharacterShortcuts();
 
   return (
     <>
@@ -205,14 +213,46 @@ export function AccessibilitySettings() {
         </SectionInfo>
       </div>
 
+      <div id="sec-a11y-keys" data-settings-section className="mt-5 border-t border-border pt-4">
+        <SectionLabel
+          action={
+            !characterShortcuts && <ResetLink onReset={() => writeCharacterShortcuts(true)} />
+          }
+        >
+          Keyboard
+        </SectionLabel>
+        <SettingRow
+          label="Single-key shortcuts"
+          description="Turns off the Calendar's t, c, Shift+C, j, k, n and p, which speech input or a stray key press can set off. The arrow keys and every button still work."
+        >
+          {(a11y) => (
+            <Toggle {...a11y} checked={characterShortcuts} onChange={writeCharacterShortcuts} />
+          )}
+        </SettingRow>
+        <SectionInfo helpId="settings-a11y-keys">
+          <p>
+            With this on, a single letter pressed anywhere on the Calendar does something: t jumps
+            to today, c starts a new event, Shift+C a quick one, j or n goes forward and k or p
+            back. A word spoken to speech input, or a key pressed by accident, can set one off, so
+            turning this off removes them (WCAG 2.2, 2.1.4). The arrow keys, shortcuts that hold
+            Ctrl or Cmd, and the keys that only work inside a field you are typing in are not
+            affected.
+          </p>
+        </SectionInfo>
+      </div>
+
       <TabResetSection
         tabName="Accessibility"
-        isDefault={accessibilityIsDefault}
-        onReset={resetAccessibility}
+        isDefault={accessibilityIsDefault && characterShortcuts}
+        onReset={() => {
+          resetAccessibility();
+          resetKeyboardPrefs();
+        }}
         confirmBody={
           <p>
-            This sets text size, contrast, density, motion, the legible font, and the colour-blind
-            palette back to their defaults. Your theme (system, mode, accent) isn't affected.
+            This sets text size, contrast, density, motion, the legible font and the colour-blind
+            palette to their defaults. The Calendar's single-key shortcuts are turned back on. Your
+            theme (system, mode, accent) isn't affected.
           </p>
         }
       />

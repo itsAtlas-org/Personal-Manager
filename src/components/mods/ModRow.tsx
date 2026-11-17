@@ -20,9 +20,15 @@ import { useRememberedFold } from "../../lib/foldPrefs";
 import { clearModError, runModAction, setModScreen, useModActions } from "../../lib/modActions";
 import { modFoldKey } from "../../lib/modFolds";
 import { useModTab } from "../../lib/nav";
-import type { ModInfo, ModPermission, ModStandingKind } from "../../lib/modsTypes";
+import {
+  pausedForDevMode,
+  type ModInfo,
+  type ModPermission,
+  type ModStandingKind,
+} from "../../lib/modsTypes";
 import { Button, Callout, Card, Collapsible, VisuallyHidden } from "../ui";
 import { toneSurface } from "../ui/tone";
+import { DevModeOffMark } from "./DevModeOffMark";
 import { ModIconView } from "./ModIconView";
 import { modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
@@ -37,7 +43,8 @@ const STANDING: Record<ModStandingKind, { label: string; attention: boolean }> =
   "paused-frozen": { label: "Stopped responding", attention: true },
   "paused-by-safety-list": { label: "Paused by the safety list", attention: true },
   "removed-by-safety-list": { label: "Removed by the safety list", attention: true },
-  "paused-dev-mode": { label: "Developer mode is off", attention: true },
+  // The reason is the mark beside the name (DevModeOffMark), so this says only that it is paused.
+  "paused-dev-mode": { label: "Paused", attention: true },
   "files-missing": { label: "Files missing", attention: true },
   "files-changed": { label: "Files changed", attention: true },
   "record-unreadable": { label: "Can't be read", attention: true },
@@ -111,6 +118,7 @@ export function ModRow({
                 {name}
               </h3>
               <span className="text-xs text-ink3">version {mod.version}</span>
+              {pausedForDevMode(mod) && <DevModeOffMark />}
             </div>
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <TierBadge tier={mod.tier} />

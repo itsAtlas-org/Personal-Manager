@@ -8,7 +8,9 @@
 // `pm.focus.sort` localStorage pattern in FocusView.
 
 import { isValidTimeZone } from "../theme/timezones";
+import type { EventKinds } from "./calendarFilters";
 import { readStored, writeStored } from "./storedPrefs";
+import type { Calendar } from "./types";
 
 /** The calendar's view modes. Day = the N-day time grid with N=1 (see PR2). */
 export type CalendarViewMode = "month" | "week" | "day" | "year" | "agenda";
@@ -59,10 +61,11 @@ export function writeView(view: CalendarViewMode): void {
  *  last calendar an event was created in, `readLastCreate`, and the Runway's named windows,
  *  `readRunwayWindows`): a Google/Outlook calendar id is routinely the account's email address, and a
  *  window's name is the user's own words ("Lisbon trip"). All three therefore live in the encrypted
- *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other eleven keys here —
+ *  `settings` table under `calendar_ui` (see storedPrefs.ts) while the other fifteen keys here —
  *  view, range, roster fold, zones, bounds, day count, openOn, the cursor, the swipe distance, the
- *  agenda layout and the Runway's "Before today" fold — stay in localStorage, which is what they are
- *  for. */
+ *  agenda layout, the Runway's "Before today" fold, its events switch and its other folded columns,
+ *  the Agenda's Hide done and the All | All-day filter — stay in localStorage, which is what they
+ *  are for. */
 export function readHidden(): Set<string> {
   const arr = readStored(PREF_KEY).hidden;
   if (Array.isArray(arr)) {
@@ -81,6 +84,27 @@ export function writeHidden(hidden: Set<string>): void {
   } catch {
     /* non-browser context (tests) */
   }
+}
+
+/** `hidden` with `id` flipped: hidden becomes shown and the other way round. A new set, never the one
+ *  passed in, so a state setter sees a change. The sidebar's list and the pop-out's header popover
+ *  both toggle through this, so the two windows can't disagree about what a tick does. */
+export function toggleHiddenId(hidden: Set<string>, id: string): Set<string> {
+  const next = new Set(hidden);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
+/** The "5/7" beside "Calendars": how many of the calendars that sync (the selected ones: an
+ *  unselected one mirrors no events and is never listed) are showing, out of how many. The overlays
+ *  (Milestones, Tasks, Pinboard) are not counted. */
+export function rosterCount(
+  calendars: readonly Calendar[],
+  hidden: ReadonlySet<string>,
+): { shown: number; total: number } {
+  const synced = calendars.filter((c) => c.selected);
+  return { shown: synced.filter((c) => !hidden.has(c.id)).length, total: synced.length };
 }
 
 /** The calendar the user last created an event in (its PM id), or null: where the next new event
@@ -103,8 +127,14 @@ export function writeLastCreate(calendarId: string): void {
 export type AgendaMode = "runway" | "list";
 
 const AGENDA_MODE_KEY = "pm.calendar.agendaMode";
-const RUNWAY_PAST_OPEN_KEY = "pm.calendar.runwayPastOpen";
+export const RUNWAY_PAST_OPEN_KEY = "pm.calendar.runwayPastOpen";
 const RUNWAY_EVENTS_KEY = "pm.calendar.runwayEvents";
+/** The Runway's other folded columns (every column but "Before today", which has its own key above
+ *  and is folded by default). Exported for the `storage` event that tells the other window. */
+export const RUNWAY_FOLDED_KEY = "pm.calendar.runwayFolded";
+/** How many folded columns are remembered: the newest. Window ids are random and never reused, so
+ *  an old window's fold is dead weight; this keeps the key from growing for ever. */
+const RUNWAY_FOLDED_MAX = 64;
 
 /** The Agenda layout last chosen on this device. Defaults to the Runway. View state, so
  *  localStorage, like the view itself. */
@@ -141,6 +171,32 @@ export function writeRunwayPastOpen(open: boolean): void {
   }
 }
 
+/** The Runway's folded columns (`foldKey`s), oldest first. A JSON array of strings; a missing key,
+ *  junk, or entries that aren't strings read as nothing folded, and a repeat counts once. Only the
+ *  newest 64 are kept. View state, so localStorage, which the pop-out shares with the main window. */
+export function readRunwayFolded(): Set<string> {
+  try {
+    const raw = localStorage.getItem(RUNWAY_FOLDED_KEY);
+    if (!raw) return new Set();
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    const keys = arr.filter((x): x is string => typeof x === "string" && x !== "");
+    // Dedupe keeping each key's last place, so "newest" means the most recently folded.
+    const unique = [...new Set(keys.reverse())].reverse();
+    return new Set(unique.slice(-RUNWAY_FOLDED_MAX));
+  } catch {
+    return new Set();
+  }
+}
+
+export function writeRunwayFolded(keys: Iterable<string>): void {
+  try {
+    localStorage.setItem(RUNWAY_FOLDED_KEY, JSON.stringify([...keys].slice(-RUNWAY_FOLDED_MAX)));
+  } catch {
+    // Best-effort.
+  }
+}
+
 /** Does the Runway show each column's events strip (calendar events and pinboard entries)? Shown
  *  until the user hides it: a busy calendar can fill a column with events and push its tasks
  *  out of sight. */
@@ -157,6 +213,66 @@ export function writeRunwayShowEvents(show: boolean): void {
     localStorage.setItem(RUNWAY_EVENTS_KEY, show ? "shown" : "hidden");
   } catch {
     // Best-effort.
+  }
+}
+
+// --- the Agenda's and the views' filters ---------------------------------------------------------
+
+export const HIDE_DONE_KEY = "pm.calendar.agendaHideDone";
+export const EVENT_KINDS_KEY = "pm.calendar.eventKinds";
+
+/** Is the Agenda hiding what is done (tasks ticked off, met milestones, events that have ended)?
+ *  Shown until the user hides it, one switch for both layouts, the Runway and the List. View state,
+ *  so localStorage, which the pop-out shares: it reads this when it opens. */
+export function readAgendaHideDone(): boolean {
+  try {
+    return localStorage.getItem(HIDE_DONE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function writeAgendaHideDone(hide: boolean): void {
+  try {
+    localStorage.setItem(HIDE_DONE_KEY, hide ? "true" : "false");
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Which events Month, Year and the Agenda draw: every one, or only the all-day ones. One setting
+ *  for every view that carries the control. Anything but "all-day" (including junk) reads as all,
+ *  the default: a filter that hides data must be switched on by a choice. */
+export function readEventKinds(): EventKinds {
+  try {
+    return localStorage.getItem(EVENT_KINDS_KEY) === "all-day" ? "all-day" : "all";
+  } catch {
+    return "all";
+  }
+}
+
+export function writeEventKinds(kinds: EventKinds): void {
+  try {
+    localStorage.setItem(EVENT_KINDS_KEY, kinds);
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Both filters off (the defaults): what General → Reset restores. */
+export function calendarFiltersAreDefault(): boolean {
+  return !readAgendaHideDone() && readEventKinds() === "all";
+}
+
+/** Put both filters back to showing everything, and tell the open Calendar, which re-reads them on
+ *  the app-wide settings signal (Settings is an overlay over the still-mounted tab). */
+export function resetCalendarFilters(): void {
+  writeAgendaHideDone(false);
+  writeEventKinds("all");
+  try {
+    window.dispatchEvent(new Event("pm:settings-changed"));
+  } catch {
+    /* non-browser context (tests) */
   }
 }
 
@@ -250,9 +366,27 @@ export function writeRange(range: CalendarRange): void {
 
 // --- extra timezones (Week/Day gutter) -----------------------------------------------------------
 
-const ZONES_KEY = "pm.calendar.zones";
+/** Exported so a window can follow a `storage` event for it (the pop-out and the main window each hold
+ *  their own copy of the zones). */
+export const ZONES_KEY = "pm.calendar.zones";
 /** Up to this many EXTRA timezone columns beside the local one. */
 export const MAX_EXTRA_ZONES = 2;
+
+/** The hour gutter's columns, in rem so they grow with the Text size axis like the text inside them
+ *  (px widths clipped the zone codes and wrapped "+ New" at Large). 60 px for the local column and 52
+ *  px per extra zone at the default size. */
+export const LOCAL_COL_REM = 3.75;
+export const ZONE_COL_REM = 3.25;
+
+/** One column's width, as a CSS length. */
+export const localColWidth = `${LOCAL_COL_REM}rem`;
+export const zoneColWidth = `${ZONE_COL_REM}rem`;
+
+/** The whole gutter's width for `extra` extra zones. The hour gutter, the header's ZoneGutter and the
+ *  all-day band all take this one string, so they can't drift apart. */
+export function gutterWidth(extra: number): string {
+  return `${LOCAL_COL_REM + extra * ZONE_COL_REM}rem`;
+}
 
 /** The user's chosen extra IANA zones for the gutter (validated, deduped, capped). */
 export function readZones(): string[] {

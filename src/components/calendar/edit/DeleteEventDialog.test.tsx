@@ -19,6 +19,7 @@ import type {
   SplitAction,
   WriteOutcome,
 } from "../../../lib/types";
+import { formatDateLocal } from "../../../lib/format";
 
 const choicesForDelete = vi.fn<(event: CalendarEvent) => Promise<SeriesChoices>>();
 const settleSplit =
@@ -276,7 +277,10 @@ describe("DeleteEventDialog", () => {
     expect(
       screen.getByText(/“Gym” \(12-10 · 10:00–11:00\) should be deleted from Personal/),
     ).toBeTruthy();
-    expect(screen.getByText("Only the one on 12-10.")).toBeTruthy();
+    // The day is the occurrence's own, in the local zone, so it comes from the same helper.
+    expect(
+      screen.getByText(`Only the one on ${formatDateLocal(new Date(occurrence.start))}.`),
+    ).toBeTruthy();
     expect(radio(/^This event/).checked).toBe(true);
     fireEvent.click(radio(/^This and following events/));
     expect(screen.getByText(/can't restore these from its Trash/)).toBeTruthy();

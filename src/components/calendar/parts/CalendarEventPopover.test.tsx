@@ -1325,12 +1325,13 @@ describe("CalendarEventPopover: asking for edit access", () => {
 
   it("an ask the backend refuses says its words", async () => {
     const ask = askOf({
-      onAsk: () => Promise.reject("PM can only open this email from its main window."),
+      onAsk: () =>
+        Promise.reject("PM can only open this email from its main window or the pop-out Calendar."),
     });
     const view = render(shown(ask));
     await act(async () => fireEvent.click(button(view)));
     expect(view.getByRole("status").textContent).toBe(
-      "PM couldn't open the email: PM can only open this email from its main window.",
+      "PM couldn't open the email: PM can only open this email from its main window or the pop-out Calendar.",
     );
     expect(button(view).getAttribute("aria-disabled")).toBeNull();
   });

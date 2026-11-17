@@ -74,8 +74,9 @@ export function PopoverRoot() {
                 <button
                   type="button"
                   onClick={() => void showMainWindow().catch(() => {})}
+                  // Named by its visible words, "Open PM" (Label in Name): no aria-label. The
+                  // title says what it does, as the description.
                   title="Bring the Personal Manager window to the front"
-                  aria-label="Open Personal Manager"
                   className="rounded-[var(--radius-sm)] px-1.5 text-xs text-ink4 hover:bg-surface hover:text-ink"
                 >
                   Open PM

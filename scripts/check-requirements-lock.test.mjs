@@ -38,7 +38,7 @@ const H = "a".repeat(64);
 const H2 = "b".repeat(64);
 
 /** A minimal but structurally real lock: header stamps, a forked pin, markers, hashes. */
-function lock({ floor = "3.11", inputSha, extra = "", body } = {}) {
+function lock({ floor = "3.12", inputSha, extra = "", body } = {}) {
   return [
     "# PM sidecar dependency lock - GENERATED, DO NOT EDIT BY HAND.",
     "#",
@@ -146,14 +146,14 @@ describe("parseRequirements", () => {
 
 describe("readRustFacts", () => {
   const rust = [
-    "const MIN_PYTHON: (u32, u32) = (3, 11);",
+    "const MIN_PYTHON: (u32, u32) = (3, 12);",
     'const OPTIONAL_TSNE_PIN: &str = "openTSNE==1.0.4";',
     'const OPTIONAL_OCR_PINS: &[&str] = &["rapidocr==3.9.2", "pi-heif==1.4.0"];',
   ].join("\n");
 
   it("reads the floor and every optional pin constant", () => {
     expect(readRustFacts(rust)).toEqual({
-      floor: "3.11",
+      floor: "3.12",
       pins: {
         tsne: ["openTSNE==1.0.4"],
         ocr: ["rapidocr==3.9.2", "pi-heif==1.4.0"],
@@ -199,7 +199,7 @@ describe("parseHeader", () => {
     });
     const header = parseHeader(text);
     expect(header.problems).toEqual([]);
-    expect(header.floor).toBe("3.11");
+    expect(header.floor).toBe("3.12");
     expect(header.input).toEqual({ path: "sidecar/requirements.txt", sha: H });
     expect(header.constraint).toEqual({ path: "sidecar/requirements.lock", sha: H2 });
     expect(header.override).toBeNull();
@@ -233,7 +233,7 @@ describe("problemsForLock", () => {
   const base = () => ({
     path: "sidecar/fixture.lock", // not one of the three real locks, so no entry floor applies
     text: lock({ inputSha: sha256(REQS) }),
-    floor: "3.11",
+    floor: "3.12",
     inputs,
     expectedPins: parseRequirements(REQS).filter((p) => p.name === "defusedxml"),
   });
@@ -265,7 +265,7 @@ describe("problemsForLock", () => {
   });
 
   it("catches a MIN_PYTHON floor that moved without a regeneration", () => {
-    expect(problemsForLock({ ...base(), floor: "3.12" }).join(" ")).toMatch(/MIN_PYTHON/);
+    expect(problemsForLock({ ...base(), floor: "3.11" }).join(" ")).toMatch(/MIN_PYTHON/);
   });
 
   it("catches an entry with no hash, which --require-hashes cannot verify", () => {
@@ -382,9 +382,11 @@ describe("scan", () => {
   it("passes on the real tree and parses a plausible number of entries", () => {
     const { failures, entryCount } = scan(root);
     expect(failures).toEqual([]);
-    // Sixty-odd base packages plus both optional components. A collapse to a handful means the
-    // parser broke; this is the same floor `problemsForLock` enforces, asserted end to end.
-    expect(entryCount).toBeGreaterThan(80);
+    // Fifty-odd base packages plus both optional components: 80 entries since the Python 3.12
+    // floor collapsed the forked pins (soupsieve, numpy, scipy) to one line each, 85 before. A
+    // collapse to a handful means the parser broke; this is the same floor `problemsForLock`
+    // enforces, asserted end to end.
+    expect(entryCount).toBeGreaterThan(70);
   });
 
   it("runs the override check on the real base lock", () => {

@@ -514,7 +514,7 @@ function ConfidenceThresholdControl() {
         type="button"
         onClick={toggle}
         aria-pressed={on}
-        className="rounded-[var(--radius-sm)] border border-border2 bg-surface px-1.5 py-0.5 text-ink2 transition-colors hover:text-ink motion-reduce:transition-none"
+        className="rounded-[var(--radius-sm)] border border-ink4 bg-surface px-1.5 py-0.5 text-ink2 transition-colors hover:text-ink motion-reduce:transition-none"
       >
         {on ? "on" : "off"}
       </button>
@@ -531,7 +531,7 @@ function ConfidenceThresholdControl() {
           const n = Number(raw.trim());
           if (raw.trim() !== "" && Number.isFinite(n)) commit(n);
         }}
-        className="w-14 rounded-[var(--radius-sm)] border border-border2 bg-surface px-1 py-0.5 text-ink2 disabled:opacity-40"
+        className="w-14 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-1 py-0.5 text-ink2 disabled:opacity-40"
       />
       <span className="normal-case">
         {on
