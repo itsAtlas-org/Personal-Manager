@@ -36,6 +36,7 @@ import { AccessibilitySettings } from "./settings/AccessibilitySettings";
 import { SearchSettings } from "./settings/SearchSettings";
 import { ModelListEditor } from "./ModelListEditor";
 import { OnboardingLocalConnect } from "./onboarding/OnboardingLocalConnect";
+import { ModNoticeStrips } from "./mods/ModNoticeStrips";
 import { ModsStrips } from "./mods/ModsStrips";
 import { SignInStrip } from "./SignInStrip";
 import { StorageSettings } from "./StorageSettings";
@@ -595,6 +596,8 @@ export function SettingsView({
       <SignInStrip />
       {/* The safety list's notices (a mod paused or removed): App's copy is under this scrim too. */}
       <ModsStrips variant="app" />
+      {/* What a mod said through `notify`: App's copy is under this scrim too. */}
+      <ModNoticeStrips />
 
       <div className="flex min-h-0 flex-1">
         <nav className="w-52 shrink-0 overflow-y-auto border-r border-border p-3">

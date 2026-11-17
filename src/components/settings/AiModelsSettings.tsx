@@ -22,6 +22,7 @@ import {
 import type { CostSummary, Settings } from "../../lib/types";
 import { IngestProgress } from "../IngestProgress";
 import { ModelListEditor } from "../ModelListEditor";
+import { modText } from "../mods/modText";
 import {
   Button,
   Callout,
@@ -49,6 +50,18 @@ function fmtUsd(v: number | null): string {
   if (v == null) return "—";
   if (v === 0) return "$0.00";
   return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
+}
+
+/** What mods spent, all time, from the by-mod rows: the sum of what could be priced, and whether
+ *  some could not (then the sum is a floor, never presented as the whole). */
+function modTotal(rows: CostSummary["by_mod"]): { usd: number; partial: boolean } {
+  let usd = 0;
+  let partial = false;
+  for (const r of rows) {
+    if (r.cost_usd == null) partial = true;
+    else usd += r.cost_usd;
+  }
+  return { usd, partial };
 }
 
 /** The copy-paste prompt handed to another AI to produce a clean, importable memory export. Kept
@@ -561,6 +574,48 @@ export function AiModelsSettings({
             </div>
           ) : (
             <p className="mt-2 text-xs text-ink4">No model calls logged yet.</p>
+          )}
+          {cost.by_mod.length > 0 && (
+            <div className="mt-3" data-help="settings-usage-by-mod">
+              <p className="pb-1 font-mono text-[0.625rem] uppercase tracking-wide text-ink4">
+                By mod (all time)
+              </p>
+              <table className="w-full text-left text-xs">
+                <thead className="font-mono uppercase tracking-wide text-ink4">
+                  <tr className="border-b border-rule">
+                    <th className="py-1 font-medium">Mod</th>
+                    <th className="py-1 text-right font-medium">Reqs</th>
+                    <th className="py-1 text-right font-medium">Tokens in/out</th>
+                    <th className="py-1 text-right font-medium">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cost.by_mod.map((m) => (
+                    <tr key={m.mod_id} className="border-b border-rule">
+                      {/* The name is the mod's own text, made one plain line; a mod that is gone
+                          keeps its history under PM's words. */}
+                      <td className="break-words py-1 pr-2 text-ink2">
+                        {m.name == null ? "removed mod" : modText(m.name)}
+                      </td>
+                      <td className="py-1 text-right text-ink3">{m.request_count}</td>
+                      <td className="py-1 text-right font-mono text-ink4">
+                        {m.prompt_tokens.toLocaleString()} / {m.completion_tokens.toLocaleString()}
+                      </td>
+                      <td className="py-1 text-right font-mono text-ink3">{fmtUsd(m.cost_usd)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="mt-1 text-xs text-ink4">
+                Mods together:{" "}
+                <span className="font-mono text-ink3">
+                  {modTotal(cost.by_mod).partial ? "at least " : ""}
+                  {fmtUsd(modTotal(cost.by_mod).usd)}
+                </span>
+                . Their calls are in the model table above too. Each mod&apos;s monthly limit, in
+                the Mods tab, counts its own ledger, so it can differ from this log.
+              </p>
+            </div>
           )}
           {/* Names a tab that only exists while Local AI is on. */}
           {localAi?.on && (

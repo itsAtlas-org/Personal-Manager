@@ -10,13 +10,15 @@
 //! access as the dispatcher would answer it now (`grants::decide`, D3 and the sealed engine
 //! included), so the tab shows what is true and not what the policy table alone would say.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::Utc;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::words::{self, RowFacts, Standing};
+use crate::mods::ai::{self as money, MonthUse};
 use crate::mods::api::grants::{self, Decision, Facts, Outcome, Refused};
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
 use crate::mods::autoinstall::{self, Pilot};
@@ -24,6 +26,7 @@ use crate::mods::index::Index;
 use crate::mods::ledger::{self, Resumed, Waiting, WaitingKind};
 use crate::mods::package::ApiRange;
 use crate::mods::policy;
+use crate::mods::secrets::{self, SlotStatus};
 use crate::mods::store;
 
 /// The largest icon PM will show (also `icon::ICON_CAP`): a small raster, not a photo.
@@ -34,7 +37,7 @@ pub const ICON_CAP: u64 = 256 << 10;
 /// has no use for the risk.
 pub const ICON_EXTENSIONS: [&str; 2] = ["png", "webp"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModDto {
     pub id: String,
@@ -58,6 +61,17 @@ pub struct ModDto {
     pub state: Standing,
     pub permissions: Vec<PermissionDto>,
     pub internet_hosts: Vec<String>,
+    /// The key slots the manifest declares, each with its host, its header and whether a key is
+    /// stored for it. Never the key.
+    pub secrets: Vec<SlotStatus>,
+    /// The monthly AI limit in dollars, or none until the person sets one (a paid call asks first).
+    pub ai_cap_usd: Option<f64>,
+    /// What counts against the limit now: this month's settled spend plus the bookings still held
+    /// (a call in flight, or one a crash left, which counts to month end). The cap's own ledger,
+    /// not the Usage and cost table's best-effort log.
+    pub ai_spent_usd: f64,
+    /// The month that number is for (`YYYY-MM`, the person's own time zone).
+    pub ai_month: String,
     /// The sidebar tab's label, when the mod has one.
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
@@ -216,6 +230,11 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     } else {
         Vec::new()
     };
+    // Which slots have a key: names, hosts and headers only, never the value column.
+    let bound = secrets::bound_pairs(conn)?;
+    // The limits and the month's use, by the cap's own rule for the month (`mods::ai::month_use`).
+    let month = money::civil_month(crate::commands::resolve_zone(conn), Utc::now());
+    let ledgers = money::read_ledgers(conn, &month)?;
     let mut out: Vec<ModDto> = rows
         .iter()
         .map(|row| {
@@ -225,7 +244,12 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                 own,
                 waiting.get(&row.id),
                 resumed.iter().rev().find(|r| r.id == row.id),
-                &held,
+                &Shared {
+                    held: &held,
+                    bound: &bound,
+                    ledgers: &ledgers,
+                    month: &month,
+                },
                 ctx,
             )
         })
@@ -272,6 +296,10 @@ fn pending_dto(pilot: &Pilot) -> ModDto {
         state,
         permissions: Vec::new(),
         internet_hosts: Vec::new(),
+        secrets: Vec::new(),
+        ai_cap_usd: None,
+        ai_spent_usd: 0.0,
+        ai_month: String::new(),
         nav_tab: Some(pilot.tab_label.to_owned()),
         calendar_overlay: None,
         help: Vec::new(),
@@ -457,14 +485,33 @@ pub fn permission(
     })
 }
 
+/// What every row's DTO is built against, read once for the whole list.
+struct Shared<'a> {
+    /// D3's holdings of the unsigned set.
+    held: &'a [(PolicyTier, Class)],
+    /// The key slots that have a key (names and bindings, never a value).
+    bound: &'a BTreeSet<(String, String, String, String)>,
+    /// Each mod's monthly AI limit and what counts against it now.
+    ledgers: &'a BTreeMap<String, (Option<f64>, MonthUse)>,
+    /// The month today falls in, for a mod with no ledger row.
+    month: &'a str,
+}
+
 fn dto(
     row: &RawRow,
     decisions: Option<&BTreeMap<String, Decision>>,
     waiting: Option<&Waiting>,
     resumed: Option<&Resumed>,
-    held: &[(PolicyTier, Class)],
+    shared: &Shared<'_>,
     ctx: &Ctx<'_>,
 ) -> ModDto {
+    let Shared {
+        held,
+        bound,
+        ledgers,
+        month,
+    } = shared;
+    let ledger = ledgers.get(&row.id);
     let m = read_manifest(&row.manifest);
     let tier = PolicyTier::of(row.signed, &row.tier);
     // Only the unsigned set is judged together; a signed tier has no exclusion to read.
@@ -517,6 +564,10 @@ fn dto(
         state,
         permissions,
         internet_hosts: m.internet_hosts.clone(),
+        secrets: secrets::statuses(&row.id, &row.manifest, bound),
+        ai_cap_usd: ledger.and_then(|(cap, _)| *cap),
+        ai_spent_usd: ledger.map_or(0.0, |(_, used)| used.used_usd),
+        ai_month: ledger.map_or_else(|| (*month).to_owned(), |(_, used)| used.month.clone()),
         nav_tab: m.nav_tab.clone(),
         calendar_overlay: m.calendar_overlay.clone(),
         help: m.help.clone(),
@@ -706,8 +757,15 @@ mod tests {
             "allowed"
         );
         // A first-use permission asks.
-        let p = show("ai", PolicyTier::First, None, &[], true);
+        let p = show("ai", PolicyTier::Second, None, &[], true);
         assert_eq!((p.access, p.when, p.class), ("asks", "first-use", "money"));
+        // A first-party mod's `ai` is allowed from the start; what asks is the limit, at the first
+        // paid use (the handler's rule, not the table's).
+        let p = show("ai", PolicyTier::First, None, &[], true);
+        assert_eq!((p.access, p.when, p.class), ("allowed", "auto", "money"));
+        // A no on record still refuses a first-party mod.
+        let p = show("ai", PolicyTier::First, Some(Decision::Denied), &[], true);
+        assert_eq!(p.access, "off");
         // D3: an unsigned mod's internet is off while another unsigned mod holds a read.
         let p = show(
             "internet",
@@ -968,6 +1026,90 @@ mod tests {
         let map = &listed[0];
         assert!(map.permissions.is_empty() && !map.has_icon && map.nav_tab.is_none());
         assert_eq!(map.state.fix, words::Fix::Uninstall);
+    }
+
+    /// The row's key slots, each with whether a key is stored AND still bound to the slot: a
+    /// moved or planted row reads as not set, and nothing in the DTO can carry the value.
+    #[test]
+    fn a_listed_mod_shows_its_key_slots_set_or_not_and_never_a_value() {
+        let (_dir, c) = test_store();
+        let mut m = manifest(&["internet"]);
+        m["internetHosts"] = json!(["a.example.com"]);
+        m["secrets"] = json!([
+            {"name": "set", "host": "a.example.com", "header": "X-A"},
+            {"name": "unset", "host": "a.example.com", "header": "X-B"},
+            {"name": "moved", "host": "a.example.com", "header": "X-C"},
+        ]);
+        insert(
+            &c,
+            &Row {
+                manifest: m,
+                ..Row::default()
+            },
+        );
+        c.execute(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'set', 'a.example.com', 'X-A', 'sentinel-value-1'), \
+             ('atlas.map', 'moved', 'old.example.com', 'X-C', 'sentinel-value-2')",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        let got: Vec<(&str, bool)> = listed[0]
+            .secrets
+            .iter()
+            .map(|s| (s.name.as_str(), s.set))
+            .collect();
+        assert_eq!(got, [("set", true), ("unset", false), ("moved", false)]);
+        assert_eq!(listed[0].secrets[0].host, "a.example.com");
+        assert_eq!(listed[0].secrets[0].header, "X-A");
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(!wire.contains("sentinel-value"), "{wire}");
+        // A mod that declares none lists none.
+        let (_d2, c2) = test_store();
+        insert(&c2, &Row::default());
+        assert!(list(&c2, &CTX).unwrap()[0].secrets.is_empty());
+    }
+
+    /// The row's monthly AI limit and what counts against it: this month's settled spend plus the
+    /// bookings held, per mod; an earlier month reads as nothing used (the next call rolls it).
+    #[test]
+    fn a_listed_mod_shows_its_ai_limit_and_what_it_has_used_this_month() {
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed[0].ai_cap_usd, None, "no limit until one is set");
+        assert_eq!(listed[0].ai_spent_usd, 0.0);
+        let now = money::civil_month(crate::commands::resolve_zone(&c), Utc::now());
+        assert_eq!(listed[0].ai_month, now);
+        c.execute(
+            "UPDATE mods SET ai_cap_usd = 2.0, ai_spent_usd = 0.5, ai_month = ?1",
+            [&now],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO ai_reservations(mod_id, reserved_usd) VALUES ('atlas.map', 0.25)",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.75)
+        );
+        let wire = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(wire["aiCapUsd"], json!(2.0));
+        assert_eq!(wire["aiSpentUsd"], json!(0.75));
+        assert_eq!(wire["aiMonth"], json!(now));
+        // Last month's spend has rolled.
+        c.execute("UPDATE mods SET ai_month = '2000-01'", [])
+            .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.0)
+        );
+        assert_eq!(listed[0].ai_month, now);
     }
 
     #[test]

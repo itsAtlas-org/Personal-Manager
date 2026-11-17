@@ -65,7 +65,9 @@ export const MAX_FRAME_HEIGHT = 4096;
 /** The codes the page itself answers with or reads; the backend answers with the rest. A test in
  *  error.rs pins each to the backend's code of the same name. `needsPrompt` is the one the page
  *  turns into PM's first-use question; `notGranted` is what a mod is told after the person says no
- *  to it. */
+ *  to it. The lines from `aiCapReached` on are the experimental calls' (PR B), listed so a page-side
+ *  answer for `ai.complete`, `net.fetch`, `secrets.set` or `notify` names a code by word and the
+ *  same test holds it to the backend's; their numbers freeze at the first release after PR C. */
 export const MOD_ERRORS = {
   unknownMethod: "MOD-1001",
   badArgs: "MOD-1003",
@@ -73,11 +75,23 @@ export const MOD_ERRORS = {
   needsPrompt: "MOD-2002",
   tooLarge: "MOD-3002",
   internal: "MOD-9001",
+  aiCapReached: "MOD-3004",
+  callTimedOut: "MOD-3005",
+  noModel: "MOD-5004",
+  priceUnknown: "MOD-5005",
+  modelCallFailed: "MOD-5006",
+  hostNotAllowed: "MOD-6001",
+  hostNotPublic: "MOD-6002",
+  hostUnresolved: "MOD-6003",
+  networkUnavailable: "MOD-6004",
+  tooManyRedirects: "MOD-6005",
+  responseTooLarge: "MOD-6006",
+  secretNotSet: "MOD-6007",
 } as const;
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because
  *  only the page holds what they need. A test in handlers.rs pins this list to the backend's. */
-export const PAGE_ACTIONS = ["theme.get", "ui.openDocument"] as const;
+export const PAGE_ACTIONS = ["theme.get", "ui.openDocument", "secrets.set", "notify"] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 

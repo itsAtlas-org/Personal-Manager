@@ -144,6 +144,7 @@ mod tray;
 mod update_delivery;
 mod vault;
 mod wipe;
+mod wire_mark;
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -2166,6 +2167,11 @@ pub fn run() {
             mods::tab::commands::resume_mod,
             mods::tab::commands::consent_mod,
             mods::tab::commands::mod_permission_decide,
+            mods::tab::commands::mod_ai_prompt_info,
+            mods::tab::commands::mod_ai_cap_set,
+            mods::tab::commands::mod_secret_save,
+            mods::tab::commands::mod_secret_clear,
+            mods::tab::commands::mod_secret_status,
             mods::tab::commands::mods_disclaimer_state,
             mods::tab::commands::accept_mods_disclaimer,
             mods::tab::commands::mods_safety_status,

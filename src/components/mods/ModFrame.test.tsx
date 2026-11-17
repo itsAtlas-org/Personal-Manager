@@ -18,6 +18,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HelpOverlay } from "../HelpOverlay";
 import { HELP as HELP_TEXT, HelpContext } from "../../lib/help";
 import { ModFrame, type ModTier } from "./ModFrame";
+import {
+  ModPageHooksContext,
+  NOTICE_MAX_CHARS,
+  readNotice,
+  type ModPageHooks,
+} from "./modPageHooks";
 import { PROMPT_GUARD_MS } from "./ModPermissionPrompt";
 import {
   FLOOD_BURST,
@@ -36,11 +42,13 @@ const modEventsAck = vi.fn();
 const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
 const modPermissionDecide = vi.fn();
+const modAiPromptInfo = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
-  modPermissionDecide: (id: string, permission: string, granted: boolean) =>
-    modPermissionDecide(id, permission, granted),
+  // Every argument is forwarded as it came, so a test sees whether a limit travelled with the yes.
+  modPermissionDecide: (...args: unknown[]) => modPermissionDecide(...args),
+  modAiPromptInfo: (modId: string) => modAiPromptInfo(modId),
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
@@ -321,6 +329,100 @@ describe("ModFrame", () => {
     });
     expect(openReaderById).toHaveBeenCalledTimes(1);
     expect(openReaderById).toHaveBeenCalledWith(12);
+  });
+
+  describe("secrets.set and notify", () => {
+    const SLOT = { name: "token", host: "api.example.com", header: "X-Api-Key", set: false };
+    const mountWith = (hooks: ModPageHooks) =>
+      render(
+        <ModPageHooksContext.Provider value={hooks}>
+          <ModFrame modId="acme.tool" name="Acme Tool" tier="second" />
+        </ModPageHooksContext.Provider>,
+      );
+
+    it("shows PM's key field for the slot the backend named, and tells the mod only whether a key was held", async () => {
+      const askSecret = vi.fn();
+      modCall.mockResolvedValue({ kind: "page", action: "secrets.set", args: SLOT });
+      mountWith({ askSecret });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "secrets.set", args: { name: "token" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: { set: false },
+      });
+      // The mod is named by PM's own record, never by anything the frame sent.
+      expect(askSecret).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        SLOT,
+      );
+    });
+
+    it("shows a notice strip with the text and tone the backend checked, and answers null", async () => {
+      const showNotice = vi.fn();
+      modCall.mockResolvedValue({
+        kind: "page",
+        action: "notify",
+        args: { text: "Rates updated", tone: "good" },
+      });
+      mountWith({ showNotice });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "notify", args: { text: "x" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: null,
+      });
+      expect(showNotice).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        { text: "Rates updated", tone: "good" },
+      );
+    });
+
+    it.each([
+      ["secrets.set", SLOT],
+      ["notify", { text: "hi", tone: "info" }],
+    ])(
+      "answers %s as PM's own failure, not as a success that showed nothing, when nothing draws it",
+      async (action, args) => {
+        modCall.mockResolvedValue({ kind: "page", action, args });
+        mount();
+        const { port } = connect(await theFrame());
+        expect(await ask(port, { id: 1, method: action })).toEqual({
+          id: 1,
+          ok: false,
+          error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+        });
+      },
+    );
+
+    it.each([
+      ["secrets.set", null],
+      ["secrets.set", { ...SLOT, set: "yes" }],
+      ["secrets.set", { ...SLOT, name: "" }],
+      ["secrets.set", { name: "token" }],
+      ["notify", null],
+      ["notify", { text: "hi", tone: "loud" }],
+      ["notify", { text: "", tone: "info" }],
+      ["notify", { text: 5, tone: "info" }],
+      ["notify", { text: "a".repeat(141), tone: "info" }],
+    ])("draws nothing for %s with the arguments %j", async (action, args) => {
+      const hooks = { askSecret: vi.fn(), showNotice: vi.fn() };
+      modCall.mockResolvedValue({ kind: "page", action, args });
+      mountWith(hooks);
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: action })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+      expect(hooks.askSecret).not.toHaveBeenCalled();
+      expect(hooks.showNotice).not.toHaveBeenCalled();
+    });
+
+    it("counts a notice's length in characters, as the backend does", () => {
+      const heavy = "é𝄞".repeat(NOTICE_MAX_CHARS / 2);
+      expect(readNotice({ text: heavy, tone: "warn" }).text).toBe(heavy);
+      expect(() => readNotice({ text: heavy + "x", tone: "warn" })).toThrow();
+    });
   });
 
   it("performs no page action for a session that ended while the backend was answering", async () => {
@@ -934,6 +1036,63 @@ describe("the first-use question", () => {
     expect(modCall).toHaveBeenCalledTimes(2);
     expect(modCall.mock.calls[1]).toEqual(modCall.mock.calls[0]);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("asks the money question on a paid route with a limit field, and the limit travels with the yes", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      model: "a/b",
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValueOnce(NEEDS_AI).mockResolvedValueOnce(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    const limit = await within(dialog).findByRole("textbox");
+    expect((limit as HTMLInputElement).value).toBe("1.00");
+    expect(modAiPromptInfo).toHaveBeenCalledWith("acme.tool");
+    fireEvent.change(limit, { target: { value: "2.50" } });
+    // Content arrived after the dialog opened: its own wait runs before the buttons answer.
+    const allow = within(dialog).getByRole("button", { name: "Allow" }) as HTMLButtonElement;
+    expect(allow.disabled).toBe(true);
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(allow);
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", true, 2.5);
+    expect(modCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("No on the money question sends no limit", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      model: "a/b",
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValue(NEEDS_AI);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    await within(dialog).findByRole("textbox");
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(within(dialog).getByRole("button", { name: "No" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", false);
   });
 
   it("No records the no and tells the mod it isn't granted, without a retry", async () => {

@@ -224,6 +224,14 @@ describe("the backend's answer", () => {
     });
   });
 
+  it.each(["secrets.set", "notify"])("reads %s as a page action the page performs", (action) => {
+    expect(readReply({ kind: "page", action, args: { a: 1 } })).toEqual({
+      kind: "page",
+      action,
+      args: { a: 1 },
+    });
+  });
+
   it("refuses a page action the page doesn't perform", () => {
     expect(readReply({ kind: "page", action: "shell.run", args: null })).toEqual({
       kind: "error",

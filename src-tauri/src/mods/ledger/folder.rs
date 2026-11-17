@@ -304,9 +304,10 @@ impl<S: LedgerStore> Ledger<'_, S> {
         let refs = project_refs_json(m);
         let at = time_text(Utc::now());
         self.with_conn(|conn| {
+            let tx = conn.transaction()?;
             // Compare-and-set on the row as read: another owner's change since wins (a pause is
             // not touched here: the state is not in this statement).
-            let n = conn.execute(
+            let n = tx.execute(
                 "UPDATE mods SET name = ?2, version = ?3, source_commit = ?4, manifest = ?5, \
                                  files = ?6, project_refs = ?7, updated_at = ?8 \
                  WHERE id = ?1 AND installed_from = ?9 AND manifest = ?10 AND version = ?11",
@@ -324,11 +325,15 @@ impl<S: LedgerStore> Ledger<'_, S> {
                     current.pinned.version,
                 ],
             )?;
-            if n == 1 {
-                Ok(())
-            } else {
-                Err(Refusal::Changed.into())
+            if n != 1 {
+                return Err(Refusal::Changed.into());
             }
+            // A key whose slot this reload moved or dropped goes in the same transaction, as an
+            // approved update's does: otherwise it is an orphan the person cannot see or clear, and
+            // a later reload that restores the slot would quietly bring the old key back.
+            crate::mods::secrets::prune_to_slots(&tx, id.as_str(), &manifest_text)?;
+            tx.commit()?;
+            Ok(())
         })?;
         let replaced = served != *serving;
         self.runtime.folders().update(id, served.clone());

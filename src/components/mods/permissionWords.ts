@@ -8,14 +8,19 @@
 // `permissionWords.test.ts` pins the list to the backend's table.
 
 import type { ModPermission, PermissionClass } from "../../lib/modsTypes";
+import { MONEY_PROMPT_WORDS } from "./aiMoneyWords";
 import { modText } from "./modText";
 
 /** What a screen says about a permission that has no checkbox of its own (one asked at install gets
  *  a checkbox instead). */
-export function standingLine(p: Pick<ModPermission, "when" | "offBecause">): string {
+export function standingLine(
+  p: Pick<ModPermission, "when" | "offBecause"> & { id?: string },
+): string {
   switch (p.when) {
     case "auto":
-      return "Always on.";
+      // `ai` is "on" for a first-party mod but is not free in general: the money question still
+      // comes, from the call, the first time a request would cost something.
+      return p.id === "ai" ? MONEY_PROMPT_WORDS.standingAuto() : "Always on.";
     case "first-use":
     case "install-then-first-use":
       return "PM asks you the first time the mod needs this.";

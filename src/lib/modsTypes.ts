@@ -182,6 +182,16 @@ export interface ModHelpEntry {
   body: string;
 }
 
+/** One key slot a mod's manifest declares: the one host the key goes to and the one header it goes
+ *  in, and whether a key is stored for it now (bound to this host and header). The key itself is
+ *  never sent to the page; the user types it into PM's own field (`modSecretSave`). */
+export interface ModSecretSlot {
+  name: string;
+  host: string;
+  header: string;
+  set: boolean;
+}
+
 export interface ModInfo {
   id: string;
   /** The one entry that is no row: a mod PM is still installing for this vault (the Map, once a
@@ -203,6 +213,15 @@ export interface ModInfo {
   state: ModStanding;
   permissions: ModPermission[];
   internetHosts: string[];
+  /** The key slots the manifest declares (empty for most mods). */
+  secrets: ModSecretSlot[];
+  /** The monthly AI limit in dollars, or null until the person sets one (a paid call asks first). */
+  aiCapUsd: number | null;
+  /** What counts against the limit now: this month's settled spend plus the bookings still held.
+   *  The limit's own ledger, which can differ from the Usage and cost table's best-effort log. */
+  aiSpentUsd: number;
+  /** The month that number is for (`YYYY-MM`). */
+  aiMonth: string;
   /** The sidebar tab's label, when the mod has one. */
   navTab: string | null;
   calendarOverlay: string | null;
@@ -216,6 +235,24 @@ export interface ModInfo {
   installedAt: string;
   updatedAt: string;
 }
+
+/** The kind of route a mod's AI call would take now (`mod_ai_prompt_info`). */
+export type AiPromptRoute = "none" | "local" | "cloud" | "local-then-cloud" | "cloud-for-power";
+
+/** What the money prompt is told about the route: facts about the person's own settings, never
+ *  anything the mod supplied. `paid` means a cloud arm exists, so the prompt asks for a monthly
+ *  limit; `unpriced` means PM cannot price the route and every call will be refused. */
+export interface AiPromptInfo {
+  route: AiPromptRoute;
+  paid: boolean;
+  unpriced: boolean;
+  /** The model the call would try first (the person's own setting). */
+  model: string | null;
+  suggestedCapUsd: number;
+}
+
+/** The largest monthly limit PM stores (`mods::ai::MAX_CAP_USD`; a Rust test holds them equal). */
+export const MAX_AI_CAP_USD = 100000;
 
 /** A mod's icon: a media type (`image/png` or `image/webp`) and its bytes in base64. */
 export interface ModIcon {
@@ -340,6 +377,25 @@ export interface KitLimits {
   maxIdsPerEvent: number;
   eventCoalesceMs: number;
   maxPendingIds: number;
+  // The experimental calls' limits (PR B); times in milliseconds.
+  callTimeoutMs: number;
+  aiMaxInFlight: number;
+  aiCallsPerMinute: number;
+  aiCallBurst: number;
+  maxAiPromptBytes: number;
+  maxAiMessages: number;
+  maxAiOutputTokens: number;
+  netMaxInFlight: number;
+  netFetchesPerSecond: number;
+  netFetchBurst: number;
+  maxFetchRequestBytes: number;
+  maxFetchResponseBytes: number;
+  fetchConnectTimeoutMs: number;
+  fetchTotalTimeoutMs: number;
+  maxFetchRedirects: number;
+  notifyMaxChars: number;
+  notifyPerDay: number;
+  secretAsksPerSession: number;
 }
 
 /** What `devKitInfo` answers: the Developer kit's rail sections. */
@@ -564,7 +620,9 @@ export type ModsChangedCause =
   | "decided"
   | "dev-mode"
   | "test-mod"
-  | "auto-installed";
+  | "auto-installed"
+  | "secret"
+  | "ai-cap";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

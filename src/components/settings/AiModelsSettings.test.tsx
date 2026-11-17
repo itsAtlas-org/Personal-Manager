@@ -8,7 +8,7 @@
 // for the first time must read the summary again, or the person who just set OpenRouter up sees no
 // prices until they next open the tab.
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { costSummary, setOpenRouterKey, setOpenRouterBackgroundKey } = vi.hoisted(() => ({
@@ -94,5 +94,73 @@ describe("the cost summary on AI & Models", () => {
     await saveIn(0, "sk-or-v1-first");
     await waitFor(() => expect(screen.getByText(/keychain locked/)).toBeTruthy());
     expect(costSummary).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the by-mod table", () => {
+  const summary = (by_mod: unknown[]) => ({
+    last_30d: [],
+    all_time: [],
+    by_mod,
+    total_30d_usd: 0,
+    total_all_time_usd: 0,
+    pricing_updated_at: null,
+  });
+  const row = (extra: Record<string, unknown>) => ({
+    mod_id: "acme.tool",
+    name: "Acme Tool",
+    prompt_tokens: 1200,
+    completion_tokens: 300,
+    request_count: 4,
+    cost_usd: 0.1234,
+    ...extra,
+  });
+
+  it("is absent when no mod has used the AI", async () => {
+    costSummary.mockResolvedValue(summary([]));
+    render(<AiModelsSettings />);
+    await screen.findByText(/Last 30 days/);
+    expect(screen.queryByText("By mod (all time)")).toBeNull();
+  });
+
+  it("lists each mod with its requests, tokens and cost, and a removed mod under PM's words", async () => {
+    costSummary.mockResolvedValue(
+      summary([
+        row({}),
+        row({ mod_id: "gone.mod", name: null, request_count: 2, cost_usd: 0.5 }),
+        row({ mod_id: "free.mod", name: "Free", cost_usd: null }),
+      ]),
+    );
+    render(<AiModelsSettings />);
+    const heading = await screen.findByText("By mod (all time)");
+    const table = heading.parentElement!;
+    expect(within(table).getByText("Acme Tool")).toBeTruthy();
+    expect(within(table).getByText("removed mod")).toBeTruthy();
+    expect(within(table).getByText("$0.12")).toBeTruthy();
+    expect(within(table).getByText("$0.50")).toBeTruthy();
+    // A mod whose spend could not be priced shows a dash, never an understated $0.
+    expect(within(table).getByText("—")).toBeTruthy();
+    // The total is a floor when some could not be priced.
+    expect(table.textContent).toContain("at least $0.62");
+  });
+
+  it("draws a mod's name as one plain line of text", async () => {
+    costSummary.mockResolvedValue(summary([row({ name: "<b>Bold</b>‮evil\nsecond line" })]));
+    render(<AiModelsSettings />);
+    const heading = await screen.findByText("By mod (all time)");
+    const table = heading.parentElement!;
+    expect(table.querySelector("b")).toBeNull();
+    expect(table.textContent).not.toContain("‮");
+    expect(table.textContent).not.toContain("\n");
+  });
+
+  it("gives the exact total when every mod's spend was priced", async () => {
+    costSummary.mockResolvedValue(
+      summary([row({ cost_usd: 0.25 }), row({ mod_id: "b.mod", cost_usd: 0.25 })]),
+    );
+    render(<AiModelsSettings />);
+    const heading = await screen.findByText("By mod (all time)");
+    expect(heading.parentElement!.textContent).toContain("Mods together: $0.50");
+    expect(heading.parentElement!.textContent).not.toContain("at least");
   });
 });

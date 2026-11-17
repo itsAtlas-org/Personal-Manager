@@ -11,7 +11,9 @@
 //! whose owner didn't: [`devmode::all_devices_off`] empties the per-device record and turns the old
 //! row off, and the load that follows the store's open pauses the unsigned mods, INVARIANTS.md
 //! I-34), the connected apps (`mcp_clients`: their tokens belong to the device that issued them),
-//! and the MCP switch. The cached safety list is the fourth thing a
+//! and the MCP switch. A fourth is not believed at all: the mods' typed keys (`mod_secrets`; a
+//! backup is written without them, so any row in a restored store was planted, and the restore
+//! deletes it). The cached safety list is the fifth thing a
 //! restore must meet before a mod runs, and it needs no step here: the restore hands the backup's
 //! copy to the acceptance rules (`mods::refresh::take_restored`), and the writer's open applies the
 //! cached list before it loads a row (`ledger::after_writer_open`), which is before any frame can
@@ -19,7 +21,8 @@
 //!
 //! **Joining a shared vault writes nothing.** Its store is the vault's, in use by the vault's
 //! other accounts and machines at the same time, so switching dev mode off or deleting the
-//! connected apps there would do it for them. Dev mode is per device (a joiner's device has no
+//! connected apps or the mods' keys there would do it for them (the keys are the vault's own, typed
+//! by whoever can open it). Dev mode is per device (a joiner's device has no
 //! entry in the record, so it reads off, and nothing else ever switches it on: the old row is
 //! never read, `mods::devmode`), and the connected apps have a seam where PR C makes that true
 //! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The
@@ -42,6 +45,7 @@ use crate::mods::ids::ModId;
 use crate::mods::ledger::ServeCheck;
 use crate::mods::runtime::ModRuntime;
 use crate::mods::safety::SafetyCheck;
+use crate::mods::secrets;
 use crate::mods::store;
 use crate::AppState;
 
@@ -57,6 +61,11 @@ pub fn reset_for_adopt(conn: &Connection) -> Result<()> {
     // makes; the page asks the backend (`dev_mode_state`), not its own copy.
     devmode::all_devices_off(&tx)?;
     tx.execute("DELETE FROM mcp_clients", [])?;
+    // The typed keys. A backup is written without them (`backup::strip`), so a row here came from
+    // somewhere that is not this person's own typing: a crafted file, or a copy made before the
+    // strip existed. Either way it would be sent to a host as the user's credential, so none is
+    // believed; the person types the keys again, as the restore card says.
+    secrets::purge_all(&tx)?;
     switch_mcp_off(&tx)?;
     tx.commit()?;
     Ok(())
@@ -394,6 +403,38 @@ mod tests {
         assert_eq!(read_rows(&conn).unwrap().len(), 1);
     }
 
+    /// A crafted backup can carry a `mod_secrets` row (the strip writes none, but nothing stops a
+    /// hand-made file): the restore's commit deletes every row, and keeps the mod itself.
+    #[test]
+    fn adopting_deletes_every_mod_secret_a_restored_store_carries() {
+        let (_d, conn) = store_conn();
+        add(&conn, "atlas.board", true, "active", None);
+        add(&conn, "acme.tool", false, "active", None);
+        conn.execute(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.board', 'a', 'h.example.com', 'X-A', 'planted-1'), \
+             ('acme.tool', 'b', 'h.example.com', 'X-B', 'planted-2')",
+            [],
+        )
+        .unwrap();
+        reset_for_adopt(&conn).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM mod_secrets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+        assert_eq!(read_rows(&conn).unwrap().len(), 2, "the mods stay");
+    }
+
+    #[test]
+    fn a_reset_that_cannot_delete_the_secrets_changes_nothing_and_fails() {
+        let (_d, mut conn) = store_conn();
+        set_legacy(&conn, "true");
+        devmode::write(&mut conn, A, true).unwrap();
+        conn.execute_batch("DROP TABLE mod_secrets").unwrap();
+        assert!(reset_for_adopt(&conn).is_err());
+        assert!(devmode::is_on(&conn, A).unwrap(), "rolled back");
+    }
+
     #[test]
     fn adopting_a_store_that_never_had_developer_mode_writes_the_empty_record_and_no_old_row() {
         let (_d, conn) = store_conn();
@@ -499,6 +540,8 @@ mod tests {
             "joiner_inherits",
             "drop_inherited",
             "mcp_clients",
+            "mod_secrets",
+            "purge_all",
         ]
         .into_iter()
         .filter(|name| join.contains(name))

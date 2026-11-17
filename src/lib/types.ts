@@ -332,10 +332,23 @@ export interface ModelSpend {
   cost_usd: number | null;
 }
 
+/** Spend for one mod, all time. `name` is null once the mod is uninstalled (its history stays); the
+ *  page words that as "removed mod". `cost_usd` is null when nothing it spent could be priced. */
+export interface ModAiSpend {
+  mod_id: string;
+  name: string | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  request_count: number;
+  cost_usd: number | null;
+}
+
 /** The Settings "Usage & cost" payload (token spend priced from OpenRouter). */
 export interface CostSummary {
   last_30d: ModelSpend[];
   all_time: ModelSpend[];
+  /** Per-mod spend (a mod's calls are also in the lists above, by model). */
+  by_mod: ModAiSpend[];
   total_30d_usd: number | null;
   total_all_time_usd: number | null;
   pricing_updated_at: string | null;

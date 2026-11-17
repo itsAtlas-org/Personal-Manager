@@ -116,9 +116,25 @@ export const HELP: Record<string, HelpEntry> = {
     title: "What a mod can do",
     body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. For something sensitive PM asks you the first time the mod uses it; 'Allow now' answers that question ahead of time.",
   },
+  "mods-ai-limit": {
+    title: "A mod's monthly AI limit",
+    body: "The most a mod's requests to a paid AI model may cost in a calendar month. The count is PM's own ledger for the limit: this month's finished requests plus any still running (or left by a crash, which count until the month ends), so it can differ a little from the Usage and cost log in Settings. Raising the limit works for the mod's next request; lowering it below what is used stops its paid requests until the month rolls over or you raise it. Leave the field empty to take the limit away: PM then asks for one again before the mod next uses a paid model. A model on your own computer is free and never counts.",
+  },
+  "mods-secret-fields": {
+    title: "A mod's keys",
+    body: "Some mods need a key (a password or token) for a service they talk to. You type it here, in PM's own field, never in the mod. The field says the one site PM will send it to and the one header it goes in, both taken from the mod's own list as installed, and PM adds it to the mod's request itself: the mod never sees it, and PM never shows it again once it is saved. 'Replace key' saves a new one over it; 'Remove key' deletes it. The field empties the moment you save, whether or not the save worked. If a mod update changes the site or the header, the old key is deleted and you type it again. Keys are kept in PM's encrypted store on this computer and are left out of backups.",
+  },
+  "mods-key-ask": {
+    title: "A mod asks for a key",
+    body: "A mod needs a key to use a service and asked PM for it. This window is PM's own, so the mod can't draw it, press anything in it or read what you type. It names the mod and says the one site the key will be sent to. Type or paste the key and press Save; Done closes the window, and you can close it without typing anything. The mod is only told whether PM already held a key when it asked, never the key.",
+  },
+  "mods-notice": {
+    title: "A notice from a mod",
+    body: "A mod can leave a short line at the top of PM, for when you have left its tab. The strip names the mod and says who vouches for it; the words under that are the mod's own, shown as plain text, and nothing in them is a link or a button. 'Dismiss' removes it. A mod may leave at most a few at a time, and five a day. Notices are not saved: they go when you dismiss them, when the mod is removed, or when PM restarts or locks.",
+  },
   "mods-permission-prompt": {
     title: "A mod asks to do something",
-    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow and No switch on half a second after the window appears, so a click meant for the mod can't answer for you. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. You can change either answer any time in the Mods tab.",
+    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow and No switch on half a second after the window appears (and again if what the window shows changes), so a click meant for the mod can't answer for you. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. When the question is about an AI model, the window says which model would answer and, if that can cost money, asks for a monthly limit that is saved with your yes. You can change either answer any time in the Mods tab.",
   },
   "mods-consent": {
     title: "Approve an install or an update",
@@ -519,6 +535,10 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Usage & cost",
     body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history.",
   },
+  "settings-usage-by-mod": {
+    title: "Spend by mod",
+    body: "What each mod's AI requests have used, all time, from the same log as the table above (a mod's requests are in that table too). A mod you have uninstalled keeps its history under 'removed mod'. A dash means nothing it used could be priced yet; the total then says 'at least'. A mod's monthly limit, in the Mods tab, is counted from its own ledger and can differ a little from this log.",
+  },
   "settings-help-mode": {
     title: "Help mode",
     body: "The switch you're using right now. While it's on, hovering any highlighted section shows an explanation like this one.",
@@ -673,6 +693,10 @@ export const HELP: Record<string, HelpEntry> = {
   "settings-developer-testmods": {
     title: "Load a test mod",
     body: "Try a mod straight from an unpacked folder while you build it. PM reads the folder where it is and never copies or changes it, shows the screen for a mod nobody has checked, and loads it once you type its id. It reloads when you save, lasts until PM restarts or developer mode goes off, and is left out of backups. 'Reload' reads the folder again, 'Unload' ends it now. A packed .pmmod file installs from the Mods tab.",
+  },
+  "settings-developer-testkeys": {
+    title: "Test keys",
+    body: "The keys of the test mods you have loaded, typed into PM's own field so a mod you are building can try a service with a real key. It is the same field the Mods tab shows for an installed mod: the key goes to PM, which sends it only to the site and header the mod's manifest names, and the mod never sees it. A test key goes when the test mod is unloaded, when PM restarts or when developer mode goes off, and is left out of backups.",
   },
 
   // Developer mode (issue #78) — read-only inspection

@@ -21,7 +21,14 @@
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
 //!   the handlers; `mod_call` hands it each call.
+//! - [`ai`]: what a mod's AI call may cost and the reserve-then-settle ledger that holds it under
+//!   the mod's monthly cap (§1.6); pure, with no dispatch row until `ai.complete`.
+//! - [`netfetch`]: the one HTTPS fetch that follows its redirects itself, every hop checked,
+//!   screened and pinned (calendar feeds and a mod's `net.fetch` share it), and the hop-fetcher
+//!   seam that lets its rules be tested with no network.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
+//! - [`secrets`]: where a mod's typed keys live (`mod_secrets`, encrypted store), bound to the
+//!   manifest slot's host and header, never handed to a frame (§1.7).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
 //!   `data_dir/mods` (§1.3, §6).
@@ -51,6 +58,7 @@
 //! gives each the app's local data folder), so every window is built with PM's environment, or,
 //! when the main window couldn't be, every window without it.
 
+pub mod ai;
 pub mod api;
 pub mod autoinstall;
 pub mod devmode;
@@ -65,12 +73,14 @@ pub mod index;
 pub mod index_state;
 pub mod keys;
 pub mod ledger;
+pub mod netfetch;
 pub mod outbox;
 pub mod package;
 pub mod policy;
 pub mod refresh;
 pub mod runtime;
 pub mod safety;
+pub mod secrets;
 pub mod store;
 pub mod tab;
 pub mod updater;

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tauri::http::Request;
 
 use super::table::{Kind, Row};
-use super::test_support::{insert_mod, manifest, ModRow, TestHost};
+use super::test_support::{insert_mod, manifest, ModRow, OverHost, TestHost};
 use super::*;
 use crate::mods::ids::ModId;
 use crate::mods::runtime::{InstalledMod, ServedFile};
@@ -560,6 +560,107 @@ async fn at_most_sixteen_calls_of_a_mod_run_at_once() {
     assert_eq!(host.calls().in_flight(&id("atlas.map")), 0);
 }
 
+/// A real handler (`storage.get`) filed under the AI family, as `ai.complete`'s row will be: the
+/// dispatcher admits it under the family's limits, not only the generic ones.
+const AI_FILED: &[Row] = &[Row {
+    name: "storage.get",
+    kind: Kind::Call,
+    permission: Some("storage"),
+    class: permissions::Class::Local,
+    added: (1, 0),
+    deprecated: None,
+    removed: None,
+    experimental: true,
+    family: limits::Family::Ai,
+}];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_of_a_family_is_held_to_the_familys_own_cap_before_its_handler_runs() {
+    /// Opens the gate when the test ends however it ends, so a failing assertion doesn't leave
+    /// handler threads waiting at it (the runtime would wait for them for good).
+    struct OpenOnDrop(Arc<Gate>);
+    impl Drop for OpenOnDrop {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+    let host = TestHost::new();
+    let s = installed(&host, map_row());
+    let m = id("atlas.map");
+    let gate = Arc::new(Gate::default());
+    let _release = OpenOnDrop(Arc::clone(&gate));
+    let held = Arc::clone(&gate);
+    host.hook(move |_, point| {
+        if point == Point::BeforeData {
+            held.wait();
+        }
+    });
+    let mut running = Vec::new();
+    for _ in 0..limits::AI_MAX_IN_FLIGHT {
+        let (host, s) = (host.clone(), s.clone());
+        running.push(tokio::spawn(async move {
+            call_in(&host, AI_FILED, &s, "storage.get", json!({"key": "a"})).await
+        }));
+    }
+    while gate.waiting() < limits::AI_MAX_IN_FLIGHT {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        host.calls().family_in_flight(&m, limits::Family::Ai),
+        limits::AI_MAX_IN_FLIGHT
+    );
+    // One more: refused by the family (the generic cap of 16 is far off), and its handler never ran.
+    // (Bounded: a call the family let through would wait at the gate for good.)
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        call_in(&host, AI_FILED, &s, "storage.get", json!({"key": "a"})),
+    )
+    .await;
+    let e = error(refused.expect("the family let a third call through to its handler"));
+    assert_eq!(e.code, Code::RateLimited);
+    assert!(e.message.contains("AI requests"), "{e}");
+    assert_eq!(gate.waiting(), limits::AI_MAX_IN_FLIGHT);
+    assert_eq!(host.calls().in_flight(&m), limits::AI_MAX_IN_FLIGHT);
+    gate.open();
+    for task in running {
+        assert!(matches!(task.await.unwrap(), Reply::Value { .. }));
+    }
+    assert_eq!(host.calls().family_in_flight(&m, limits::Family::Ai), 0);
+    assert_eq!(host.calls().in_flight(&m), 0);
+    // The same handler under the live table is a general call: no family counts it, and the gate
+    // is open, so a crowd of them runs.
+    for _ in 0..(limits::AI_MAX_IN_FLIGHT + 3) {
+        assert!(matches!(
+            call(&host, &s, "storage.get", json!({"key": "a"})).await,
+            Reply::Value { .. }
+        ));
+        assert_eq!(host.calls().family_in_flight(&m, limits::Family::Ai), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_family_call_the_mod_makes_too_often_is_refused_whoever_else_is_calling() {
+    let host = TestHost::new();
+    let a = installed(&host, map_row());
+    let b = installed(&host, ModRow::signed("acme.tool", "second", &["storage"]));
+    for i in 0..limits::AI_CALL_BURST {
+        let reply = call_in(&host, AI_FILED, &a, "storage.get", json!({"key": "a"})).await;
+        assert!(matches!(reply, Reply::Value { .. }), "{i}: {reply:?}");
+    }
+    let e = error(call_in(&host, AI_FILED, &a, "storage.get", json!({"key": "a"})).await);
+    assert_eq!(e.code, Code::RateLimited);
+    assert!(e.message.contains("too often"), "{e}");
+    assert!(matches!(
+        call_in(&host, AI_FILED, &b, "storage.get", json!({"key": "a"})).await,
+        Reply::Value { .. }
+    ));
+    // The family's refusal is the family's: the same handler as a general call still runs.
+    assert!(matches!(
+        call(&host, &a, "storage.get", json!({"key": "a"})).await,
+        Reply::Value { .. }
+    ));
+}
+
 /// What the ledger's uninstall does, in its order: the row's transaction, then the registry.
 fn uninstall(host: &TestHost, m: &str) {
     host.sql(|c| c.execute("DELETE FROM mods WHERE id = ?1", [m]).unwrap());
@@ -614,23 +715,6 @@ async fn a_call_in_flight_across_an_uninstall_commits_nothing() {
     let e = error(call(&host, &s, "storage.set", set_args("settings", json!(1), 0)).await);
     assert_eq!(e.code, Code::SessionEnded);
     assert!(kv_rows(&host, "atlas.map").is_empty());
-}
-
-/// The ledger's store over a test host's open store, with no vault to compare (the host has none).
-struct OverHost<'a>(&'a AppState);
-
-impl crate::mods::ledger::LedgerStore for OverHost<'_> {
-    fn with_conn<T>(
-        &self,
-        _layout: &crate::mods::disk::Layout,
-        f: impl FnOnce(&mut rusqlite::Connection) -> Result<T, crate::mods::ledger::LedgerError>,
-    ) -> Result<T, crate::mods::ledger::LedgerError> {
-        let mut conn = self
-            .0
-            .conn()
-            .map_err(|e| crate::mods::ledger::LedgerError::Store(e.to_string()))?;
-        f(&mut conn)
-    }
 }
 
 /// The signed list's blacklist applied to the host's mods (the real `Ledger::apply_blacklist`: cut
@@ -824,6 +908,7 @@ const RELABELLED: &[Row] = &[
         deprecated: None,
         removed: None,
         experimental: false,
+        family: limits::Family::General,
     },
     Row {
         name: "storage.set",
@@ -834,6 +919,7 @@ const RELABELLED: &[Row] = &[
         deprecated: None,
         removed: None,
         experimental: false,
+        family: limits::Family::General,
     },
 ];
 
@@ -871,6 +957,7 @@ static RELABELLED_GET: [Row; 1] = [Row {
     deprecated: None,
     removed: None,
     experimental: false,
+    family: limits::Family::General,
 }];
 
 fn grant(host: &TestHost, m: &str, permission: &str, decision: &str) {

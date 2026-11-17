@@ -58,6 +58,7 @@ use super::policy::{
 };
 use super::runtime::{InstalledMod, ModRuntime, ServedFile};
 use super::safety::SafetyCheck;
+use super::secrets;
 use super::store;
 use crate::AppState;
 
@@ -1258,6 +1259,13 @@ fn write_row(
             values,
         )?,
     };
+    // A key whose slot this version moved or dropped goes now, in this transaction: its value was
+    // typed for another host or header, and must not wait in the store for a later slot to match
+    // (`secrets` also refuses to read a row whose pair is not the slot's). The approval that let
+    // the move land was about the new destination, never about the old key.
+    if matches!(kind, InstallKind::Update | InstallKind::Repair) {
+        secrets::prune_to_slots(tx, w.id, w.manifest)?;
+    }
     // A waiting update this install satisfies is no longer waiting.
     blacklist::clear_waiting(tx, w.id, Some(w.version))?;
     Ok(Committed { state, consented })
@@ -2160,6 +2168,64 @@ mod tests {
             w.install(&host, Approval::Approved).unwrap().version,
             "1.3.0"
         );
+    }
+
+    /// A key is bound to its slot's host and header: an approved update that moves or drops the
+    /// slot deletes the key in the install's own transaction, one that leaves the slot alone keeps
+    /// it, and a refused or failed install deletes nothing.
+    #[test]
+    fn an_approved_update_that_moves_a_slot_deletes_its_key_and_the_rest_stay() {
+        use serde_json::json;
+        let w = world();
+        let with = |version: &str, k_host: &str| {
+            let k_host = k_host.to_owned();
+            pkg(version, move |m| {
+                m["permissions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id": "internet", "why": "x"}));
+                m["internetHosts"] = json!(["a.example.com", "b.example.com"]);
+                m["secrets"] = json!([
+                    {"name": "k", "host": k_host, "header": "X-Key"},
+                    {"name": "j", "host": "a.example.com", "header": "X-J"},
+                ]);
+            })
+        };
+        let keys = |w: &World| {
+            w.sql::<String>(
+                "SELECT group_concat(name, ',') FROM (SELECT name FROM mod_secrets ORDER BY name)",
+            )
+        };
+        w.install(&with("1.0.0", "a.example.com"), Approval::Approved)
+            .unwrap();
+        w.exec(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'k', 'a.example.com', 'X-Key', 'v1'), \
+             ('atlas.map', 'j', 'a.example.com', 'X-J', 'v2')",
+        );
+        // The same slots: both keys stay.
+        w.install(&with("1.1.0", "a.example.com"), Approval::Unattended)
+            .unwrap();
+        assert_eq!(keys(&w), "j,k");
+        // `k` goes to another host: unattended it waits, and nothing is deleted by a refusal.
+        let moved = with("1.2.0", "b.example.com");
+        assert!(w.install(&moved, Approval::Unattended).is_err());
+        assert_eq!(keys(&w), "j,k");
+        // Approved, it installs and `k`'s old key is gone; `j` is untouched.
+        w.install(&moved, Approval::Approved).unwrap();
+        assert_eq!(keys(&w), "j");
+        // A repair keeps what is exactly a slot and deletes a row that is not one.
+        w.exec(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'k', 'b.example.com', 'X-Key', 'v3'), \
+             ('atlas.map', 'stale', 'a.example.com', 'X-S', 'v4')",
+        );
+        w.install(&moved, Approval::Approved).unwrap();
+        assert_eq!(keys(&w), "j,k");
+        // Dropping the slot altogether.
+        let dropped = pkg("1.3.0", |_| {});
+        w.install(&dropped, Approval::Approved).unwrap();
+        assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_secrets"), 0);
     }
 
     /// Write, fsync (file and folder), rename and the row's commit: each failure leaves no row, no
