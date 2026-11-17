@@ -12,7 +12,7 @@
 // can't nag by calling in a loop). ModFrame holds the mod's call while this is open and retries it
 // once after an Allow.
 
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { Button, Callout, Dialog } from "../ui";
 import { ModName } from "./ModName";
 import { permissionWords } from "./permissionWords";
@@ -49,7 +49,10 @@ export function ModPermissionPrompt({
 }) {
   const words = permissionWords(permission);
   const [armed, setArmed] = useState(false);
-  useEffect(() => {
+  // A layout effect, so the wait starts in the same commit that puts the buttons on screen. A
+  // passive effect runs after paint, a moment later and at the scheduler's whim, so the buttons
+  // would be armed later than PROMPT_GUARD_MS after they appear (and tests saw them early or late).
+  useLayoutEffect(() => {
     const t = setTimeout(() => setArmed(true), PROMPT_GUARD_MS);
     return () => clearTimeout(t);
   }, []);
