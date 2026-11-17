@@ -21,7 +21,12 @@
     "nav.tab": { "label": "Map" }
   },
   "data": {
-    "keys": [{ "key": "settings", "class": "content" }]
+    "keys": [
+      { "key": "settings", "class": "content" },
+      { "key": "semantic-meta", "class": "cache" },
+      { "key": "semantic-coords", "class": "cache" },
+      { "key": "project-layout", "class": "cache" }
+    ]
   },
   "entry": { "page": "app/index.html" },
   "engines": { "frame": true }
