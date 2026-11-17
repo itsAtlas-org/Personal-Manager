@@ -78,3 +78,35 @@ export function readShowCompletedMilestones(): boolean {
 export function writeShowCompletedMilestones(show: boolean): void {
   writeStored(PREF_KEY, { showCompleted: show });
 }
+
+/** What a project's Milestones list shows, and whether the "Completed" checkbox is on screen. */
+export interface MilestoneVisibility<T> {
+  /** The "Completed" checkbox is on screen (and so the hide, if ticked off, can be undone). */
+  controlShown: boolean;
+  /** The rows to draw. */
+  shown: T[];
+  /** How many completed rows the hide dropped (0 whenever the checkbox is not on screen). */
+  hidden: number;
+}
+
+/**
+ * One predicate drives BOTH the "Completed" checkbox and the hide it controls, so the saved
+ * preference can only ever hide rows while the person can see the box that undoes it. At Minimal
+ * depth (no checkbox), with a single milestone, or under Manual sort, every row is shown whatever
+ * the saved choice is. `sorted` is the whole list in display order; completed means `state === "met"`.
+ */
+export function milestoneVisibility<T extends { state: string | null }>(
+  sorted: readonly T[],
+  opts: { showMeta: boolean; showCompleted: boolean; sortKey: MsSortKey },
+): MilestoneVisibility<T> {
+  const controlShown =
+    opts.showMeta &&
+    sorted.length > 1 &&
+    opts.sortKey !== "manual" &&
+    sorted.some((m) => m.state === "met");
+  if (!controlShown || opts.showCompleted) {
+    return { controlShown, shown: [...sorted], hidden: 0 };
+  }
+  const shown = sorted.filter((m) => m.state !== "met");
+  return { controlShown, shown, hidden: sorted.length - shown.length };
+}

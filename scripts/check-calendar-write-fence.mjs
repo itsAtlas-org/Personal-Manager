@@ -4,12 +4,13 @@
 // The calendar write path stays where it was put, and nothing that talks to a model can reach it.
 //
 // WHY. Calendar editing (#884) changes the user's Google Calendar under their own sign-in. Its
-// commands refuse any window but the main one, and no model call in PM has tools, but neither of
-// those says anything about the NEXT change: a helper that imports the write wrapper into the chat
-// view, a briefing tweak that "just fixes the time" through the Rust command, a model path that
-// builds a Calendar URL and sends it with the stored token. Each would compile, pass review on a busy
-// day, and quietly let model output edit someone's calendar. Stage 4's AI editing is a deliberate
-// design of its own (with the user approving each change), not something to arrive by accident.
+// commands refuse any window but the main one and the pop-out Calendar, and no model call in PM has
+// tools, but neither of those says anything about the NEXT change: a helper that imports the write
+// wrapper into the chat view, a briefing tweak that "just fixes the time" through the Rust command,
+// a model path that builds a Calendar URL and sends it with the stored token. Each would compile,
+// pass review on a busy day, and quietly let model output edit someone's calendar. Stage 4's AI
+// editing is a deliberate design of its own (with the user approving each change), not something
+// to arrive by accident.
 //
 // So the write path has a fixed shape, checked here as text:
 //   1. The Rust command names appear only where they are defined and registered, and in ipc.ts,

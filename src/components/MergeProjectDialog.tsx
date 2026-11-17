@@ -176,7 +176,7 @@ export function MergeProjectDialog({
             autoComplete="off"
             spellCheck={false}
             disabled={busy}
-            className="mt-1 w-full rounded-[var(--radius-sm)] border border-border2 bg-transparent px-2 py-1 text-sm text-ink outline-none focus:border-accent"
+            className="mt-1 w-full rounded-[var(--radius-sm)] border border-ink4 bg-transparent px-2 py-1 text-sm text-ink outline-none focus:border-accent-text"
           />
         </>
       )}

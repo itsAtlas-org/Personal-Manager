@@ -195,3 +195,31 @@ describe("a date the backend refuses", () => {
     await waitFor(() => expect(dateInput().value).toBe("01-08-2026"));
   });
 });
+
+describe("an empty list", () => {
+  it("says there are none yet when nothing is hidden", () => {
+    render(<MilestoneList project="Atlas" milestones={[]} onChanged={() => {}} />);
+    expect(screen.getByText(/No milestones yet/)).toBeTruthy();
+  });
+
+  it("says how many completed ones are hidden, and how to show them", () => {
+    render(
+      <MilestoneList project="Atlas" milestones={[]} onChanged={() => {}} hiddenCompleted={3} />,
+    );
+    expect(screen.queryByText(/No milestones yet/)).toBeNull();
+    expect(
+      screen.getByText("3 completed milestones are hidden. Tick Completed to show them."),
+    ).toBeTruthy();
+    // A status, so a screen reader hears it when unticking Completed empties the list.
+    expect(screen.getByRole("status").textContent).toMatch(/3 completed milestones are hidden/);
+  });
+
+  it("uses the singular for one hidden milestone", () => {
+    render(
+      <MilestoneList project="Atlas" milestones={[]} onChanged={() => {}} hiddenCompleted={1} />,
+    );
+    expect(
+      screen.getByText("1 completed milestone is hidden. Tick Completed to show it."),
+    ).toBeTruthy();
+  });
+});

@@ -23,7 +23,8 @@ export function Select({ className, children, compact = false, ...rest }: Props)
   return (
     <select
       className={cn(
-        "rounded-[var(--radius-sm)] border border-border2 bg-surface text-ink2 outline-none transition focus:border-accent disabled:cursor-not-allowed disabled:bg-transparent disabled:text-ink3",
+        // Edge `--ink4` (3:1, WCAG 1.4.11), focus `--accent-text`; see Input.tsx for the measurements.
+        "rounded-[var(--radius-sm)] border border-ink4 bg-surface text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3",
         sizing,
         system === "terminal" && "font-mono",
         className,

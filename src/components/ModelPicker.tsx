@@ -107,7 +107,7 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-2 rounded-[var(--radius-sm)] border border-border2 bg-surface px-3 py-2 text-left text-sm text-ink2 outline-none transition hover:border-accent focus:border-accent"
+        className="flex w-full items-center justify-between gap-2 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-left text-sm text-ink2 outline-none transition hover:border-ink2 focus:border-accent-text"
       >
         <span className="min-w-0 flex-1 truncate">
           {selected ? selected.name : value || triggerLabel}

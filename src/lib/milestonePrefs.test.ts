@@ -18,6 +18,7 @@ import { getPref, setPref } from "./ipc";
 import { __resetStoredPrefs, hydrateStoredPrefs } from "./storedPrefs";
 import {
   readMilestoneSort,
+  milestoneVisibility,
   readShowCompletedMilestones,
   writeMilestoneSort,
   writeShowCompletedMilestones,
@@ -130,5 +131,65 @@ describe("show completed", () => {
     expect(set).not.toHaveBeenCalled();
     await hydrateWith({ showCompleted: false });
     expect(readShowCompletedMilestones()).toBe(false);
+  });
+});
+
+// The hide only applies while its checkbox is on screen. The predicate is one function, so the box
+// and the filter cannot disagree (Minimal depth used to hide completed rows with no way back).
+describe("milestoneVisibility", () => {
+  const met = (id: number) => ({ id, state: "met" });
+  const open = (id: number) => ({ id, state: "pending" });
+  const std = { showMeta: true, showCompleted: false, sortKey: "deadline" as const };
+
+  it("hides completed rows while the checkbox is on screen and unticked", () => {
+    const v = milestoneVisibility([met(1), open(2)], std);
+    expect(v.controlShown).toBe(true);
+    expect(v.shown.map((m) => m.id)).toEqual([2]);
+    expect(v.hidden).toBe(1);
+  });
+
+  it("shows every row when the box is ticked", () => {
+    const v = milestoneVisibility([met(1), open(2)], { ...std, showCompleted: true });
+    expect(v.shown).toHaveLength(2);
+    expect(v.hidden).toBe(0);
+  });
+
+  it("shows every row at Minimal depth, whatever the saved choice is", () => {
+    const v = milestoneVisibility([met(1), open(2)], { ...std, showMeta: false });
+    expect(v.controlShown).toBe(false);
+    expect(v.shown).toHaveLength(2);
+    expect(v.hidden).toBe(0);
+  });
+
+  it("shows a lone completed milestone (the box needs more than one)", () => {
+    const v = milestoneVisibility([met(1)], std);
+    expect(v.controlShown).toBe(false);
+    expect(v.shown.map((m) => m.id)).toEqual([1]);
+  });
+
+  it("ignores the hide under Manual sort", () => {
+    const v = milestoneVisibility([met(1), open(2)], { ...std, sortKey: "manual" });
+    expect(v.controlShown).toBe(false);
+    expect(v.shown).toHaveLength(2);
+  });
+
+  it("shows no box when nothing is completed", () => {
+    const v = milestoneVisibility([open(1), open(2)], std);
+    expect(v.controlShown).toBe(false);
+    expect(v.shown).toHaveLength(2);
+  });
+
+  it("counts the hidden rows when every milestone is completed", () => {
+    const v = milestoneVisibility([met(1), met(2), met(3)], std);
+    expect(v.controlShown).toBe(true);
+    expect(v.shown).toEqual([]);
+    expect(v.hidden).toBe(3);
+  });
+
+  it("does not mutate or alias its input", () => {
+    const rows = [met(1), open(2)];
+    const v = milestoneVisibility(rows, { ...std, showCompleted: true });
+    expect(v.shown).not.toBe(rows);
+    expect(rows).toHaveLength(2);
   });
 });

@@ -23,6 +23,16 @@ export function isMilestoneEvent(ev: CalendarEvent): boolean {
   return ev.calendar_id === MILESTONE_CALENDAR_ID;
 }
 
+/** The id of the overlay event a milestone is drawn as: `milestone:<milestone id>`. */
+export function milestoneOverlayId(milestoneId: number): string {
+  return `milestone:${milestoneId}`;
+}
+
+/** What a MET milestone's overlay summary starts with: the colour-independent cue that it is met.
+ *  Display only. Nothing reads it back; the overlay's `done` field is what `isEventPast` uses, so a
+ *  label that itself begins with a check mark cannot make an unmet milestone recede. */
+export const MILESTONE_MET_MARK = "✓ ";
+
 /** The pseudo-calendar carrying the pinboard overlay: dated entries from freeform (not-yet-linked)
  *  timeline widgets. Toggled like a calendar via the same `hidden` set. */
 export const PINBOARD_CALENDAR_ID = "pm:pinboard";
@@ -91,11 +101,22 @@ const DRAFT_WORDS: Record<DraftState, string> = {
   saved: "New event, saved",
 };
 
+/** The same for a new task (quick create's Task side), the ghost of which sits on the Tasks
+ *  calendar. A task is a local insert, so only the first two are ever said; the rest keep the table
+ *  whole. */
+const TASK_DRAFT_WORDS: Record<DraftState, string> = {
+  unsaved: "New task, not saved yet",
+  saving: "New task, saving",
+  unsure: "New task, PM may already have made it",
+  saved: "New task, saved",
+};
+
 /** The words that say an event is the new one and how far it has got, for the start of its
  *  accessible name (the dashed edge says it to the eye); null for any other event. */
 export function draftNote(ev: CalendarEvent): string | null {
   if (!isDraftEvent(ev)) return null;
-  return DRAFT_WORDS[(ev as Partial<DraftEvent>).draft_state ?? "unsaved"];
+  const words = ev.calendar_id === TASK_CALENDAR_ID ? TASK_DRAFT_WORDS : DRAFT_WORDS;
+  return words[(ev as Partial<DraftEvent>).draft_state ?? "unsaved"];
 }
 
 /** An event's accessible name, `note` (`draftNote`) first when it's the ghost. */
@@ -383,8 +404,14 @@ export function timedSegments(ev: CalendarEvent, days: readonly Date[]): TimedSe
 /** Whether an event has fully passed as of `now` (device-local) — drives the greyed "past event"
  *  styling. A timed event is past once its end (or its start, if it has no end) is before now, however
  *  many days it runs; an all-day event is past once its last day is before today. An event happening
- *  right now, or later today, is never past. */
+ *  right now, or later today, is never past.
+ *
+ *  Late work is never past, though it sits on a day that is: a task overlay is always open work (the
+ *  overlay skips done tasks), and an unmet milestone's is late. Greying them drew work still owed
+ *  as if it were finished, so they keep their full colour and stand out. */
 export function isEventPast(ev: CalendarEvent, now: Date): boolean {
+  if (isTaskEvent(ev)) return false;
+  if (isMilestoneEvent(ev) && !ev.done) return false;
   if (ev.all_day) {
     const span = eventDaySpan(ev);
     return !!span && span.endDay.getTime() < startOfDay(now).getTime();

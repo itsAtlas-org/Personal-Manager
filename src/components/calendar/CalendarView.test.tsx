@@ -31,7 +31,9 @@ import type {
 import { addDays, dayKey, startOfDay, startOfWeek } from "../../lib/calendar-layout";
 import { A11_NOTE } from "../../lib/calendarEdit/editReasons";
 import { COPY_CALL_OFF_NOTE } from "../../lib/calendarEdit/eventDraft";
-import { formatDateLocal, pad2 } from "../../lib/format";
+import { isoToDisplay } from "../../lib/dateField";
+import { resetKeyboardPrefs, writeCharacterShortcuts } from "../../lib/keyboardPrefs";
+import { formatDateLocal, formatDateOnly, pad2 } from "../../lib/format";
 import { BOARD_VERSION, PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
 
 const ipc = vi.hoisted(() => ({
@@ -81,7 +83,12 @@ const ipc = vi.hoisted(() => ({
 const env = vi.hoisted(() => ({
   system: "slate",
   hidden: new Set<string>(),
+  written: [] as string[][],
   yearEvents: null as CalendarEvent[] | null,
+  monthEvents: null as CalendarEvent[] | null,
+  // The Runway's named windows, as the stored prefs cache holds them (read again on the app-wide
+  // settings signal, as the other window's change arrives).
+  windows: [] as { id: string; label: string; start: string; end: string }[],
 }));
 
 vi.mock("../../lib/ipc", () => ipc);
@@ -104,6 +111,14 @@ vi.mock("../../theme/timezones", async (importOriginal) => ({
 vi.mock("../../lib/calendarPrefs", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   readHidden: () => new Set(env.hidden),
+  readRunwayWindows: () => env.windows.map((w) => ({ ...w })),
+  // What the pop-out's Calendars list writes: kept, and announced as the real one does, so the grid
+  // re-reads it.
+  writeHidden: (hidden: Set<string>) => {
+    env.written.push([...hidden]);
+    env.hidden = new Set(hidden);
+    window.dispatchEvent(new Event("pm:settings-changed"));
+  },
 }));
 
 vi.mock("./views/YearView", () => ({
@@ -112,6 +127,20 @@ vi.mock("./views/YearView", () => ({
     return null;
   },
 }));
+
+// Month is the real one (jsdom lays out none of its weeks, so its chips can't be looked at), with
+// what it was handed kept beside it, as the Year stand-in keeps its own.
+vi.mock("./views/MonthView", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./views/MonthView")>();
+  const { createElement } = await import("react");
+  return {
+    ...real,
+    MonthView: (props: Parameters<typeof real.MonthView>[0]) => {
+      env.monthEvents = props.events;
+      return createElement(real.MonthView, props);
+    },
+  };
+});
 
 const ME = "gcal:me@x.com";
 const PERSONAL = `${ME}:me@x.com`;
@@ -167,6 +196,43 @@ const overview: CalendarOverview = {
 };
 
 const today = dayKey(startOfDay(new Date()));
+
+/** For a describe whose tests open quick create: the clock reads the middle of the hours that are
+ *  `today` both here and in London, before 23:00 there. The file gives the device Europe/London, and
+ *  the box opens on London's today, or from 23:30 there on tomorrow (the next half hour is 00:00, as
+ *  Google's does), while `today` and the fixtures are this machine's. So the box opened on a day the
+ *  tests didn't expect when London was past 23:30 (CI at 23:35 UTC, 2026-11-16), and just after
+ *  London's midnight on a machine at UTC-10 or further west. Those hours overlap for at least nine
+ *  hours on any machine from UTC-12 to UTC+14. Only Date is faked, so waitFor's timers still run.
+ *  newEventSeed's own tests cover the rollover. */
+function clockMidTodayHereAndInLondon() {
+  const london = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const fits = (at: number) => {
+    const p = Object.fromEntries(london.formatToParts(at).map((part) => [part.type, part.value]));
+    return (
+      dayKey(new Date(at)) === today &&
+      `${p.year}-${p.month}-${p.day}` === today &&
+      `${p.hour}:${p.minute}` < "23:00"
+    );
+  };
+  // Every half hour from 14 hours before today's UTC midnight to 14 after its end.
+  const first = Date.parse(`${today}T00:00:00Z`) - 14 * 3_600_000;
+  const fitting = Array.from({ length: 105 }, (_, i) => first + i * 1_800_000).filter(fits);
+  const at = fitting[Math.floor(fitting.length / 2)];
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at);
+  });
+  afterEach(() => vi.useRealTimers());
+}
 
 const row = (over: Partial<CalendarEvent>): CalendarEvent => ({
   id: "e1",
@@ -233,7 +299,10 @@ beforeEach(() => {
   localStorage.setItem("pm.calendar.agendaMode", "list");
   env.system = "slate";
   env.hidden = new Set();
+  env.written = [];
   env.yearEvents = null;
+  env.monthEvents = null;
+  env.windows = [];
   reads = [];
   held = false;
   rows = [standup];
@@ -574,6 +643,8 @@ describe("CalendarView: dragging in Week", () => {
 });
 
 describe("CalendarView: a new event", () => {
+  clockMidTodayHereAndInLondon();
+
   // C16 critique C2-M9: a date typed in quick create that the view doesn't show moves the view to
   // it, as Google's does; the box opening on a day already shown moves nothing.
   it("a date typed in quick create off screen moves the week to it", async () => {
@@ -597,8 +668,8 @@ describe("CalendarView: a new event", () => {
     expect(quick()).toBeTruthy();
   });
 
-  // One home per view: the time grid's corner in Week and Day, above the timezone control; the
-  // header's right end where there's no corner.
+  // One home per view: the time grid's corner in Week and Day, across the gutter over the timezone
+  // row; the header's right end where there's no corner.
   it("+ New event sits in Week's grid corner and in Month's header", async () => {
     localStorage.setItem("pm.calendar.view", "week");
     const first = await mount();
@@ -612,6 +683,46 @@ describe("CalendarView: a new event", () => {
     await screen.findByRole("button", { name: "+ New event" });
     expect(screen.getAllByRole("button", { name: "+ New event" })).toHaveLength(1);
     expect(newEvent().closest("header")).not.toBeNull();
+  });
+
+  // The pop-out and the main window each keep their own copy of the zones: one added in the other
+  // window reaches this one through the `storage` event, so this window's next change can't erase it.
+  it("a zone added in the other window appears here, and goes when it is removed there", async () => {
+    localStorage.setItem("pm.calendar.view", "week");
+    await mount();
+    const zoneRow = () =>
+      screen.getByRole("button", { name: /change time zones|Add a time zone|Zone/ });
+    expect(zoneRow().textContent).toContain("+ Zone");
+    localStorage.setItem("pm.calendar.zones", JSON.stringify(["Asia/Kolkata"]));
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.zones" }));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
+    // Another key's change leaves it alone.
+    localStorage.setItem("pm.calendar.zones", JSON.stringify([]));
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.view" }));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.zones" }));
+    });
+    expect(zoneRow().textContent).toContain("+ Zone");
+  });
+
+  // A webview that never delivers `storage` between windows still catches up when the window is
+  // looked at again.
+  it("re-reads the zones when the window regains focus", async () => {
+    localStorage.setItem("pm.calendar.view", "week");
+    await mount();
+    const zoneRow = () =>
+      screen.getByRole("button", { name: /change time zones|Add a time zone|Zone/ });
+    expect(zoneRow().textContent).toContain("+ Zone");
+    localStorage.setItem("pm.calendar.zones", JSON.stringify(["Asia/Kolkata"]));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(zoneRow().textContent).toContain("Kolkata");
   });
 
   it("Shift+C opens quick create, non-modal, under + New event; c the full editor", async () => {
@@ -1629,18 +1740,122 @@ describe("CalendarView: tasks", () => {
     render(<View />);
     const board = await screen.findByRole("region", { name: "Today" });
     expect(within(board).getByText("Draft the deck")).toBeTruthy();
-    expect(document.querySelector('[data-help="calendar-runway"]')).not.toBeNull();
+    // The board's own root: the header's buttons carry the Runway's help id too.
+    expect(board.closest('[data-help="calendar-runway"]')).not.toBeNull();
     // The Runway runs from today: no paging.
     expect(screen.queryByRole("button", { name: "Previous" })).toBeNull();
     expect(screen.getByText("From today")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     await screen.findByRole("button", { name: /Standup/ });
+    expect(screen.queryByRole("region", { name: "Today" })).toBeNull();
     expect(document.querySelector('[data-help="calendar-runway"]')).toBeNull();
     expect(localStorage.getItem("pm.calendar.agendaMode")).toBe("list");
     fireEvent.click(screen.getByRole("button", { name: "Runway" }));
     await screen.findByRole("region", { name: "Today" });
     expect(localStorage.getItem("pm.calendar.agendaMode")).toBe("runway");
+  });
+
+  it("the Runway's count, next up, Hide events, + Window and + Task are in the header, not the board, and gone in the List", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [
+      task({ id: 1, status: "done" }),
+      task({ id: 2, title: "Send the deck", effective_deadline: today }),
+    ];
+    // The suite's milestone counts as planned work from today.
+    ipc.listAllMilestones.mockResolvedValue([]);
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    const board = await screen.findByRole("region", { name: "Today" });
+    const header = document.querySelector<HTMLElement>('[data-help="calendar-header"]')!;
+    const inHeader = within(header);
+    expect(await inHeader.findByText("1/2 done")).toBeTruthy();
+    expect(inHeader.getByText(/Next up/)).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "Hide events" })).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "+ Window" })).toBeTruthy();
+    expect(inHeader.getByRole("button", { name: "+ Task" })).toBeTruthy();
+    // Each is in one place: none of them is left in the board.
+    const root = board.closest<HTMLElement>('[data-help="calendar-runway"]')!;
+    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByRole("button", { name: "Hide events" })).toBeNull();
+    expect(within(root).queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(within(root).queryByRole("button", { name: "+ Task" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    await screen.findByRole("button", { name: /Standup/ });
+    expect(screen.queryByText("1/2 done")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Hide events" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Window" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
+  });
+
+  it("says Nothing planned in the header when nothing is planned from today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [];
+    // The suite's milestone counts as planned work from today.
+    ipc.listAllMilestones.mockResolvedValue([]);
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    expect(screen.getByText("Nothing planned")).toBeTruthy();
+    expect(screen.queryByText("0/0 done")).toBeNull();
+  });
+
+  it("+ Task in the header opens New task starting today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    fireEvent.click(screen.getByRole("button", { name: "+ Task" }));
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Start doing it on").value).toBe(
+      isoToDisplay(today),
+    );
+    // One editor, not two: the board's own stays closed.
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("+ Task sits just before + New event in the header", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    const buttons = within(
+      document.querySelector<HTMLElement>('[data-help="calendar-header"]')!,
+    ).getAllByRole("button");
+    const at = buttons.indexOf(screen.getByRole("button", { name: "+ Task" }));
+    expect(buttons[at + 1]).toBe(screen.getByRole("button", { name: "+ New event" }));
+  });
+
+  it("a window the other window made shows on the Runway when the settings signal comes, not only on focus", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    expect(screen.queryByRole("region", { name: "Lisbon" })).toBeNull();
+    env.windows = [{ id: "w1", label: "Lisbon", start: today, end: today }];
+    act(() => {
+      window.dispatchEvent(new Event("pm:settings-changed"));
+    });
+    expect(await screen.findByRole("region", { name: "Lisbon" })).toBeTruthy();
+  });
+
+  it("a folded column stays folded across Runway to List to Runway", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("region", { name: "Today" });
+    fireEvent.click(screen.getByRole("button", { name: "Fold Tomorrow" }));
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    await screen.findByRole("button", { name: /Standup/ });
+    fireEvent.click(screen.getByRole("button", { name: "Runway" }));
+    await screen.findByRole("region", { name: "Today" });
+    // The body remounted (its key changed), and the fold came back from storage.
+    expect(screen.getByRole("button", { name: "Show Tomorrow" })).toBeTruthy();
   });
 
   it("draws an open task in the list, and a click on it opens the task editor", async () => {
@@ -1741,5 +1956,1197 @@ describe("CalendarView: tasks", () => {
     expect(within(todayCol).queryByRole("group", { name: "Events, Today" })).toBeNull();
     expect(screen.queryByText("Standup")).toBeNull();
     expect(screen.queryByText("Seed order")).toBeNull();
+  });
+});
+
+// The keys that page the calendar: ← → and Google's j n k p everywhere, ↑ ↓ too where the periods
+// run down the screen (Month and Year). They stand down behind anything open over the grid.
+describe("CalendarView: the paging keys", () => {
+  async function mountIn(view: string) {
+    localStorage.setItem("pm.calendar.view", view);
+    const { CalendarView } = await import("./CalendarView");
+    const utils = render(<CalendarView />);
+    // The label is the header's, in every System (the Terminal's chrome has no "+ New event").
+    await screen.findByTitle("Pick a date");
+    await act(async () => {});
+    return utils;
+  }
+  const label = () => screen.getByTitle("Pick a date").textContent ?? "";
+  const monthName = (offset: number) => {
+    const n = new Date();
+    return new Date(n.getFullYear(), n.getMonth() + offset, 1).toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  it("pages a month with ↓ and ↑ in Month, as ← and → do", async () => {
+    await mountIn("month");
+    expect(label()).toContain(monthName(0));
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    press("ArrowUp");
+    expect(label()).toContain(monthName(0));
+    press("ArrowRight");
+    expect(label()).toContain(monthName(1));
+    press("ArrowLeft");
+    expect(label()).toContain(monthName(0));
+  });
+
+  // The paging keys take the press for themselves: left alone, ↑ ↓ would also nudge a focused Month or
+  // Year scroller natively, on top of the page. A press that stands down stays the page's to ignore.
+  it("takes the press it pages with, and leaves one it stands down for", async () => {
+    await mountIn("month");
+    // fireEvent returns false when the handler called preventDefault.
+    for (const key of ["ArrowDown", "ArrowUp", "j", "n", "k", "p", "ArrowRight", "ArrowLeft"]) {
+      expect(fireEvent.keyDown(document.body, { key }), key).toBe(false);
+    }
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    try {
+      expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(true);
+      expect(fireEvent.keyDown(field, { key: "j" })).toBe(true);
+    } finally {
+      field.remove();
+    }
+    const menu = document.createElement("div");
+    menu.setAttribute("data-popover-panel", "");
+    document.body.appendChild(menu);
+    try {
+      expect(fireEvent.keyDown(document.body, { key: "ArrowDown" })).toBe(true);
+    } finally {
+      menu.remove();
+    }
+  });
+
+  it("pages with Google's j n and k p in Month", async () => {
+    await mountIn("month");
+    press("j");
+    expect(label()).toContain(monthName(1));
+    press("n");
+    expect(label()).toContain(monthName(2));
+    press("k");
+    expect(label()).toContain(monthName(1));
+    press("p");
+    expect(label()).toContain(monthName(0));
+  });
+
+  // WCAG 2.2 SC 2.1.4: Settings → Accessibility → Keyboard turns the single-letter shortcuts off. The
+  // switch is read at the press, so it takes effect without a remount, and the arrows stay.
+  it("with single-key shortcuts off, t c Shift+C j k n p do nothing and the arrows still page", async () => {
+    await mountIn("month");
+    act(() => writeCharacterShortcuts(false));
+    press("ArrowRight");
+    expect(label()).toContain(monthName(1));
+    for (const key of ["j", "n", "k", "p", "t", "c"]) {
+      // Not taken: a press that does something is `preventDefault`ed (`t` is the one that isn't).
+      expect(fireEvent.keyDown(document.body, { key }), key).toBe(true);
+      expect(label(), key).toContain(monthName(1));
+    }
+    expect(fireEvent.keyDown(document.body, { key: "C", shiftKey: true })).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    press("ArrowLeft");
+    expect(label()).toContain(monthName(0));
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    // Turned back on, the letters work again with no remount.
+    act(() => resetKeyboardPrefs());
+    press("t");
+    expect(label()).toContain(monthName(0));
+    press("j");
+    expect(label()).toContain(monthName(1));
+    press("c");
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+  });
+
+  it("with single-key shortcuts off, the buttons say no letters, and still work", async () => {
+    await mountIn("month");
+    act(() => writeCharacterShortcuts(false));
+    const today = screen.getByRole("button", { name: "Today" });
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(today.hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(next.getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown");
+    fireEvent.click(next);
+    expect(label()).toContain(monthName(1));
+    fireEvent.click(today);
+    expect(label()).toContain(monthName(0));
+  });
+
+  it("pages a year with ↓ and ↑ in Year", async () => {
+    await mountIn("year");
+    const year = new Date().getFullYear();
+    expect(label()).toContain(String(year));
+    press("ArrowDown");
+    expect(label()).toContain(String(year + 1));
+    press("ArrowUp");
+    press("ArrowUp");
+    expect(label()).toContain(String(year - 1));
+    press("n");
+    expect(label()).toContain(String(year));
+  });
+
+  it("leaves ↑ and ↓ to the hours in Week, which j and → still page", async () => {
+    await mountIn("week");
+    const was = label();
+    press("ArrowDown");
+    press("ArrowUp");
+    expect(label()).toBe(was);
+    press("ArrowRight");
+    const next = label();
+    expect(next).not.toBe(was);
+    press("j");
+    expect(label()).not.toBe(next);
+    press("k");
+    expect(label()).toBe(next);
+  });
+
+  it("leaves ↑ and ↓ alone in the Agenda list, and in the Terminal's single-month table", async () => {
+    await mountIn("agenda");
+    const was = label();
+    press("ArrowDown");
+    expect(label()).toBe(was);
+    press("j");
+    expect(label()).toContain(monthName(1));
+    cleanup();
+    // Terminal's Month is one table driven by the same cursor, so ↑ ↓ page it too.
+    env.system = "terminal";
+    await mountIn("month");
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+  });
+
+  it("stands down behind a mini-calendar, a right-click menu or any popover, as clicks do", async () => {
+    await mountIn("month");
+    // The mini-calendar: a Popover, which is no dialog.
+    fireEvent.click(screen.getByTitle("Pick a date"));
+    expect(document.querySelector("[data-popover-panel]")).not.toBeNull();
+    for (const k of ["ArrowRight", "ArrowDown", "j", "n", "k", "p", "ArrowLeft", "ArrowUp"]) {
+      press(k);
+      expect(label()).toContain(monthName(0));
+    }
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.querySelector("[data-popover-panel]")).toBeNull();
+    press("ArrowDown");
+    expect(label()).toContain(monthName(1));
+    // The right-click menu marks its panel the same way: it moves its own focus with the arrows.
+    const menu = document.createElement("div");
+    menu.setAttribute("data-popover-panel", "");
+    document.body.appendChild(menu);
+    try {
+      press("ArrowDown");
+      press("j");
+      press("t");
+      expect(label()).toContain(monthName(1));
+    } finally {
+      menu.remove();
+    }
+    press("ArrowDown");
+    expect(label()).toContain(monthName(2));
+  });
+
+  it("stands down in a field, with a modifier held, and behind a dialog", async () => {
+    await mountIn("month");
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    try {
+      act(() => void fireEvent.keyDown(field, { key: "ArrowDown" }));
+      act(() => void fireEvent.keyDown(field, { key: "j" }));
+      expect(label()).toContain(monthName(0));
+    } finally {
+      field.remove();
+    }
+    act(() => void fireEvent.keyDown(document.body, { key: "ArrowDown", ctrlKey: true }));
+    act(() => void fireEvent.keyDown(document.body, { key: "n", metaKey: true }));
+    expect(label()).toContain(monthName(0));
+    // Quick create is a dialog.
+    press("C", true);
+    await screen.findByRole("dialog", { name: "New event" });
+    act(() => void fireEvent.keyDown(document.body, { key: "ArrowDown" }));
+    expect(label()).toContain(monthName(0));
+  });
+
+  it("has no keys for the Runway, which runs from today", async () => {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    localStorage.setItem("pm.calendar.view", "agenda");
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView />);
+    await screen.findByText("From today");
+    await act(async () => {});
+    press("j");
+    press("ArrowRight");
+    press("n");
+    // Switched to the list, the cursor is where it was: this month.
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(label()).toContain(monthName(0));
+  });
+});
+
+// A fling or a held key moves the cursor through many months: what loads, and what the strips say,
+// follows it only once it holds still (the first move of a burst at once).
+describe("CalendarView: loads follow the cursor once it settles", () => {
+  const monthStartUtc = (months: number) => {
+    const n = new Date();
+    return new Date(Date.UTC(n.getFullYear(), n.getMonth() + months, 1)).toISOString();
+  };
+  async function mountMonth() {
+    localStorage.setItem("pm.calendar.view", "month");
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView />);
+    await screen.findByRole("button", { name: "+ New event" });
+    await act(async () => {});
+  }
+
+  it("makes one load for a burst of months past the live band, not one per month", async () => {
+    // The live band ended at the start of this month.
+    ipc.calendarOverview.mockResolvedValue({ ...overview, mirror_end: monthStartUtc(0) });
+    await mountMonth();
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(1);
+    // Six months on, a keystroke each: the first passes at once and asks for what it needs.
+    for (let i = 0; i < 6; i++) press("ArrowDown");
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(2);
+    // The rest wait for the cursor to hold still, then make one call for where it ended.
+    await waitFor(() => expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(3), { timeout: 2000 });
+    const [, to] = ipc.loadCalendarMonths.mock.calls[2] as [string, string];
+    expect(new Date(to).getTime()).toBeGreaterThan(new Date(monthStartUtc(7)).getTime());
+    await new Promise((r) => setTimeout(r, 400));
+    expect(ipc.loadCalendarMonths).toHaveBeenCalledTimes(3);
+  });
+
+  it("changes the range hint only after the cursor holds still, the label following at once", async () => {
+    // History starts two months back and is still downloading: the hint is for months before it.
+    ipc.calendarOverview.mockResolvedValue({
+      ...overview,
+      mirror_start: monthStartUtc(-2),
+      history_ready: false,
+    });
+    await mountMonth();
+    const hint = () => screen.queryByText(/older events are still downloading/);
+    expect(hint()).toBeNull();
+    // Three months back: the first (a month back) is inside the history and passes at once; the
+    // third is before it, and its hint waits.
+    for (let i = 0; i < 3; i++) press("ArrowUp");
+    const n = new Date();
+    expect(screen.getByTitle("Pick a date").textContent).toContain(
+      new Date(n.getFullYear(), n.getMonth() - 3, 1).toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      }),
+    );
+    expect(hint()).toBeNull();
+    expect(await screen.findByText(/older events are still downloading/)).toBeTruthy();
+  });
+});
+
+// Refresh is an icon in the header's corner, so what it does is said in the tab's live region
+// (WCAG 4.1.3): the start and the finish. A failure is said by the alert strip.
+describe("CalendarView: Refresh", () => {
+  const refresh = () => screen.getByRole("button", { name: "Refresh" });
+
+  it("says so in the status region when it starts and when it finishes", async () => {
+    let finish: () => void = () => {};
+    ipc.syncCalendar.mockImplementation(() => new Promise<void>((r) => (finish = r)));
+    await mount();
+    fireEvent.click(refresh());
+    expect(await screen.findByText(/Refreshing your calendars…/)).toBeTruthy();
+    expect(refresh().getAttribute("aria-busy")).toBe("true");
+    // A second press while it runs is ignored.
+    fireEvent.click(refresh());
+    expect(ipc.syncCalendar).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    expect(await screen.findByText(/Calendars refreshed/)).toBeTruthy();
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("still shows a failed sync in the alert strip, and does not say it finished", async () => {
+    ipc.syncCalendar.mockRejectedValue(new Error("Google can't be reached"));
+    await mount();
+    fireEvent.click(refresh());
+    expect((await screen.findByRole("alert")).textContent).toContain("Google can't be reached");
+    expect(screen.queryByText(/Calendars refreshed/)).toBeNull();
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+  });
+});
+
+// The pop-out has no sidebar, so its view holds the calendar list in the header (`rosterInHeader`);
+// the main window keeps the sidebar's and gets no such button.
+describe("CalendarView: the calendar list in the header", () => {
+  async function mountWith(rosterInHeader: boolean) {
+    const { CalendarView } = await import("./CalendarView");
+    render(<CalendarView rosterInHeader={rosterInHeader} />);
+    await screen.findByRole("button", { name: /Standup/ });
+    await act(async () => {});
+  }
+
+  it("offers Calendars with its count in the pop-out, and not in the main window", async () => {
+    await mountWith(true);
+    expect(screen.getByRole("button", { name: "Calendars 2/2" })).toBeTruthy();
+    cleanup();
+    await mountWith(false);
+    expect(screen.queryByRole("button", { name: /^Calendars/ })).toBeNull();
+  });
+
+  it("ticking a calendar hides its events and writes the hidden set", async () => {
+    await mountWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "Calendars 2/2" }));
+    const list = within(screen.getByRole("group", { name: "Calendars to show" }));
+    fireEvent.click(list.getByRole("checkbox", { name: "Personal" }));
+    expect(env.written).toEqual([[PERSONAL]]);
+    expect(screen.queryByRole("button", { name: /Standup/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Calendars 1/2" })).toBeTruthy();
+    // Ticked again: it comes back.
+    fireEvent.click(list.getByRole("checkbox", { name: "Personal" }));
+    expect(env.written).toEqual([[PERSONAL], []]);
+    expect(await screen.findByRole("button", { name: /Standup/ })).toBeTruthy();
+  });
+
+  it("follows a change made in the other window, as the sidebar does", async () => {
+    await mountWith(true);
+    // The other window hid Personal: followStoredPrefs re-reads the store and fires the signal.
+    env.hidden = new Set([PERSONAL]);
+    act(() => void window.dispatchEvent(new Event("pm:settings-changed")));
+    expect(screen.getByRole("button", { name: "Calendars 1/2" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Standup/ })).toBeNull();
+  });
+});
+
+// The two view filters: the Agenda's Hide done (Runway and List) and the header's All | All-day.
+// Both are applied to the views' own props, never to what search, the drag and a task's link read.
+describe("CalendarView: the filters", () => {
+  const HIDE = "pm.calendar.agendaHideDone";
+  const KINDS = "pm.calendar.eventKinds";
+  const at = (daysFromToday: number, time: string) =>
+    `${dayKey(addDays(startOfDay(new Date()), daysFromToday))}T${time}`;
+  const allDay = (id: string, summary: string, daysFromToday = 0): CalendarEvent =>
+    row({
+      id,
+      summary,
+      uid: id,
+      all_day: true,
+      start: dayKey(addDays(startOfDay(new Date()), daysFromToday)),
+      end: dayKey(addDays(startOfDay(new Date()), daysFromToday + 1)),
+    });
+  const timedRow = (
+    id: string,
+    summary: string,
+    daysFromToday: number,
+    from = "09:00:00",
+    to = "10:00:00",
+  ) => row({ id, summary, uid: id, start: at(daysFromToday, from), end: at(daysFromToday, to) });
+  const hour = 3_600_000;
+  const iso = (ms: number) => {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
+  };
+  /** An event running now: an hour ago to an hour ahead. */
+  const runningNow = (summary: string) =>
+    row({
+      id: "running",
+      summary,
+      uid: "running",
+      start: iso(Date.now() - hour),
+      end: iso(Date.now() + hour),
+    });
+  const task = (over: Partial<Task>): Task => ({
+    id: 1,
+    title: "Draft the deck",
+    why: null,
+    project_name: null,
+    project_archived: false,
+    milestone_id: null,
+    event_uid: null,
+    do_start: today,
+    do_end: null,
+    deadline: null,
+    deadline_kind: "hard",
+    deadline_from: "date",
+    effective_deadline: null,
+    deadline_missing: false,
+    milestone_label: null,
+    event_title: null,
+    status: "todo",
+    completed_at: null,
+    lane: "foreground",
+    stack_id: null,
+    parked: false,
+    ordinal: 0,
+    source: "user",
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+    ...over,
+  });
+  /** The Calendar tab, fresh, once its reads have landed: the header is drawn once the calendars
+   *  are read, and the events, milestones and tasks land beside them. (Some of these tests leave no
+   *  row on screen, so `mount`'s wait for a Standup row can't be the signal.) */
+  async function open() {
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("group", { name: "Calendar view" });
+    await act(async () => {});
+    await act(async () => {});
+  }
+  /** A view, picked from the view switcher (the range control has a "Day" of its own). */
+  const pickView = (name: string) =>
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "Calendar view" })).getByRole("button", { name }),
+    );
+  const hideButton = () => screen.queryByRole("button", { name: /^(Hide|Show) done/ });
+  const status = () =>
+    screen
+      .getAllByRole("status")
+      .map((s) => s.textContent)
+      .join("|");
+  const kinds = () => screen.queryByRole("group", { name: "Which events" });
+  const kindsButton = (name: string) =>
+    within(screen.getByRole("group", { name: "Which events" })).getByRole("button", { name });
+  const seen = (summary: RegExp) => screen.queryAllByRole("button", { name: summary }).length > 0;
+
+  describe("Hide done in the List", () => {
+    beforeEach(() => {
+      // From the 1st of last month, as the List opens after paging back: both days are drawn.
+      rows = [
+        timedRow("old", "Standup last week", -3),
+        runningNow("Standup running"),
+        timedRow("later", "Standup tomorrow", 1),
+        allDay("yesterday", "Standup holiday", -1),
+      ];
+    });
+
+    it("drops ended events on every day the List draws, never one running now or later", async () => {
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(seen(/last week/)).toBe(true);
+      expect(seen(/holiday/)).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(seen(/last week/)).toBe(false);
+      expect(seen(/holiday/)).toBe(false);
+      expect(seen(/running/)).toBe(true);
+      expect(seen(/tomorrow/)).toBe(true);
+      // The label says how many it took off the screen, and the toggle is said in the live region.
+      expect(hideButton()?.textContent).toBe("Show done (2)");
+      expect(status()).toContain("2 done items hidden");
+      fireEvent.click(screen.getByRole("button", { name: /Show done/ }));
+      expect(seen(/last week/)).toBe(true);
+      expect(hideButton()?.textContent).toBe("Hide done");
+      expect(status()).toContain("Done items shown");
+    });
+
+    it("remembers the choice across a remount, and the pop-out reads it when it opens", async () => {
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(localStorage.getItem(HIDE)).toBe("true");
+      cleanup();
+      await open();
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
+    });
+
+    it("says how many are hidden when nothing is left", async () => {
+      rows = [timedRow("old", "Standup last week", -3)];
+      // No milestone due today either: the default one would be the List's one row left.
+      ipc.listAllMilestones.mockResolvedValue([]);
+      localStorage.setItem(HIDE, "true");
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(await screen.findByText("Nothing left in view — 1 done hidden.")).toBeTruthy();
+    });
+
+    it("takes a met milestone's overlay off the List, never an unmet one", async () => {
+      rows = [timedRow("later", "Standup tomorrow", 1)];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 2, label: "Opened", state: "met" },
+        {
+          ...milestone,
+          id: 3,
+          label: "Still owed",
+          due_date: dayKey(addDays(startOfDay(new Date()), -2)),
+        },
+      ]);
+      localStorage.setItem(HIDE, "true");
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(screen.queryByText(/Opened/)).toBeNull();
+      expect(screen.getByText(/Still owed/)).toBeTruthy();
+    });
+
+    it("an overdue task chip and a late milestone are not greyed as if finished, in any view", async () => {
+      rows = [timedRow("later", "Standup tomorrow", 1)];
+      const twoDaysAgo = dayKey(addDays(startOfDay(new Date()), -2));
+      tasks = [
+        task({ id: 5, title: "Send the deck", do_start: null, effective_deadline: twoDaysAgo }),
+      ];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 3, label: "Still owed", due_date: twoDaysAgo },
+        { ...milestone, id: 4, label: "Opened", due_date: twoDaysAgo, state: "met" },
+      ]);
+      await open();
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      const row = (name: RegExp) => screen.getByText(name).closest("li")!;
+      expect(row(/Due: Send the deck/).className).not.toContain("opacity-60");
+      expect(row(/Still owed/).className).not.toContain("opacity-60");
+      // A met milestone still recedes.
+      expect(row(/Opened/).className).toContain("opacity-60");
+    });
+  });
+
+  describe("Hide done on the Runway", () => {
+    beforeEach(() => {
+      localStorage.removeItem("pm.calendar.agendaMode");
+      ipc.listAllMilestones.mockResolvedValue([]);
+    });
+
+    it("hides a task done before the Agenda opened, keeps one ticked since, and keeps counting both", async () => {
+      const doneBefore = task({
+        id: 2,
+        title: "Done before",
+        status: "done",
+        completed_at: new Date(Date.now() - 3 * hour).toISOString(),
+      });
+      tasks = [task({ id: 1, title: "Open one" }), doneBefore];
+      // No events: the default Standup (07:00 to 07:30 today) has ended once the clock passes
+      // 07:30, and Hide done would count it as well, so this test failed after 07:30.
+      rows = [];
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(within(todayCol).getByText("Done before")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+      expect(within(todayCol).getByText("Open one")).toBeTruthy();
+      expect(hideButton()?.textContent).toBe("Show done (1)");
+      expect(status()).toContain("1 done item hidden");
+      // "1/2 done" still counts what is hidden.
+      expect(screen.getByText("1/2 done")).toBeTruthy();
+      // Ticked now, after Hide done went on (the editor's status select or the other window reach
+      // it the same way, as a fresh `completed_at`): it stays, struck through, until the toggle flips.
+      tasks = [
+        task({ id: 1, title: "Open one", status: "done", completed_at: new Date().toISOString() }),
+        doneBefore,
+      ];
+      await act(async () => tasksChanged());
+      expect(within(todayCol).getByText("Open one")).toBeTruthy();
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+      expect(screen.getByText("2/2 done")).toBeTruthy();
+      // A moment on, Show done, then Hide done again: the cutoff is fresh, so now both were done
+      // before it.
+      await act(() => new Promise((r) => setTimeout(r, 5)));
+      fireEvent.click(screen.getByRole("button", { name: /Show done/ }));
+      expect(within(todayCol).getByText("Done before")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByText("Open one")).toBeNull();
+      expect(within(todayCol).queryByText("Done before")).toBeNull();
+    });
+    it("drops the strips' events that have ended, keeps the one running now, and counts them", async () => {
+      rows = [
+        // Midnight to 00:01 today: over, unless this runs in the day's first minute.
+        timedRow("old", "Standup earlier", 0, "00:00:00", "00:01:00"),
+        runningNow("Standup running"),
+      ];
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(within(todayCol).getByRole("button", { name: /Standup earlier/ })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide done" }));
+      expect(within(todayCol).queryByRole("button", { name: /Standup earlier/ })).toBeNull();
+      expect(within(todayCol).getByRole("button", { name: /Standup running/ })).toBeTruthy();
+      // No task is done, so the one hidden is the event.
+      expect(hideButton()?.textContent).toBe("Show done (1)");
+    });
+
+    it("sits beside Runway | List, in the List too, and in no other view", async () => {
+      await open();
+      expect(hideButton()).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "List" }));
+      expect(hideButton()).not.toBeNull();
+      for (const view of ["Month", "Week", "Day", "Year"]) {
+        pickView(view);
+        expect(hideButton(), view).toBeNull();
+      }
+    });
+
+    it("General → Reset turns it off, and the open Calendar follows", async () => {
+      localStorage.setItem(HIDE, "true");
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
+      const { resetCalendarFilters } = await import("../../lib/calendarPrefs");
+      act(() => resetCalendarFilters());
+      expect(hideButton()?.textContent).toBe("Hide done");
+      expect(localStorage.getItem(HIDE)).toBe("false");
+      expect(localStorage.getItem(KINDS)).toBe("all");
+    });
+
+    // The pop-out and the main window share the two keys but each keeps its own state: a Reset or a
+    // toggle in the other window reaches an already-open one through `storage`, or when this window
+    // is next focused, so its own next toggle can't write a stale value back.
+    it("follows Hide done and All | All-day changed in the other window", async () => {
+      localStorage.setItem("pm.calendar.view", "month");
+      await open();
+      expect(kindsButton("All").getAttribute("aria-pressed")).toBe("true");
+      localStorage.setItem(KINDS, "all-day");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: KINDS }));
+      });
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      // Another key's change leaves it alone; a focus re-reads it.
+      localStorage.setItem(KINDS, "all");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: "pm.calendar.view" }));
+      });
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(kindsButton("All").getAttribute("aria-pressed")).toBe("true");
+      pickView("Agenda");
+      expect(hideButton()?.textContent).toBe("Hide done");
+      localStorage.setItem(HIDE, "true");
+      await act(async () => {
+        window.dispatchEvent(new StorageEvent("storage", { key: HIDE }));
+      });
+      expect(hideButton()?.textContent).toMatch(/^Show done/);
+    });
+
+    it("the Terminal look says it on its strip and leaves the same cards out", async () => {
+      env.system = "terminal";
+      localStorage.setItem(HIDE, "true");
+      tasks = [
+        task({ id: 1, title: "Open one" }),
+        task({
+          id: 2,
+          title: "Done before",
+          status: "done",
+          completed_at: new Date(Date.now() - 3 * hour).toISOString(),
+        }),
+      ];
+      await open();
+      await screen.findByText("Open one");
+      expect(screen.queryByText("Done before")).toBeNull();
+      expect(screen.getByText("cal --runway --hide-done")).toBeTruthy();
+    });
+  });
+
+  describe("All | All-day", () => {
+    beforeEach(() => {
+      localStorage.setItem("pm.calendar.view", "month");
+      rows = [
+        allDay("holiday", "Standup holiday"),
+        timedRow("lunch", "Standup lunch", 0, "12:00:00", "13:00:00"),
+        { ...timedRow("review", "Standup review", 0, "14:00:00", "15:00:00"), uid: "review-uid" },
+      ];
+      tasks = [task({ id: 5, title: "Draft the deck" })];
+      ipc.listAllMilestones.mockResolvedValue([
+        { ...milestone, id: 9, label: "Ship it", event_uid: "review-uid" },
+      ]);
+    });
+
+    /** The summaries Month was last handed. */
+    const inMonth = () => (env.monthEvents ?? []).map((e) => e.summary);
+
+    it("Month keeps an all-day bar, a task chip and a milestone's linked timed event, and drops other timed chips", async () => {
+      await open();
+      expect(inMonth()).toContain("Standup lunch");
+      fireEvent.click(kindsButton("All-day"));
+      expect(localStorage.getItem(KINDS)).toBe("all-day");
+      expect(inMonth()).not.toContain("Standup lunch");
+      expect(inMonth()).toContain("Standup holiday");
+      // The milestone is drawn as the timed event it links to, so that stays.
+      expect(inMonth()).toContain("Standup review");
+      expect(inMonth()).toContain("Draft the deck");
+    });
+
+    it("Week and Day still show the timed event, and have no such control", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(kinds()).not.toBeNull();
+      pickView("Week");
+      expect(kinds()).toBeNull();
+      expect(seen(/Standup lunch/)).toBe(true);
+      pickView("Day");
+      expect(kinds()).toBeNull();
+      expect(seen(/Standup lunch/)).toBe(true);
+      // Still remembered for the views that carry it.
+      pickView("Month");
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("is remembered across a remount, and shows in Month, Year and the List", async () => {
+      await open();
+      fireEvent.click(kindsButton("All-day"));
+      cleanup();
+      await open();
+      expect(kindsButton("All-day").getAttribute("aria-pressed")).toBe("true");
+      expect(inMonth()).not.toContain("Standup lunch");
+      pickView("Year");
+      expect(kinds()).not.toBeNull();
+      const inYear = (env.yearEvents ?? []).map((e) => e.summary);
+      expect(inYear).toContain("Standup holiday");
+      expect(inYear).not.toContain("Standup lunch");
+      pickView("Agenda");
+      expect(kinds()).not.toBeNull();
+    });
+
+    it("ANDs with the Calendars list: a hidden calendar's all-day event stays hidden", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      env.hidden = new Set([PERSONAL]);
+      rows = [
+        allDay("holiday", "Standup holiday"),
+        { ...allDay("offsite", "Standup offsite"), calendar_id: WORK_CAL },
+        { ...timedRow("lunch", "Standup lunch", 0, "12:00:00", "13:00:00"), calendar_id: WORK_CAL },
+      ];
+      await open();
+      expect(inMonth()).toContain("Standup offsite");
+      expect(inMonth()).not.toContain("Standup holiday");
+      expect(inMonth()).not.toContain("Standup lunch");
+    });
+
+    it("the Terminal's month table honours it, and its strip echoes it", async () => {
+      env.system = "terminal";
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      expect(screen.queryByText(/lunch/)).toBeNull();
+      expect(screen.getAllByText(/holiday/).length).toBeGreaterThan(0);
+      expect(screen.getByText("cal --month --all-day")).toBeTruthy();
+    });
+
+    it("the List says 'No all-day events in view.' when only timed events are left", async () => {
+      localStorage.setItem("pm.calendar.view", "agenda");
+      localStorage.setItem(KINDS, "all-day");
+      rows = [timedRow("lunch", "Standup lunch", 1, "12:00:00", "13:00:00")];
+      tasks = [];
+      ipc.listAllMilestones.mockResolvedValue([]);
+      await open();
+      expect(await screen.findByText("No all-day events in view.")).toBeTruthy();
+    });
+
+    it("on the Runway it shows only while the strips do, and thins them", async () => {
+      localStorage.setItem("pm.calendar.view", "agenda");
+      localStorage.removeItem("pm.calendar.agendaMode");
+      localStorage.setItem(KINDS, "all-day");
+      await open();
+      const todayCol = await screen.findByRole("region", { name: "Today" });
+      expect(kinds()).not.toBeNull();
+      expect(within(todayCol).queryByRole("button", { name: /Standup lunch/ })).toBeNull();
+      expect(within(todayCol).getByRole("button", { name: /Standup holiday/ })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Hide events" }));
+      expect(kinds()).toBeNull();
+    });
+
+    it("a search hit on a timed event the filter hides still opens its details", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      const View = (await import("./CalendarView")).CalendarView;
+      const lunch = rows[1];
+      render(<View reveal={{ event: lunch, nonce: 1 }} />);
+      expect(await screen.findByRole("dialog", { name: /Standup lunch/ })).toBeTruthy();
+    });
+
+    it("says so when a timed event is saved while All-day hides it", async () => {
+      localStorage.setItem(KINDS, "all-day");
+      ipc.createCalendarEvent.mockResolvedValue(saved);
+      await open();
+      press("C", true);
+      fireEvent.change(title(), { target: { value: "Dentist" } });
+      fireEvent.click(within(quick()).getByRole("button", { name: "Save" }));
+      await waitFor(() =>
+        expect(status()).toContain("Saved. Timed events are hidden while All-day is on."),
+      );
+    });
+  });
+});
+
+// Event | Task in the quick box (Shift+C opens the very box a click or drag on the grid does): a task
+// made there is a PM task on the clicked day, shown as the tasks overlay's chip; More options opens
+// the one task editor; the box comes back on Task after a tab switch.
+describe("CalendarView: Event | Task in quick create", () => {
+  const made = (title: string): Task => ({
+    id: 9,
+    title,
+    why: null,
+    project_name: null,
+    project_archived: false,
+    milestone_id: null,
+    event_uid: null,
+    do_start: today,
+    do_end: null,
+    deadline: null,
+    deadline_kind: "hard",
+    deadline_from: "date",
+    effective_deadline: null,
+    deadline_missing: false,
+    milestone_label: null,
+    event_title: null,
+    status: "todo",
+    completed_at: null,
+    lane: "foreground",
+    stack_id: null,
+    parked: false,
+    ordinal: 0,
+    source: "user",
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+  });
+  // The box's name follows its kind, so these find it on either (they shadow the file's, which are
+  // the event's).
+  const quick = () => screen.getByRole("dialog", { name: /^New (event|task)$/ });
+  const title = () => within(quick()).getByLabelText<HTMLInputElement>("Title");
+  const taskSeg = () => within(quick()).getByRole("button", { name: "Task" });
+  const said = () => document.querySelector('[role="status"]')?.textContent ?? "";
+  clockMidTodayHereAndInLondon();
+
+  it("Shift+C's box has the switch, on Event", async () => {
+    await mount();
+    press("C", true);
+    const group = within(quick()).getByRole("group", { name: "Create" });
+    expect(within(group).getByRole("button", { name: "Event" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
+  /** The next tasks read, held until `release` is called with the list it brings. */
+  function holdNextTasksRead() {
+    let release: (list: Task[]) => void = () => {};
+    let fail: (e: Error) => void = () => {};
+    ipc.listTasks.mockImplementationOnce(
+      () =>
+        new Promise<Task[]>((resolve, reject) => {
+          release = resolve;
+          fail = reject;
+        }),
+    );
+    return { release: (list: Task[]) => release(list), fail: (e: Error) => fail(e) };
+  }
+  const savedGhost = () => {
+    const g = ghost();
+    return g && /^New task, saved: /.test(g.getAttribute("aria-label") ?? "") ? g : null;
+  };
+  /** The task's real chips (the ghost is a button too, but a draft). */
+  const chips = () =>
+    screen
+      .queryAllByRole("button", { name: /Pay rent/ })
+      .filter((el) => !el.hasAttribute("data-draft-event"));
+  /** The list's day section the ghost sits in, as its date reads. */
+  const ghostDay = () => ghost()?.closest("section")?.textContent ?? "";
+  const pickDay = (iso: string) => {
+    const day = within(quick()).getByLabelText<HTMLInputElement>("Day");
+    // The field commits on blur, so it holds focus while typed into.
+    act(() => day.focus());
+    fireEvent.change(day, { target: { value: isoToDisplay(iso) } });
+    act(() => title().focus());
+  };
+  /** Save on Task for `Pay rent`, with its tasks read held; returns that hold. */
+  async function saveTaskHeld(day?: string) {
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    if (day) pickDay(day);
+    ipc.addTask.mockResolvedValue(9);
+    const read = holdNextTasksRead();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    return read;
+  }
+
+  it("a task made from the box lands on its day, leaves no event ghost, and shows as a chip", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy();
+    // The ghost is the task's chip on the Tasks calendar.
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    ipc.addTask.mockImplementation(() => {
+      tasks = [made("Pay rent")];
+      return Promise.resolve(9);
+    });
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(ipc.addTask).toHaveBeenCalledTimes(1);
+    expect(ipc.addTask.mock.calls[0][0]).toMatchObject({
+      title: "Pay rent",
+      doStart: today,
+      doEnd: null,
+      deadline: null,
+      lane: "foreground",
+    });
+    expect(ipc.createCalendarEvent).not.toHaveBeenCalled();
+    // Once the read lands the chip is there, alone: the ghost never stays beside the real chip.
+    await waitFor(() => expect(ghost()).toBeNull());
+    await waitFor(() => expect(chips()).toHaveLength(1));
+    expect(said()).toBe(`Task added: Pay rent, ${formatDateOnly(today)}.`);
+    expect(document.activeElement).toBe(newEvent());
+  });
+
+  it("keeps a saved task's ghost until the read that follows the save brings its chip", async () => {
+    await mount();
+    const read = await saveTaskHeld();
+    // The box is gone and the read hasn't landed: the task is drawn as a saved ghost, not missing.
+    expect(savedGhost()?.getAttribute("aria-label")).toMatch(/^New task, saved: .*Pay rent$/);
+    expect(chips()).toHaveLength(0);
+    tasks = [made("Pay rent")];
+    await act(async () => read.release(tasks));
+    // The same update that brings the chip takes the ghost: never both, never neither.
+    expect(ghost()).toBeNull();
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("an older tasks read landing doesn't take the saved ghost: only one begun after the save does", async () => {
+    await mount();
+    // A read already in flight when the task is saved (a focus refresh, or the write's own event).
+    const older = holdNextTasksRead();
+    act(() => tasksChanged());
+    const read = await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    // The older one is superseded by the save's own read and applies nothing; the ghost stays.
+    await act(async () => older.release([]));
+    expect(savedGhost()).not.toBeNull();
+    tasks = [made("Pay rent")];
+    await act(async () => read.release(tasks));
+    expect(ghost()).toBeNull();
+    expect(chips()).toHaveLength(1);
+  });
+
+  it("draws the saved ghost on today when the planned day has passed, where the chip will land", async () => {
+    await mount();
+    const read = await saveTaskHeld("2020-03-04");
+    expect(savedGhost()).not.toBeNull();
+    expect(ghostDay()).toContain(formatDateLocal(new Date()));
+    tasks = [{ ...made("Pay rent"), do_start: "2020-03-04" }];
+    await act(async () => read.release(tasks));
+    expect(ghost()).toBeNull();
+    // The chip is on today too, as the ghost said.
+    expect(chips()).toHaveLength(1);
+    expect(chips()[0].closest("section")?.textContent).toContain(formatDateLocal(new Date()));
+  });
+
+  it("draws the box's own ghost on today for a day that has passed", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    pickDay("2020-03-04");
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    expect(ghostDay()).toContain(formatDateLocal(new Date()));
+  });
+
+  it("draws no saved ghost when Tasks is hidden: nothing would draw the chip", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    await saveTaskHeld();
+    expect(ghost()).toBeNull();
+  });
+
+  it("drops the saved ghost when the read that should bring the chip fails", async () => {
+    await mount();
+    const read = await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    await act(async () => read.fail(new Error("db busy")));
+    expect(ghost()).toBeNull();
+  });
+
+  it("drops the saved ghost when a new box starts", async () => {
+    await mount();
+    await saveTaskHeld();
+    expect(savedGhost()).not.toBeNull();
+    press("C", true);
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+    expect(savedGhost()).toBeNull();
+  });
+
+  it("never draws a task of an archived project while the archived names are still arriving", async () => {
+    let names: (n: string[]) => void = () => {};
+    ipc.listArchivedProjects.mockImplementation(
+      () =>
+        new Promise<string[]>((resolve) => {
+          names = resolve;
+        }),
+    );
+    tasks = [{ ...made("Shelved job"), project_name: "Old", do_start: today }];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    await screen.findByRole("button", { name: /Standup/ });
+    await act(async () => {});
+    // The tasks read has landed but the archived names haven't: nothing is applied yet.
+    expect(screen.queryByRole("button", { name: /Shelved job/ })).toBeNull();
+    await act(async () => names(["Old"]));
+    expect(screen.queryByRole("button", { name: /Shelved job/ })).toBeNull();
+  });
+
+  it("keeps each list's last good value when its own read fails", async () => {
+    tasks = [made("Draft the deck")];
+    await mount();
+    expect(await screen.findByRole("button", { name: /Draft the deck/ })).toBeTruthy();
+    ipc.listTasks.mockRejectedValueOnce(new Error("db busy"));
+    ipc.listTaskStacks.mockResolvedValueOnce([]);
+    act(() => tasksChanged());
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: /Draft the deck/ })).toBeTruthy();
+  });
+
+  it("a task planned on a day that has passed is announced as showing on today", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    const day = within(quick()).getByLabelText<HTMLInputElement>("Day");
+    // The field commits on blur, so it holds focus while typed into.
+    act(() => day.focus());
+    fireEvent.change(day, { target: { value: isoToDisplay("2020-03-04") } });
+    act(() => title().focus());
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Task added: Pay rent"));
+    expect(ipc.addTask.mock.calls[0][0]).toMatchObject({ doStart: "2020-03-04" });
+    expect(said()).toBe(
+      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. It shows on today, ${formatDateOnly(today)}, until it's done.`,
+    );
+  });
+
+  it("a passed day with Tasks hidden doesn't claim the task shows on today", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    pickDay("2020-03-04");
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Task added: Pay rent"));
+    expect(said()).toBe(
+      `Task added: Pay rent, ${formatDateOnly("2020-03-04")}. Tasks are hidden in your calendar list.`,
+    );
+    expect(said()).not.toContain("shows on today");
+  });
+
+  it("says when Tasks is hidden in the list that the new one won't show", async () => {
+    env.hidden = new Set(["pm:tasks"]);
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    expect(
+      within(quick()).getByText(
+        "Tasks are hidden in your calendar list, so the new task won't show until you show Tasks again.",
+      ),
+    ).toBeTruthy();
+    ipc.addTask.mockResolvedValue(9);
+    fireEvent.keyDown(title(), { key: "Enter" });
+    await waitFor(() => expect(said()).toContain("Tasks are hidden in your calendar list."));
+  });
+
+  it("More options on Task opens the task editor on the title and day, and Cancel returns to + New event", async () => {
+    await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    fireEvent.click(within(quick()).getByRole("button", { name: "More options" }));
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Pay rent");
+    expect(within(editor).getByLabelText<HTMLInputElement>("Start doing it on").value).toBe(
+      isoToDisplay(today),
+    );
+    // One surface: the box is gone, and nothing was saved.
+    expect(screen.getAllByRole("dialog")).toEqual([editor]);
+    expect(ghost()).toBeNull();
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(newEvent());
+    // The Runway's own + Task isn't a quick one: closing it leaves focus alone (no `fromQuick`).
+    expect(ipc.addTask).not.toHaveBeenCalled();
+  });
+
+  it("a titled task draft that went with the tab comes back on Task", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    first.unmount();
+    await act(async () => {});
+    await mount(first.View);
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "New task" })).toBeTruthy());
+    expect(title().value).toBe("Pay rent");
+    expect(ghost()?.getAttribute("aria-label")).toMatch(/^New task, not saved yet: .*Pay rent$/);
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    // A new box starts on Event again.
+    fireEvent.click(within(quick()).getByRole("button", { name: "Discard" }));
+    press("C", true);
+    expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy();
+  });
+
+  // The tab's cached overview is what the remounted tab first sees, so editing is turned off on a
+  // refresh BEFORE the tab goes, as it would be by the time anyone is back.
+  async function editingOffThenLeave(first: Awaited<ReturnType<typeof mount>>) {
+    ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    first.unmount();
+    await act(async () => {});
+  }
+
+  it("a titled task draft isn't dropped when no calendar can take events: the task editor opens on it", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    await editingOffThenLeave(first);
+    await mount(first.View);
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Pay rent");
+    expect(ipc.addTask).not.toHaveBeenCalled();
+    // Nothing was made from it: Cancel ends it, and focus lands somewhere on the tab, not the page.
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(
+      document.querySelector('[data-help="calendar-view"]')?.contains(document.activeElement),
+    ).toBe(true);
+  });
+
+  it("with no Google account at all, so no + New event, focus still lands on a named control in the header, not the page", async () => {
+    const first = await mount();
+    quickCreate("Pay rent");
+    fireEvent.click(taskSeg());
+    ipc.calendarOverview.mockResolvedValue({
+      ...overview,
+      accounts: [],
+      calendars: [],
+      editing: {},
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    first.unmount();
+    await act(async () => {});
+    const View = first.View;
+    render(<View onOpenProject={vi.fn()} onOpenPinboard={vi.fn()} />);
+    const editor = await screen.findByRole("dialog", { name: "New task" });
+    expect(screen.queryByRole("button", { name: "+ New event" })).toBeNull();
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Only the fallback can have taken focus: a named control in the header.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(
+      document.querySelector('[data-help="calendar-header"]')?.contains(document.activeElement),
+    ).toBe(true);
+  });
+
+  it("an event draft is kept, with a word to say so, until a calendar can take events again", async () => {
+    const first = await mount();
+    quickCreate("Dentist");
+    await editingOffThenLeave(first);
+    const second = await mount(first.View);
+    // Not opened, not lost: the polite live region says it is kept.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const allSaid = [...document.querySelectorAll('[role="status"]')].map((e) => e.textContent);
+    expect(allSaid).toContain("Your unsent event draft is kept until a calendar can take events.");
+    // Editing back on, back on the tab: the box opens on the draft.
+    second.unmount();
+    ipc.calendarOverview.mockResolvedValue(overview);
+    cleanup();
+    await act(async () => {});
+    await mount(first.View);
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "New event" })).toBeTruthy());
+    expect(title().value).toBe("Dentist");
+  });
+
+  it("a task chip's click still opens Edit task", async () => {
+    tasks = [made("Draft the deck")];
+    await mount();
+    fireEvent.click(await screen.findByRole("button", { name: /Draft the deck/ }));
+    const editor = await screen.findByRole("dialog", { name: "Edit task" });
+    expect(within(editor).getByLabelText<HTMLInputElement>("Title").value).toBe("Draft the deck");
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Not from the quick box: focus isn't sent to + New event.
+    expect(document.activeElement).not.toBe(newEvent());
   });
 });

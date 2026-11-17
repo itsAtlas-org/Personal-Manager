@@ -7,9 +7,9 @@
 // account is connected, and when no calendar can take an event it stays focusable and says why
 // rather than going grey and silent.
 
-import { createRef, type RefObject } from "react";
+import { createRef, type ReactNode, type RefObject } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -18,8 +18,24 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
 
 import { CalendarHeader } from "./CalendarHeader";
 import type { AgendaMode, CalendarViewMode } from "../../lib/calendarPrefs";
+import type { EventKinds } from "../../lib/calendarFilters";
+import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
+import { formatClock } from "../../lib/format";
+import { resetKeyboardPrefs, writeCharacterShortcuts } from "../../lib/keyboardPrefs";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+// The tooltip shows on KEYBOARD focus only (`:focus-visible`: a click's focus doesn't count), and
+// jsdom's idea of that is its own, so a test that Tabs onto a control says so.
+function tabbing() {
+  const real = Element.prototype.matches;
+  vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, sel: string) {
+    return sel === ":focus-visible" ? true : real.call(this, sel);
+  });
+}
 
 const REASON = "None of your calendars can take new events.";
 
@@ -30,7 +46,18 @@ interface Over {
   view?: CalendarViewMode;
   agendaMode?: AgendaMode;
   onAgendaModeChange?: (mode: AgendaMode) => void;
+  runwaySlotRef?: (el: HTMLDivElement | null) => void;
+  onCreateTask?: () => void;
+  hideDone?: boolean;
+  hiddenCount?: number;
+  onToggleHideDone?: () => void;
+  eventKinds?: EventKinds;
+  onEventKindsChange?: (kinds: EventKinds) => void;
   onPopOut?: () => void;
+  roster?: ReactNode;
+  onRefresh?: () => void;
+  syncing?: boolean;
+  lastSync?: string | null;
 }
 
 function header(over: Over = {}) {
@@ -188,6 +215,65 @@ describe("CalendarHeader: the Agenda layout", () => {
     expect(screen.queryByText("From today")).toBeNull();
   });
 
+  it("the Runway gives the board a slot beside From today, the List none", () => {
+    const slotRef = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      runwaySlotRef: slotRef,
+    });
+    const lastSlot = () =>
+      slotRef.mock.calls[slotRef.mock.calls.length - 1][0] as HTMLElement | null;
+    const slot = lastSlot()!;
+    expect(slot).toBeInstanceOf(HTMLElement);
+    // Next to the label, inside the header's left group, and empty (hidden) until the board draws.
+    expect(slot.previousElementSibling?.textContent).toBe("From today");
+    expect(slot.closest('[data-help="calendar-header"]')).not.toBeNull();
+    expect(screen.getByText("From today")).toBeTruthy();
+    // Back to the List: the slot goes, and the board's ref hears null.
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        runwaySlotRef: slotRef,
+      }),
+    );
+    expect(lastSlot()).toBeNull();
+    expect(screen.queryByText("From today")).toBeNull();
+  });
+
+  it("+ Task shows where onCreateTask is given, just before + New event, and not in List", () => {
+    const onCreateTask = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      onCreate: vi.fn(),
+      onCreateTask,
+    });
+    const task = screen.getByRole("button", { name: "+ Task" });
+    // The Runway's help names it, as it names Hide events and + Window.
+    expect(task.getAttribute("data-help")).toBe("calendar-runway");
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.indexOf(task) + 1]).toBe(
+      screen.getByRole("button", { name: "+ New event" }),
+    );
+    fireEvent.click(task);
+    expect(onCreateTask).toHaveBeenCalledOnce();
+    // CalendarView hands it over only on the Runway.
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        onCreate: vi.fn(),
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
+  });
+
   it("offers Pop out where it's given, and not in the pop-out itself", () => {
     const onPopOut = vi.fn();
     const { unmount } = header({ onPopOut });
@@ -196,5 +282,392 @@ describe("CalendarHeader: the Agenda layout", () => {
     unmount();
     header();
     expect(screen.queryByRole("button", { name: "Pop out" })).toBeNull();
+  });
+
+  it("Pop out is an icon named Pop out, just before Refresh", () => {
+    header({ onPopOut: vi.fn() });
+    const popOut = screen.getByRole("button", { name: "Pop out" });
+    // An icon: no words on it, and the drawing is hidden from assistive technology.
+    expect(popOut.textContent).toBe("");
+    expect(popOut.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    expect(popOut.getAttribute("data-help")).toBe("calendar-popout");
+    expect(popOut.nextElementSibling).toBeNull();
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.indexOf(popOut) + 1]).toBe(
+      screen.getByRole("button", { name: "Refresh" }),
+    );
+  });
+
+  it("the Calendars slot sits just before Refresh, and only where it is given", () => {
+    header({ roster: <button type="button">Calendars 2/3</button> });
+    const buttons = screen.getAllByRole("button");
+    const at = buttons.indexOf(screen.getByRole("button", { name: "Calendars 2/3" }));
+    expect(buttons[at + 1]).toBe(screen.getByRole("button", { name: "Refresh" }));
+    cleanup();
+    header();
+    expect(screen.queryByRole("button", { name: /Calendars/ })).toBeNull();
+  });
+});
+
+// The Agenda's Hide done and the All | All-day filter (#1090): each is drawn only where CalendarView
+// hands it a handler, so which views carry them is CalendarView's test; this one is how they read.
+describe("CalendarHeader: the filters", () => {
+  const hideDone = () => screen.queryByRole("button", { name: /^(Hide|Show) done/ });
+
+  it("Hide done sits beside Runway | List in the Agenda, and flips its label with the count", () => {
+    const onToggleHideDone = vi.fn();
+    const view = header({
+      view: "agenda",
+      agendaMode: "runway",
+      onAgendaModeChange: vi.fn(),
+      onToggleHideDone,
+      hideDone: false,
+      hiddenCount: 0,
+    });
+    const button = screen.getByRole("button", { name: "Hide done" });
+    // No aria-pressed: the label flips instead, as Hide events does.
+    expect(button.getAttribute("aria-pressed")).toBeNull();
+    const layout = screen.getByRole("group", { name: "Agenda layout" });
+    expect(layout.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(button);
+    expect(onToggleHideDone).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "runway",
+        onAgendaModeChange: vi.fn(),
+        onToggleHideDone,
+        hideDone: true,
+        hiddenCount: 4,
+      }),
+    );
+    expect(hideDone()?.textContent).toBe("Show done (4)");
+    // Nothing hidden now: plain "Show done", with no "(0)".
+    view.rerender(
+      element({
+        view: "agenda",
+        agendaMode: "list",
+        onAgendaModeChange: vi.fn(),
+        onToggleHideDone,
+        hideDone: true,
+        hiddenCount: 0,
+      }),
+    );
+    expect(hideDone()?.textContent).toBe("Show done");
+  });
+
+  it("Hide done names what it hides in its tooltip, and is there only where it is given", () => {
+    header({ view: "agenda", agendaMode: "list", onToggleHideDone: vi.fn() });
+    expect(hideDone()?.getAttribute("title")).toMatch(
+      /tasks you've finished.*events that have ended/,
+    );
+    cleanup();
+    for (const view of ["month", "year", "week", "day"] as const) {
+      header({ view });
+      expect(hideDone()).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("All | All-day is a two-option control named Which events, where it is given", () => {
+    const onEventKindsChange = vi.fn();
+    const view = header({ view: "month", eventKinds: "all", onEventKindsChange });
+    const group = screen.getByRole("group", { name: "Which events" });
+    const all = within(group).getByRole("button", { name: "All" });
+    const allDay = within(group).getByRole("button", { name: "All-day" });
+    expect(all.getAttribute("aria-pressed")).toBe("true");
+    expect(allDay.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(allDay);
+    expect(onEventKindsChange).toHaveBeenCalledWith("all-day");
+    view.rerender(element({ view: "month", eventKinds: "all-day", onEventKindsChange }));
+    expect(
+      within(screen.getByRole("group", { name: "Which events" }))
+        .getByRole("button", { name: "All-day" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    // Not given (Week, Day, the Runway with its events hidden): not drawn.
+    view.rerender(element({ view: "week" }));
+    expect(screen.queryByRole("group", { name: "Which events" })).toBeNull();
+  });
+
+  it("both sit before the view switcher, and the header keeps Refresh last", () => {
+    header({
+      view: "agenda",
+      agendaMode: "list",
+      onAgendaModeChange: vi.fn(),
+      onToggleHideDone: vi.fn(),
+      onEventKindsChange: vi.fn(),
+    });
+    const hide = screen.getByRole("button", { name: "Hide done" });
+    const kinds = screen.getByRole("group", { name: "Which events" });
+    const views = screen.getByRole("group", { name: "Calendar view" });
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    const follows = (a: HTMLElement, b: HTMLElement) =>
+      !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(hide, kinds)).toBe(true);
+    expect(follows(kinds, views)).toBe(true);
+    expect(follows(views, refresh)).toBe(true);
+  });
+});
+
+// Refresh is an icon in the header's corner (Bobby: "i instinctively click top right for refresh"),
+// with a constant name and the last sync as a description and a tooltip.
+describe("CalendarHeader: Refresh", () => {
+  const refresh = () => screen.getByRole("button", { name: "Refresh" });
+  const SYNCED = new Date().toISOString();
+
+  it("is the header's last control, named Refresh, and described by the last sync", () => {
+    header({ onCreate: vi.fn(), onPopOut: vi.fn(), lastSync: SYNCED });
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[buttons.length - 1]).toBe(refresh());
+    // Icon only, at every Depth: no words on it, and no native title beside the JS tooltip.
+    expect(refresh().textContent).toBe("");
+    expect(refresh().getAttribute("title")).toBeNull();
+    const described = document.getElementById(refresh().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe(refreshDescription(SYNCED, false));
+    expect(described?.textContent).toMatch(/^Last synced /);
+  });
+
+  it("sits in a cell of its own, first row, apart from the controls that wrap", () => {
+    // jsdom has no layout, so this pins the structure that keeps the corner: Refresh's cell is
+    // pinned to row 1 and shares no wrapping container with the view switcher, + New event,
+    // Pop out or Calendars.
+    header({
+      onCreate: vi.fn(),
+      onPopOut: vi.fn(),
+      roster: <button type="button">Calendars 1/2</button>,
+    });
+    const cell = refresh().closest("span")?.parentElement as HTMLElement;
+    expect(cell.className).toContain("row-start-1");
+    expect(within(cell).getAllByRole("button")).toEqual([refresh()]);
+    const controls = screen.getByRole("group", { name: "Calendar view" })
+      .parentElement as HTMLElement;
+    expect(controls.contains(refresh())).toBe(false);
+    expect(controls.className).toContain("flex-wrap");
+  });
+
+  it("keeps its name when it has never synced, and says so as the description", () => {
+    header({ lastSync: null });
+    const described = document.getElementById(refresh().getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe("Never synced");
+  });
+
+  it("calls onRefresh when pressed", () => {
+    const onRefresh = vi.fn();
+    header({ onRefresh });
+    fireEvent.click(refresh());
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("while syncing is aria-busy and aria-disabled, stays focused, and ignores clicks", () => {
+    const onRefresh = vi.fn();
+    header({ onRefresh, syncing: true });
+    const button = refresh();
+    button.focus();
+    // Marked, not disabled: a focused button that turns disabled would drop keyboard focus.
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    expect(onRefresh).not.toHaveBeenCalled();
+    // The icon turns, but not under reduced motion; the description still says why.
+    expect(button.querySelector("svg")?.getAttribute("class")).toContain(
+      "motion-reduce:animate-none",
+    );
+    expect(button.querySelector("svg")?.getAttribute("class")).toContain("animate-spin");
+    const described = document.getElementById(button.getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe("Refreshing…");
+  });
+
+  it("is neither busy nor disabled while idle", () => {
+    header({ syncing: false });
+    expect(refresh().getAttribute("aria-busy")).toBeNull();
+    expect(refresh().getAttribute("aria-disabled")).toBeNull();
+    expect(refresh().querySelector("svg")?.getAttribute("class")).not.toContain("animate-spin");
+  });
+
+  // The JS tooltip, which a keyboard user gets on focus as a mouse user does on hover.
+  it("shows 'Refresh · last synced …' on focus and 'Refreshing…' while syncing", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = header({ lastSync: SYNCED });
+      tabbing();
+      fireEvent.focus(refresh());
+      act(() => void vi.advanceTimersByTime(200));
+      expect(screen.getByRole("tooltip").textContent).toBe(refreshTip(SYNCED, false));
+      expect(screen.getByRole("tooltip").textContent).toBe(
+        `Refresh · last synced ${formatClock(new Date(SYNCED))}`,
+      );
+      rerender(element({ lastSync: SYNCED, syncing: true }));
+      expect(screen.getByRole("tooltip").textContent).toBe("Refreshing…");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// The keys that page the calendar are findable: ‹ › and Today say them in the tooltip (the repo's
+// "label · key" form, which shows on focus too) and in aria-keyshortcuts, while their names stay
+// "Previous", "Next" and "Today".
+describe("CalendarHeader: the keys", () => {
+  const prev = () => screen.getByRole("button", { name: "Previous" });
+  const next = () => screen.getByRole("button", { name: "Next" });
+  const today = () => screen.getByRole("button", { name: "Today" });
+
+  it("names the arrows and Google's letters on ‹ › and t on Today", () => {
+    header({ view: "week" });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft k p");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+  });
+
+  it("adds ↑ and ↓ in Month and Year only", () => {
+    for (const view of ["month", "year"] as const) {
+      header({ view });
+      expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft ArrowUp k p");
+      expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown j n");
+      cleanup();
+    }
+    for (const view of ["week", "day", "agenda"] as const) {
+      header({ view });
+      expect(prev().getAttribute("aria-keyshortcuts")).not.toContain("ArrowUp");
+      expect(next().getAttribute("aria-keyshortcuts")).not.toContain("ArrowDown");
+      cleanup();
+    }
+  });
+
+  it("keeps the buttons' names, whatever the tooltip says", () => {
+    header({ view: "month" });
+    expect(prev().getAttribute("aria-label")).toBe("Previous");
+    expect(next().getAttribute("aria-label")).toBe("Next");
+    expect(today().textContent).toBe("Today");
+  });
+
+  // The tooltip is the JS one, which a keyboard user gets on focus as a mouse user does on hover.
+  it("shows the keys in the tooltip on focus", () => {
+    vi.useFakeTimers();
+    try {
+      header({ view: "month" });
+      tabbing();
+      const shown = (button: HTMLElement) => {
+        fireEvent.focus(button);
+        act(() => void vi.advanceTimersByTime(200));
+        const text = screen.getByRole("tooltip").textContent;
+        fireEvent.blur(button);
+        return text;
+      };
+      expect(shown(prev())).toBe("Previous · ←, ↑, k or p");
+      expect(shown(next())).toBe("Next · →, ↓, j or n");
+      expect(shown(today())).toBe("Jump to today · t");
+      cleanup();
+      header({ view: "week" });
+      expect(shown(prev())).toBe("Previous · ←, k or p");
+      expect(shown(next())).toBe("Next · →, j or n");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// WCAG 2.2 SC 2.1.4: while Settings → Accessibility → Keyboard has single-key shortcuts off, nothing
+// advertises the letters (tooltip or aria-keyshortcuts), the arrows stay, and a flip is followed
+// while the header is mounted, as it is when made from Settings or the other window.
+describe("CalendarHeader: the keys with single-key shortcuts off", () => {
+  const prev = () => screen.getByRole("button", { name: "Previous" });
+  const next = () => screen.getByRole("button", { name: "Next" });
+  const today = () => screen.getByRole("button", { name: "Today" });
+  const newEvent = () => screen.getByRole("button", { name: "+ New event" });
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  function tip(button: HTMLElement): string | null {
+    fireEvent.focus(button);
+    act(() => void vi.advanceTimersByTime(200));
+    const text = screen.queryByRole("tooltip")?.textContent ?? null;
+    fireEvent.blur(button);
+    return text;
+  }
+
+  it("names only the arrows on ‹ ›, and nothing on Today and + New event", () => {
+    writeCharacterShortcuts(false);
+    header({ onCreate: vi.fn(), view: "month", createReason: null });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft ArrowUp");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown");
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(newEvent().hasAttribute("aria-keyshortcuts")).toBe(false);
+    cleanup();
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight");
+  });
+
+  it("says no letters in the tooltips", () => {
+    vi.useFakeTimers();
+    try {
+      writeCharacterShortcuts(false);
+      header({ onCreate: vi.fn(), view: "month", createReason: null });
+      tabbing();
+      expect(tip(prev())).toBe("Previous · ← or ↑");
+      expect(tip(next())).toBe("Next · → or ↓");
+      expect(tip(today())).toBe("Jump to today");
+      expect(tip(newEvent())).toBe("New event");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the letters again when the switch is on", () => {
+    vi.useFakeTimers();
+    try {
+      header({ onCreate: vi.fn(), view: "week", createReason: null });
+      tabbing();
+      expect(tip(prev())).toBe("Previous · ←, k or p");
+      expect(tip(today())).toBe("Jump to today · t");
+      expect(tip(newEvent())).toBe("New event · c, or Shift+C for a quick event or task");
+      expect(newEvent().getAttribute("aria-keyshortcuts")).toBe("c");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("follows a flip while mounted, both ways", () => {
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+    act(() => writeCharacterShortcuts(false));
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(newEvent().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight");
+    act(() => resetKeyboardPrefs());
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+    expect(newEvent().getAttribute("aria-keyshortcuts")).toBe("c");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+  });
+
+  it("follows the other window's change, which arrives as a storage event", () => {
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    localStorage.setItem("pm:a11y:characterShortcuts", "false");
+    act(
+      () =>
+        void window.dispatchEvent(
+          new StorageEvent("storage", { key: "pm:a11y:characterShortcuts" }),
+        ),
+    );
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+  });
+
+  it("keeps the reason when no event can be made, whatever the switch says", () => {
+    vi.useFakeTimers();
+    try {
+      writeCharacterShortcuts(false);
+      header({ onCreate: vi.fn(), view: "week", createReason: REASON });
+      tabbing();
+      expect(tip(newEvent())).toBe(REASON);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -359,13 +359,15 @@ own message, it redacts through `error::redact_url` first and never interpolates
 ### I-22 · Calendar writes have one path, and nothing on a model path reaches it — **Enforced**
 
 Changing a Google event (#884) goes through `commands/calendar_edit.rs` and nowhere else: its three
-commands refuse every window but the main one, its private `google_io` is the only code that sends
-a calendar write, and the webview's wrappers are imported only by the editor's hook. No module that
-calls a model names any of it, sends an authorised Google request, or holds a Calendar API URL; no
-other module holds that URL beside anything that could send more than a read; and the write path
-calls no model. `scripts/check-calendar-write-fence.mjs` (`just calendar-write-fence`) and an
-`eslint.config.js` import rule fail the build when any of that slips, and the fence checks its own
-lists of commands and wrappers against calendar_edit.rs, ipc.ts and the ESLint rule.
+commands refuse every window but the main one and the pop-out Calendar (`shared::caller_may_write`;
+the briefing window and any window added later are refused), its private `google_io` is the only
+code that sends a calendar write, and the webview's wrappers are imported only by the editor's
+hook. No module that calls a model names any of it, sends an authorised Google request, or holds a
+Calendar API URL; no other module holds that URL beside anything that could send more than a read;
+and the write path calls no model. `scripts/check-calendar-write-fence.mjs`
+(`just calendar-write-fence`) and an `eslint.config.js` import rule fail the build when any of that
+slips, and the fence checks its own lists of commands and wrappers against calendar_edit.rs, ipc.ts
+and the ESLint rule.
 
 **Why.** Each step that would let model output edit someone's calendar is small and plausible on its
 own: a chat helper that imports the wrapper "to fix a time", a briefing that calls the command, a

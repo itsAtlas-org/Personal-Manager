@@ -14,12 +14,16 @@ import {
   isDraftEvent,
   isEventPast,
   isMultiDay,
+  MILESTONE_CALENDAR_ID,
+  MILESTONE_MET_MARK,
   minutesFromLocalMidnight,
   occurrenceKey,
   packBands,
+  PINBOARD_CALENDAR_ID,
   spokenName,
   startOfDay,
   startOfWeek,
+  TASK_CALENDAR_ID,
   timedEndMinutes,
   timedSegments,
 } from "./calendar-layout";
@@ -200,6 +204,54 @@ describe("isEventPast", () => {
     expect(isEventPast(ev, new Date(2026, 9, 13, 23, 0))).toBe(false);
     expect(isEventPast(ev, new Date(2026, 9, 14, 0, 1))).toBe(true);
   });
+
+  it("never greys late work: an overdue task chip, or a milestone that isn't met", () => {
+    const base = { ...timedEv("2026-10-01", "2026-10-02"), all_day: true, end: null };
+    const later = new Date(2026, 9, 20);
+    expect(
+      isEventPast({ ...base, calendar_id: TASK_CALENDAR_ID, summary: "Due: Deck" }, later),
+    ).toBe(false);
+    expect(
+      isEventPast(
+        { ...base, calendar_id: MILESTONE_CALENDAR_ID, summary: "Launch · Atlas" },
+        later,
+      ),
+    ).toBe(false);
+    // A met one recedes with the past, as it did, and as a pinboard entry does.
+    expect(
+      isEventPast(
+        {
+          ...base,
+          calendar_id: MILESTONE_CALENDAR_ID,
+          summary: `${MILESTONE_MET_MARK}Launch · Atlas`,
+          done: true,
+        },
+        later,
+      ),
+    ).toBe(true);
+    // The check mark is display only: a label that itself starts with one is not a met milestone.
+    for (const done of [false, undefined]) {
+      expect(
+        isEventPast(
+          {
+            ...base,
+            calendar_id: MILESTONE_CALENDAR_ID,
+            summary: `${MILESTONE_MET_MARK}Launch · Atlas`,
+            done,
+          },
+          later,
+        ),
+      ).toBe(false);
+    }
+    // And a met one needs no mark to recede.
+    expect(
+      isEventPast(
+        { ...base, calendar_id: MILESTONE_CALENDAR_ID, summary: "Launch · Atlas", done: true },
+        later,
+      ),
+    ).toBe(true);
+    expect(isEventPast({ ...base, calendar_id: PINBOARD_CALENDAR_ID }, later)).toBe(true);
+  });
 });
 
 describe("the new event's ghost (C10c)", () => {
@@ -300,6 +352,15 @@ describe("the new event's ghost (C10c)", () => {
       "New event, saving: Dentist, 09:00",
     );
     expect(spokenName(null, "Dentist, 09:00")).toBe("Dentist, 09:00");
+  });
+
+  // The quick box's Task side draws its ghost on the Tasks calendar: it says "task", not "event".
+  it("draftNote says task for a ghost on the Tasks calendar", () => {
+    const at = (state: Parameters<typeof draftEvent>[2]) =>
+      draftNote(draftEvent(fields, TASK_CALENDAR_ID, state)!);
+    expect(at("unsaved")).toBe("New task, not saved yet");
+    expect(at("saving")).toBe("New task, saving");
+    expect(draftNote(draftEvent(fields, "c", "unsaved")!)).toBe("New event, not saved yet");
   });
 
   // A saved quick create's ghost waits for its row: a read begun after the save brings it, and the

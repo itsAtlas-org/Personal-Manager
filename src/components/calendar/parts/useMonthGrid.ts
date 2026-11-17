@@ -73,12 +73,19 @@ export function weekStartMonday(cursor: Date): Date {
  *  chips and packing multi-day events into stable lanes across the whole range. `focus` (a year+month)
  *  marks cells inside that month as `inMonth` for the single-month grid; the continuous stream omits it
  *  (every day is in-month). Shared by the single-month grid and the scrolling week stream so the
- *  chip/band logic can't drift. */
+ *  chip/band logic can't drift.
+ *
+ *  `only` (the stream's drawn slice, rows `from` up to `to`) builds just those rows. Lanes are still
+ *  packed over the whole range, so a band keeps its lane however much of the range is drawn, and what
+ *  is returned is the full build's rows `from..to`, in order: row `from + i` is `result[i]`. The
+ *  stream's `events` change with every keystroke of a quick create's draft, so a build over a
+ *  decade's rows each time would be wasted on the rows nobody sees. */
 export function buildWeekRows(
   gridStart: Date,
   rows: number,
   events: CalendarEvent[],
   focus?: { year: number; month: number },
+  only?: { from: number; to: number },
 ): MonthWeekRow[] {
   const lastIdx = rows * 7 - 1;
   const todayKey = dayKey(startOfDay(new Date()));
@@ -140,7 +147,9 @@ export function buildWeekRows(
   const ghostLanes = ghost ? lanesOf(DRAFT_EVENT_ID) : plainLanes;
 
   const weeks: MonthWeekRow[] = [];
-  for (let r = 0; r < rows; r++) {
+  const from = Math.max(0, only?.from ?? 0);
+  const to = Math.min(rows, only?.to ?? rows);
+  for (let r = from; r < to; r++) {
     const weekStartIdx = r * 7;
     const weekEndIdx = weekStartIdx + 6;
     const weekStart = addDays(gridStart, weekStartIdx);

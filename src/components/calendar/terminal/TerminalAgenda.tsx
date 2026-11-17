@@ -38,6 +38,9 @@ interface Props {
   now?: Date;
   /** Open an event's detail popup, anchored at the row's on-screen rect. */
   onEventClick?: (ev: CalendarEvent, anchor: DOMRect) => void;
+  /** What an empty open-ended agenda says, when a filter is why it is empty (Hide done, All-day).
+   *  Defaults to "No events in view." */
+  emptyText?: string;
 }
 
 interface DayRow {
@@ -60,7 +63,15 @@ function rowTime(ev: CalendarEvent, day: Date): string {
     : "→";
 }
 
-export function TerminalAgenda({ events, colorOf, days, fromDay, now, onEventClick }: Props) {
+export function TerminalAgenda({
+  events,
+  colorOf,
+  days,
+  fromDay,
+  now,
+  onEventClick,
+  emptyText,
+}: Props) {
   const { showPower } = useDepth();
   const bounded = !!(days && days.length > 0);
   const nowDate = now ?? new Date();
@@ -88,7 +99,7 @@ export function TerminalAgenda({ events, colorOf, days, fromDay, now, onEventCli
   if (!bounded && !hasAny) {
     return (
       <div className="flex flex-1 items-center justify-center p-8 font-mono">
-        <p className="text-sm text-ink4">No events in view.</p>
+        <p className="text-sm text-ink4">{emptyText ?? "No events in view."}</p>
       </div>
     );
   }

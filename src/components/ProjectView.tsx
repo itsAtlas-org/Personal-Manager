@@ -41,6 +41,7 @@ import { rankImportance } from "../lib/importance";
 import { useReader } from "../lib/reader";
 import {
   readMilestoneSort,
+  milestoneVisibility,
   readShowCompletedMilestones,
   writeMilestoneSort,
   writeShowCompletedMilestones,
@@ -222,17 +223,15 @@ export function ProjectView({
     });
   }, [milestones, msSort]);
 
-  // Whether there's any completed milestone to hide — gates the "Completed" checkbox.
-  const hasMetMilestones = useMemo(() => milestones.some((m) => m.state === "met"), [milestones]);
-  // The list actually shown: completed ones dropped when hidden — except under Manual sort, where the
-  // ↑/↓ reorder maps array indices to sort_order and must see every row.
-  const displayMilestones = useMemo(
-    () =>
-      showCompleted || msSort.key === "manual"
-        ? sortedMilestones
-        : sortedMilestones.filter((m) => m.state !== "met"),
-    [sortedMilestones, showCompleted, msSort.key],
+  // The list actually shown, and whether the "Completed" checkbox is on screen. ONE predicate drives
+  // both (milestoneVisibility), so the saved "hide completed" choice only ever applies while the
+  // box that undoes it is visible: not at Minimal depth, not with a single milestone, and not under
+  // Manual sort, where the ↑/↓ reorder maps array indices to sort_order and must see every row.
+  const msVisibility = useMemo(
+    () => milestoneVisibility(sortedMilestones, { showMeta, showCompleted, sortKey: msSort.key }),
+    [sortedMilestones, showMeta, showCompleted, msSort.key],
   );
+  const displayMilestones = msVisibility.shown;
 
   const refreshMilestones = () => {
     listMilestones(project)
@@ -498,7 +497,7 @@ export function ProjectView({
         <span className="font-mono text-xs uppercase tracking-wide text-ink4">Milestones</span>
         {showMeta && milestones.length > 1 && (
           <div className="flex items-center gap-2 text-[0.625rem] text-ink4">
-            {msSort.key !== "manual" && hasMetMilestones && (
+            {msVisibility.controlShown && (
               <label
                 className="flex cursor-pointer items-center gap-1"
                 title="Show completed milestones"
@@ -531,6 +530,7 @@ export function ProjectView({
           onChanged={refreshMilestones}
           readOnly={!showMeta}
           manualOrder={msSort.key === "manual"}
+          hiddenCompleted={msVisibility.hidden}
         />
       </div>
     </div>

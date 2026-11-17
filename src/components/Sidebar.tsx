@@ -6,7 +6,14 @@ import type { CalendarOverview, Conversation, LocalLlmStatus } from "../lib/type
 import { calendarOverview, listArchivedProjects, listProjects, onCalendarSynced } from "../lib/ipc";
 import { archivedSet, isArchived } from "../lib/archivedProjects";
 import { shortModel } from "../lib/format";
-import { readHidden, readRosterOpen, writeHidden, writeRosterOpen } from "../lib/calendarPrefs";
+import {
+  readHidden,
+  readRosterOpen,
+  rosterCount,
+  toggleHiddenId,
+  writeHidden,
+  writeRosterOpen,
+} from "../lib/calendarPrefs";
 import { localEndpointState, LOCAL_STATE_LABEL, LOCAL_STATE_TOKEN } from "../lib/localStatus";
 import {
   ACTIVITY_DETAIL,
@@ -306,12 +313,11 @@ export function Sidebar({
     return () => window.removeEventListener("pm:settings-changed", sync);
   }, []);
   function toggleCalendar(id: string) {
-    const next = new Set(calHidden);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
+    const next = toggleHiddenId(calHidden, id);
     setCalHidden(next);
     writeHidden(next); // announces, so the grid follows
   }
+  const calCount = rosterCount(calOverview?.calendars ?? [], calHidden);
   // Pure functions of the id SET (sorted internally), so this map provably matches the grid's without
   // any plumbing between them.
   const calColorOf = useMemo(() => {
@@ -359,7 +365,7 @@ export function Sidebar({
           onClick={onOpenPalette}
           data-help="sidebar-search"
           title="Search and jump to any project, file, conversation, or calendar event"
-          className="flex w-full items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface px-3 py-1.5 text-left text-sm text-ink4 hover:text-ink2"
+          className="flex w-full items-center justify-between rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-1.5 text-left text-sm text-ink4 hover:text-ink2"
         >
           <span>Search…</span>
           <span className="ml-2 shrink-0 font-mono text-xs text-ink4">{SHORTCUT_HINT}</span>
@@ -516,9 +522,7 @@ export function Sidebar({
                 change and a restart. */}
             <Collapsible
               title="Calendars"
-              meta={`${calOverview.calendars.filter((c) => c.selected && !calHidden.has(c.id)).length}/${
-                calOverview.calendars.filter((c) => c.selected).length
-              }`}
+              meta={`${calCount.shown}/${calCount.total}`}
               open={rosterOpen}
               onOpenChange={(o) => {
                 setRosterOpen(o);

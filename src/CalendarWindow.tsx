@@ -34,6 +34,7 @@ import {
 } from "./lib/ipc";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { subscribeUntilCleanup } from "./lib/subscribe";
+import { useCalendarChangeCheck } from "./lib/useCalendarChangeCheck";
 import { useExternalLinks } from "./lib/useExternalLinks";
 import { installAxisScrollNormalizer } from "./lib/scrollAxis";
 
@@ -72,10 +73,17 @@ export default function CalendarWindow() {
     return () => offs.forEach((off) => off());
   }, [check]);
 
+  // The ~30 s Google change check, for this window itself: the main window's runs only while main is
+  // on screen, and with it hidden in the tray this window may be the only one. Not behind the lock
+  // gate, where there is no store to read and nothing to refresh.
+  useCalendarChangeCheck(gate === "open");
+
   if (gate === "open")
     return (
       <main className="flex h-full min-h-0 flex-1 flex-col">
         <CalendarView
+          // No sidebar here, so the calendar list rides in the header as "Calendars n/m".
+          rosterInHeader
           onOpenProject={(project) => void showInMainWindow({ view: "project", project })}
           onOpenPinboard={() => void showInMainWindow({ view: "pinboard" })}
         />
@@ -93,7 +101,7 @@ export default function CalendarWindow() {
         <p className="mt-1 text-xs text-ink4">
           {gate === "curtain"
             ? "It comes back here when PM has the vault again."
-            : "Unlock PM in its main window, then try again."}
+            : "Unlock PM in its main window (Open PM, at the top of this window), then try again."}
         </p>
         {gate === "locked" && (
           <Button variant="secondary" size="sm" onClick={() => void check()} className="mt-3">

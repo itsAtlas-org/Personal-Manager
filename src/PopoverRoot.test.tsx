@@ -70,7 +70,8 @@ describe("the briefing window's root", () => {
     render(<PopoverRoot />);
     // The drag strip is this frameless window's only way to be moved or closed, so a regression that
     // takes it out has to be loud.
-    expect(screen.getByLabelText("Open Personal Manager")).toBeTruthy();
+    // Named by what it says (WCAG 2.5.3): a speech user says "click Open PM".
+    expect(screen.getByRole("button", { name: "Open PM" })).toBeTruthy();
     expect(screen.getByLabelText("Close the briefing window")).toBeTruthy();
   });
 });

@@ -10,20 +10,18 @@
 // one the board's cards have.
 
 import { useState } from "react";
+import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import {
-  readRunwayPastOpen,
-  writeRunwayPastOpen,
-  type RunwayWindow,
-} from "../../../lib/calendarPrefs";
-import {
+  cardCount,
   linkedEvent,
+  milestoneDone,
   type RunwayCard,
   type RunwayColumn,
   type RunwayTaskCard,
   type TaskPlan,
 } from "../../../lib/runway";
 import { deadlineInfo, STACK_KIND_LABEL, TONE_CLASS } from "../../../lib/tasks";
-import type { CalendarEvent, Task, TaskInput, TaskLane } from "../../../lib/types";
+import type { CalendarEvent, Task, TaskLane } from "../../../lib/types";
 import { useDepth } from "../../../theme";
 import { DeadlineChip, TaskStatusButton } from "../../tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
@@ -32,15 +30,16 @@ import {
   eventWhen,
   linkedDue,
   memberPlace,
-  newTaskDefaults,
   rolledWords,
   useRunwayActions,
-  useRunwayModel,
+  useRunwayFolds,
   type RunwayProps,
 } from "../views/runwayLogic";
-import { EventsStrip, MoveMenu, RunwayStrip, WindowDialog } from "../views/runwayParts";
+import { EventsStrip, MoveMenu, RunwayChrome, WindowDialog } from "../views/runwayParts";
 
-type Editing = { task: Task } | { defaults: Partial<TaskInput> } | null;
+/** The task open in the editor from a row's edit. A new task is CalendarView's (+ Task, in the
+ *  header). */
+type Editing = { task: Task } | null;
 
 interface RowCtx {
   today: Date;
@@ -70,28 +69,15 @@ export function TerminalRunway(props: RunwayProps) {
     onEventClick,
     onShowList,
     announce,
+    chrome,
   } = props;
-  const { today, columns, model, strips, showEvents, toggleEvents } = useRunwayModel(props);
+  const { today, columns, model, strips, showEvents, toggleEvents } = props.runway;
   const { error, cycle, replan, reorder } = useRunwayActions(announce);
   const [editing, setEditing] = useState<Editing>(null);
   const [windowEdit, setWindowEdit] = useState<{ window: RunwayWindow | null } | null>(null);
-  const [pastOpen, setPastOpen] = useState(readRunwayPastOpen);
-  // Any column folds, as on the board: Before today remembered, the rest for this visit.
-  const [folded, setFolded] = useState<Set<string>>(() => new Set());
-  const isOpenCol = (c: RunwayColumn) => (c.kind === "past" ? pastOpen : !folded.has(c.id));
-  const toggle = (c: RunwayColumn) => {
-    if (c.kind === "past") {
-      writeRunwayPastOpen(!pastOpen);
-      setPastOpen(!pastOpen);
-      return;
-    }
-    setFolded((f) => {
-      const next = new Set(f);
-      if (next.has(c.id)) next.delete(c.id);
-      else next.add(c.id);
-      return next;
-    });
-  };
+  // Any column folds, as on the board, and each fold is remembered (one key for both systems).
+  const { isFolded, toggle } = useRunwayFolds();
+  const isOpenCol = (c: RunwayColumn) => !isFolded(c);
 
   const ctx: RowCtx = {
     today,
@@ -107,13 +93,13 @@ export function TerminalRunway(props: RunwayProps) {
 
   return (
     <div data-help="calendar-runway" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <RunwayStrip
+      <RunwayChrome
+        chrome={chrome}
         model={model}
         terminal
-        onAddTask={() => setEditing({ defaults: newTaskDefaults(today) })}
-        onAddWindow={() => setWindowEdit({ window: null })}
         showEvents={showEvents}
         onToggleEvents={toggleEvents}
+        onAddWindow={() => setWindowEdit({ window: null })}
       />
       {error && (
         <div className="px-4 pt-2">
@@ -124,7 +110,7 @@ export function TerminalRunway(props: RunwayProps) {
         {columns.map((c) => {
           const lanes = model.lanes[c.id] ?? { foreground: [], background: [] };
           const open = isOpenCol(c);
-          const count = lanes.foreground.length + lanes.background.length;
+          const count = cardCount(lanes);
           return (
             <section key={c.id} aria-label={c.label}>
               <div className="flex items-baseline gap-2">
@@ -212,8 +198,7 @@ export function TerminalRunway(props: RunwayProps) {
       </div>
       <TaskEditor
         open={editing !== null}
-        task={editing && "task" in editing ? editing.task : null}
-        defaults={editing && "defaults" in editing ? editing.defaults : undefined}
+        task={editing ? editing.task : null}
         onClose={() => setEditing(null)}
       />
       <WindowDialog
@@ -249,7 +234,7 @@ function Row({
     return <TaskRow card={card} column={column} laneCards={laneCards} ctx={ctx} />;
   if (card.kind === "milestone") {
     const m = card.milestone;
-    const met = m.state === "met" || m.status === "done";
+    const met = milestoneDone(m);
     // Its deadline in its tone wherever it sits (plain once met), as a task's is.
     const info = m.due_date ? deadlineInfo(m.due_date.slice(0, 10), "hard", ctx.today, met) : null;
     return (

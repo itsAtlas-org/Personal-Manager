@@ -31,8 +31,8 @@ use super::shared::own_client;
 use super::shared::resolve_zone;
 use super::shared::{
     caller_may_write, google_account_emails, google_grant_token_keys, google_grant_users,
-    pin_existing_grants, release_plan, require_main_window, saved_project_account, wrong_account,
-    GoogleDisconnect, GoogleUse,
+    pin_existing_grants, release_plan, require_calendar_window, saved_project_account,
+    wrong_account, GoogleDisconnect, GoogleUse,
 };
 use super::vaults::require_vault_owner;
 
@@ -191,7 +191,7 @@ pub enum AccessAsk {
 /// Open a new email in the system's mail app asking the owner of a calendar shared with you to view
 /// only for edit access (plan Q10, A12). `calendar_id` is PM's calendar id; whom to ask and what the
 /// email says come from the stored calendar list, never from the webview. Nothing is sent: the user
-/// sends the email, or doesn't. Checked like a calendar write (the main window, the vault's owner),
+/// sends the email, or doesn't. Checked like a calendar write (a window that may edit, the vault's owner),
 /// since the email names the owner's account. Not one: it changes nothing in Google.
 #[tauri::command]
 pub async fn request_calendar_access(
@@ -201,7 +201,7 @@ pub async fn request_calendar_access(
 ) -> Result<AccessAsk> {
     if !caller_may_write(window.label()) {
         return Err(Error::Other(
-            "PM can only open this email from its main window.".into(),
+            "PM can only open this email from its main window or the pop-out Calendar.".into(),
         ));
     }
     require_vault_owner(&app).map_err(|_| {
@@ -469,7 +469,7 @@ pub async fn enable_calendar_editing(
     window: tauri::Window,
     email: String,
 ) -> Result<EditingStatus> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_vault_owner(&app)?;
     let email = email.trim().to_string();
     let account = calendar::google_account_id(&email);
@@ -549,7 +549,7 @@ pub fn set_calendar_editing_paused(
     email: String,
     paused: bool,
 ) -> Result<EditingStatus> {
-    require_main_window(&window)?;
+    require_calendar_window(&window)?;
     require_vault_owner(&app)?;
     let choice = if paused { Choice::Paused } else { Choice::On };
     {
@@ -1483,7 +1483,9 @@ fn announce_synced(app: &AppHandle, calendar_ids: Vec<String>) {
     if calendar_ids.is_empty() {
         return;
     }
-    let _ = app.emit_to("main", "calendar://synced", CalendarSynced { calendar_ids });
+    // To every window: the pop-out Calendar re-reads too (see `Host::landed` for why this isn't
+    // `emit_to("main", …)`).
+    let _ = app.emit("calendar://synced", CalendarSynced { calendar_ids });
     // A task whose deadline follows an event reads that event's date and title (PA-1), so the task
     // views (project page, pinboard list, Runway) re-read too.
     let _ = app.emit(crate::tasks::TASKS_CHANGED, ());

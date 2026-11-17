@@ -111,7 +111,7 @@ export function QueuedMessages({
                   }
                 }}
                 aria-label="Edit this queued message"
-                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-border2 bg-bg px-1.5 py-0.5 text-xs text-ink2"
+                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-bg px-1.5 py-0.5 text-xs text-ink2"
               />
             ) : (
               <button

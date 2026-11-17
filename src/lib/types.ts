@@ -1749,6 +1749,9 @@ export interface CalendarEvent {
    *  8,000 characters of the description, so the pop-up says where the rest is (C19). Absent when
    *  it kept all of it. */
   description_cut?: boolean;
+  /** PM's milestone overlay events only (never sent by the backend): the milestone is reached. What
+   *  `isEventPast` reads to let a met milestone recede; the check mark in its summary is display only. */
+  done?: boolean;
 }
 
 // --- Calendar editing (#884; mirrors `calendar_write::dto`) ---

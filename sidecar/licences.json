@@ -358,15 +358,15 @@
       }
     },
     "numpy": {
-      "versions": ["2.4.6", "2.5.4"],
+      "versions": ["2.5.4"],
       "licence": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 AND BSD-3-Clause-Open-MPI AND GPL-3.0-or-later WITH GCC-exception-3.1 AND LGPL-2.1-or-later AND LicenseRef-Microsoft-VC-Redistributable",
-      "stamp": "b7d881dff99b010b79e8248ee3b93b06",
+      "stamp": "5ad31abef68beccea589fe3d34e91115",
       "evidence": {
         "expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
         "license": null,
         "classifiers": []
       },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). numpy's own code and what it vendors (highway, pocketfft, libdivide, x86-simd-sort, svml) is the declared BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0. The wheels add OpenBLAS (BSD-3-Clause, with LAPACK's BSD-3-Clause-Open-MPI), the GCC runtime libgfortran and libgcc_s (GPL-3.0-or-later WITH GCC-exception-3.1; static inside the Windows OpenBLAS DLL) and libquadmath (LGPL-2.1-or-later; Linux and the older macOS wheels), and on Windows Microsoft's msvcp140. The macosx_14_0 wheels bundle nothing: they link Apple's Accelerate."
+      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). numpy's own code and what it vendors (highway, pocketfft, libdivide, x86-simd-sort, svml) is the declared BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0. The wheels add OpenBLAS (BSD-3-Clause, with LAPACK's BSD-3-Clause-Open-MPI), the GCC runtime libgfortran and libgcc_s (GPL-3.0-or-later WITH GCC-exception-3.1; static inside the Windows OpenBLAS DLL) and libquadmath (LGPL-2.1-or-later; Linux and the older macOS wheels), and on Windows Microsoft's msvcp140. The macosx_14_0 wheels bundle nothing: they link Apple's Accelerate. Re-checked 2026-11-16 after the Python 3.12 floor dropped the 2.4.6 fork: 2.5.4 was already in the reviewed set and no hash was added to the locks, so the wheels read are the wheels still locked."
     },
     "olefile": {
       "versions": ["0.47"],
@@ -444,15 +444,15 @@
       }
     },
     "pandas": {
-      "versions": ["3.1.0"],
+      "versions": ["3.1.1"],
       "licence": "BSD-3-Clause AND BSD-2-Clause AND MIT AND TCL AND Apache-2.0 AND PSF-2.0 AND LicenseRef-Microsoft-VC-Redistributable",
-      "stamp": "74929ac5d36cd4b3aa55701ec6905a27",
+      "stamp": "9c0e587b1748c374b1a8793141d0e978",
       "evidence": {
         "expression": "BSD-3-Clause",
         "license": null,
         "classifiers": []
       },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). pandas is BSD-3-Clause; compiled in are ujson (BSD-3-Clause AND TCL), klib, musl-derived code, xsimd and fast_float 8.2.10 (Apache-2.0 OR BSL-1.0 OR MIT: MIT taken); its pure-Python borrowings add Apache-2.0, BSD-2-Clause and PSF-2.0. Windows adds msvcp140; Linux and macOS bundle no libraries."
+      "note": "Bundled natives read 2026-11-06 for 3.1.0 and again 2026-11-11 for 3.1.1 in the cp312 win_amd64, macOS arm64 and manylinux x86_64 wheels (hashes checked against the locks): 3.1.1 ships byte-identical licence files and the same native file set as 3.1.0. pandas is BSD-3-Clause; compiled in are ujson (BSD-3-Clause AND TCL), klib, musl-derived code, xsimd and fast_float 8.2.10 (Apache-2.0 OR BSL-1.0 OR MIT: MIT taken); its pure-Python borrowings add Apache-2.0, BSD-2-Clause and PSF-2.0. Windows adds msvcp140; Linux and macOS bundle no libraries."
     },
     "pdfminer-six": {
       "versions": ["20260107"],
@@ -552,18 +552,15 @@
       "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). The bindings are Apache-2.0 OR BSD-3-Clause (BSD-3-Clause taken) with CC-BY-4.0 documentation. The one bundled library, PDFium (BSD-3-Clause AND Apache-2.0), links statically FreeType (FTL), ICU (Unicode-3.0 AND ICU), libc++ (Apache-2.0 WITH LLVM-exception), Anti-Grain Geometry 2.3, libjpeg-turbo, libpng, OpenJPEG, abseil, lcms2, fast_float, simdutf and zlib, plus the Microsoft static C/C++ runtime on Windows. The same 15 licence files ship for every platform."
     },
     "python-dateutil": {
-      "versions": ["2.9.0.post0"],
+      "versions": ["4.0.0"],
       "licence": "Apache-2.0 AND BSD-3-Clause",
-      "stamp": "7b88e055c464a215b50ecbd0f91a3557",
+      "stamp": "05128aa929879d997c349d58cbfed014",
       "evidence": {
-        "expression": null,
-        "license": "Dual License",
-        "classifiers": [
-          "License :: OSI Approved :: Apache Software License",
-          "License :: OSI Approved :: BSD License"
-        ]
+        "expression": "BSD-3-Clause",
+        "license": null,
+        "classifiers": []
       },
-      "note": "`license: \"Dual License\"`, and the two classifiers name Apache and BSD without saying which applies. The LICENSE file (read in the py3 wheel) applies both rather than offering a choice: Apache-2.0 to every contribution after 2017-12-01 and to the code its authors re-licensed, and BSD-3-Clause to all the code, 'even that also covered by Apache 2.0'."
+      "note": "4.0.0 declares `license_expression: \"BSD-3-Clause\"`, which understates its own LICENSE file. That file (read in the py3 wheel, 2026-11-11) is unchanged from 2.9: Apache-2.0 applies to every contribution after 2017-12-01 and to the code its authors re-licensed, and BSD-3-Clause to all the code, 'even that also covered by Apache 2.0'. Both apply, so both are recorded. The wheel no longer bundles a time-zone database (tzdata supplies it)."
     },
     "python-pptx": {
       "versions": ["1.0.2"],
@@ -617,22 +614,15 @@
       "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). scikit-learn is BSD-3-Clause (libsvm and liblinear inside, BSD-3-Clause; vendored array-api code, MIT). Its OpenMP runtime differs by platform: GCC's libgomp on Linux (GCC runtime exception), LLVM's libomp on macOS (Apache-2.0 WITH LLVM-exception AND NCSA), Microsoft's msvcp140 and vcomp140 on Windows."
     },
     "scipy": {
-      "versions": ["1.17.1", "1.18.1"],
+      "versions": ["1.18.1"],
       "licence": "BSD-3-Clause AND BSD-2-Clause AND MIT AND BSL-1.0 AND Qhull AND BSD-3-Clause-LBNL AND Apache-2.0 WITH LLVM-exception AND BSD-3-Clause-Open-MPI AND GPL-3.0-or-later WITH GCC-exception-3.1 AND LGPL-2.1-or-later",
-      "stamp": "daed36ea6c2fb70ef7b9f5d9641cfc51",
+      "stamp": "2fc8184a800193c75157dad33d04021d",
       "evidence": {
-        "1.17.1": {
-          "expression": null,
-          "license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers. All rights reserved. Redistribution and use in source...",
-          "classifiers": ["License :: OSI Approved :: BSD License"]
-        },
-        "1.18.1": {
-          "expression": null,
-          "license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers. All rights reserved. Redistribution and use in source...",
-          "classifiers": ["License :: OSI Approved :: BSD License"]
-        }
+        "expression": null,
+        "license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers. All rights reserved. Redistribution and use in source...",
+        "classifiers": ["License :: OSI Approved :: BSD License"]
       },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). SciPy is BSD-3-Clause and compiles in Qhull, Boost.Math and ryu (BSL-1.0), xsf (BSD-3-Clause, MIT, BSD-3-Clause-LBNL, Apache-2.0 WITH LLVM-exception), HiGHS, SuperLU, ARPACK and others (BSD, MIT). The wheels bundle OpenBLAS with LAPACK (BSD-3-Clause, BSD-3-Clause-Open-MPI), libgfortran and libgcc_s (GCC runtime exception) and libquadmath (LGPL-2.1-or-later, not on Windows). The macosx_14_0 wheels link Apple's Accelerate instead of OpenBLAS."
+      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). SciPy is BSD-3-Clause and compiles in Qhull, Boost.Math and ryu (BSL-1.0), xsf (BSD-3-Clause, MIT, BSD-3-Clause-LBNL, Apache-2.0 WITH LLVM-exception), HiGHS, SuperLU, ARPACK and others (BSD, MIT). The wheels bundle OpenBLAS with LAPACK (BSD-3-Clause, BSD-3-Clause-Open-MPI), libgfortran and libgcc_s (GCC runtime exception) and libquadmath (LGPL-2.1-or-later, not on Windows). The macosx_14_0 wheels link Apple's Accelerate instead of OpenBLAS. Re-checked 2026-11-16 after the Python 3.12 floor dropped the 1.17.1 fork: 1.18.1 was already in the reviewed set and no hash was added to the locks, so the wheels read are the wheels still locked."
     },
     "shapely": {
       "versions": ["2.2.0"],
@@ -656,14 +646,15 @@
       }
     },
     "soupsieve": {
-      "versions": ["2.10", "3.0.4"],
+      "versions": ["4.1.1"],
       "licence": "MIT",
-      "stamp": "2702c392b509edace536e5f3eb2af9f2",
+      "stamp": "d8691329fa2aa3f2bd6ee2b99e5cd639",
       "evidence": {
         "expression": "MIT",
         "license": null,
         "classifiers": ["License :: OSI Approved :: MIT License"]
-      }
+      },
+      "note": "4.1.1's py3 wheel (hash checked against the lock, read 2026-11-16) carries the same MIT LICENSE.md as 3.0.4 and no compiled code. It is the only soupsieve left in the locks since the Python 3.12 floor dropped the 2.10 fork."
     },
     "threadpoolctl": {
       "versions": ["3.7.0"],
