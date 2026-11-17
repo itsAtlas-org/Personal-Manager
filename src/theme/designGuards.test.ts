@@ -325,6 +325,7 @@ describe("form-control edges use --ink4, not --border2", () => {
       ["src/components/calendar/ZoneGutter.tsx", ["zones.length === 0 &&"]],
       ["src/components/DevView.tsx", ["bg-surface px-2 py-1 text-sm text-ink"]],
       ["src/components/RemovePmData.tsx", ["cursor-pointer border-"]],
+      ["src/components/backup/AutomaticBackupsSection.tsx", ["w-20 rounded-[var(--radius-sm)]"]],
     ];
     for (const [path, anchors] of SITES) {
       const lines = (SOURCES.find(([p]) => p === path)?.[1] ?? "").split("\n");
@@ -349,5 +350,80 @@ describe("form-control edges use --ink4, not --border2", () => {
     const button = SOURCES.find(([p]) => p === "src/components/ui/Button.tsx")?.[1] ?? "";
     expect(button).toContain("border border-ink4");
   });
+
+  // The Mods screens, the Developer kit, Storage and the backup panels. They hold hand-styled
+  // controls next to panels (a bare `border-border`/`border-border2` is right on a card or a list
+  // frame), so the rule is read off the control's own tag, not the file: a text-like <input> must
+  // carry --ink4 and focus --accent-text; a pill-shaped <button> must carry --ink4 and hover to
+  // --ink2 (a `hover:border-accent` edge is weaker than the resting one on a pale accent).
+  // Checkboxes and radios are the browser's own widgets (their own edge), so they are exempt.
+  it("hand-styled inputs and pill buttons in the Mods, Storage and backup files keep an --ink4 edge", () => {
+    const SCOPE =
+      /^src\/components\/(mods\/|settings\/(Developer|TestMods)|backup\/|Storage(Settings|Mods)\.tsx)/;
+    const offenders: string[] = [];
+    let inputs = 0;
+    for (const [path, text] of SOURCES) {
+      if (!SCOPE.test(path)) continue;
+      for (const m of text.matchAll(/<input\b[^>]*?\/>|<input\b[\s\S]*?\n\s*\/>/g)) {
+        if (/type="(checkbox|radio)"/.test(m[0])) continue;
+        inputs += 1;
+        if (!m[0].includes("border-ink4") || !m[0].includes("focus:border-accent-text"))
+          offenders.push(`${path}: <input> without border-ink4 + focus:border-accent-text`);
+      }
+      text.split("\n").forEach((line, i) => {
+        if (/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(line)) return;
+        if (/rounded-full/.test(line) && /(?<![\w:-])border\b/.test(line)) {
+          // A pill with an edge: a badge (a status label, not operated) is told apart by a
+          // non-interactive tag; the pills in these files that ARE buttons use `hover:`.
+          if (/hover:border-accent\b(?!-)/.test(line))
+            offenders.push(`${path}:${i + 1} hover:border-accent`);
+          if (/hover:/.test(line) && !/(?<![\w:-])border-ink4/.test(line))
+            offenders.push(`${path}:${i + 1} pill button without border-ink4`);
+        }
+      });
+    }
+    expect(inputs, "the scan should find the Keep last field").toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
+  });
 });
 // ===== END form-control edges (#1105) =======================================================
+
+// ===== BEGIN chip-row fields (#1115) ========================================================
+// The small field at the end of a row of chips (add a tag, add another name, link a project) had
+// no edge at all, so only its placeholder said it was a field. Each one now takes `CHIP_INPUT`
+// (src/components/ui/chipInput.ts): Input's `--ink4` edge (3:1, WCAG 1.4.11), at chip height.
+describe("chip-row fields take CHIP_INPUT's --ink4 edge", () => {
+  const CHIP_ROW_FIELDS = [
+    "src/components/TagEditor.tsx",
+    "src/components/TeachTags.tsx",
+    "src/components/TeachView.tsx",
+    "src/components/ProjectPicker.tsx",
+  ] as const;
+
+  it("CHIP_INPUT edges in --ink4, focuses in --accent-text and recedes only when disabled", () => {
+    const text = SOURCES.find(([p]) => p === "src/components/ui/chipInput.ts")?.[1] ?? "";
+    expect(text).toContain("border border-ink4");
+    expect(text).toContain("focus:border-accent-text");
+    expect(text).toContain("disabled:border-border2");
+    const recipe = text.slice(text.indexOf('"'));
+    expect(recipe).not.toMatch(/(?<![\w-])(?<!disabled:)border-border2\b/);
+  });
+
+  it("every chip-row field uses it", () => {
+    for (const path of CHIP_ROW_FIELDS) {
+      const text = SOURCES.find(([p]) => p === path)?.[1];
+      expect(text, `${path} should exist`).toBeDefined();
+      // On the field itself: exactly one use, in a className.
+      const uses = (text ?? "").split("\n").filter((l) => l.includes("CHIP_INPUT)"));
+      expect(uses, path).toHaveLength(1);
+      expect(uses[0], path).toContain("className=");
+    }
+  });
+
+  it("the old borderless recipe is gone from the tree", () => {
+    expect(filesContaining("bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none")).toEqual(
+      [],
+    );
+  });
+});
+// ===== END chip-row fields (#1115) ==========================================================

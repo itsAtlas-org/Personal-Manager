@@ -1,0 +1,16 @@
+# Cargo settings for every cargo run in this repo. Cargo reads .cargo/config.toml from the directory it
+# runs in and from each parent, never from the manifest's folder, so this file sits at the repo root:
+# CI and the justfile run cargo from here with --manifest-path src-tauri/Cargo.toml, and `tauri dev` /
+# `tauri build` run it from src-tauri/, which is below this.
+
+[env]
+# Build SQLite (SQLCipher, from libsqlite3-sys's bundled build) with its memory statistics off. With them
+# on, which is SQLite's default, every allocation and free SQLite makes takes one process-wide lock to
+# keep a running total. PM never reads that total: nothing calls sqlite3_memory_used, sqlite3_status or
+# the soft and hard heap limits, which all stop working with it off. When several threads use a database
+# at once they queue on that lock, and PM's Rust tests spent most of their time in the kernel waiting
+# on it (the mods:: tests ran five times faster with it off).
+#
+# db::tests::sqlite_is_built_without_memory_statistics fails if this stops reaching the build. A
+# LIBSQLITE3_FLAGS already set in the environment wins over this one, and the test catches that too.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"

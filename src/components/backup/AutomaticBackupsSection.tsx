@@ -112,7 +112,7 @@ export function AutomaticBackupsSection({
                 type="number"
                 min={1}
                 max={100}
-                className="w-20 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1 text-ink2"
+                className="w-20 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3"
                 value={retentionDraft}
                 onChange={(e) => setRetentionDraft(e.currentTarget.value)}
                 onBlur={commitRetention}

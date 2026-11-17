@@ -24,6 +24,27 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.183.3-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "Under the hood: PM's database no longer keeps a running count of the memory it uses, which PM never read. Keeping it took one shared lock every time the database set memory aside or gave it back, so parts of PM using the database at the same moment could hold each other up. In the app this saves a little work on every database call; PM's own tests now run several times faster.",
+    ],
+  },
+  {
+    version: "3.183.2-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "The “Keep last” box under Automatic backups now has a clearly visible edge, like PM's other fields, and its edge changes colour when you click into it. The small buttons in Settings → Storage that take you to another tab keep a strong edge when you point at them, instead of fading in light themes.",
+    ],
+  },
+  {
+    version: "3.183.1-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "The small fields at the end of a row of tags or projects now have a visible edge too: adding a tag to a document, linking a document to another project, and adding a tag or another name in Teach. Before, only the faint hint text inside showed they were there to type in. In a project's list of documents, a screen reader now also says which document each tag or project field is for.",
+    ],
+  },
+  {
     version: "3.183.0-alpha",
     date: "2026-11-17",
     highlights: [

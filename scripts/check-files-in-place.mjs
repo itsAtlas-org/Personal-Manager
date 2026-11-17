@@ -93,6 +93,7 @@ for (const f of tracked) {
 // 2. Root cleanliness — tracked top-level entries must be a known set. Adding a
 // new legitimate root file? Add it here in the same PR; that is the point.
 const ALLOWED_ROOT = new Set([
+  ".cargo", // cargo settings for every cargo run in the repo (SQLite build flags); see its header
   ".claude",
   ".design-sync", // /design-sync skill inputs (claude.ai/design); build output is git-ignored
   ".gitattributes", // pins the working-tree line endings (see the file's own header)
