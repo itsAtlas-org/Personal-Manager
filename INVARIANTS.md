@@ -457,9 +457,15 @@ pre-commit) fails on a `mods/` path in a bundle's resources (and the other file-
 and on a `src/` import of `mods/`. The sources are read the way Tauri reads them (each platform file merged onto the base per RFC 7386, a
 list or a map, a glob matched against `mods/`, a folder that holds the repository refused), and each
 import specifier is resolved against its file, so PM's own `src/components/mods/` is not confused for
-the top-level folder. It reads source only. What it does not read: a Rust `include_str!` or
-`include_bytes!` of a `mods/` path in non-test code; no such use exists, and a new one is a review
-item until the gate learns it. The same gate holds each
+the top-level folder. It reads source only. It also reads every Rust file under `src-tauri/` and
+fails on an `include_str!`, `include_bytes!` or `include!` of a `mods/` file in non-test code: a
+string literal is resolved from the folder of the file holding the macro (as rustc does), and
+`concat!(env!("CARGO_MANIFEST_DIR"), "...")` from the crate's folder. A form it cannot resolve that
+mentions `mods/` fails closed. Test code is exempt: `tests.rs`, `*_tests.rs`, a `tests/` folder and
+an item behind `#[cfg(test)]` exactly; any other test-only use is allow-listed by file path in
+`RUST_INCLUDE_ALLOWED`. A `build.rs` that names a `mods/` path and uses `OUT_DIR` is refused too.
+What it does not read: a path built at run time or by joining pieces in code (a `build.rs` doing
+`Path::new("..").join("mods")`), which is a review item. The same gate holds each
 manifest to `package.rs`'s rules (and pins a first-party mod's author and `sourceRepo`), and
 `check-version-lockstep.mjs` uses it for D12: a change that touches only mod folders (`mods/<id>/`)
 owes the mod's own version bump, not PM's. A shared file directly under `mods/` (`vite.config.ts`,

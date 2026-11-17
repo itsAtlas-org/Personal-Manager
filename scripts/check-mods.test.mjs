@@ -42,6 +42,8 @@ import {
   resolvesIntoMods,
   resourceReaches,
   rustConstants,
+  rustTokens,
+  testRanges,
   specifiersIn,
 } from "./check-mods.mjs";
 import { PERMISSIONS } from "./pack-mod.mjs";
@@ -173,6 +175,7 @@ describe("the baseline tree", () => {
     expect(r.fixtures).toBeGreaterThanOrEqual(1);
     expect(r.configs).toBe(3);
     expect(r.scanned).toBeGreaterThan(100);
+    expect(r.rustScanned).toBeGreaterThan(100);
   });
 });
 
@@ -1145,6 +1148,158 @@ describe("src/ importing mods/", () => {
 });
 
 // ---- The gate as a command ------------------------------------------------------------------------
+
+describe("Rust embedding a file of mods/", () => {
+  const rust = (path, text) => goodTree({ [path]: text });
+  const flagged = (path, text, part = "top-level mods/ folder") =>
+    expectRefused(rust(path, text), part);
+  const passes = (path, text) => expect(problemsOf(rust(path, text))).toEqual([]);
+  const MAP = "../../../mods/atlas.map/manifest.json"; // from src-tauri/src/mods/x.rs
+
+  it("is refused for a string literal, resolved from the file that holds the macro", () => {
+    flagged("src-tauri/src/mods/x.rs", `const A: &str = include_str!("${MAP}");\n`);
+    flagged("src-tauri/src/mods/x.rs", `const A: &[u8] = include_bytes!("${MAP}");\n`);
+    flagged("src-tauri/src/mods/x.rs", `include!("../../../mods/atlas.map/gen.rs");\n`);
+    flagged("src-tauri/src/mods/x.rs", `let a = include_str!(\n    "${MAP}",\n);\n`);
+    flagged("src-tauri/src/mods/x.rs", `let a = include_str! { "${MAP}" };\n`);
+    flagged("src-tauri/src/mods/x.rs", `let a = include_str!(r#"${MAP}"#);\n`);
+    flagged(
+      "src-tauri/src/lib.rs",
+      `let a = include_str!("../../mods/atlas.map/manifest.json");\n`,
+    );
+    flagged(
+      "src-tauri/src/mods/x.rs",
+      `let a = include_str!("../../../Mods/atlas.map/manifest.json");\n`,
+    );
+    flagged("src-tauri/src/mods/x.rs", `let a = include_str!("../../../mods");\n`);
+  });
+
+  it("is refused in the concat!(env!(CARGO_MANIFEST_DIR), ...) form, from src-tauri/", () => {
+    flagged(
+      "src-tauri/src/mods/x.rs",
+      'const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../mods/atlas.map/manifest.json"));\n',
+    );
+    flagged(
+      "src-tauri/src/lib.rs",
+      'const A: &str = include_str!(concat!(\n    env!("CARGO_MANIFEST_DIR"),\n    "/../",\n    "mods/atlas.map/manifest.json",\n));\n',
+    );
+    flagged(
+      "src-tauri/build.rs",
+      'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../mods/x.rs"));\n',
+    );
+  });
+
+  it("uses the crate that holds the file as CARGO_MANIFEST_DIR", () => {
+    // In a crate at src-tauri/extra the same text names src-tauri/mods, which is not the top-level one.
+    const tree = goodTree({
+      "src-tauri/extra/Cargo.toml": "[package]\n",
+      "src-tauri/extra/src/lib.rs":
+        'const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../mods/x"));\n',
+    });
+    expect(problemsOf(tree)).toEqual([]);
+    tree["src-tauri/extra/src/lib.rs"] =
+      'const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../mods/x"));\n';
+    expectRefused(tree, "top-level mods/ folder");
+  });
+
+  it("never confuses PM's own src/components/mods, or another folder called mods", () => {
+    passes(
+      "src-tauri/src/mods/x.rs",
+      'const A: &str = include_str!("../../../src/components/mods/modBridge.ts");\n',
+    );
+    passes("src-tauri/src/mods/x.rs", 'const A: &str = include_str!("../mods/tab/kit.rs");\n');
+    passes("src-tauri/src/mods/x.rs", 'const A: &str = include_str!("mods/x.js");\n');
+    passes(
+      "src-tauri/src/lib.rs",
+      'const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/components/mods/modBridge.ts"));\n',
+    );
+    passes("src-tauri/src/mods/x.rs", 'const A: &str = include_str!("../../../LICENCE.txt");\n');
+  });
+
+  it("allows test code: tests.rs, *_tests.rs, a tests/ folder and #[cfg(test)] items", () => {
+    const use = `const A: &str = include_str!("${MAP}");\n`;
+    passes("src-tauri/src/mods/tests.rs", use);
+    passes("src-tauri/src/mods/surface_tests.rs", use);
+    passes("src-tauri/src/mods/ledger/tests/pilots.rs", use.replace("../../../", "../../../../"));
+    passes(
+      "src-tauri/src/mods/x.rs",
+      `#[cfg(test)]\nmod tests {\n    fn t() { let _ = include_str!("${MAP}"); }\n}\n`,
+    );
+    passes("src-tauri/src/mods/x.rs", `#[cfg(test)]\n#[allow(dead_code)]\nmod t {\n    ${use}}\n`);
+    passes("src-tauri/src/mods/x.rs", `#[cfg(test)]\nconst A: &str = include_str!("${MAP}");\n`);
+    passes("src-tauri/src/mods/x.rs", `#![cfg(test)]\n${use}`);
+  });
+
+  it("allows a test module only as far as its closing brace", () => {
+    const after =
+      '#[cfg(test)]\nmod tests {\n    fn t() { let c = \'}\'; let s = "}"; /* } */ let _: &\'static str = ""; }\n}\n' +
+      `const A: &str = include_str!("${MAP}");\n`;
+    flagged("src-tauri/src/mods/x.rs", after);
+    const before = `const A: &str = include_str!("${MAP}");\n#[cfg(test)]\nmod tests {}\n`;
+    flagged("src-tauri/src/mods/x.rs", before);
+  });
+
+  it("does not take any other cfg for test code, and says how to allow one", () => {
+    const body = `#[cfg(all(test, unix))]\nmod tests {\n    const A: &str = include_str!("${MAP}");\n}\n`;
+    flagged("src-tauri/src/mods/x.rs", body);
+    flagged("src-tauri/src/mods/x.rs", body, "RUST_INCLUDE_ALLOWED");
+    flagged(
+      "src-tauri/src/mods/x.rs",
+      `#[cfg(not(test))]\nconst A: &str = include_str!("${MAP}");\n`,
+    );
+  });
+
+  it("is refused, closed, for a form it cannot resolve that mentions mods/", () => {
+    flagged(
+      "src-tauri/src/mods/x.rs",
+      'const A: &str = include_str!(concat!(env!("OUT_DIR"), "/../mods/x"));\n',
+      "cannot resolve",
+    );
+    flagged(
+      "src-tauri/src/mods/x.rs",
+      'const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), path!(), "/../mods/x"));\n',
+      "cannot resolve",
+    );
+    passes(
+      "src-tauri/src/mods/x.rs",
+      'const A: &str = include_str!(concat!(env!("OUT_DIR"), "/gen.rs"));\n',
+    );
+  });
+
+  it("ignores a mention in a comment or a string, and a macro of another name", () => {
+    passes("src-tauri/src/mods/x.rs", `// include_str!("${MAP}")\n/* include_str!("${MAP}") */\n`);
+    passes("src-tauri/src/mods/x.rs", `const S: &str = "include_str!(\\"${MAP}\\")";\n`);
+    passes("src-tauri/src/mods/x.rs", `const S: &str = r#"include_str!("${MAP}")"#;\n`);
+    passes("src-tauri/src/mods/x.rs", `const A: &str = my_include_str!("${MAP}");\n`);
+  });
+
+  it("is refused for a build script that copies mods/ into OUT_DIR", () => {
+    flagged(
+      "src-tauri/build.rs",
+      'fn main() {\n    let out = std::env::var("OUT_DIR").unwrap();\n    std::fs::copy("../mods/atlas.map/manifest.json", out).unwrap();\n}\n',
+      "build script",
+    );
+    passes(
+      "src-tauri/build.rs",
+      'fn main() {\n    let out = std::env::var("OUT_DIR").unwrap();\n    let _ = std::fs::read_to_string("../src/components/mods/ModFrame.tsx");\n}\n',
+    );
+    passes(
+      "src-tauri/build.rs",
+      'fn main() {\n    let _ = std::fs::read_to_string("../mods/atlas.map/manifest.json");\n}\n',
+    );
+  });
+
+  it("reads Rust the way the compiler does (comments, raw strings, lifetimes, characters)", () => {
+    const src =
+      "#[cfg(test)]\nmod t {\n    // }\n    /* /* } */ } */\n    fn f<'a>(x: &'a str) -> char { let _ = r#\"}\"#; '{' }\n}\nfn after() {}\n";
+    const tokens = rustTokens(src);
+    const [[from, to]] = testRanges(tokens);
+    expect(tokens[from].v).toBe("#");
+    expect(tokens[to].v).toBe("}");
+    expect(tokens[to + 1].v).toBe("fn");
+    expect(tokens.filter((t) => t.t === "str").map((t) => t.v)).toEqual(["}"]);
+  });
+});
 
 describe("the command", () => {
   const SCRIPTS = [

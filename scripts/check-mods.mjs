@@ -36,6 +36,13 @@
 //     * nothing under src/ (and not the root index.html) imports from the top-level mods/ folder.
 //       Each specifier is RESOLVED against the importing file: a substring test would refuse src/components/mods/, which is
 //       PM's own.
+//     * no Rust file under src-tauri/ (src/, build.rs, any other crate) embeds a file of the top-level
+//       mods/ folder with `include_str!`, `include_bytes!` or `include!`: a string literal (resolved
+//       from the folder of the file holding the macro, as rustc does) or `concat!` of literals led by
+//       `env!("CARGO_MANIFEST_DIR")` (resolved from the crate's folder). A form it cannot resolve that
+//       mentions mods/ fails closed. Test code is exempt: `tests.rs`, `*_tests.rs`, a `tests/` folder,
+//       and an item behind `#[cfg(test)]` exactly (any other test-only use goes in
+//       RUST_INCLUDE_ALLOWED by file path). A build.rs naming mods/ and using OUT_DIR is refused too.
 //
 //   --base <ref>: each mods/<id>/ that differs from the merge-base with <ref> (working tree
 //       included) needs a manifest version greater than the one at <ref>, and the matching top
@@ -678,6 +685,282 @@ function checkSrcImports(root) {
   return { problems, scanned };
 }
 
+// ---- Rust embedding a mod's file ------------------------------------------------------------------
+
+// A Rust `include_str!` of a mod's file would put that file inside PM's own binary, which skips the
+// verifier, the ledger and the blacklist just as a bundle resource would. This is a mistake-catching
+// lint (a careless edit), not a wall against someone hiding the path, so it reads the forms people
+// write: a string literal, and `concat!(env!("CARGO_MANIFEST_DIR"), "...")`.
+//
+// Test code may embed a mod's committed file (a test that parses mods/atlas.map/manifest.json is how
+// the Rust job notices drift). The gate knows test code by: a file named `tests.rs` or `*_tests.rs`, a
+// file under a `tests/` folder, and an item behind `#[cfg(test)]` exactly. Any other test-only use
+// (for instance `#[cfg(all(test, ...))]`) is allow-listed here by FILE PATH, never by a marker comment.
+export const RUST_INCLUDE_ALLOWED = [];
+
+const INCLUDE_MACROS = new Set(["include_str", "include_bytes", "include"]);
+
+/**
+ * Rust source as tokens: `{ t: "id" | "str" | "p", v, at }`. Comments are dropped, a string keeps its
+ * value (raw and byte strings too), and a character literal is told from a lifetime, so a brace or a
+ * quote inside either cannot unbalance what reads these.
+ */
+export function rustTokens(text) {
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (/\s/.test(c)) i++;
+    else if (c === "/" && text[i + 1] === "/") {
+      while (i < n && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (text[i] === "/" && text[i + 1] === "*") {
+          depth++;
+          i += 2;
+        } else if (text[i] === "*" && text[i + 1] === "/") {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+    } else if (/[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < n && /[A-Za-z0-9_]/.test(text[j])) j++;
+      const word = text.slice(i, j);
+      const raw = /^(?:b?r)$/.test(word) && /["#]/.test(text[j] ?? "");
+      if (raw) {
+        let k = j;
+        while (text[k] === "#") k++;
+        const hashes = k - j;
+        if (text[k] === '"') {
+          const close = `"${"#".repeat(hashes)}`;
+          const end = text.indexOf(close, k + 1);
+          const stop = end < 0 ? n : end;
+          out.push({ t: "str", v: text.slice(k + 1, stop), at: i });
+          i = end < 0 ? n : end + close.length;
+          continue;
+        }
+      }
+      if (word === "b" && text[j] === '"') {
+        i = j; // a byte string reads like a string; the quote is handled next time round
+        continue;
+      }
+      out.push({ t: "id", v: word, at: i });
+      i = j;
+    } else if (c === '"') {
+      let j = i + 1;
+      let v = "";
+      while (j < n && text[j] !== '"') {
+        if (text[j] === "\\") {
+          const e = text[j + 1];
+          v += e === "\\" || e === '"' ? e : `\\${e ?? ""}`;
+          j += 2;
+        } else v += text[j++];
+      }
+      out.push({ t: "str", v, at: i });
+      i = j + 1;
+    } else if (c === "'") {
+      // A character literal ('x', '\n', '\'') or a lifetime ('a).
+      const cp = text.codePointAt(i + 1);
+      const width = cp === undefined ? 0 : String.fromCodePoint(cp).length;
+      if (text[i + 1] === "\\") {
+        let j = i + 2;
+        while (j < n && text[j] !== "'") j += text[j] === "\\" ? 2 : 1;
+        i = j + 1;
+      } else if (width > 0 && text[i + 1 + width] === "'") i += width + 2;
+      else i++;
+    } else if (/[0-9]/.test(c)) {
+      let j = i;
+      while (j < n && /[A-Za-z0-9_]/.test(text[j])) j++;
+      out.push({ t: "id", v: text.slice(i, j), at: i });
+      i = j;
+    } else {
+      out.push({ t: "p", v: c, at: i });
+      i++;
+    }
+  }
+  return out;
+}
+
+/** The index of the token that closes the bracket opened at `open`, or -1. */
+function closeOf(tokens, open) {
+  const pairs = { "(": ")", "[": "]", "{": "}" };
+  const stack = [];
+  for (let k = open; k < tokens.length; k++) {
+    const tok = tokens[k];
+    if (tok.t !== "p") continue;
+    if (pairs[tok.v]) stack.push(pairs[tok.v]);
+    else if (tok.v === stack[stack.length - 1]) {
+      stack.pop();
+      if (stack.length === 0) return k;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The token ranges `[from, to]` that are test-only: the item behind each `#[cfg(test)]` (a module, a
+ * function, a `use`), and the whole file for an inner `#![cfg(test)]`. Only `cfg(test)` exactly counts.
+ */
+export function testRanges(tokens) {
+  const ranges = [];
+  const isCfgTest = (from, to) =>
+    tokens
+      .slice(from, to + 1)
+      .map((t) => t.v)
+      .join("") === "cfg(test)";
+  for (let k = 0; k < tokens.length; k++) {
+    if (tokens[k].v !== "#") continue;
+    const inner = tokens[k + 1]?.v === "!";
+    const open = k + (inner ? 2 : 1);
+    if (tokens[open]?.v !== "[") continue;
+    const close = closeOf(tokens, open);
+    if (close < 0 || !isCfgTest(open + 1, close - 1)) continue;
+    if (inner) {
+      ranges.push([0, tokens.length - 1]);
+      continue;
+    }
+    let at = close + 1;
+    while (tokens[at]?.v === "#" && tokens[at + 1]?.v === "[") at = closeOf(tokens, at + 1) + 1;
+    // The item runs to its closing brace, or to the `;` that ends it, whichever comes first at depth 0.
+    let end = -1;
+    for (let m = at; m < tokens.length; m++) {
+      const v = tokens[m].t === "p" ? tokens[m].v : "";
+      if (v === "(" || v === "[") {
+        m = closeOf(tokens, m);
+        if (m < 0) break;
+      } else if (v === "{") {
+        end = closeOf(tokens, m);
+        break;
+      } else if (v === ";") {
+        end = m;
+        break;
+      }
+    }
+    ranges.push([k, end < 0 ? tokens.length - 1 : end]);
+  }
+  return ranges;
+}
+
+const MODS_SEGMENT = /(^|[\\/])mods([\\/]|$)/i;
+const inTopLevelMods = (rel) => {
+  const lower = rel.toLowerCase();
+  return lower === MODS_DIR || lower.startsWith(`${MODS_DIR}/`);
+};
+
+/** The nearest folder at or above `file` that holds a Cargo.toml, under src-tauri/ (what CARGO_MANIFEST_DIR is). */
+function crateDir(root, file) {
+  let dir = posix.dirname(file);
+  while (dir.length >= TAURI_DIR.length && dir.startsWith(TAURI_DIR)) {
+    if (existsSync(join(root, dir, "Cargo.toml"))) return dir;
+    dir = posix.dirname(dir);
+  }
+  return TAURI_DIR;
+}
+
+/**
+ * The repo-relative path an include macro's argument tokens name, `null` when it names nothing the
+ * gate can place. Two forms: one string literal (rustc reads it relative to the file holding the
+ * macro), and `concat!` of string literals, optionally led by `env!("CARGO_MANIFEST_DIR")`.
+ */
+function includedPath(args, file, manifestDir) {
+  const parts = args[args.length - 1]?.v === "," ? args.slice(0, -1) : args;
+  const fromFile = (s) => posix.normalize(posix.join(posix.dirname(file), s.replace(/\\/g, "/")));
+  if (parts.length === 1 && parts[0].t === "str") return fromFile(parts[0].v);
+  if (parts[0]?.v !== "concat" || parts[1]?.v !== "!" || parts[2]?.v !== "(") return null;
+  const inner = parts.slice(3, -1);
+  if (parts[parts.length - 1]?.v !== ")") return null;
+  let text = "";
+  let usesManifest = false;
+  for (let k = 0; k < inner.length;) {
+    const tok = inner[k];
+    if (tok.t === "str") {
+      text += tok.v;
+      k += 1;
+    } else if (
+      tok.v === "env" &&
+      inner[k + 1]?.v === "!" &&
+      inner[k + 2]?.v === "(" &&
+      inner[k + 3]?.t === "str" &&
+      inner[k + 3].v === "CARGO_MANIFEST_DIR" &&
+      inner[k + 4]?.v === ")" &&
+      k === 0
+    ) {
+      usesManifest = true;
+      text += `${manifestDir}/`;
+      k += 5;
+    } else return null;
+    if (inner[k]?.v === ",") k++;
+    else if (k < inner.length) return null;
+  }
+  const clean = text.replace(/\\/g, "/");
+  return usesManifest ? posix.normalize(clean) : fromFile(clean);
+}
+
+const isTestFile = (file) =>
+  /(^|\/)tests\.rs$/.test(file) || /_tests\.rs$/.test(file) || file.split("/").includes("tests");
+
+function checkRustIncludes(root) {
+  const problems = [];
+  const { files } = walk(root, TAURI_DIR, (rel) => rel === "target" || rel.endsWith("/target"));
+  const sources = files.filter((f) => f.endsWith(".rs"));
+  for (const file of sources) {
+    const text = readText(root, file);
+    const tokens = rustTokens(text);
+    const line = (tok) => text.slice(0, tok.at).split("\n").length;
+    const manifestDir = crateDir(root, file);
+    if (posix.basename(file) === "build.rs") {
+      // Copying mods/ into OUT_DIR is the same embedding by another road. Cargo runs a build script
+      // from its crate's folder, so a path literal is read from there.
+      const touchesOut = tokens.some((t) => t.v === "OUT_DIR");
+      const hit = tokens.find(
+        (t) =>
+          t.t === "str" &&
+          touchesOut &&
+          inTopLevelMods(posix.normalize(posix.join(manifestDir, t.v.replace(/\\/g, "/")))),
+      );
+      if (hit) {
+        problems.push(
+          `${file}:${line(hit)}: names ${JSON.stringify(hit.v)} (the top-level mods/ folder) in a ` +
+            `build script that uses OUT_DIR, which looks like a copy of a mod into PM's build ` +
+            `(I-25: a mod reaches a user only as a signed package)`,
+        );
+      }
+    }
+    if (isTestFile(file) || RUST_INCLUDE_ALLOWED.includes(file)) continue;
+    const ranges = testRanges(tokens);
+    tokens.forEach((tok, k) => {
+      if (tok.t !== "id" || !INCLUDE_MACROS.has(tok.v) || tokens[k + 1]?.v !== "!") return;
+      if (ranges.some(([from, to]) => k >= from && k <= to)) return;
+      const open = k + 2;
+      if (!["(", "[", "{"].includes(tokens[open]?.v)) return;
+      const args = tokens.slice(open + 1, closeOf(tokens, open));
+      const rel = includedPath(args, file, manifestDir);
+      const where = `${file}:${line(tok)}: ${tok.v}!`;
+      const fix =
+        `(I-25: a mod reaches a user only as a signed package. Test code may embed one: use a ` +
+        `tests.rs or *_tests.rs file, a tests/ folder or #[cfg(test)]. A test-only use the gate ` +
+        `cannot tell, such as cfg(all(test, ...)), goes in RUST_INCLUDE_ALLOWED in scripts/check-mods.mjs)`;
+      if (rel !== null) {
+        if (inTopLevelMods(rel))
+          problems.push(`${where} embeds ${rel}, in the top-level mods/ folder ${fix}`);
+      } else if (args.some((a) => a.t === "str" && MODS_SEGMENT.test(a.v))) {
+        problems.push(
+          `${where} names something under mods/ in a form this gate cannot resolve (it reads one ` +
+            `string literal, or concat! of literals led by env!("CARGO_MANIFEST_DIR")), so it ` +
+            `refuses it ${fix}`,
+        );
+      }
+    });
+  }
+  if (sources.length === 0)
+    problems.push(`${TAURI_DIR}/ held no Rust files to scan: the path moved, or the walk broke`);
+  return { problems, scanned: sources.length };
+}
+
 // ---- The whole tree -------------------------------------------------------------------------------
 
 /** Every rule that needs no git history. */
@@ -687,7 +970,7 @@ export function checkMods(root = repoRoot) {
   try {
     rust = rustConstants(root);
   } catch (e) {
-    return { problems: [e.message], mods: 0, fixtures: 0, scanned: 0, configs: 0 };
+    return { problems: [e.message], mods: 0, fixtures: 0, scanned: 0, configs: 0, rustScanned: 0 };
   }
   if (JSON.stringify(rust.permissions) !== JSON.stringify(PACK_MOD_PERMISSIONS)) {
     problems.push(
@@ -724,12 +1007,15 @@ export function checkMods(root = repoRoot) {
   problems.push(...tauri.problems);
   const src = checkSrcImports(root);
   problems.push(...src.problems);
+  const rustSrc = checkRustIncludes(root);
+  problems.push(...rustSrc.problems);
   return {
     problems,
     mods: mods.length,
     fixtures,
     scanned: src.scanned,
     configs: tauri.configs,
+    rustScanned: rustSrc.scanned,
   };
 }
 
@@ -885,6 +1171,7 @@ function main(argv) {
   console.log(
     `✓ check-mods: ${result.mods} mod folder(s) and ${result.fixtures} fixture(s) valid, ` +
       `${result.scanned} src files import nothing from mods/, ` +
+      `${result.rustScanned} Rust files embed nothing from it outside tests, ` +
       `${result.configs} tauri config(s) bundle nothing from mods/${bumpNote}`,
   );
 }
