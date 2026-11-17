@@ -903,13 +903,13 @@ async fn a_settle_with_the_store_shut_keeps_its_reservation() {
     let slot = {
         let mut conn = host.store().conn().unwrap();
         let r = money::reserve(&mut conn, epoch, MOD, "2026-11", WORST, true).unwrap();
-        std::sync::Mutex::new(Some(r))
+        ai::Slot::with(r)
     };
     assert!(close(booked(&host), WORST));
     let held = host.store().take_conn().unwrap().unwrap();
     ai::settle_failed_in(&host, &slot, true);
     assert!(
-        slot.lock().unwrap().is_some(),
+        !slot.is_empty(),
         "a shut store must not lose the reservation"
     );
     *host.store().db.lock().unwrap() = Some(held);
@@ -921,8 +921,7 @@ async fn a_settle_with_the_store_shut_keeps_its_reservation() {
 #[test]
 fn a_settled_guard_drops_without_touching_the_store() {
     let (host, _s) = setup();
-    let slot: Arc<std::sync::Mutex<Option<money::Reservation>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::new(ai::Slot::default());
     let held = host.store().conn().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = {
@@ -940,6 +939,46 @@ fn a_settled_guard_drops_without_touching_the_store() {
         done.is_ok(),
         "an empty slot must not wait for the DB connection"
     );
+}
+
+/// A call dropped while `reserve` is still running (a blocking task cannot be cancelled) must not
+/// leave the booking behind: the guard looks at an empty slot and returns, then `reserve` fills it,
+/// and `reserve` itself sees the guard is gone and gives the booking back. The call is cancelled
+/// with `reserve` parked just before it fills the slot. Without the flag the row counts to the
+/// month's end for a call that never reached the wire (D-19).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_dropped_while_the_booking_is_made_does_not_leak_it() {
+    let (host, s) = setup();
+    set_cap(&host, Some(1.0));
+    host.model().set_plan(PlanSpec::Cloud(CLOUD));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (entered_tx, go_rx) = (
+        std::sync::Mutex::new(entered_tx),
+        std::sync::Mutex::new(go_rx),
+    );
+    host.hook(move |_, at| {
+        if at == Point::Booking {
+            entered_tx.lock().unwrap().send(()).unwrap();
+            // Parked here, holding the DB guard, until the call future is gone.
+            let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }
+    });
+    let auth = authorised(&host, &s);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(300),
+        ai::run(&host, &auth, &ask("hi", 100), Duration::from_secs(60)),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the call is cancelled during reserve");
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("reserve reached the booking step");
+    go_tx.send(()).unwrap();
+    // `booked` waits for the DB guard, which reserve holds until it has finished (and released).
+    assert!(close(booked(&host), 0.0), "the booking was released");
+    assert_eq!(host.model().entered(), 0);
+    assert_eq!(ledger(&host), (Some(1.0), 0.0));
 }
 
 // --- the deadline on what runs before the booking ----------------------------------------------

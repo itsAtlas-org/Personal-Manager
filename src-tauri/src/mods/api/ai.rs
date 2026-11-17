@@ -23,7 +23,9 @@
 //!
 //! **A booking never leaks.** It is handed to a [`Booking`] guard the moment it is made. Every
 //! normal end settles it through the guard's slot, and a call dropped mid-flight (a future cancelled
-//! at an await) settles it from the guard's `Drop` the way a failed call is settled (below). Only
+//! at an await) settles it from the guard's `Drop` the way a failed call is settled (below). A call
+//! dropped while the booking step itself is still running (a blocking task outlives its future)
+//! is released by that step, which sees the guard's flag ([`Slot::put`]). Only
 //! a process kill leaves a row, which counts until the month ends (plan decision 4): the cap errs
 //! high, never low. The one other way a row can stay is a store taken or swapped under the call:
 //! a booking belongs to the store (epoch) it was made in, so a settle in any other store is refused
@@ -45,6 +47,7 @@
 //! so a mod's text never becomes part of a prompt PM builds for itself.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -243,19 +246,63 @@ impl Request {
 
 // --- the booking guard --------------------------------------------------------------------------
 
-type Slot = Arc<Mutex<Option<money::Reservation>>>;
+/// Where a call's booking waits to be settled, shared by the [`Booking`] guard and the blocking
+/// steps. A blocking task cannot be cancelled: it outlives a dropped call future, so a guard that
+/// is dropped while `reserve` is still running can look at the slot before `reserve` has filled
+/// it. The `abandoned` flag closes that: the guard sets it first, and `reserve` reads it after it
+/// fills the slot, so one of the two always sees the other (see [`Slot::put`]).
+#[derive(Default)]
+pub(super) struct Slot {
+    held: Mutex<Option<money::Reservation>>,
+    abandoned: AtomicBool,
+}
 
-fn lock(slot: &Mutex<Option<money::Reservation>>) -> MutexGuard<'_, Option<money::Reservation>> {
-    slot.lock().unwrap_or_else(PoisonError::into_inner)
+impl Slot {
+    fn held(&self) -> MutexGuard<'_, Option<money::Reservation>> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A slot that already holds a booking (a test's).
+    #[cfg(test)]
+    pub(super) fn with(reservation: money::Reservation) -> Self {
+        let slot = Self::default();
+        *slot.held() = Some(reservation);
+        slot
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.held().is_none()
+    }
+
+    fn take(&self) -> Option<money::Reservation> {
+        self.held().take()
+    }
+
+    /// The guard is gone: nobody will settle what lands here after this, so whoever puts a booking
+    /// in must see it ([`Slot::put`]).
+    fn abandon(&self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+    }
+
+    /// Stores a booking and says whether the guard had already been dropped. The flag is read after
+    /// the booking is in the slot, and the guard sets it before it looks: if the guard looked first
+    /// (and found nothing) the flag was already set, so `true` here means "release it yourself";
+    /// if the booking was in first the guard's own look finds and settles it.
+    fn put(&self, reservation: money::Reservation) -> bool {
+        *self.held() = Some(reservation);
+        self.abandoned.load(Ordering::SeqCst)
+    }
 }
 
 /// Holds a call's booking until it is settled. The booking lives in a slot the blocking steps share
 /// (so one that never ran leaves it here, and one that did has taken it): whoever takes it settles
 /// it, once. A call dropped while a booking is still here settles it as a failed call, by what its
-/// [`WireMark`] says ([`settle_failed_in`]).
+/// [`WireMark`] says ([`settle_failed_in`]); one dropped before `reserve` has booked leaves
+/// `reserve` to release it ([`Slot::put`]).
 struct Booking<H: Host> {
     host: H,
-    slot: Slot,
+    slot: Arc<Slot>,
     /// What the model call's requests did, read at the end of a failed or dropped call.
     wire: WireMark,
 }
@@ -264,7 +311,7 @@ impl<H: Host> Booking<H> {
     fn new(host: &H) -> Self {
         Self {
             host: host.clone(),
-            slot: Arc::new(Mutex::new(None)),
+            slot: Arc::new(Slot::default()),
             wire: WireMark::new(),
         }
     }
@@ -275,7 +322,8 @@ impl<H: Host> Drop for Booking<H> {
         // A short synchronous write: a drop cannot await. The guard is taken here and nowhere an
         // await is pending, so the non-reentrant DB mutex is never taken twice by one thread.
         // A closed or locked store: the booking stays in the slot, and its row counts until the
-        // month ends.
+        // month ends. The flag goes up BEFORE the slot is looked at, never after.
+        self.slot.abandon();
         settle_failed_in(
             &self.host,
             &self.slot,
@@ -288,23 +336,20 @@ impl<H: Host> Drop for Booking<H> {
 /// ([`money::settle_unknown`]); if none did, it is deleted ([`money::release`]). The connection is
 /// taken BEFORE the reservation leaves the slot, so a store that is shut right now leaves it there
 /// for the guard's `Drop` instead of losing it.
-pub(super) fn settle_failed_in<H: Host>(
-    host: &H,
-    slot: &Mutex<Option<money::Reservation>>,
-    reached_wire: bool,
-) {
+pub(super) fn settle_failed_in<H: Host>(host: &H, slot: &Slot, reached_wire: bool) {
     // An empty slot is the normal end of every call (it was settled or never booked): that must
     // not touch the store at all, or each finished call would block an async worker on the DB
-    // mutex behind whatever job holds it. Only this guard and the blocking steps it was shared
-    // with ever fill or empty the slot, so a peek cannot miss a booking that matters.
-    if lock(slot).is_none() {
+    // mutex behind whatever job holds it. A booking that lands after this look (a `reserve` still
+    // running when the guard was dropped) is released by `reserve` itself, which sees the flag the
+    // guard raised before looking ([`Slot::put`]).
+    if slot.held().is_none() {
         return;
     }
     let store = host.store();
     let Ok(mut conn) = store.conn() else {
         return;
     };
-    let Some(reservation) = lock(slot).take() else {
+    let Some(reservation) = slot.take() else {
         return;
     };
     let epoch = store.store_epoch();
@@ -529,7 +574,7 @@ fn reserve<H: Host>(
     class: Option<EndpointClass>,
     prompt_bytes: u64,
     max_tokens: u32,
-    slot: &Mutex<Option<money::Reservation>>,
+    slot: &Slot,
 ) -> Result<(), ModError> {
     let store = host.store();
     let mut conn = store.conn().map_err(|_| ModError::locked())?;
@@ -551,11 +596,20 @@ fn reserve<H: Host>(
         cost.is_cloud(),
     )
     .map_err(reserve_refusal)?;
-    *lock(slot) = Some(reservation);
+    #[cfg(test)]
+    host.at(super::Point::Booking);
+    let abandoned = slot.put(reservation);
     #[cfg(test)]
     host.at(super::Point::Booked);
-    if let Err(stopped) = still_current(host, auth) {
-        if let Some(reservation) = lock(slot).take() {
+    // A call dropped while this step ran has nobody left to settle the booking: it is released
+    // here, under the guard already held, as a call that stopped being current is.
+    let current = if abandoned {
+        Err(ModError::session_ended())
+    } else {
+        still_current(host, auth)
+    };
+    if let Err(stopped) = current {
+        if let Some(reservation) = slot.take() {
             if let Err(e) = money::release(&mut conn, epoch, reservation) {
                 eprintln!("mods: ai.complete could not release a booking: {e}");
             }
@@ -589,7 +643,7 @@ fn reserve_refusal(e: money::ReserveError) -> ModError {
 /// nothing to do. A failure leaves the booking, which counts: the cap errs high.
 async fn settle<H: Host>(
     host: &H,
-    slot: &Slot,
+    slot: &Arc<Slot>,
     plan: &Arc<RoutePlan>,
     completion: Completion,
     meta: CallMeta,
@@ -602,7 +656,7 @@ async fn settle<H: Host>(
         // the guard's `Drop` rather than losing it.
         let store = host.store();
         let mut conn = store.conn().map_err(|_| ModError::locked())?;
-        let Some(reservation) = lock(&slot).take() else {
+        let Some(reservation) = slot.take() else {
             return Ok(());
         };
         let epoch = store.store_epoch();

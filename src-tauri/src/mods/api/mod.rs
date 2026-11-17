@@ -153,6 +153,9 @@ pub enum Point {
     /// An event is about to choose its recipients: the moment between a flush's own checks and the
     /// emission.
     BeforeEmit,
+    /// An `ai.complete` booking is priced and written, and is about to go into the call's slot.
+    /// The DB guard is held: a hook here must not take it.
+    Booking,
     /// An `ai.complete` booking is made and the call is about to be checked once more. The DB guard
     /// is held: a hook here must not take it.
     Booked,
