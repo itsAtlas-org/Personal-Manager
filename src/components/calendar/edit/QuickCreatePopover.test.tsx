@@ -1890,7 +1890,9 @@ describe("QuickCreatePopover Event | Task", () => {
     expect(await screen.findByText("The task list is locked.")).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
     expect(title().value).toBe("Pay rent");
-    expect(document.activeElement).toBe(saveButton());
+    // Save gets focus on the next task (refocusSave's setTimeout), not with the banner, so wait for
+    // it: asserted straight after the banner, it failed once on a busy CI runner (#1117).
+    await waitFor(() => expect(document.activeElement).toBe(saveButton()));
     // Again: it goes through, and the banner goes.
     addTask.mockResolvedValueOnce(2);
     fireEvent.click(saveButton());
