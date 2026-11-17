@@ -102,6 +102,12 @@ export const EVENT_BUFFER = 256;
  *  dispatch table; this only keeps junk off the IPC channel. */
 const METHOD = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
 
+/** Whether `name` is shaped like a method name. One test for both ends of the port: the page refuses
+ *  what fails it, and the frame SDK (src/kit/host.ts) refuses it first, so a typo costs no token. */
+export function isMethodName(name: unknown): name is string {
+  return typeof name === "string" && METHOD.test(name);
+}
+
 /** A reason sent back to a frame is clipped: PM's messages are short, and a mod has no use for more. */
 const MAX_ERROR_CHARS = 500;
 
@@ -250,7 +256,7 @@ export function readPortMessage(data: unknown): PortMessage {
   const id = data.id;
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return DROP;
   const method = data.method;
-  if (typeof method !== "string" || !METHOD.test(method)) {
+  if (!isMethodName(method)) {
     return {
       kind: "refuse",
       id,

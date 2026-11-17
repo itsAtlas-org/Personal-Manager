@@ -26,6 +26,7 @@ import {
   fitsBytes,
   isArrayBuffer,
   isConnectRequest,
+  isMethodName,
   readEvent,
   readPortMessage,
   readReply,
@@ -142,6 +143,17 @@ describe("a call", () => {
       id: 3,
       error: { code: MOD_ERRORS.badArgs, message: "PM couldn't read that call's method." },
     });
+  });
+
+  it("is told apart by isMethodName exactly as the page reads it (the frame SDK asks it first)", () => {
+    for (const method of ["storage.get", "a", "A_b-c.9", "x".repeat(128)]) {
+      expect(isMethodName(method), method).toBe(true);
+      expect(readPortMessage({ id: 1, method }).kind).toBe("call");
+    }
+    for (const method of [undefined, "", "1abc", "a b", "x".repeat(129), 7, null]) {
+      expect(isMethodName(method), String(method)).toBe(false);
+      expect(readPortMessage({ id: 1, method }).kind).toBe("refuse");
+    }
   });
 
   it("refuses arguments that aren't plain JSON", () => {

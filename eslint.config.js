@@ -393,6 +393,31 @@ export default tseslint.config(
       ],
     },
   },
+  // The mod kit (src/kit/**, Mods spec D14): code that is bundled INTO a mod's page, so it runs in a
+  // sealed frame where there is no Tauri API and no ipc.ts, and a mod's own bans (the HTML and frame
+  // sinks, dynamic import, import.meta.glob: MODS_SYNTAX) hold for it too. A rule's options replace
+  // rather than merge, so the imports are restated. Its tests are exempt from the syntax bans by the
+  // test block below, like every test in src/.
+  {
+    files: ["src/kit/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: IPC_BOUNDARY,
+          patterns: [
+            ...MODS_TAURI,
+            {
+              regex: "(^|/)ipc(\\.[cm]?[jt]sx?)?$",
+              message:
+                "The kit runs in a mod's frame, which has no IPC: take its data from a context.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": ["error", ...MODS_SYNTAX],
+    },
+  },
   // A plain JavaScript file in src/ (none exists) would ship just the same, so the page's fences hold
   // there too rather than stopping at the TypeScript block's glob.
   {
