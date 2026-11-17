@@ -5,7 +5,7 @@
 //! headers and body a mod may send, which of the answer's headers it may see, how the answer is
 //! shaped, and which fixed sentence each failure becomes. The fetch itself (redirects, the
 //! public-internet screen, the pin, the caps) is `mods/netfetch.rs`; the handler that joins the
-//! two with the grant, the secret and the limits is X6's.
+//! two with the grant, the secret and the limits is `net_fetch.rs`.
 //!
 //! **The URL** is parsed once, by the `url` crate (WHATWG: it lowercases the host, turns an
 //! internationalised name into punycode, reads `\` as `/`, parses `2130706433` and `0x7f.1` as the
@@ -36,9 +36,6 @@
 //! **A key** ([`SlotSecret`]) travels with the host its slot is bound to, and [`build_request`]
 //! refuses to put it on the first hop of any other listed host: the person approved the key for one
 //! destination, and the list may hold several.
-
-// Nothing calls these until the `net.fetch` handler lands (X6); the tests below are their callers.
-#![allow(dead_code)]
 
 use reqwest::Url;
 use serde_json::{json, Map, Value};

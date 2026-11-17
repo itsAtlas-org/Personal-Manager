@@ -237,8 +237,7 @@ impl ModError {
 // The experimental calls' errors (PR B). Each is one fixed PM sentence: nothing a provider said,
 // no URL, host, header, path or number from the request ever reaches one (D-25), so a mod can't
 // use the text to learn what PM saw, and a malicious website or model can't write into it. The
-// handlers use these and no other sentence for these codes. (Dead until the handlers land.)
-#[cfg_attr(not(test), allow(dead_code))]
+// handlers use these and no other sentence for these codes.
 impl ModError {
     pub fn ai_cap_reached() -> Self {
         Self::new(

@@ -49,12 +49,9 @@ use crate::net_screen::{self, Refusal};
 
 /// Whether `net.fetch` may go through a proxy named by the environment (`HTTPS_PROXY` and the OS
 /// settings). False, so the DNS pin means something. One named place to change it (Q6).
-// Nothing in a build reads this until the `net.fetch` handler lands (X6): `Policy::for_mods` does.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const NET_FETCH_SYSTEM_PROXY: bool = false;
 
 /// The `User-Agent` of a mod's fetch: fixed, no PM version and no mod id (D-22).
-#[cfg_attr(not(test), allow(dead_code))]
 pub const MOD_USER_AGENT: &str = "PM-mod/1";
 
 /// The methods a fetch can use. Which of them a MOD may name is `api/net.rs`'s rule; this is the
@@ -98,7 +95,6 @@ pub struct Policy {
 
 impl Policy {
     /// A mod's `net.fetch`: the limits are the Developer kit's numbers (`api/limits.rs`).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn for_mods() -> Self {
         Self {
             max_redirects: limits::MAX_FETCH_REDIRECTS,

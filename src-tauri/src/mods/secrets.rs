@@ -117,11 +117,9 @@ pub fn statuses(
 
 /// A key's text. It prints as nothing and is never serialised: the one way out is [`Self::expose`],
 /// which only the code that puts it on a request line calls.
-#[cfg_attr(not(test), allow(dead_code))] // read by `net.fetch`'s handler (X6)
 pub struct SecretValue(String);
 
 impl SecretValue {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -136,7 +134,6 @@ impl fmt::Debug for SecretValue {
 /// A key ready for a request: its slot (the host the URL must be, the header it goes in) and the
 /// value.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct Bound {
     pub slot: Slot,
     pub value: SecretValue,
@@ -244,7 +241,6 @@ pub fn status(conn: &Connection, mod_id: &str) -> Result<Vec<SlotStatus>, Refuse
 /// header are the installed manifest's slot's, else `None`, which the caller answers as "key not
 /// set" (no other word, so a mismatch cannot be told from an empty slot). The binding is in the
 /// query itself, so no path reads a value it has not matched.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_for_use(
     conn: &Connection,
     mod_id: &str,

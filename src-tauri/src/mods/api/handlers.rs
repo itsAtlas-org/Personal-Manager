@@ -13,8 +13,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    ai, doc_storage, documents, embeddings, limits, storage, Authorised, Host, ModError,
-    PageAction, Reply,
+    ai, doc_storage, documents, embeddings, limits, net_fetch, storage, surface, Authorised, Host,
+    ModError, PageAction, Reply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,10 +31,13 @@ pub enum Method {
     EmbeddingsSignature,
     UiOpenDocument,
     AiComplete,
+    NetFetch,
+    SecretsSet,
+    Notify,
 }
 
 impl Method {
-    pub const ALL: [Method; 12] = [
+    pub const ALL: [Method; 15] = [
         Self::ThemeGet,
         Self::StorageGet,
         Self::StorageSet,
@@ -47,6 +50,9 @@ impl Method {
         Self::EmbeddingsSignature,
         Self::UiOpenDocument,
         Self::AiComplete,
+        Self::NetFetch,
+        Self::SecretsSet,
+        Self::Notify,
     ];
 
     pub fn name(self) -> &'static str {
@@ -63,6 +69,9 @@ impl Method {
             Self::EmbeddingsSignature => "embeddings.signature",
             Self::UiOpenDocument => "ui.openDocument",
             Self::AiComplete => "ai.complete",
+            Self::NetFetch => "net.fetch",
+            Self::SecretsSet => "secrets.set",
+            Self::Notify => "notify",
         }
     }
 
@@ -97,6 +106,9 @@ pub(super) async fn run<H: Host>(
         Method::EmbeddingsSignature => embeddings::signature(host, auth, args).await,
         Method::UiOpenDocument => documents::open_document(host, auth, args).await,
         Method::AiComplete => ai::complete(host, auth, args).await,
+        Method::NetFetch => net_fetch::fetch(host, auth, args).await,
+        Method::SecretsSet => surface::secrets_set(host, auth, args).await,
+        Method::Notify => surface::notify(host, auth, args).await,
     }
 }
 
@@ -131,9 +143,6 @@ pub(super) fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, ModError> {
 /// cancellable async work stops this way: a `spawn_blocking` step that began is not cancelled, so
 /// the handler asks [`super::still_current`] after the await and commits nothing for a call
 /// that ended.
-// Used by the handlers of the experimental calls (X6): `ai.complete` runs its own deadline through
-// `within`, so a test can shorten it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) async fn within_call_timeout<T>(
     work: impl Future<Output = Result<T, ModError>>,
 ) -> Result<T, ModError> {

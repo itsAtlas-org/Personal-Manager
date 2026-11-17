@@ -16,6 +16,12 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ModFrame, type ModTier } from "./ModFrame";
+import {
+  ModPageHooksContext,
+  NOTICE_MAX_CHARS,
+  readNotice,
+  type ModPageHooks,
+} from "./modPageHooks";
 import { PROMPT_GUARD_MS } from "./ModPermissionPrompt";
 import {
   FLOOD_BURST,
@@ -319,6 +325,100 @@ describe("ModFrame", () => {
     });
     expect(openReaderById).toHaveBeenCalledTimes(1);
     expect(openReaderById).toHaveBeenCalledWith(12);
+  });
+
+  describe("secrets.set and notify", () => {
+    const SLOT = { name: "token", host: "api.example.com", header: "X-Api-Key", set: false };
+    const mountWith = (hooks: ModPageHooks) =>
+      render(
+        <ModPageHooksContext.Provider value={hooks}>
+          <ModFrame modId="acme.tool" name="Acme Tool" tier="second" />
+        </ModPageHooksContext.Provider>,
+      );
+
+    it("shows PM's key field for the slot the backend named, and tells the mod only whether a key was held", async () => {
+      const askSecret = vi.fn();
+      modCall.mockResolvedValue({ kind: "page", action: "secrets.set", args: SLOT });
+      mountWith({ askSecret });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "secrets.set", args: { name: "token" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: { set: false },
+      });
+      // The mod is named by PM's own record, never by anything the frame sent.
+      expect(askSecret).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        SLOT,
+      );
+    });
+
+    it("shows a notice strip with the text and tone the backend checked, and answers null", async () => {
+      const showNotice = vi.fn();
+      modCall.mockResolvedValue({
+        kind: "page",
+        action: "notify",
+        args: { text: "Rates updated", tone: "good" },
+      });
+      mountWith({ showNotice });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "notify", args: { text: "x" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: null,
+      });
+      expect(showNotice).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        { text: "Rates updated", tone: "good" },
+      );
+    });
+
+    it.each([
+      ["secrets.set", SLOT],
+      ["notify", { text: "hi", tone: "info" }],
+    ])(
+      "answers %s as PM's own failure, not as a success that showed nothing, when nothing draws it",
+      async (action, args) => {
+        modCall.mockResolvedValue({ kind: "page", action, args });
+        mount();
+        const { port } = connect(await theFrame());
+        expect(await ask(port, { id: 1, method: action })).toEqual({
+          id: 1,
+          ok: false,
+          error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+        });
+      },
+    );
+
+    it.each([
+      ["secrets.set", null],
+      ["secrets.set", { ...SLOT, set: "yes" }],
+      ["secrets.set", { ...SLOT, name: "" }],
+      ["secrets.set", { name: "token" }],
+      ["notify", null],
+      ["notify", { text: "hi", tone: "loud" }],
+      ["notify", { text: "", tone: "info" }],
+      ["notify", { text: 5, tone: "info" }],
+      ["notify", { text: "a".repeat(141), tone: "info" }],
+    ])("draws nothing for %s with the arguments %j", async (action, args) => {
+      const hooks = { askSecret: vi.fn(), showNotice: vi.fn() };
+      modCall.mockResolvedValue({ kind: "page", action, args });
+      mountWith(hooks);
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: action })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+      expect(hooks.askSecret).not.toHaveBeenCalled();
+      expect(hooks.showNotice).not.toHaveBeenCalled();
+    });
+
+    it("counts a notice's length in characters, as the backend does", () => {
+      const heavy = "é𝄞".repeat(NOTICE_MAX_CHARS / 2);
+      expect(readNotice({ text: heavy, tone: "warn" }).text).toBe(heavy);
+      expect(() => readNotice({ text: heavy + "x", tone: "warn" })).toThrow();
+    });
   });
 
   it("performs no page action for a session that ended while the backend was answering", async () => {

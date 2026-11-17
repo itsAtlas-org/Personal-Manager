@@ -372,9 +372,11 @@ mod tests {
         assert_eq!(info.api.version, "1.0");
         assert_eq!(info.api.oldest_major, MOD_API_OLDEST_MAJOR);
         assert!(info.api.window.contains("1.0") && info.api.window.contains("older"));
-        // The live table's experimental calls, in its order: `ai.complete` so far (PR B adds the
-        // others as their handlers land).
-        assert_eq!(info.api.experimental, ["ai.complete"]);
+        // The live table's experimental calls, in its order: PR B's four.
+        assert_eq!(
+            info.api.experimental,
+            ["ai.complete", "net.fetch", "secrets.set", "notify"]
+        );
         let l = &info.limits;
         assert_eq!(l.calls_per_second, limits::CALLS_PER_SECOND);
         assert_eq!(l.max_in_flight, limits::MAX_IN_FLIGHT);

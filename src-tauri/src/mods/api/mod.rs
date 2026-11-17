@@ -52,8 +52,14 @@ pub mod grants;
 mod handlers;
 pub mod limits;
 pub(crate) mod net;
+mod net_fetch;
+#[cfg(test)]
+mod net_fetch_tests;
 pub mod permissions;
 mod storage;
+mod surface;
+#[cfg(test)]
+mod surface_tests;
 pub mod table;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -106,8 +112,6 @@ pub trait Host: Clone + Send + Sync + 'static {
     /// The network edge `net.fetch` goes through: the real one resolves, screens and pins; a test
     /// scripts it (`netfetch::fake`), so the fetch's rules run with no network.
     type Hops: HopFetcher + 'static;
-    // Nothing in a build calls it until the `net.fetch` handler lands (X6).
-    #[allow(dead_code)]
     fn hops(&self) -> &Self::Hops;
 
     /// The model side `ai.complete` goes through: the real one routes, prices and calls PM's AI; a
@@ -197,17 +201,31 @@ pub enum PageAction {
     /// (`ModFrame.tsx`, through the app's `ReaderProvider`).
     #[serde(rename = "ui.openDocument")]
     UiOpenDocument,
+    /// PM's own key field for one of the mod's declared secret slots (`secrets.set`): the person
+    /// types the key there, and the page sends it to Rust, never to the frame.
+    #[serde(rename = "secrets.set")]
+    SecretsSet,
+    /// A notice strip with the mod's name, in PM's own band (`notify`).
+    #[serde(rename = "notify")]
+    Notify,
 }
 
 impl PageAction {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [PageAction; 2] = [Self::ThemeGet, Self::UiOpenDocument];
+    pub const ALL: [PageAction; 4] = [
+        Self::ThemeGet,
+        Self::UiOpenDocument,
+        Self::SecretsSet,
+        Self::Notify,
+    ];
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn name(self) -> &'static str {
         match self {
             Self::ThemeGet => "theme.get",
             Self::UiOpenDocument => "ui.openDocument",
+            Self::SecretsSet => "secrets.set",
+            Self::Notify => "notify",
         }
     }
 }

@@ -27,7 +27,9 @@
 //   has its port closed and its session ended, and PM says so where the frame was.
 // - The backend answers each call with a value, a refusal (`MOD-####`), or a page action it has
 //   authorised, which PM performs here from what only the page holds (`theme.get`: PM's live theme;
-//   `ui.openDocument`: PM's own document reader, on a document the backend found readable). The
+//   `ui.openDocument`: PM's own document reader, on a document the backend found readable;
+//   `secrets.set`: PM's key field and `notify`: a notice strip, both drawn by whatever provides
+//   `ModPageHooksContext`, and an answer of PM's own failure when nothing does). The
 //   action and its arguments come from the backend, never from the frame. The vectors come back as
 //   bytes, which are transferred to the frame, not copied.
 // - Events (spec §1.5): `mod_frame_open` is given a channel, and Rust keeps it with the session and
@@ -54,7 +56,7 @@
 //   replaces the frame. A store that closes under a mounted frame sends no goodbye, so the owner
 //   unmounts it (ModTab does, on the vault fault).
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   modCall,
@@ -70,6 +72,13 @@ import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
+import {
+  ModPageHooksContext,
+  readNotice,
+  readSecretAsk,
+  type ModPageHooks,
+  type ModSource,
+} from "./modPageHooks";
 import { ModPermissionPrompt } from "./ModPermissionPrompt";
 import { TierBadge } from "./TierBadge";
 import {
@@ -195,6 +204,10 @@ function reply(live: Live, message: unknown, transfer: Transferable[] = []) {
 interface PageContext {
   theme: ModThemeAxes;
   openDocument: (id: number) => void;
+  /** The mod this frame is, as PM's own list has it: what a key field or a notice names. */
+  source: ModSource;
+  /** What draws `secrets.set`'s field and `notify`'s strip (`modPageHooks.ts`). */
+  hooks: ModPageHooks;
 }
 
 /** What the page answers for an action the backend authorised. The arguments are the backend's (it
@@ -209,6 +222,20 @@ function performPageAction(action: PageAction, args: unknown, ctx: PageContext):
         throw new Error("ui.openDocument: not a document id");
       }
       ctx.openDocument(id);
+      return null;
+    }
+    case "secrets.set": {
+      // PM's own field for one of the mod's declared slots. The mod is told only whether PM held a
+      // key when it asked; the key never comes back to a frame.
+      const ask = readSecretAsk(args);
+      if (!ctx.hooks.askSecret) throw new Error("secrets.set: nothing to show the field with");
+      ctx.hooks.askSecret(ctx.source, ask);
+      return { set: ask.set };
+    }
+    case "notify": {
+      const notice = readNotice(args);
+      if (!ctx.hooks.showNotice) throw new Error("notify: nothing to show the strip with");
+      ctx.hooks.showNotice(ctx.source, notice);
       return null;
     }
   }
@@ -370,9 +397,11 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
   // The reader is the app's own (the Map opens it the same way), reached through the provider
   // that wraps every view.
   const { openReaderById } = useReader();
-  const pageRef = useRef<PageContext>({ theme, openDocument: openReaderById });
+  const hooks = useContext(ModPageHooksContext);
+  const source: ModSource = { modId, name, tier };
+  const pageRef = useRef<PageContext>({ theme, openDocument: openReaderById, source, hooks });
   useLayoutEffect(() => {
-    pageRef.current = { theme, openDocument: openReaderById };
+    pageRef.current = { theme, openDocument: openReaderById, source, hooks };
   });
 
   // While this frame is mounted the page proves to PM that it is alive (the frozen-page watchdog: a

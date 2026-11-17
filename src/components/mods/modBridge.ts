@@ -91,7 +91,7 @@ export const MOD_ERRORS = {
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because
  *  only the page holds what they need. A test in handlers.rs pins this list to the backend's. */
-export const PAGE_ACTIONS = ["theme.get", "ui.openDocument"] as const;
+export const PAGE_ACTIONS = ["theme.get", "ui.openDocument", "secrets.set", "notify"] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 

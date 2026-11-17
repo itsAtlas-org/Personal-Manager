@@ -117,6 +117,15 @@ pub const ROWS: &[Row] = &[
     // PR B's experimental calls (D13: outside the API freeze), each under its limits' family.
     // Asks a model PM routes, books its worst-case price against the mod's monthly cap first.
     experimental_call("ai.complete", "ai", Class::Money, Family::Ai),
+    // Fetches an https URL on a host the manifest lists, through PM's pinned, screened client; the
+    // `internet` permission is egress class, so D3 judges it like any other egress call.
+    experimental_call("net.fetch", "internet", Class::Egress, Family::Net),
+    // Asks PM's page to show the key field for one of the mod's declared slots. `internet`, not a
+    // permission of its own: a key is only ever for a host the mod may reach, and a mod without
+    // `internet` has no slots.
+    experimental_call("secrets.set", "internet", Class::Egress, Family::General),
+    // An in-app notice strip with the mod's name, capped per day.
+    experimental_call("notify", "notify", Class::Local, Family::General),
     // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
     // A document that landed, as `documents.list`'s DTO with every field.
     event("documents.added", Some("documents.meta"), Class::Read),
