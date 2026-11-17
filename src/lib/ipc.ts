@@ -20,7 +20,9 @@ import type {
   ModUninstalled,
   ModsChanged,
   ModsDisclaimerState,
+  ModsHandoverState,
   ModsResetResult,
+  ModsRetryResult,
   ModsSafetyStatus,
   Reloaded,
   Repaired,
@@ -2405,6 +2407,21 @@ export const dismissModResumed = (modId: string) => invoke<void>("dismiss_mod_re
  *  seen revoked until a list names them again, so ask first. Rejects `not-allowed` unless the record
  *  really is unusable. Then fetches. */
 export const resetSafetyRecord = () => invoke<ModsResetResult>("reset_safety_record");
+
+/** "Try now" under an Installing tab: fetch the safety list now and let PM install the mod it still
+ *  owes this vault (the Map, once a migration says so). Offline it says so; it never rejects for
+ *  that. */
+export const retryAutoInstall = () => invoke<ModsRetryResult>("retry_auto_install");
+
+/** Which auto-installed mods landed in this vault, and whether the Map's device-local view prefs
+ *  still wait to be handed over (both empty for a vault with no auto-install). */
+export const modsHandoverState = () => invoke<ModsHandoverState>("mods_handover_state");
+
+/** Hand this device's Map view prefs to the Map mod's storage (it fills only what the mod lacks).
+ *  Resolves true when it did or there was nothing left to hand over; remove the device's own keys
+ *  only after this resolves. */
+export const adoptMapPrefs = (layoutMode: string, cohesion: number, labels: boolean) =>
+  invoke<boolean>("adopt_map_prefs", { layoutMode, cohesion, labels });
 
 /** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
  *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows

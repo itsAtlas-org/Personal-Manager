@@ -24,6 +24,8 @@
 //!   (part 4 of slice 6).
 //! - [`kit`]: the Developer kit's readouts (API version, endpoints from the dispatch table, limits,
 //!   the engine seal, the sessions' counters), one read-only command.
+//! - [`pilots`]: the auto-install's three commands (`retry_auto_install`, `mods_handover_state`,
+//!   `adopt_map_prefs`).
 //!
 //! The user's own pause, resume and first-open "Turn on" are the ledger's (`ledger/user.rs`): they
 //! change rows and the registry, so they live beside the other writers of both.
@@ -40,6 +42,7 @@ pub mod icon;
 pub mod install;
 pub mod kit;
 pub mod listing;
+pub mod pilots;
 pub mod stage;
 pub mod status;
 #[cfg(test)]

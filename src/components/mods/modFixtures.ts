@@ -42,6 +42,7 @@ export const perm = (id: string, extra: Partial<ModPermission> = {}): ModPermiss
 export function mod(extra: Partial<ModInfo> = {}): ModInfo {
   return {
     id: "acme.tool",
+    pending: false,
     name: "Acme Tool",
     description: "Does a thing.",
     tier: "second",

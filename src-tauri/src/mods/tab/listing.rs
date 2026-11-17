@@ -19,6 +19,7 @@ use serde_json::Value;
 use super::words::{self, RowFacts, Standing};
 use crate::mods::api::grants::{self, Decision, Facts, Outcome, Refused};
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
+use crate::mods::autoinstall::{self, Pilot};
 use crate::mods::index::Index;
 use crate::mods::ledger::{self, Resumed, Waiting, WaitingKind};
 use crate::mods::package::ApiRange;
@@ -37,6 +38,10 @@ pub const ICON_EXTENSIONS: [&str; 2] = ["png", "webp"];
 #[serde(rename_all = "camelCase")]
 pub struct ModDto {
     pub id: String,
+    /// True for the one entry that is no row: a pilot PM is still installing for this store (a
+    /// marker, no `mods` row; `autoinstall`). It has a tab and the "Installing" words and nothing
+    /// else: no permissions, no files, nothing to uninstall.
+    pub pending: bool,
     pub name: String,
     pub description: String,
     /// `first`, `second` or `third`: what the row says. Which tier PM *treats* it as is
@@ -211,7 +216,7 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     } else {
         Vec::new()
     };
-    Ok(rows
+    let mut out: Vec<ModDto> = rows
         .iter()
         .map(|row| {
             let own = decisions.get(&row.id);
@@ -224,7 +229,58 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                 ctx,
             )
         })
-        .collect())
+        .collect();
+    // A pilot whose marker is set and whose row isn't there yet. Never a row: a fake one in a
+    // truth-class table would carry an invented hash and version into backups and shared vaults.
+    for pilot in autoinstall::pending(conn)? {
+        if !rows.iter().any(|r| r.id == pilot.id) {
+            out.push(pending_dto(pilot));
+        }
+    }
+    Ok(out)
+}
+
+/// The entry for a pilot that is still installing: its tab and the "Installing" words.
+fn pending_dto(pilot: &Pilot) -> ModDto {
+    let state = words::standing(
+        &RowFacts {
+            id: pilot.id,
+            name: pilot.name,
+            version: "",
+            package_sha256: None,
+            state: store::STATE_INSTALLING,
+            reason: None,
+            consented: false,
+            installed_from: store::FROM_CATALOGUE,
+            api: None,
+        },
+        None,
+    );
+    ModDto {
+        id: pilot.id.to_owned(),
+        pending: true,
+        name: pilot.name.to_owned(),
+        description: String::new(),
+        tier: "first".to_owned(),
+        author: String::new(),
+        repo: String::new(),
+        commit: String::new(),
+        version: String::new(),
+        installed_from: store::FROM_CATALOGUE.to_owned(),
+        signed: true,
+        consented: false,
+        state,
+        permissions: Vec::new(),
+        internet_hosts: Vec::new(),
+        nav_tab: Some(pilot.tab_label.to_owned()),
+        calendar_overlay: None,
+        help: Vec::new(),
+        has_icon: false,
+        update: None,
+        resumed: None,
+        installed_at: String::new(),
+        updated_at: String::new(),
+    }
 }
 
 fn read_decisions(
@@ -447,6 +503,7 @@ fn dto(
     );
     ModDto {
         id: row.id.clone(),
+        pending: false,
         name: row.name.clone(),
         description: m.description.clone(),
         tier: row.tier.clone(),
@@ -825,6 +882,70 @@ mod tests {
         let resumed = map.resumed.as_ref().unwrap();
         assert_eq!(resumed.version, "1.0.0");
         assert_eq!(resumed.text, "Map is back on, fixed in version 1.0.0.");
+    }
+
+    #[test]
+    fn a_pilot_still_installing_is_one_synthesized_entry_and_never_a_row() {
+        let (_dir, c) = test_store();
+        // No marker: no entry, and the wire carries `pending: false` for a real row.
+        assert!(list(&c, &CTX).unwrap().is_empty());
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["pending"], json!(false));
+        c.execute("DELETE FROM mods", []).unwrap();
+
+        c.execute(
+            "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1')",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed.len(), 1);
+        let map = &listed[0];
+        assert!(map.pending);
+        assert_eq!(
+            (map.id.as_str(), map.name.as_str(), map.nav_tab.as_deref()),
+            ("atlas.map", "Map", Some("Map"))
+        );
+        // The existing "Installing" words, nothing to turn on, nothing to run, no permissions.
+        assert_eq!(map.state.kind, words::Kind::Installing);
+        assert_eq!(map.state.fix, words::Fix::None);
+        assert!(!map.state.running && !map.consented);
+        assert!(
+            map.state.text.starts_with("Installing."),
+            "{}",
+            map.state.text
+        );
+        assert!(map.permissions.is_empty() && map.help.is_empty() && map.update.is_none());
+        // Listing writes nothing: no row, the marker stays.
+        let (rows, marker): (i64, i64) = c
+            .query_row(
+                "SELECT (SELECT count(*) FROM mods), \
+                        (SELECT count(*) FROM settings WHERE key = 'mods_autoinstall_map')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, marker), (0, 1));
+
+        // Once the mod has a row (any kind) the real row speaks for it, never both.
+        insert(&c, &Row::default());
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].pending);
+        // A marker for no pilot in the table lists nothing.
+        c.execute("DELETE FROM mods", []).unwrap();
+        c.execute(
+            "DELETE FROM settings WHERE key = 'mods_autoinstall_map'",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_nothing', '1')",
+            [],
+        )
+        .unwrap();
+        assert!(list(&c, &CTX).unwrap().is_empty());
     }
 
     #[test]

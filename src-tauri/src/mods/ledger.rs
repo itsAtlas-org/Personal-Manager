@@ -72,6 +72,9 @@ mod dev_switch;
 mod unsigned;
 // A developer's unpacked test folder: loaded for the session, never persisted (slice 6, part 4).
 mod folder;
+// The pilots' auto-install: a fresh unconsented install whose marker and handover share its
+// transaction (PR B, B8).
+mod pilots;
 #[allow(unused_imports)]
 pub use blacklist::{
     clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
@@ -82,6 +85,7 @@ pub use folder::{
     list_test_mods, reload_test_mod, unload_test_mod, FolderLoad, Reloaded, TestModStatus,
     ALLOW_ATLAS_FOLDERS,
 };
+pub use pilots::PilotLanded;
 pub use unsigned::{UnsignedInstall, UnsignedOptions};
 #[allow(unused_imports)]
 pub use updates::{Landed, Pass, RepairTarget};
@@ -509,9 +513,24 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
+        self.install_package_with(bytes, keys, opts, now, &|_, _| Ok(()))
+    }
+
+    /// [`Self::install_package`] with `in_tx` run inside the transaction that writes the row, after
+    /// the row and before the commit (the pilots' auto-install: its marker and handover land with
+    /// the row or not at all). An error from it rolls the row back, and the files go the way a
+    /// failed commit's do.
+    pub(crate) fn install_package_with(
+        &self,
+        bytes: &[u8],
+        keys: &TrustedKeys,
+        opts: &InstallOptions<'_>,
+        now: DateTime<Utc>,
+        in_tx: InTx<'_>,
+    ) -> Result<Installed, LedgerError> {
         let pkg = package::verify(bytes, keys.public_keys()).map_err(LedgerError::Package)?;
         let sha = hex::encode(Sha256::digest(bytes));
-        self.install_verified(&pkg, &sha, opts, now)
+        self.install_verified_with(&pkg, &sha, opts, now, in_tx)
     }
 
     /// Every check an install makes, before anything is written, as the Mods tab's consent screen
@@ -640,6 +659,17 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
+        self.install_verified_with(pkg, package_sha256, opts, now, &|_, _| Ok(()))
+    }
+
+    fn install_verified_with(
+        &self,
+        pkg: &VerifiedPackage,
+        package_sha256: &str,
+        opts: &InstallOptions<'_>,
+        now: DateTime<Utc>,
+        in_tx: InTx<'_>,
+    ) -> Result<Installed, LedgerError> {
         let m = &pkg.manifest;
         let _ledger = self.runtime.ledger_lock();
 
@@ -680,7 +710,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         // The state and consent come from the row as the commit reads it, not as the checks did:
         // a pause written while the files were staging survives the install.
         let Committed { state, consented } =
-            self.with_conn(|c| commit(c, &write, kind, expected))?;
+            self.with_conn(|c| commit_with(c, &write, kind, expected, in_tx))?;
         placed.keep();
         if policy::serves(&state, consented) {
             self.runtime.install(installed);
@@ -1140,24 +1170,31 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
     rows.collect()
 }
 
+/// What an install runs inside its own transaction after the row is written, told which kind of
+/// install it is (see [`Ledger::install_package_with`]).
+pub(crate) type InTx<'a> = &'a dyn Fn(&Connection, InstallKind) -> Result<(), LedgerError>;
+
 /// Write the row, after checking the pin is still what the checks read: a fresh install needs no
 /// row, an update or repair the very row it was decided against. The state is decided here, from
 /// the row this transaction reads: another owner's pause written since the checks (the blacklist,
-/// the user) is kept, never overwritten from the earlier read.
-fn commit(
+/// the user) is kept, never overwritten from the earlier read. `in_tx` runs between the row and the
+/// commit: its failure drops the transaction, so the row goes with it.
+fn commit_with(
     conn: &mut Connection,
     w: &RowWrite<'_>,
     kind: InstallKind,
     expected: Option<&Pinned>,
+    in_tx: InTx<'_>,
 ) -> Result<Committed, LedgerError> {
     let tx = conn.transaction()?;
     let committed = write_row(&tx, w, kind, expected)?;
+    in_tx(&tx, kind)?;
     disk::failpoint(Step::Commit).map_err(LedgerError::Disk)?;
     tx.commit()?;
     Ok(committed)
 }
 
-/// [`commit`]'s writes, in the caller's transaction (the unsigned install adds its own rule to the
+/// [`commit_with`]'s writes, in the caller's transaction (the unsigned install adds its own rule to the
 /// same one).
 fn write_row(
     tx: &Connection,
@@ -1593,6 +1630,10 @@ pub fn after_settle(app: &AppHandle, writes: impl FnOnce() -> bool) {
     };
     if settle_registry(runtime.inner(), writes) {
         after_writer_open(app);
+        // A pilot owed to this store (a marker; nothing without one) with the index held on this
+        // machine. After the load, not inside it: `after_writer_open` returns early for a store with
+        // no mods yet, which is exactly the store that is owed one.
+        super::autoinstall::spawn_after_open(app);
     }
     // Either way the sessions of test folders are gone (a close forgot them, a writer's open
     // deleted their rows): so are their watches.
@@ -1648,6 +1689,8 @@ mod tests {
 
     // The safety list against the ledger (slice 5).
     mod slice5;
+    // The pilots' auto-install (PR B, B8).
+    mod pilots;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).
@@ -2288,7 +2331,7 @@ mod tests {
             (InstallKind::Update, Some(&stale)),
         ] {
             assert!(matches!(
-                commit(&mut conn, &write, kind, expected),
+                commit_with(&mut conn, &write, kind, expected, &|_, _| Ok(())),
                 Err(LedgerError::Refused(Refusal::Changed))
             ));
         }
@@ -2298,7 +2341,13 @@ mod tests {
         let mut conn = w.store.conn.lock().unwrap();
         assert!(
             matches!(
-                commit(&mut conn, &write, InstallKind::Update, Some(&pin)),
+                commit_with(
+                    &mut conn,
+                    &write,
+                    InstallKind::Update,
+                    Some(&pin),
+                    &|_, _| Ok(())
+                ),
                 Err(LedgerError::Refused(Refusal::Changed))
             ),
             "an uninstall since the checks isn't updated back into being"

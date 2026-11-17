@@ -313,6 +313,17 @@ async fn work_on<T: Transport>(
     // Restrictions first.
     apply_in_background(app, &index, now).await;
 
+    // Then a pilot owed to a store that used its core feature (a marker; nothing without one), with
+    // the same index and the same trusted keys the updates below use.
+    super::autoinstall::run(
+        app,
+        transport,
+        endpoints,
+        Some(&index),
+        &safety::trusted_keys(state),
+    )
+    .await;
+
     // Then what the index lists newer.
     let planned = {
         let (app, index) = (app.clone(), index.clone());
@@ -500,6 +511,9 @@ pub const CHANGED_DEV_MODE: &str = "dev-mode";
 /// unloaded. A frame of it that was open has ended (`replaced` or `uninstalled`): the page mounts it
 /// again if its tab is showing.
 pub const CHANGED_TEST_MOD: &str = "test-mod";
+/// A pilot (the Map) was installed for a store that had used its core feature, or its handover was
+/// finished for one the user had already installed (`autoinstall`).
+pub const CHANGED_AUTOINSTALLED: &str = "auto-installed";
 
 /// What `mods://changed` carries.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -916,6 +930,7 @@ mod tests {
             CHANGED_DECIDED,
             CHANGED_DEV_MODE,
             CHANGED_TEST_MOD,
+            CHANGED_AUTOINSTALLED,
         ];
         let source = include_str!("refresh.rs");
         let declared = source

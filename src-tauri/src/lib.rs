@@ -2171,6 +2171,10 @@ pub fn run() {
             mods::tab::commands::mods_safety_status,
             mods::tab::commands::dismiss_mod_resumed,
             mods::tab::commands::reset_safety_record,
+            // The pilots' auto-install (PR B, B8): "Try now", what landed, the Map's device-local prefs.
+            mods::tab::pilots::retry_auto_install,
+            mods::tab::pilots::mods_handover_state,
+            mods::tab::pilots::adopt_map_prefs,
             // Developer mode's switch, per device, and the unsigned file install's first step
             // (Mods slice 6, part 3). Not the `commands_dev` readers below: those are harmless
             // reads; these decide whether unsigned mods may be installed and run.

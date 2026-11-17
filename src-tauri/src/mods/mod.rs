@@ -15,6 +15,8 @@
 //!   unsigned checks, and the plan for applying the blacklist to an installed row). [`refresh`]:
 //!   the task that runs them, and what runs at launch and after a restore. [`updater`]: the
 //!   background update and the pinned-version repair download.
+//! - [`autoinstall`]: a pilot (the Map) installed once, unconsented, for a store that used its core
+//!   feature, and the handover of that feature's settings.
 //! - [`runtime`]: the installed-mod registry, the one-time entry URLs and the frame sessions, and
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
@@ -50,6 +52,7 @@
 //! when the main window couldn't be, every window without it.
 
 pub mod api;
+pub mod autoinstall;
 pub mod devmode;
 pub mod disk;
 pub mod engine;

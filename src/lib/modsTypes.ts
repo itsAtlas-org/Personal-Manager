@@ -184,6 +184,10 @@ export interface ModHelpEntry {
 
 export interface ModInfo {
   id: string;
+  /** The one entry that is no row: a mod PM is still installing for this vault (the Map, once a
+   *  migration says so). It has a tab and the Installing words and nothing else: no permissions, no
+   *  files, nothing to uninstall, and the Mods tab's list leaves it out. */
+  pending: boolean;
   name: string;
   description: string;
   /** What the row says; an unsigned row is third party whatever it claims (`signed`). */
@@ -531,6 +535,21 @@ export interface ModsResetResult {
   problem: string | null;
 }
 
+/** How "Try now" went (`retryAutoInstall`). */
+export interface ModsRetryResult {
+  /** The safety list was fetched and taken, so the install ran against a fresh one. */
+  fetched: boolean;
+  /** When it wasn't, why, in the backend's words. */
+  problem: string | null;
+}
+
+/** What the page asks once it has the rows (`modsHandoverState`): the auto-installed mods that landed
+ *  in this vault, and whether the Map's device-local view prefs still wait to be handed over. */
+export interface ModsHandoverState {
+  landed: string[];
+  adoptMapPrefs: boolean;
+}
+
 /** Why `mods://changed` fired. The page's answer is the same for every cause: read the rows again. */
 export type ModsChangedCause =
   | "recovered"
@@ -544,7 +563,8 @@ export type ModsChangedCause =
   | "loaded"
   | "decided"
   | "dev-mode"
-  | "test-mod";
+  | "test-mod"
+  | "auto-installed";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

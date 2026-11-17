@@ -66,6 +66,7 @@ import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
 import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
 import { useModRows } from "./lib/modRows";
+import { usePilotHandover } from "./lib/pilotHandover";
 
 const LAST_SEEN_VERSION_KEY = "pm:lastSeenVersion";
 import {
@@ -262,6 +263,8 @@ export default function App() {
   // store re-opens the provider empties the rows until the new read lands, and the tab must survive
   // that gap (ModTab draws its own Loading panel meanwhile).
   const { loaded: modsLoaded } = useModRows();
+  // What an auto-installed mod (the Map, once it is one) leaves for this device to carry over.
+  usePilotHandover();
   useEffect(() => {
     if (!isReachable(view, navEntries, nav, modsLoaded)) setView("focus");
   }, [view, navEntries, nav, modsLoaded]);

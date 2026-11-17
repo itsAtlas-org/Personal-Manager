@@ -106,6 +106,14 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     { modId: "atlas.map" },
   ],
   ["resetSafetyRecord", () => ipc.resetSafetyRecord(), "reset_safety_record", undefined],
+  ["retryAutoInstall", () => ipc.retryAutoInstall(), "retry_auto_install", undefined],
+  ["modsHandoverState", () => ipc.modsHandoverState(), "mods_handover_state", undefined],
+  [
+    "adoptMapPrefs",
+    () => ipc.adoptMapPrefs("semantic", 0.25, true),
+    "adopt_map_prefs",
+    { layoutMode: "semantic", cohesion: 0.25, labels: true },
+  ],
 ];
 
 describe("the Mods tab's wrappers", () => {
