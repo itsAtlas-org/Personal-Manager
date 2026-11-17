@@ -50,10 +50,53 @@ export function modsErrorOf(e: unknown): ModsError | null {
   return { code: f.code as ModsErrorCode, message: f.message };
 }
 
+/** A plain sentence for every code, for the day the backend sends one with no message of its own
+ *  (the backend always words its refusals, so this is the page's last resort and never overrides
+ *  it). `Record<ModsErrorCode, …>` makes a code added to the union without words a compile error. */
+export const ERROR_WORDS: Record<ModsErrorCode, string> = {
+  "not-main-window": "This can only be done from PM's main window.",
+  "no-store":
+    "PM's data isn't open on this computer right now: it is locked, or another PM window is in charge.",
+  locked: "PM is locked. Unlock it and try again.",
+  "not-installed": "That mod isn't installed.",
+  "not-in-catalogue": "The catalogue doesn't list that mod, or PM hasn't downloaded it yet.",
+  "bad-request": "PM couldn't make sense of that request.",
+  "consent-expired":
+    "That screen ran out of time, so nothing was installed. Start again to get a fresh one.",
+  "file-too-large": "That file is too big to be a mod.",
+  "file-unreadable": "PM couldn't read that file.",
+  "not-a-mod": "That file isn't a mod PM can use.",
+  unsigned: "That file isn't signed. PM only takes an unsigned file when developer mode is on.",
+  "safety-list": "PM's safety list says no to this one.",
+  "needs-newer-pm": "This mod needs a newer PM than this one.",
+  "api-retired": "This mod was made for an older PM, and its maker hasn't updated it.",
+  refused: "PM won't install this.",
+  "not-from-catalogue":
+    "That mod didn't come from the catalogue, so PM can't fetch it again. Install its file again.",
+  changed: "That mod changed while PM was working on it. Nothing was changed. Try again.",
+  "grant-refused": "PM can't allow that combination of permissions.",
+  "not-allowed": "PM doesn't allow that right now.",
+  offline: "PM couldn't reach the internet. Check your connection and try again.",
+  "download-refused": "PM refused the download because it wasn't what the catalogue promised.",
+  "dev-mode-off":
+    "Developer mode is off on this computer. Switch it on in Settings, under Developer.",
+  "confirm-mismatch": "That isn't the mod's id. Type it exactly as shown.",
+  internal: "Something went wrong inside PM. Try again.",
+};
+
+/** The sentence for a typed refusal: the backend's own words, else PM's for its code. */
+export function modsErrorSentence(err: ModsError): string | null {
+  if (err.message.trim()) return err.message;
+  return Object.prototype.hasOwnProperty.call(ERROR_WORDS, err.code) ? ERROR_WORDS[err.code] : null;
+}
+
 /** What to tell the user about any caught rejection of a Mods command: the backend's own sentence
- *  when it sent a typed refusal, else an error's message, else `fallback`. */
+ *  when it sent a typed refusal (PM's own words for its code if it sent none), else an error's
+ *  message, else `fallback`. */
 export function failureText(e: unknown, fallback: string): string {
-  return modsErrorOf(e)?.message ?? (e instanceof Error && e.message ? e.message : fallback);
+  const typed = modsErrorOf(e);
+  if (typed) return modsErrorSentence(typed) ?? fallback;
+  return e instanceof Error && e.message ? e.message : fallback;
 }
 
 // ---- The installed list ---------------------------------------------------------------------------

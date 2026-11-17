@@ -30,6 +30,7 @@ const approveUpdate = vi.fn();
 const uninstallPreview = vi.fn();
 const uninstallMod = vi.fn();
 const pauseMod = vi.fn();
+const listCatalogue = vi.fn();
 // Three readers listen to `mods://changed` (the shared rows, the disclaimer, the strips) and two
 // kinds to the notice, so an event goes to every one that subscribed.
 const changedHandlers = new Set<(e: ModsChanged) => void>();
@@ -46,6 +47,7 @@ vi.mock("../../lib/ipc", () => ({
   uninstallPreview: (id: string) => uninstallPreview(id),
   uninstallMod: (id: string, also: boolean) => uninstallMod(id, also),
   pauseMod: (id: string) => pauseMod(id),
+  listCatalogue: () => listCatalogue(),
   modIcon: () => Promise.reject(new Error("none")),
   dismissModResumed: () => Promise.resolve(),
   onModsChanged: (h: (e: ModsChanged) => void) => {
@@ -90,6 +92,7 @@ beforeEach(() => {
   noticeHandlers.clear();
   modsDisclaimerState.mockResolvedValue({ accepted: true, problem: null });
   modsSafetyStatus.mockResolvedValue(safety());
+  listCatalogue.mockResolvedValue({ entries: [], usable: true, unavailable: null });
 });
 afterEach(cleanup);
 

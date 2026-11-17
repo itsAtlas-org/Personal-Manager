@@ -5,8 +5,12 @@
 // the spec names, in order:
 //
 //   Installed         one row per mod: its standing, permissions, update waiting, pause, uninstall
-//   Available         the signed catalogue
+//   Available         the signed catalogue: each entry's tier, maker and what it asks for, Install
 //   Install from file the one home of file installs (an unsigned one needs developer mode)
+//
+// Installing is two steps: Install / Choose a file reads and checks and returns a consent screen
+// (lib/modInstall), staged outside the view; ConsentDialog draws it (the signed screen, the stark
+// unsigned one, or "ran out of time") and its button finishes the install.
 //
 // Nothing the tab offers shows before the Mods disclaimer is accepted on this device in this vault
 // (ModsDisclaimerGate), except the safety strips, which are about mods already installed.
@@ -20,8 +24,11 @@
 import { useState } from "react";
 import { useModRows } from "../../lib/modRows";
 import { dismissModNote, useModActions } from "../../lib/modActions";
+import { useCatalogue } from "../../lib/useCatalogue";
 import { Button, Callout, Modal } from "../ui";
+import { AvailableMods } from "./AvailableMods";
 import { ConsentDialog } from "./ConsentDialog";
+import { InstallFromFile } from "./InstallFromFile";
 import { ModFirstOpen } from "./ModFirstOpen";
 import { ModRow } from "./ModRow";
 import { ModsDisclaimerGate } from "./ModsDisclaimerGate";
@@ -32,6 +39,7 @@ const TURN_ON_TITLE = "mods-turn-on-title";
 
 export function ModsView() {
   const { rows, loaded, problem, refresh } = useModRows();
+  const { catalogue, problem: catalogueProblem, refresh: refreshCatalogue } = useCatalogue();
   const { notes, screens } = useModActions();
   const [uninstallId, setUninstallId] = useState<string | null>(null);
   const [turnOnId, setTurnOnId] = useState<string | null>(null);
@@ -110,15 +118,36 @@ export function ModsView() {
                 </ul>
               )}
             </section>
-            <section aria-labelledby="mods-available" data-mods-section="available">
+            <section
+              aria-labelledby="mods-available"
+              data-mods-section="available"
+              data-help="mods-available"
+              className="space-y-3"
+            >
               <h2 id="mods-available" className="font-head text-sm font-semibold text-ink">
                 Available
               </h2>
+              <p className="text-xs text-ink3">
+                Mods published through Atlas. PM checks each download is the one the catalogue lists
+                before it shows you what it asks to do.
+              </p>
+              <AvailableMods
+                catalogue={catalogue}
+                problem={catalogueProblem}
+                retry={() => void refreshCatalogue()}
+                dialogFor={dialogFor}
+              />
             </section>
-            <section aria-labelledby="mods-from-file" data-mods-section="from-file">
+            <section
+              aria-labelledby="mods-from-file"
+              data-mods-section="from-file"
+              data-help="mods-from-file"
+              className="space-y-3"
+            >
               <h2 id="mods-from-file" className="font-head text-sm font-semibold text-ink">
                 Install from file
               </h2>
+              <InstallFromFile />
             </section>
           </ModsDisclaimerGate>
         </div>

@@ -53,11 +53,20 @@ function Probe() {
   );
 }
 
-function open(screen: ConsentScreen) {
-  setModScreen(screen.id, screen);
+/** The dialog as ModsView hosts it: the first staged screen, remounted when its token changes. */
+function Host() {
+  const { screens } = useModActions();
+  const staged = screens.values().next().value;
+  return staged ? <ConsentDialog key={staged.token} screen={staged} refresh={refresh} /> : null;
+}
+
+function open(screen: ConsentScreen, restart?: () => Promise<ConsentScreen>) {
+  // A test that opens several screens in turn starts each from nothing staged.
+  resetModActions();
+  setModScreen(screen.id, screen, restart);
   return render(
     <>
-      <ConsentDialog screen={screen} refresh={refresh} />
+      <Host />
       <Probe />
     </>,
   );
@@ -238,16 +247,17 @@ describe("answers and the button", () => {
     ).toBeTruthy();
   });
 
-  it("shows the backend's sentence when the screen has expired, and keeps the screen", async () => {
+  it("shows the backend's sentence when the install is refused, and keeps the screen to try again", async () => {
     installModConsented.mockRejectedValue({
-      code: "consent-expired",
-      message: "That screen has expired. Start again.",
+      code: "refused",
+      message: "This mod wasn't installed: it is older than the one you have.",
     });
     open(update());
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
-    expect(await screen.findByText("That screen has expired. Start again.")).toBeTruthy();
+    expect(
+      await screen.findByText("This mod wasn't installed: it is older than the one you have."),
+    ).toBeTruthy();
     expect(screen.getByTestId("staged").textContent).toBe("acme.tool");
-    // The person can try again or cancel.
     expect((screen.getByRole("button", { name: "Update" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
@@ -289,23 +299,142 @@ describe("answers and the button", () => {
   });
 });
 
-describe("a screen it doesn't draw", () => {
-  it("an unsigned file's stark screen is not drawn here, and nothing can be installed from it", () => {
+describe("the tiers of a signed screen", () => {
+  const fresh = (extra: Partial<ConsentScreen> = {}) =>
+    update({ kind: "fresh", installedVersion: null, widening: [], from: "file", ...extra });
+
+  it("first party: says who made it and lists what it asks, with no review line", () => {
+    open(fresh({ tier: "first", author: "Atlas" }));
+    const dialog = screen.getByRole("dialog", { name: "Install Acme Tool?" });
+    expect(dialog.textContent).toContain("First party");
+    expect(dialog.textContent).toContain("Made by Atlas");
+    expect(dialog.textContent).not.toContain("reviewed by Atlas");
+    expect(dialog.textContent).toContain("See your documents' titles");
+    expect(dialog.textContent).toContain("Ask an AI model");
+  });
+
+  it("second party: adds 'made by X, reviewed by Atlas at commit abc'", () => {
+    open(fresh({ tier: "second", author: "Friend", commit: "0123456789abcdef0123" }));
+    const dialog = screen.getByRole("dialog", { name: "Install Acme Tool?" });
+    expect(dialog.textContent).toContain("Reviewed by Atlas");
+    expect(dialog.textContent).toContain(
+      "Made by Friend · reviewed by Atlas at commit 0123456789ab",
+    );
+  });
+
+  it("says where it came from, and that PM checked it", () => {
+    open(fresh());
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "From a file you chose. PM checked its signature.",
+    );
+    cleanup();
+    open(fresh({ from: "catalogue" }));
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "From the catalogue. PM checked it is the one the catalogue lists.",
+    );
+  });
+
+  it("answers every permission it asks at install, yes and no alike, and nothing it doesn't", async () => {
+    installModConsented.mockResolvedValue(result({ kind: "fresh" }));
     open(
-      update({
-        tier: "third",
-        unsigned: {
-          confirmId: "acme.tool",
-          reinstall: false,
-          engineSealed: true,
-          readOrInternet: null,
-          testFolder: null,
-        },
+      fresh({
+        permissions: [
+          consentPerm("documents.meta"),
+          consentPerm("tasks.read", { defaultAnswer: false }),
+          consentPerm("ai", { answerRequired: false, when: "first-use" }),
+          consentPerm("storage", { answerRequired: false, when: "auto", class: "local" }),
+        ],
       }),
     );
-    expect(screen.getByRole("dialog", { name: "This one needs another screen" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() =>
+      expect(installModConsented).toHaveBeenCalledWith(
+        "tok-1",
+        { "documents.meta": true, "tasks.read": false },
+        undefined,
+      ),
+    );
+  });
+});
+
+describe("a screen that ran out of time", () => {
+  const expired = () =>
+    installModConsented.mockRejectedValue({
+      code: "consent-expired",
+      message: "That install screen is out of date. Start the install again.",
+    });
+
+  it("replaces the screen with one that says so, offers nothing that can't work, and keeps nothing installed", async () => {
+    expired();
+    open(update());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    const dialog = await screen.findByRole("dialog", { name: "This screen ran out of time" });
+    expect(dialog.textContent).toContain("Nothing was installed.");
+    expect(dialog.textContent).toContain("only lasts ten minutes");
+    expect(dialog.textContent).toContain("locking PM or switching to another vault");
     expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
-    expect(installModConsented).not.toHaveBeenCalled();
+    // The refusal that expired it is not repeated as an error.
+    expect(dialog.textContent).not.toContain("That install screen is out of date");
+    expect(installModConsented).toHaveBeenCalledTimes(1);
+  });
+
+  it("without a way to start again, it says where to start and only closes", async () => {
+    expired();
+    open(update());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByRole("dialog", { name: "This screen ran out of time" });
+    expect(screen.queryByRole("button", { name: "Start again" })).toBeNull();
+    expect(screen.getByRole("dialog").textContent).toContain("start again from the Mods tab");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByTestId("staged").textContent).toBe("");
+  });
+
+  it("Start again asks for a fresh screen and installs with ITS token", async () => {
+    expired();
+    const restart = vi.fn().mockResolvedValue(update({ token: "tok-2" }));
+    open(update(), restart);
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+    expect(await screen.findByRole("dialog", { name: /Update Acme Tool/ })).toBeTruthy();
+    expect(restart).toHaveBeenCalledTimes(1);
+    installModConsented.mockResolvedValue(result());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await waitFor(() =>
+      expect(installModConsented).toHaveBeenLastCalledWith(
+        "tok-2",
+        { "documents.meta": true, ai: true },
+        undefined,
+      ),
+    );
+  });
+
+  it("says why starting again failed, and stays on the expired screen", async () => {
+    expired();
+    const restart = vi
+      .fn()
+      .mockRejectedValue({ code: "file-unreadable", message: "PM couldn't read that file." });
+    open(update(), restart);
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+    expect(await screen.findByText("PM couldn't read that file.")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "This screen ran out of time" })).toBeTruthy();
+  });
+
+  it("a screen for another mod id (the file was swapped) replaces the old one", async () => {
+    expired();
+    const restart = vi.fn().mockResolvedValue(update({ id: "acme.other", token: "tok-9" }));
+    open(update(), restart);
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+    await screen.findByRole("dialog", { name: /Update Acme Tool/ });
+    expect(screen.getByTestId("staged").textContent).toBe("acme.other");
+  });
+
+  it("closing it drops the screen and its refusal", async () => {
+    expired();
+    open(update(), vi.fn());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByRole("dialog", { name: "This screen ran out of time" });
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.getByTestId("staged").textContent).toBe("");
   });

@@ -12,7 +12,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addModNote,
   clearModError,
+  currentModActions,
   dismissModNote,
+  markScreenExpired,
   resetModActions,
   runModAction,
   setModScreen,
@@ -185,5 +187,45 @@ describe("errors, notes and screens", () => {
     expect(renderHook(() => useModActions()).result.current.screens.get("acme")).toBe(screen);
     act(() => setModScreen("acme", null));
     expect(view.result.current.screens.has("acme")).toBe(false);
+  });
+});
+
+describe("a staged screen's way to start again, and running out of time", () => {
+  const screenFor = (id: string) => ({ id, token: "t" }) as unknown as ConsentScreen;
+
+  it("keeps the restart with its screen and drops it with the screen", () => {
+    const restart = () => Promise.resolve(screenFor("acme"));
+    act(() => setModScreen("acme", screenFor("acme"), restart));
+    expect(currentModActions().restarts.get("acme")).toBe(restart);
+    act(() => setModScreen("acme", null));
+    expect(currentModActions().restarts.has("acme")).toBe(false);
+  });
+
+  it("a screen staged without a restart has none, even if an older one had", () => {
+    act(() => setModScreen("acme", screenFor("acme"), () => Promise.resolve(screenFor("acme"))));
+    act(() => setModScreen("acme", screenFor("acme")));
+    expect(currentModActions().restarts.has("acme")).toBe(false);
+  });
+
+  it("marks a staged screen expired, and a fresh screen for the same mod is not", () => {
+    act(() => setModScreen("acme", screenFor("acme")));
+    act(() => markScreenExpired("acme"));
+    expect(currentModActions().expired.has("acme")).toBe(true);
+    act(() => setModScreen("acme", screenFor("acme")));
+    expect(currentModActions().expired.has("acme")).toBe(false);
+  });
+
+  it("dropping an expired screen clears the mark", () => {
+    act(() => setModScreen("acme", screenFor("acme")));
+    act(() => markScreenExpired("acme"));
+    act(() => setModScreen("acme", null));
+    expect(currentModActions().expired.has("acme")).toBe(false);
+  });
+
+  it("marking a mod with nothing staged does nothing (no stale mark waits for a later screen)", () => {
+    act(() => markScreenExpired("ghost"));
+    expect(currentModActions().expired.size).toBe(0);
+    act(() => setModScreen("ghost", screenFor("ghost")));
+    expect(currentModActions().expired.has("ghost")).toBe(false);
   });
 });

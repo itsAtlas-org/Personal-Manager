@@ -206,7 +206,10 @@ export function ModRow({
                   disabled={working !== null}
                   onClick={() =>
                     act("Getting the update", "PM couldn't get the update.", async () =>
-                      setModScreen(mod.id, await approveUpdate(mod.id)),
+                      // `restart` is how its screen is asked for again if it runs out of time.
+                      setModScreen(mod.id, await approveUpdate(mod.id), () =>
+                        approveUpdate(mod.id),
+                      ),
                     )
                   }
                 >

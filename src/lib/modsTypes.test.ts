@@ -3,7 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, expect, it } from "vitest";
-import { iconBlob, modsErrorOf, type ModIcon } from "./modsTypes";
+import {
+  ERROR_WORDS,
+  failureText,
+  iconBlob,
+  modsErrorOf,
+  type ModIcon,
+  type ModsErrorCode,
+} from "./modsTypes";
 
 describe("modsErrorOf", () => {
   it("reads the backend's {code, message} refusal", () => {
@@ -44,5 +51,48 @@ describe("iconBlob", () => {
     expect(iconBlob({ mediaType: "image/webp", data: btoa("RIFF....WEBPVP8 ") }).type).toBe(
       "image/webp",
     );
+  });
+});
+
+describe("failureText: every code has a plain sentence", () => {
+  it("has a full sentence for every code (the Rust test pins the union to the backend's 24)", () => {
+    const codes = Object.keys(ERROR_WORDS);
+    expect(codes.length).toBe(24);
+    for (const code of codes) {
+      const words = ERROR_WORDS[code as ModsErrorCode];
+      expect(words.length).toBeGreaterThan(15);
+      expect(words.endsWith(".")).toBe(true);
+      expect(words).not.toBe(code);
+    }
+  });
+
+  it("uses the backend's own message whenever it gives one, whatever the code", () => {
+    for (const code of Object.keys(ERROR_WORDS)) {
+      expect(failureText({ code, message: "The backend's words." }, "fallback")).toBe(
+        "The backend's words.",
+      );
+    }
+  });
+
+  it("falls back to PM's sentence for the code when the message is empty or blank", () => {
+    for (const code of Object.keys(ERROR_WORDS) as ModsErrorCode[]) {
+      expect(failureText({ code, message: "" }, "fallback")).toBe(ERROR_WORDS[code]);
+      expect(failureText({ code, message: "  " }, "fallback")).toBe(ERROR_WORDS[code]);
+    }
+  });
+
+  it("a code PM doesn't know, with no message, uses the caller's fallback", () => {
+    expect(failureText({ code: "from-the-future", message: "" }, "Something failed.")).toBe(
+      "Something failed.",
+    );
+    expect(failureText({ code: "constructor", message: "" }, "Something failed.")).toBe(
+      "Something failed.",
+    );
+  });
+
+  it("other rejections: an Error's message, else the fallback", () => {
+    expect(failureText(new Error("disk full"), "x")).toBe("disk full");
+    expect(failureText(new Error(""), "x")).toBe("x");
+    expect(failureText("nope", "x")).toBe("x");
   });
 });

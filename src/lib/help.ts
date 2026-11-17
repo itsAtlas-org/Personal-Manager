@@ -97,8 +97,24 @@ export const HELP: Record<string, HelpEntry> = {
     body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. PM asks again the first time a mod uses something sensitive.",
   },
   "mods-consent": {
-    title: "Approve an update",
-    body: "An update waits for you when it asks for something you hadn't allowed, such as a new permission or a new site. This lists everything it asks for, with what's new marked, and nothing changes until you press Update. The old version keeps running meanwhile.",
+    title: "Approve an install or an update",
+    body: "Lists everything the mod asks for, in PM's words with the maker's reason beside each, and nothing is installed until you press the button. For an update, what's new is marked and the old version keeps running meanwhile. A mod from Atlas says who made it; one Atlas has looked over says 'reviewed by Atlas' and at which version of its code. Untick anything you don't want it to have. This screen lasts ten minutes.",
+  },
+  "mods-consent-unsigned": {
+    title: "A mod nobody has checked",
+    body: "This mod comes from a file or folder nobody has signed or reviewed. Its name, maker and repository are only what the file says about itself. Each thing it asks for starts at no, and you allow only what you want. A mod like this may read your data or use the internet, never both, counting your other unchecked mods too. To install it you type its id exactly, so it can't happen by accident.",
+  },
+  "mods-consent-expired": {
+    title: "A screen that ran out of time",
+    body: "An install screen only works for ten minutes, and locking PM or switching vaults ends it sooner. Nothing was installed. 'Start again' reads the file or downloads the mod again and shows a fresh screen.",
+  },
+  "mods-available": {
+    title: "Available mods",
+    body: "Mods published through Atlas, from the catalogue PM keeps. Each one says who made it and everything it asks to do before you install anything. 'Install' downloads it, checks it is the one the catalogue lists, and then shows the screen where you say yes or no to each thing it asks. If PM's safety list is out of date, the catalogue is shown but nothing installs from it until the list is refreshed.",
+  },
+  "mods-from-file": {
+    title: "Install from a file",
+    body: "The one place to install a mod from a .pmmod file. A file signed by Atlas is checked and then shown on the same screen as a catalogue mod. A file nobody has signed can't be checked by anyone, so PM takes it only when developer mode is on (Settings, then Developer), and then makes you type its id to confirm.",
   },
   "mods-uninstall": {
     title: "Uninstall a mod",

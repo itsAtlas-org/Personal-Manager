@@ -202,7 +202,12 @@ release remain the open post-v1 work.
     strips, one `ModRow` per mod, the uninstall and update dialogs): what is in flight (a pause,
     an uninstall, a staged update screen) lives in `lib/modActions.ts`, not in the view, because
     the tab router unmounts the view and the backend's work keeps going; every word a mod
-    supplied goes through `modText` first.
+    supplied goes through `modText` first. Installing is `lib/modInstall.ts`: a START (Available's
+    Install, or Install from file, the ONLY home of file installs) returns a consent screen that
+    installs nothing and is staged in `modActions` with a way to start again; `ConsentDialog`
+    draws it (signed tiers, the stark `UnsignedConsentDialog` for `screen.unsigned`, or the
+    "ran out of time" screen after `consent-expired`) and its button is the FINISH. The page
+    only enables the stark screen's button for the typed id; Rust checks it.
     `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
