@@ -78,6 +78,10 @@ describe("buildShell", () => {
     expect(shell.legend.getAttribute("aria-label")).toBe("Projects");
   });
 
+  it("lets the keyboard reach the legend, which scrolls when there are many projects", () => {
+    expect(buildShell(document).legend.tabIndex).toBe(0);
+  });
+
   it("points the settings button at its popover and announces the strips", () => {
     const shell = buildShell(document);
     expect(shell.settingsButton.getAttribute("aria-controls")).toBe(shell.settingsPanel.id);

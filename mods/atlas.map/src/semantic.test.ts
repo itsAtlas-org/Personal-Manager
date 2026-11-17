@@ -200,6 +200,95 @@ describe("what makes the cache stale", () => {
   });
 });
 
+describe("the previous layout, handed over as a placeholder while a new one is worked out", () => {
+  /** Load with a listener; what it was given and what PM had been asked when it was. */
+  const watched = async (pm: MemoryHost) => {
+    const seen: { coords: { id: number }[]; vectorsRead: boolean }[] = [];
+    const result = await load(pm.host, 1000, {
+      onStale: (coords) =>
+        seen.push({ coords, vectorsRead: methods(pm).includes("embeddings.documentVectors") }),
+    });
+    return { seen, result };
+  };
+
+  it("a changed document set hands over the old coordinates before the vectors are read", async () => {
+    const { pm } = world(30);
+    const first = await load(pm.host);
+    pm.addDoc(doc(99, "A"), new Float32Array(DIM).fill(0.3));
+    pm.calls.length = 0;
+    const { seen, result } = await watched(pm);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].vectorsRead).toBe(false);
+    expect(seen[0].coords).toEqual(first.coords);
+    // And the answer is still the new, full layout.
+    expect(result).toMatchObject({ source: "computed", placed: 31 });
+  });
+
+  it("a changed cap does the same: the rows are the old cap's, and still a picture", async () => {
+    const { pm } = world(30);
+    const first = await load(pm.host, 1000);
+    const seen: unknown[] = [];
+    await load(pm.host, 200, { onStale: (c) => seen.push(c) });
+    expect(seen).toEqual([first.coords]);
+  });
+
+  it("a layout that is still right is not a placeholder", async () => {
+    const { pm } = world(30);
+    await load(pm.host);
+    const { seen, result } = await watched(pm);
+    expect(result.source).toBe("cache");
+    expect(seen).toEqual([]);
+  });
+
+  it("a first open has nothing to hand over", async () => {
+    const { pm } = world(30);
+    const { seen } = await watched(pm);
+    expect(seen).toEqual([]);
+  });
+
+  const unusable: [string, (pm: MemoryHost) => void][] = [
+    [
+      "coordinates made by another algorithm",
+      (pm) => {
+        const m = pm.kv.get(KEY_SEMANTIC_META)!;
+        pm.kv.set(KEY_SEMANTIC_META, {
+          value: { ...(m.value as object), algo: ALGO_VERSION + 1 },
+          revision: m.revision,
+        });
+      },
+    ],
+    [
+      "a fingerprint that was cleared (a write that never finished)",
+      (pm) => {
+        const m = pm.kv.get(KEY_SEMANTIC_META)!;
+        pm.kv.set(KEY_SEMANTIC_META, { value: null, revision: m.revision });
+      },
+    ],
+    ["a row missing", (pm) => pm.rows.get(KEY_SEMANTIC_COORDS)!.delete(3)],
+    ["a row that is not a coordinate", (pm) => pm.rows.get(KEY_SEMANTIC_COORDS)!.set(3, null)],
+  ];
+
+  it.each(unusable)("%s is not a placeholder, and the recompute still runs", async (_n, damage) => {
+    const { pm } = world(30);
+    await load(pm.host);
+    pm.addDoc(doc(99, "A"), new Float32Array(DIM).fill(0.3));
+    damage(pm);
+    const { seen, result } = await watched(pm);
+    expect(seen).toEqual([]);
+    expect(result.source).toBe("computed");
+  });
+
+  it("a failure reading the old rows costs the placeholder and nothing else", async () => {
+    const { pm } = world(30);
+    await load(pm.host);
+    pm.addDoc(doc(99, "A"), new Float32Array(DIM).fill(0.3));
+    pm.failNext("storage.doc.list", "MOD-2001");
+    const { seen, result } = await watched(pm);
+    expect(seen).toEqual([]);
+    expect(result).toMatchObject({ source: "computed", placed: 31 });
+  });
+});
+
 describe("a cache that does not hold together is stale, never trusted", () => {
   const broken: [string, (pm: MemoryHost) => void][] = [
     ["a missing row", (pm) => pm.rows.get(KEY_SEMANTIC_COORDS)!.delete(3)],

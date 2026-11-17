@@ -34,7 +34,7 @@ import {
   subtitle,
 } from "./copy";
 import { listDocuments, type MapHost } from "./hostApi";
-import { buildSemanticLayout, type BaseLayout } from "./layoutModel";
+import { buildSemanticLayout, projectOf, type BaseLayout } from "./layoutModel";
 import { graphColor } from "./palette";
 import { loadProjectLayout } from "./projectLayout";
 import { loadSemanticCoords, type SemanticResult } from "./semantic";
@@ -88,6 +88,7 @@ export function mountMap(options: MapAppOptions): MapApp {
   let settings: MapSettings = { ...DEFAULT_SETTINGS };
   let docs: MapDoc[] = [];
   let docsReady = false;
+  let projectCount = 0;
   let loadFailed = false;
   // What has been worked out this session, one per arrangement.
   let semantic: SemanticResult | null = null;
@@ -172,12 +173,7 @@ export function mountMap(options: MapAppOptions): MapApp {
 
   const renderSubtitle = () => {
     const text = docsReady
-      ? subtitle(
-          settings.layoutMode,
-          docs.length,
-          base?.projectNames.length ?? 0,
-          semantic?.placed ?? 0,
-        )
+      ? subtitle(settings.layoutMode, docs.length, projectCount, semantic?.placed ?? 0)
       : "";
     shell.subtitle.textContent = text;
     shell.canvas.setAttribute("aria-label", text ? `Map: ${text}` : "Map");
@@ -247,6 +243,14 @@ export function mountMap(options: MapAppOptions): MapApp {
             onPhase: (p) => {
               if (!stale()) setPhase(phaseText(p));
             },
+            // The saved picture no longer fits the documents: show it (new documents faded at their
+            // project's centre) under the strip until the new one lands, as the core Map did, not a
+            // blank "Preparing" for the whole recompute.
+            onStale: (old) => {
+              if (stale()) return;
+              setBase(buildSemanticLayout(docs, old, settings.cohesion));
+              render();
+            },
           });
           if (stale()) return;
           semantic = result;
@@ -299,6 +303,9 @@ export function mountMap(options: MapAppOptions): MapApp {
     }
     if (dead || run !== loadRun) return;
     docs = listed;
+    // Counted from the documents, not from the layout: the layout is what is still being worked out
+    // when the first subtitle is drawn ("3,200 documents across 0 projects"), and it names the same set.
+    projectCount = new Set(listed.map(projectOf)).size;
     docsReady = true;
     await arrange();
   };

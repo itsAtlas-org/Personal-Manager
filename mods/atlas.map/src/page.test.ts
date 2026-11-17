@@ -160,6 +160,14 @@ describe("the page's markup and stylesheet", () => {
     expect(styleCss).toContain(".card");
   });
 
+  it("scrolls a long legend instead of clipping it (a name nowhere else would be lost)", () => {
+    const rules = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    const legend = /\.legend\s*\{([^}]*)\}/.exec(rules)?.[1] ?? "";
+    expect(legend).toMatch(/max-height:/);
+    expect(legend).toMatch(/overflow-y:\s*auto/);
+    expect(legend).not.toMatch(/overflow(-y)?:\s*hidden/);
+  });
+
   it("has no colour literal, no url, no import and no font face (the frame loads none of them)", () => {
     // Comments out: the header says what the rules ban, in the words of the ban.
     const rules = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");

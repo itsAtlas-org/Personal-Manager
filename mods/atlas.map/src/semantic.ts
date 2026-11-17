@@ -85,6 +85,12 @@ export interface SemanticOptions {
   /** The node cap, 200..5000 (settings.ts keeps it there). */
   nodeCap: number;
   onPhase?: (phase: SemanticPhase) => void;
+  /** Called once, before the slow part, with the PREVIOUS layout when the saved one no longer fits (a
+   *  document was added, the cap changed) but whole rows of it are still there. It is a placeholder to
+   *  draw under the computing strip, as the core Map drew its cached coordinates while it recomputed;
+   *  the result replaces it. Never called for a fresh cache, for an algorithm the code no longer
+   *  speaks (those coordinates were made under other rules), or when the rows are not whole. */
+  onStale?: (coords: SemanticCoord[]) => void;
   /** Wait (a rate limit's refill); injectable so a test does not wait in real time. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -245,6 +251,17 @@ export async function loadSemanticCoords(
         placed: cached.length,
         saved: true,
       };
+    }
+  }
+
+  if (options.onStale && meta !== null && meta.algo === ALGO_VERSION) {
+    // A look at the old picture is a courtesy: whatever goes wrong reading it, the recompute below
+    // goes ahead and the person simply waits under the strip.
+    try {
+      const old = await readCachedCoords(host, meta);
+      if (old && old.length > 0) options.onStale(old);
+    } catch {
+      // No placeholder.
     }
   }
 

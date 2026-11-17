@@ -87,7 +87,18 @@ export function readDoc(raw: unknown): MapDoc | null {
   };
 }
 
-/** Every document the Map may draw (PM lists all but the archived), paged by id. */
+/** The core Map's order: newest ingested first, ties by id descending (ingest.rs list_documents,
+ *  `ORDER BY d.ingested_at DESC, d.id DESC`). Colours and the legend are handed out by a project's first
+ *  appearance in this list, and the by-project simulation starts from it, so the same vault must read
+ *  in the same order or switching from the core Map recolours every project. The timestamps are
+ *  compared as plain text, as SQLite does (they are ISO 8601, which sorts as time). */
+export function byNewest(a: MapDoc, b: MapDoc): number {
+  if (a.ingestedAt !== b.ingestedAt) return a.ingestedAt < b.ingestedAt ? 1 : -1;
+  return b.id - a.id;
+}
+
+/** Every document the Map may draw (PM lists all but the archived): read page by page (PM pages by
+ *  id), then put in the core Map's order. */
 export async function listDocuments(host: MapHost): Promise<MapDoc[]> {
   const out: MapDoc[] = [];
   let after = 0;
@@ -105,7 +116,7 @@ export async function listDocuments(host: MapHost): Promise<MapDoc[]> {
       if (doc) out.push(doc);
     }
     const next = reply.next;
-    if (next === null || next === undefined) return out;
+    if (next === null || next === undefined) return out.sort(byNewest);
     // The cursor must move forward, or the loop never ends: PM keys pages by id.
     if (!isCount(next) || next <= after) throw new HostAnswerError("documents.list");
     after = next;

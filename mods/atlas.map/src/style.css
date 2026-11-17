@@ -102,7 +102,9 @@ input {
 }
 
 /* The legend can hold a name for every project in a big library: it wraps, and stops growing at about
-   three lines (the rest is clipped) so the header never eats the map. */
+   three lines so the header never eats the map. The rest scrolls (it is the only place a project's name
+   is written, so clipping it would leave dots nobody can name); the list is focusable (shell.ts) so the
+   keyboard can scroll it. */
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -112,7 +114,9 @@ input {
   max-height: 3.9rem;
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
   color: var(--ink2, CanvasText);
   font-size: 0.75rem;
   list-style: none;

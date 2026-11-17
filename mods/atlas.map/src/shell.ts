@@ -74,6 +74,9 @@ export function buildShell(doc: Document): Shell {
   const subtitle = p("subtitle");
   const legend = make(doc.createElement("ul"), "legend", []);
   legend.setAttribute("aria-label", "Projects");
+  // The list scrolls when there are many projects; a scroller is only reachable by keyboard when it
+  // can take focus (WebKit does not focus one on its own).
+  legend.tabIndex = 0;
 
   const cohesion = doc.createElement("select");
   cohesion.id = "map-cohesion";

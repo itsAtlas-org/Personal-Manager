@@ -34,9 +34,14 @@ afterEach(() => {
 });
 
 const NAMES = ["Atlas", "Beta", "Gamma"];
-/** Documents in three projects, in the order their colours are given out. */
+/** Documents in three projects, in the order their colours are given out. The Map lists newest first
+ *  (hostApi.ts byNewest), so each document is ingested a minute before the one with the id below it:
+ *  the list then opens with document 1 and Atlas, Beta, Gamma keep their colours. */
 const library = (n = 12): MapDoc[] =>
-  Array.from({ length: n }, (_, i) => doc(i + 1, NAMES[i % 3], 2 + (i % 5), `Document ${i + 1}`));
+  Array.from({ length: n }, (_, i) => ({
+    ...doc(i + 1, NAMES[i % 3], 2 + (i % 5), `Document ${i + 1}`),
+    ingestedAt: new Date(Date.UTC(2026, 0, 1) - i * 60_000).toISOString(),
+  }));
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -206,6 +211,13 @@ describe("starting", () => {
     const o = await open();
     expect(legendNames(o)).toEqual(["Atlas", "Beta", "Gamma"]);
     expect(legendColors(o)).toEqual(DARK);
+  });
+
+  it("hands the colours out as the core Map does: by the newest documents' projects first", async () => {
+    // Every document ingested at the same moment: newest first is the highest id, a Gamma one here.
+    const docs = Array.from({ length: 12 }, (_, i) => doc(i + 1, NAMES[i % 3]));
+    const o = await open({ docs });
+    expect(legendNames(o)).toEqual(["Gamma", "Beta", "Atlas"]);
   });
 
   it("puts PM's theme on the page and the canvas", async () => {
@@ -604,6 +616,104 @@ describe("the two arrangements", () => {
     await tick();
     expect(o.hidden(".strip-error")).toBe(true);
     expect(draw()).toHaveLength(15);
+  });
+
+  it("keeps showing the old picture, the new document faded, while a changed set is worked out", async () => {
+    // The vectors are held only once the first layout is made and saved.
+    let hold = false;
+    let release: () => void = () => undefined;
+    const o = await open({
+      settings: { layoutMode: "semantic" },
+      wrap: (pm) => ({
+        ...pm.host,
+        async documentVectors(request) {
+          if (hold) await new Promise<void>((resolve) => (release = resolve));
+          return pm.host.documentVectors(request);
+        },
+      }),
+    });
+    expect(draw()).toHaveLength(12);
+
+    hold = true;
+    o.pm.addDoc(doc(99, "Atlas", 3, "New one"), new Float32Array(8).fill(0.4));
+    // Refresh: the saved layout is for twelve documents, the signature says thirteen.
+    void o.app.reload();
+    await tick();
+    await tick();
+    // Under the strip, not behind a blank "Preparing the map…": every dot, the new one parked and faded.
+    expect(o.text(".strip[role=status] .strip-text")).toBe(
+      "Reading what your documents are about…",
+    );
+    expect(o.hidden(".message")).toBe(true);
+    expect(o.hidden(".canvas")).toBe(false);
+    draw();
+    const fills = lastFrame().filter((c) => c.op === "fill");
+    expect(fills).toHaveLength(13);
+    expect(fills.filter((c) => c.state.globalAlpha === 0.32)).toHaveLength(1);
+
+    release();
+    await tick();
+    await tick();
+    await tick();
+    expect(o.hidden(".strip[role=status]")).toBe(true);
+    draw();
+    const placed = lastFrame().filter((c) => c.op === "fill");
+    expect(placed).toHaveLength(13);
+    expect(placed.filter((c) => c.state.globalAlpha === 0.32)).toHaveLength(0);
+  });
+});
+
+describe("an old picture that arrives after the person moved on", () => {
+  it("is dropped: the old by-meaning picture does not replace the by-project map chosen meanwhile", async () => {
+    let gate!: Gate;
+    const o = await open({
+      settings: { layoutMode: "semantic" },
+      wrap: (pm) => (gate = gated(pm, "storage.doc.list")).host,
+    });
+    expect(draw()).toHaveLength(12);
+    o.pm.addDoc(doc(99, "Atlas", 3, "New one"), new Float32Array(8).fill(0.4));
+    // Refresh: reading the saved rows (for the placeholder) is held at the gate.
+    void o.app.reload();
+    await tick();
+    await tick();
+    expect(gate.held).toBe(1);
+    click(o.el("button.seg-button:first-child"));
+    await tick();
+    await tick();
+    await tick();
+    // Thirteen documents and three hubs.
+    expect(draw()).toHaveLength(16);
+    gate.open();
+    await tick();
+    await tick();
+    await tick();
+    expect(draw()).toHaveLength(16);
+  });
+});
+
+describe("the subtitle while a layout is being worked out", () => {
+  it("counts the projects from the documents, not from a layout that is not there yet", async () => {
+    let release: () => void = () => undefined;
+    const compute = inlineCompute();
+    const o = await open({
+      noWait: true,
+      compute: {
+        ...compute,
+        force: async (request) => {
+          await new Promise<void>((resolve) => (release = resolve));
+          return compute.force(request);
+        },
+      },
+    });
+    await tick();
+    await tick();
+    await tick();
+    expect(o.text(".strip[role=status] .strip-text")).toBe("Arranging your projects…");
+    expect(o.text(".subtitle")).toContain("12 documents across 3 projects");
+    release();
+    await o.app.ready;
+    await tick();
+    expect(o.text(".subtitle")).toContain("12 documents across 3 projects");
   });
 });
 

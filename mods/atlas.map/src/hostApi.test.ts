@@ -8,9 +8,11 @@
 import { describe, expect, it } from "vitest";
 import documentsRs from "../../../src-tauri/src/mods/api/documents.rs?raw";
 import errorRs from "../../../src-tauri/src/mods/api/error.rs?raw";
+import ingestRs from "../../../src-tauri/src/ingest.rs?raw";
 import limitsRs from "../../../src-tauri/src/mods/api/limits.rs?raw";
 import { ModCallError } from "../../../src/kit/host";
 import {
+  byNewest,
   clearDocRows,
   CODE,
   codeOf,
@@ -143,11 +145,12 @@ describe("readDoc", () => {
 });
 
 describe("listDocuments", () => {
-  it("reads every page, in order, asking for the nine fields and the largest page", async () => {
+  it("reads every page, asking for the nine fields and the largest page", async () => {
     const docs = Array.from({ length: 23 }, (_, i) => doc(i + 1, i % 2 ? "A" : ""));
     const pm = memoryHost({ docs, pageSize: 7 });
     const listed = await listDocuments(pm.host);
-    expect(listed.map((d) => d.id)).toEqual(docs.map((d) => d.id));
+    // Every page's documents are there (the same ingest time, so newest-first is id descending).
+    expect(listed.map((d) => d.id)).toEqual(docs.map((d) => d.id).reverse());
     const calls = pm.of("documents.list");
     expect(calls).toHaveLength(4);
     expect(calls.map((c) => (c.args as { after: number }).after)).toEqual([0, 7, 14, 21]);
@@ -169,7 +172,35 @@ describe("listDocuments", () => {
       documents: [{ id: 1, title: "a" }, { nope: 1 }, { id: 2 }],
       next: null,
     });
-    expect((await listDocuments(host)).map((d) => d.id)).toEqual([1, 2]);
+    expect((await listDocuments(host)).map((d) => d.id)).toEqual([2, 1]);
+  });
+
+  it("lists in the core Map's order, newest ingested first, across pages (so the colours match)", async () => {
+    // PM pages by id; the newest documents are not the highest ids and they sit on different pages.
+    const at = (id: number, ingestedAt: string) => ({ ...doc(id, "A"), ingestedAt });
+    const docs = [
+      at(1, "2026-03-01T00:00:00Z"),
+      at(2, "2026-01-01T00:00:00Z"),
+      at(3, "2026-03-01T00:00:00Z"),
+      at(4, "2026-02-01T00:00:00Z"),
+      at(5, "2026-03-01T00:00:00Z"),
+    ];
+    const listed = await listDocuments(memoryHost({ docs, pageSize: 2 }).host);
+    expect(listed.map((d) => d.id)).toEqual([5, 3, 1, 4, 2]);
+  });
+
+  it("the order is the one ingest.rs gives the core Map's list", () => {
+    expect(ingestRs).toContain("FROM documents d ORDER BY d.ingested_at DESC, d.id DESC");
+  });
+
+  it("byNewest compares the timestamps as text and breaks a tie by the higher id", () => {
+    const at = (id: number, ingestedAt: string) => ({ ...doc(id, "A"), ingestedAt });
+    expect(byNewest(at(1, "2026-02-01"), at(2, "2026-01-01"))).toBeLessThan(0);
+    expect(byNewest(at(1, "2026-01-01"), at(2, "2026-02-01"))).toBeGreaterThan(0);
+    expect(byNewest(at(1, "x"), at(2, "x"))).toBeGreaterThan(0);
+    expect(byNewest(at(2, "x"), at(1, "x"))).toBeLessThan(0);
+    // A document with no readable time sorts last, like an empty string would.
+    expect(byNewest(at(1, ""), at(2, "2026-01-01"))).toBeGreaterThan(0);
   });
 
   it.each([
