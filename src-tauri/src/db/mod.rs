@@ -542,6 +542,44 @@ mod tests {
 
     const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
+    /// SQLite is built with its memory statistics off (`SQLITE_DEFAULT_MEMSTATUS=0`, set by
+    /// `LIBSQLITE3_FLAGS` in the repo root's `.cargo/config.toml`). With them on, every allocation
+    /// takes one process-wide lock, and threads using databases at once queue on it. The setting can
+    /// stop reaching the build without any error, for example if cargo runs from a folder that
+    /// doesn't see that file, or the environment sets its own `LIBSQLITE3_FLAGS`. So this checks the
+    /// built library in two ways: the build records the option, and SQLite's running total of the
+    /// memory it holds stays at zero while a store is open and in use (it can't be zero with the
+    /// statistics on, because this test's own connection holds memory).
+    #[test]
+    fn sqlite_is_built_without_memory_statistics() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("memstatus.sqlite"), KEY).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE probe(x BLOB); INSERT INTO probe VALUES (randomblob(65536));",
+        )
+        .unwrap();
+
+        let options: Vec<String> = conn
+            .prepare("PRAGMA compile_options")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            options.iter().any(|o| o == "DEFAULT_MEMSTATUS=0"),
+            "SQLite was built without SQLITE_DEFAULT_MEMSTATUS=0 (see .cargo/config.toml); \
+             its compile options are {options:?}"
+        );
+
+        // SAFETY: sqlite3_memory_used takes no arguments and only reads SQLite's own counter.
+        let used = unsafe { rusqlite::ffi::sqlite3_memory_used() };
+        assert_eq!(
+            used, 0,
+            "SQLite is counting its memory use, so its memory statistics are on"
+        );
+    }
+
     /// Pins the on-disk encoding of a boolean setting, not just the round-trip. The point is the
     /// middle assertion: the stored value is the bare string `"true"` / `"false"`. Several call
     /// sites used to hand-roll `set_setting(k, if v { "true" } else { "false" })`, and this is what

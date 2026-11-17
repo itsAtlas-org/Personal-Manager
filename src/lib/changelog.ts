@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.183.3-alpha",
+    date: "2026-11-17",
+    highlights: [
+      "Under the hood: PM's database no longer keeps a running count of the memory it uses, which PM never read. Keeping it took one shared lock every time the database set memory aside or gave it back, so parts of PM using the database at the same moment could hold each other up. In the app this saves a little work on every database call; PM's own tests now run several times faster.",
+    ],
+  },
+  {
     version: "3.183.2-alpha",
     date: "2026-11-17",
     highlights: [
