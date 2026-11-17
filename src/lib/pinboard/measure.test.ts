@@ -2,16 +2,23 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { measureSpace } from "./measure";
 import { CELL } from "./grid";
 
+// In the document, as the real scroller is: jsdom 31 gives a detached element no computed style
+// (empty strings), so `measureSpace` would read no padding at all.
 function scroller(width: number, height: number, padding: string): HTMLElement {
   const el = document.createElement("div");
   el.style.padding = padding;
   el.getBoundingClientRect = () => new DOMRect(0, 0, width, height);
+  document.body.appendChild(el);
   return el;
 }
+
+afterEach(() => {
+  document.body.replaceChildren();
+});
 
 describe("measureSpace", () => {
   it("takes the padding as rendered, so a larger text size can't make the board overflow", () => {

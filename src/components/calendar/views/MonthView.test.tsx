@@ -312,10 +312,18 @@ describe("MonthView: dragging", () => {
     });
     const ghosts = [...document.querySelectorAll<HTMLElement>("[data-drag-ghost]")];
     expect(ghosts).toHaveLength(2);
-    expect(ghosts.map((g) => [parseFloat(g.style.left), parseFloat(g.style.width)])).toEqual([
+    // Compared to a few decimals: jsdom 31 writes a percentage out to six digits (71.4286), not the
+    // full double.
+    const placed = ghosts.map((g) => [parseFloat(g.style.left), parseFloat(g.style.width)]);
+    const want = [
       [(5 / 7) * 100, (2 / 7) * 100],
       [0, (2 / 7) * 100],
-    ]);
+    ];
+    expect(placed).toHaveLength(want.length);
+    placed.forEach((got, i) => {
+      expect(got[0]).toBeCloseTo(want[i][0], 3);
+      expect(got[1]).toBeCloseTo(want[i][1], 3);
+    });
     expect(ghosts[0].getAttribute("aria-hidden")).toBe("true");
     expect(ghosts[0].textContent).toBe("Away · 17-10 – 20-10");
   });

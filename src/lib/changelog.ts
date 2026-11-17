@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.182.3-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "Under-the-hood tidying: routine updates to the building blocks underneath PM, bundled together. The library that runs PM's database on your computer is updated too, and your data stays encrypted exactly as before. The note editor's own building blocks pick up small fixes, one of which keeps it from holding on to extra memory on Windows. Everything else is the tools PM is built and tested with, plus the parts that write your backups and exports, watch your local folders and read your computer's hardware. Nothing changes in how you use PM.",
+    ],
+  },
+  {
     version: "3.182.2-alpha",
     date: "2026-11-16",
     highlights: [
