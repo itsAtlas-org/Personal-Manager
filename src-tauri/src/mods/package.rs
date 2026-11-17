@@ -84,7 +84,8 @@ pub const PERMISSIONS: &[&str] = &[
 ];
 
 /// Headers a secret may never go in: hop-by-hop ones and those the request itself owns (spec §1.5).
-const FORBIDDEN_SECRET_HEADERS: &[&str] = &[
+/// `api/net.rs` refuses a mod the same names (and more), and a test holds the two together.
+pub(crate) const FORBIDDEN_SECRET_HEADERS: &[&str] = &[
     "connection",
     "content-length",
     "cookie",

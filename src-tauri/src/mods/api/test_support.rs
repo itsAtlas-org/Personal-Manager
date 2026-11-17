@@ -16,6 +16,7 @@ use super::events::Hub;
 use super::{Calls, Host, Point};
 use crate::mods::engine::Platform;
 use crate::mods::ids::ModId;
+use crate::mods::netfetch::fake::ScriptedHops;
 use crate::mods::outbox::Outbox;
 use crate::mods::runtime::{InstalledMod, ModRuntime, ServedFile};
 use crate::sidecar::{SidecarManager, SidecarPaths};
@@ -146,6 +147,8 @@ pub struct Parts {
     pub sealed: AtomicBool,
     /// PM locked, as `app_locked_for_mods` would say on a platform with a lock.
     pub locked: AtomicBool,
+    /// The network, scripted: what `net.fetch` resolves and sends through.
+    pub hops: ScriptedHops,
     hook: Mutex<Option<Hook>>,
 }
 
@@ -175,6 +178,7 @@ impl TestHost {
             hub: Hub::with_delay(interval),
             sealed: AtomicBool::new(true),
             locked: AtomicBool::new(false),
+            hops: ScriptedHops::new(),
             hook: Mutex::new(None),
             dir,
         }))
@@ -224,6 +228,12 @@ impl Host for TestHost {
         // After the read, before the caller acts on it: where a lock enabled "just now" lands.
         self.at(Point::LockRead);
         Ok(answer)
+    }
+
+    type Hops = ScriptedHops;
+
+    fn hops(&self) -> &ScriptedHops {
+        &self.0.hops
     }
 
     fn at(&self, point: Point) {

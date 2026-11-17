@@ -48,6 +48,7 @@ pub mod events;
 pub mod grants;
 mod handlers;
 pub mod limits;
+mod net;
 pub mod permissions;
 mod storage;
 pub mod table;
@@ -70,6 +71,7 @@ pub use limits::Calls;
 
 use self::grants::ModFacts;
 use self::table::{Lookup, Row};
+use super::netfetch::{HopFetcher, SystemHops};
 use super::policy::MOD_API_VERSION;
 use super::runtime::{CallTicket, ModRuntime};
 use super::{EngineState, MAIN_LABEL};
@@ -97,6 +99,13 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn engine_sealed(&self) -> bool;
     /// Whether PM is locked now. An error means the store is closed, which refuses the same way.
     fn app_locked(&self) -> crate::error::Result<bool>;
+
+    /// The network edge `net.fetch` goes through: the real one resolves, screens and pins; a test
+    /// scripts it (`netfetch::fake`), so the fetch's rules run with no network.
+    type Hops: HopFetcher + 'static;
+    // Nothing in a build calls it until the `net.fetch` handler lands (X6).
+    #[allow(dead_code)]
+    fn hops(&self) -> &Self::Hops;
 
     /// A test's hook into a call in flight, so it can change the world at an exact point (an
     /// uninstall between the checks and the commit). Nothing in a build.
@@ -150,6 +159,13 @@ impl Host for AppHandle {
 
     fn app_locked(&self) -> crate::error::Result<bool> {
         crate::settings::app_locked_for_mods(self.store())
+    }
+
+    type Hops = SystemHops;
+
+    fn hops(&self) -> &SystemHops {
+        static HOPS: SystemHops = SystemHops::new();
+        &HOPS
     }
 }
 

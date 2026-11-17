@@ -21,6 +21,9 @@
 //!   the handlers; `mod_call` hands it each call.
 //! - [`ai`]: what a mod's AI call may cost and the reserve-then-settle ledger that holds it under
 //!   the mod's monthly cap (§1.6); pure, with no dispatch row until `ai.complete`.
+//! - [`netfetch`]: the one HTTPS fetch that follows its redirects itself, every hop checked,
+//!   screened and pinned (calendar feeds and a mod's `net.fetch` share it), and the hop-fetcher
+//!   seam that lets its rules be tested with no network.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
@@ -65,6 +68,7 @@ pub mod index;
 pub mod index_state;
 pub mod keys;
 pub mod ledger;
+pub mod netfetch;
 pub mod outbox;
 pub mod package;
 pub mod policy;

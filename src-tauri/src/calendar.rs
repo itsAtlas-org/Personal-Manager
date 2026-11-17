@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 pub use crate::calendar_history::{Band, Changed};
 use crate::calendar_history::{Held, HistoryState};
 use crate::error::{Error, Result};
+use crate::mods::netfetch::{
+    self, Failure, FetchError, FetchRequest, HopFetcher, Method as NetMethod, Policy, SystemHops,
+};
 use crate::net_screen::{self, Refusal};
 use crate::{calendar_history, clock, db, google, ics, secrets};
 
@@ -831,9 +834,33 @@ pub fn remove_feed(conn: &Connection, id: &str) -> Result<()> {
 /// ICS times (the feed itself carries no viewer zone), resolved by the caller before the await.
 ///
 /// Returns `(events, complete)` — see [`ics::parse_feed_within_reporting`]. An over-size body is an
-/// error from `read_capped`, but a body cut mid-`VEVENT` or a feed past the parser's block/event
-/// caps comes back looking clean, so the parse's own verdict is what gates the mirror's delete.
+/// error ([`FEED_POLICY`]'s cap), but a body cut mid-`VEVENT` or a feed past the parser's
+/// block/event caps comes back looking clean, so the parse's own verdict is what gates the mirror's
+/// delete.
 pub async fn sync_feed(
+    feed: &IcsFeed,
+    band: &Band,
+    tz: chrono_tz::Tz,
+) -> Result<(Vec<CalendarEvent>, bool)> {
+    sync_feed_via(&SystemHops::new(), feed, band, tz).await
+}
+
+/// How a feed is fetched: up to [`MAX_FEED_BYTES`], five redirects, 30 s for all of it. The
+/// environment's proxy still carries it (as it always did), unlike a mod's fetch: a feed is a URL
+/// the user chose for themselves, so a network that is only reachable through a proxy must keep
+/// working.
+const FEED_POLICY: Policy = Policy {
+    max_redirects: 5,
+    total: std::time::Duration::from_secs(30),
+    connect: std::time::Duration::from_secs(30),
+    max_body: MAX_FEED_BYTES,
+    user_agent: None,
+    system_proxy: true,
+};
+
+/// [`sync_feed`] over a given network edge, so the feed's rules are tested with no network.
+async fn sync_feed_via<F: HopFetcher>(
+    fetcher: &F,
     feed: &IcsFeed,
     band: &Band,
     tz: chrono_tz::Tz,
@@ -842,79 +869,74 @@ pub async fn sync_feed(
     // that now resolves to a private address is refused by the first hop's screen below.
     validate_feed_url(&feed.url)?;
 
-    // M-6: fetch the feed following any redirects OURSELVES, so every hop — the first request and each
-    // redirect target — is resolved, screened by the public-internet screen (`net_screen`), and PINNED
-    // onto a single-hop client before we dial it. That makes the address we vetted the exact one
-    // reqwest connects to, with no automatic (and unpinned) redirect resolution in between; reqwest's
-    // own redirect following is therefore disabled. The URL is left unchanged so Host and TLS SNI stay
-    // correct. Fail closed: an unresolvable or non-public hop is an error, never a silent skip.
-    const MAX_REDIRECTS: usize = 5;
-    let mut next_url = feed.url.clone();
-    let mut hops = 0usize;
-    let text = loop {
-        let parsed = reqwest::Url::parse(&next_url).map_err(|e| Error::Other(e.to_string()))?;
-        if parsed.scheme() != "https" {
-            return Err(Error::Other(
-                "Calendar feeds must use https:// (an http link would expose the feed address)."
-                    .into(),
-            ));
-        }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| Error::Other("That calendar URL has no host.".into()))?
-            .to_string();
-        let port = parsed.port_or_known_default().unwrap_or(443);
-        let pinned = net_screen::resolve_and_screen(&host, port)
-            .await
-            .map_err(feed_refusal)?;
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .https_only(true)
-            .resolve_to_addrs(&host, &pinned)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let resp = client
-            .get(parsed.clone())
-            .header(reqwest::header::ACCEPT, "text/calendar")
-            .send()
-            .await?;
-
-        if resp.status().is_redirection() {
-            hops += 1;
-            if hops > MAX_REDIRECTS {
-                return Err(Error::Other(
-                    "That calendar feed redirected too many times.".into(),
-                ));
-            }
-            let location = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    Error::Other("That calendar feed sent an invalid redirect.".into())
-                })?;
-            // Resolve the Location against the URL we just fetched (handles a relative target); the
-            // next loop iteration screens + pins it exactly like the first request.
-            next_url = parsed
-                .join(location)
-                .map_err(|e| Error::Other(e.to_string()))?
-                .to_string();
-            continue;
-        }
-        if !resp.status().is_success() {
-            return Err(Error::Other(format!(
-                "Calendar feed “{}” returned {}. Check the URL.",
-                feed.label,
-                resp.status()
-            )));
-        }
-        break read_capped(resp, MAX_FEED_BYTES).await?;
+    // M-6: fetch the feed following any redirects OURSELVES (`netfetch::fetch`, shared with a mod's
+    // `net.fetch`), so every hop — the first request and each redirect target — is resolved,
+    // screened by the public-internet screen (`net_screen`), and PINNED onto a single-hop client
+    // before we dial it. That makes the address we vetted the exact one reqwest connects to, with
+    // no automatic (and unpinned) redirect resolution in between. The URL is left unchanged so Host
+    // and TLS SNI stay correct. Fail closed: an unresolvable or non-public hop is an error, never a
+    // silent skip.
+    let start = reqwest::Url::parse(&feed.url).map_err(|e| Error::Other(e.to_string()))?;
+    let request = FetchRequest {
+        method: NetMethod::Get,
+        url: start,
+        headers: vec![("accept".into(), "text/calendar".into())],
+        first_hop_headers: Vec::new(),
+        body: None,
     };
+    let reply = netfetch::fetch(fetcher, request, &FEED_POLICY, feed_hop_rule)
+        .await
+        .map_err(feed_failure)?;
+    let status = reqwest::StatusCode::from_u16(reply.status)
+        .map_err(|_| Error::Other("That calendar feed sent an invalid answer.".into()))?;
+    if !status.is_success() {
+        return Err(Error::Other(format!(
+            "Calendar feed “{}” returned {}. Check the URL.",
+            feed.label, status
+        )));
+    }
+    let text = String::from_utf8(reply.body)
+        .map_err(|_| Error::Other("That calendar feed wasn't valid text.".into()))?;
     let (win_start, win_end) = feed_window(band)?;
     Ok(ics::parse_feed_within_reporting(
         &text, &feed.id, win_start, win_end, tz,
     ))
+}
+
+/// What every hop of a feed fetch, the first request and each redirect target, must be: https, and
+/// a URL with a host. (Whether the host is on the public internet is the screen's, per hop.)
+fn feed_hop_rule(url: &reqwest::Url) -> Result<()> {
+    if url.scheme() != "https" {
+        return Err(Error::Other(
+            "Calendar feeds must use https:// (an http link would expose the feed address).".into(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(Error::Other("That calendar URL has no host.".into()));
+    }
+    Ok(())
+}
+
+/// A feed fetch's failures, in the feed's own words.
+fn feed_failure(failure: Failure<Error>) -> Error {
+    let fetch = match failure {
+        Failure::Refused(e) => return e,
+        Failure::Fetch(e) => e,
+    };
+    Error::Other(
+        match fetch {
+            FetchError::NotPublic => return feed_refusal(Refusal::NotPublic),
+            FetchError::Unresolved => return feed_refusal(Refusal::Unresolved),
+            FetchError::BadUrl => "That calendar URL has no host.",
+            FetchError::BadRequest => "PM couldn't send that request to the calendar feed.",
+            FetchError::Unavailable => "Couldn't reach that calendar feed. Check your connection.",
+            FetchError::Timeout => "That calendar feed took too long to answer.",
+            FetchError::TooManyRedirects => "That calendar feed redirected too many times.",
+            FetchError::BadRedirect => "That calendar feed sent an invalid redirect.",
+            FetchError::TooLarge => "That calendar feed is too large.",
+        }
+        .into(),
+    )
 }
 
 /// The earliest instant an open-ended request means, for a provider that needs a lower bound (an
@@ -982,22 +1004,6 @@ fn feed_refusal(refusal: Refusal) -> Error {
         }
         .into(),
     )
-}
-
-/// Read a response body into a `String`, but never buffer more than `max` bytes —
-/// a hostile feed must not be able to balloon memory.
-async fn read_capped(resp: reqwest::Response, max: usize) -> Result<String> {
-    use futures_util::StreamExt;
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if buf.len() + chunk.len() > max {
-            return Err(Error::Other("That calendar feed is too large.".into()));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    String::from_utf8(buf).map_err(|_| Error::Other("That calendar feed wasn't valid text.".into()))
 }
 
 fn new_feed_id() -> Result<String> {
@@ -4082,6 +4088,187 @@ mod tests {
             feed_refusal(Refusal::Unresolved).to_string(),
             "Couldn't resolve that calendar URL's host."
         );
+    }
+
+    // ---- a feed fetched through the shared hop loop (`netfetch`), over a scripted network --------
+
+    use crate::mods::netfetch::fake::{reply as scripted, ScriptedHops};
+
+    const ICS: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nuid:a\r\nsummary:Standup\r\n\
+                       dtstart:20260615T090000Z\r\ndtend:20260615T093000Z\r\nEND:VEVENT\r\n\
+                       END:VCALENDAR";
+
+    fn scripted_feed(url: &str) -> IcsFeed {
+        IcsFeed {
+            id: "ics:0000000000000000".into(),
+            label: "Work".into(),
+            url: url.into(),
+            provider: "other".into(),
+        }
+    }
+
+    fn feed_net() -> ScriptedHops {
+        let net = ScriptedHops::new();
+        net.dns("cal.example.com", &["93.184.216.34"])
+            .dns("other.example.com", &["93.184.216.35"]);
+        net
+    }
+
+    fn sync_over(net: &ScriptedHops, url: &str) -> Result<(Vec<CalendarEvent>, bool)> {
+        let band = Band::through_live(chrono::Utc::now());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(sync_feed_via(
+                net,
+                &scripted_feed(url),
+                &band,
+                chrono_tz::UTC,
+            ))
+    }
+
+    #[test]
+    fn a_feed_is_fetched_pinned_and_asked_for_as_a_calendar() {
+        let net = feed_net();
+        net.answer(|_| Ok(scripted(200, &[], ICS.as_bytes())));
+        let (events, complete) = sync_over(&net, "https://cal.example.com/feed.ics").unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(complete);
+        let seen = net.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, NetMethod::Get);
+        assert_eq!(seen[0].pinned, vec!["93.184.216.34:443".parse().unwrap()]);
+        assert_eq!(
+            seen[0].headers,
+            vec![("accept".to_owned(), "text/calendar".to_owned())]
+        );
+        assert!(seen[0].body.is_none());
+    }
+
+    #[test]
+    fn a_feed_keeps_the_environments_proxy_unlike_a_mods_fetch() {
+        // A feed is a URL the person chose; a network that is only reachable through a proxy must
+        // keep working. (The mod's fetch is the opposite, `netfetch`'s own test.)
+        let policy = std::hint::black_box(FEED_POLICY);
+        assert!(policy.system_proxy);
+        assert_eq!(policy.max_body, MAX_FEED_BYTES);
+        assert_eq!(policy.max_redirects, 5);
+        assert!(policy.user_agent.is_none());
+    }
+
+    #[test]
+    fn a_feed_redirect_to_a_plain_or_private_address_is_refused_in_the_feeds_words() {
+        let private =
+            "That calendar URL points at a private or local address, which isn't allowed.";
+        for (to, words) in [
+            (
+                "http://other.example.com/feed.ics",
+                "Calendar feeds must use https:// (an http link would expose the feed address).",
+            ),
+            ("https://192.168.0.1/feed.ics", private),
+            ("https://[::ffff:127.0.0.1]/feed.ics", private),
+            ("https://[64:ff9b::7f00:1]/feed.ics", private),
+            ("https://lan.example.com/feed.ics", private),
+        ] {
+            let net = feed_net();
+            net.dns("lan.example.com", &["10.0.0.7"]);
+            net.answer(move |s| {
+                if s.url.contains("cal.example.com") {
+                    Ok(scripted(302, &[("Location", to)], b""))
+                } else {
+                    Ok(scripted(200, &[], ICS.as_bytes()))
+                }
+            });
+            let err = sync_over(&net, "https://cal.example.com/feed.ics").unwrap_err();
+            assert_eq!(err.to_string(), words, "{to}");
+            assert_eq!(net.seen().len(), 1, "{to} was dialled");
+        }
+    }
+
+    #[test]
+    fn a_feed_that_redirects_to_another_public_host_is_followed() {
+        let net = feed_net();
+        net.answer(|s| {
+            if s.url.contains("cal.example.com") {
+                Ok(scripted(
+                    301,
+                    &[("Location", "https://other.example.com/f.ics")],
+                    b"",
+                ))
+            } else {
+                Ok(scripted(200, &[], ICS.as_bytes()))
+            }
+        });
+        assert_eq!(
+            sync_over(&net, "https://cal.example.com/feed.ics")
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(net.seen().len(), 2);
+    }
+
+    #[test]
+    fn a_feed_that_cannot_be_read_says_why_in_the_feeds_words() {
+        let sync = |answer: std::result::Result<crate::mods::netfetch::HopReply, FetchError>| {
+            let net = feed_net();
+            net.answer(move |_| answer.clone());
+            sync_over(&net, "https://cal.example.com/feed.ics")
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            sync(Ok(scripted(302, &[("Location", "/again")], b""))),
+            "That calendar feed redirected too many times."
+        );
+        assert_eq!(
+            sync(Ok(scripted(302, &[], b""))),
+            "That calendar feed sent an invalid redirect."
+        );
+        assert_eq!(
+            sync(Ok(scripted(200, &[], &vec![b'x'; MAX_FEED_BYTES + 1]))),
+            "That calendar feed is too large."
+        );
+        assert_eq!(
+            sync(Ok(scripted(200, &[], &[0xff, 0xfe, 0x00]))),
+            "That calendar feed wasn't valid text."
+        );
+        assert_eq!(
+            sync(Ok(scripted(404, &[], b"nope"))),
+            "Calendar feed “Work” returned 404 Not Found. Check the URL."
+        );
+        // A 304 is not a redirect and not a feed.
+        assert_eq!(
+            sync(Ok(scripted(304, &[("Location", "/x")], b""))),
+            "Calendar feed “Work” returned 304 Not Modified. Check the URL."
+        );
+        assert_eq!(
+            sync(Err(FetchError::Unavailable)),
+            "Couldn't reach that calendar feed. Check your connection."
+        );
+        assert_eq!(
+            sync(Err(FetchError::Timeout)),
+            "That calendar feed took too long to answer."
+        );
+    }
+
+    #[test]
+    fn a_feed_with_no_dns_answer_is_unresolved_and_a_stored_http_feed_is_never_fetched() {
+        let net = ScriptedHops::new();
+        net.answer(|_| Ok(scripted(200, &[], ICS.as_bytes())));
+        assert_eq!(
+            sync_over(&net, "https://cal.example.com/feed.ics")
+                .unwrap_err()
+                .to_string(),
+            "Couldn't resolve that calendar URL's host."
+        );
+        assert!(net.seen().is_empty());
+        let net = feed_net();
+        net.answer(|_| Ok(scripted(200, &[], ICS.as_bytes())));
+        assert!(sync_over(&net, "http://cal.example.com/feed.ics").is_err());
+        assert!(net.seen().is_empty() && net.looked_up().is_empty());
     }
 
     fn upcoming(summary: &str) -> UpcomingEvent {
