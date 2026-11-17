@@ -51,6 +51,9 @@ sidecar/.venv/
 # from the pm-mods pipeline; scripts/check-files-in-place.mjs proves none is tracked. (A mod's stage
 # dir, mods/<id>/dist, is already covered by the bare `dist` rule at the top.)
 *.pmmod
+# The record of which npm packages a mod's bundle holds (mods/vite.config.ts writes it, pack-mod reads
+# it): a build record next to dist/, never part of the package.
+.build/
 
 # Claude Code: the shared project settings.json is committed; the per-developer
 # settings.local.json (personal permission overrides) stays local.

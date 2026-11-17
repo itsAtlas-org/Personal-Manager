@@ -2988,6 +2988,115 @@ pub(crate) mod tests {
         assert_eq!(m.contributions.nav_tab.as_deref(), Some("Map"));
     }
 
+    /// A folder of one `app/index.html` and the repo's own LICENCE.txt around a committed manifest:
+    /// what `pack-mod --stage` leaves in a mod's `dist/` for the developer folder loader.
+    fn staged_folder(manifest: &str) -> BTreeMap<String, VerifiedFile> {
+        let file = |bytes: &[u8]| VerifiedFile {
+            sha256: Sha256::digest(bytes).into(),
+            bytes: bytes.to_vec(),
+        };
+        BTreeMap::from([
+            (MANIFEST.to_string(), file(manifest.as_bytes())),
+            (
+                LICENCE_FILE.to_string(),
+                file(include_str!("../../../LICENCE.txt").as_bytes()),
+            ),
+            ("app/index.html".to_string(), file(b"<!doctype html>")),
+        ])
+    }
+
+    /// Both committed source manifests, as the developer-mode folder loader reads a staged `dist/`:
+    /// the Map as a first-party folder (a development build only) and the toolchain's third-party
+    /// fixture (`tests/mod-fixtures/acme.hello`, packed `--unsigned` in the live test) as anyone's.
+    #[test]
+    fn the_committed_manifests_load_as_the_folders_pack_mod_stages() {
+        let map = include_str!("../../../mods/atlas.map/manifest.json");
+        let pkg = verify_folder(staged_folder(map), true).expect("atlas.map loads in a dev build");
+        assert_eq!(pkg.manifest.id.as_str(), "atlas.map");
+        // Not in a release build: an atlas. folder is Atlas's.
+        assert_eq!(
+            refusal(verify_folder(staged_folder(map), false)),
+            Refusal::Id
+        );
+
+        let hello = include_str!("../../../tests/mod-fixtures/acme.hello/manifest.json");
+        for allow_atlas in [false, true] {
+            let pkg = verify_folder(staged_folder(hello), allow_atlas).expect("acme.hello loads");
+            assert_eq!(pkg.manifest.id.as_str(), "acme.hello");
+            assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+            assert_eq!(pkg.manifest.contributions.nav_tab.as_deref(), Some("Hello"));
+            assert_eq!(pkg.manifest.data.keys.len(), 1);
+        }
+    }
+
+    /// The other half of the format agreement. `scripts/pack-mod.mjs` wrote the archive in
+    /// `tests/mod-fixtures/golden/hello.pmmod.b64` (scripts/pack-mod.test.mjs regenerates it from fixed
+    /// inputs and fails if the bytes differ), and this is the real verifier reading it: the zip
+    /// structure, the sorted checksums, the AGPL text, the manifest and the `--commit` stamp. Two
+    /// implementations of one format agree on at least one real archive, in the rust job, which has
+    /// no node build.
+    #[test]
+    fn a_pack_mod_golden_archive_is_one_the_verifier_takes() {
+        let text = include_str!("../../../tests/mod-fixtures/golden/hello.pmmod.b64");
+        let b64: String = text.split_whitespace().collect();
+        let bytes = B64.decode(b64).expect("the golden file is base64");
+
+        let pkg = verify_unsigned(&bytes).expect("pack-mod's file verifies");
+        assert_eq!(pkg.manifest.id.as_str(), "acme.golden");
+        assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+        assert_eq!(
+            pkg.manifest.publisher.commit,
+            "1234567890abcdef1234567890abcdef12345678"
+        );
+        assert!(pkg.signer.is_none() && pkg.trusted_comment.is_none());
+        let paths: Vec<&str> = pkg.files.keys().map(String::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "LICENCE.txt",
+                "NOTICE.txt",
+                "app/assets/app.js",
+                "app/assets/style.css",
+                "app/index.html",
+                "manifest.json"
+            ]
+        );
+        let notice = std::str::from_utf8(&pkg.files[NOTICE_FILE].bytes).unwrap();
+        assert!(notice.contains("golden-dep 1.0.0"));
+
+        // It is an unsigned file, so the signed entry point refuses it for that and nothing else.
+        let key = TestKey::new();
+        assert_eq!(refusal(verify(&bytes, &[key.public()])), Refusal::Unsigned);
+        // And the zip itself is what the writer promises: stored entries, the 1980 time, in path order.
+        let mut zip = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut names = Vec::new();
+        for i in 0..zip.len() {
+            let entry = zip.by_index(i).unwrap();
+            assert_eq!(entry.compression(), CompressionMethod::Stored);
+            let t = entry.last_modified().expect("a time");
+            assert_eq!(
+                (
+                    t.year(),
+                    t.month(),
+                    t.day(),
+                    t.hour(),
+                    t.minute(),
+                    t.second()
+                ),
+                (1980, 1, 1, 0, 0, 0)
+            );
+            assert_eq!(entry.unix_mode().map(|m| m & 0o777), Some(0o644));
+            names.push(String::from_utf8_lossy(entry.name_raw()).into_owned());
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("pmmod/checksums.json")
+        );
+    }
+
     #[test]
     fn a_quoted_name_cant_fake_the_message_around_it() {
         let q = quote("x\", and it's fine\n");

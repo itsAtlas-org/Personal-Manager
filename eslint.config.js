@@ -283,6 +283,8 @@ export default tseslint.config(
       // A mod's built stage dir (mods/<id>/dist: Vite's bundle, not source). Rooted strings, so the
       // bare "dist" above does not reach a nested one.
       "mods/*/dist",
+      // The toolchain test's third-party fixture mod builds into its own dist the same way.
+      "tests/mod-fixtures/*/dist",
       "design-system-docs",
       // The spec + decision log + scratch notes (git-ignored, local-only — not first-party
       // source). Lint shouldn't reach into it (e.g. a stray docs/calendar-view/*.js prototype).

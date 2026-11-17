@@ -80,6 +80,32 @@ describe("files-in-place and the mods folder", () => {
     expect(near.ok).toBe(true);
   });
 
+  it("refuses the same build output of the toolchain's fixture mod, and its build record", () => {
+    for (const path of [
+      "tests/mod-fixtures/acme.hello/dist/app/index.html",
+      "tests/mod-fixtures/acme.hello/dist/acme.hello.txt",
+    ]) {
+      const r = run({ [path]: "x" });
+      expect(r.ok, path).toBe(false);
+      expect(r.out, path).toContain("built stage dir");
+    }
+    for (const path of [
+      "mods/atlas.map/.build/modules.json",
+      "tests/mod-fixtures/acme.hello/.build/modules.json",
+    ]) {
+      const r = run({ [path]: "{}" });
+      expect(r.ok, path).toBe(false);
+      expect(r.out, path).toContain("build record");
+    }
+    // The fixture's source, manifest and golden file are tracked on purpose.
+    const source = run({
+      "tests/mod-fixtures/acme.hello/manifest.json": "{}",
+      "tests/mod-fixtures/acme.hello/src/index.html": "<html></html>",
+      "tests/mod-fixtures/golden/hello.pmmod.b64": "UEs=",
+    });
+    expect(source.ok).toBe(true);
+  });
+
   it("refuses a mod test file no runner collects", () => {
     for (const path of ["mods/atlas.map/src/a.test.mjs", "mods/atlas.map/src/a.test.js"]) {
       const r = run({ [path]: "export {};" });

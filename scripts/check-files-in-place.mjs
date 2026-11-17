@@ -63,8 +63,14 @@ const FORBIDDEN = [
   {
     // The Vite stage dir the mod loader and pack-mod read (mods/<id>/dist). `.gitignore`'s bare
     // `dist` already skips it; this proves the tracked set holds none, as for the root dist/ above.
-    re: /^mods\/[^/]+\/dist\//,
+    // The toolchain test's fixture mod (tests/mod-fixtures/<id>) builds the same way.
+    re: /^(mods|tests\/mod-fixtures)\/[^/]+\/dist\//,
     why: "a mod's built stage dir (frontend build output)",
+  },
+  {
+    // The record of a mod's bundled npm packages (`mods/vite.config.ts` writes it, `pack-mod` reads it).
+    re: /^(mods|tests\/mod-fixtures)\/[^/]+\/\.build\//,
+    why: "a mod's build record (build output: the next build rewrites it)",
   },
   { re: /(^|\/)\.env(\.|$)/, why: "environment file (may hold secrets)" },
   { re: /^docs\//, why: "docs/ is intentionally git-ignored (local-only until the repo move)" },

@@ -29,7 +29,7 @@ default:
 check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers license-subset ci-membership sync-set ipc-commands calendar-write-fence script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
 
 # Everything a PR is gated on (adds the compile/test/supply-chain/security checks).
-check: check-fast frontend-test build-frontend clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
+check: check-fast frontend-test build-frontend build-mods clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
 
 # Auto-apply every formatter (the writing counterpart to the --check recipes).
 fmt:
@@ -75,6 +75,35 @@ frontend-test:
 # to notice on every commit.
 build-frontend:
     npx vite build
+
+# Build, stage, pack and verify every mod under mods/ (Mods spec §7). For each folder with a
+# manifest: Vite builds it into dist/app (mods/vite.config.ts), `pack-mod --stage` puts manifest,
+# licence and notice beside it (dist/ is then a folder the developer-mode loader opens), `pack-mod`
+# writes dist/<id>-<version>.pmmod stamped with this checkout's commit, and `pack-mod --verify` reads
+# that file back with the independent check (no inline script or style, no module script, no
+# `crossorigin`, which the hygiene job cannot do: it has no build). The file is NOT signed: Atlas's
+# only signer is the pm-mods pipeline. Fails when there is no mod to build, so a moved folder cannot
+# leave this a green step that built nothing.
+build-mods:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    commit="$(git rev-parse HEAD)"
+    built=0
+    for dir in mods/*/; do
+        dir="${dir%/}"
+        [ -f "$dir/manifest.json" ] || continue
+        PM_MOD_DIR="$dir" npx vite build --config mods/vite.config.ts
+        node scripts/pack-mod.mjs "$dir" --stage --commit "$commit"
+        rm -f "$dir"/dist/*.pmmod
+        node scripts/pack-mod.mjs "$dir" --commit "$commit"
+        node scripts/pack-mod.mjs --verify "$dir"/dist/*.pmmod
+        built=$((built + 1))
+    done
+    if [ "$built" -eq 0 ]; then
+        echo "✗ build-mods: no mod folder (a manifest.json) under mods/" >&2
+        exit 1
+    fi
+    echo "✓ build-mods: built, packed and verified $built mod(s)"
 
 # --- backend (Rust) -------------------------------------------------------
 

@@ -132,6 +132,27 @@ const ALLOWED = [
     pinExempt:
       "Exact-pinning is the right bar for a format library whose behaviour we cannot verify by hand. It is the wrong bar for the shared test runner: vitest is a repo-wide devDependency on `^`, governed by the normal npm/Dependabot flow and used by every other test in the tree. Pinning it here would let one scripts/ test dictate the whole repo's runner version.",
   },
+  {
+    file: "scripts/pack-mod.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. pack-mod writes the `.pmmod` file PM verifies and the pm-mods job signs, so its zip writer, its mirror of package.rs's refusals and its constants are each pinned by a test that fails without them; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/mods-build.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. This file runs the real Vite build of a mod and the pack-mod step after it, because what Vite emits (a module script, `crossorigin`, `data:` URLs, a worker's packages) cannot be faked; `just frontend-test` already collects it through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/mods-build.test.mjs",
+    specifier: "vite",
+    why: "The mods' build is Vite (mods/vite.config.ts), and the test runs that build in-process the way `just build-mods` runs it from the command line. vite is already the app's own devDependency, so nothing new is installed; this file lives in a test (collected by `just frontend-test`, which has node_modules), never in the dependency-free hygiene job, and the packer itself imports no vite.",
+    pinExempt:
+      "vite is the repo-wide build tool on a `^` range, governed by the normal npm/Dependabot flow and used by the app's own build. A scripts/ test must not dictate its version.",
+  },
 ];
 
 // ---------------------------------------------------------------------------------------------

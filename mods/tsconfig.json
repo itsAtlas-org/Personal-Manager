@@ -29,7 +29,9 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["."],
+  // `../tests/mod-fixtures` is the third-party mod the toolchain tests build (a developer's mod, so it
+  // lives under tests/, not in mods/): it is type-checked like any mod page.
+  "include": [".", "../tests/mod-fixtures"],
   // dist is built output (never checked), the Vite config is Node-side (tsconfig.node.json owns it),
   // and every worker folder is its own project (above). Worker folders are listed by path, not by a
   // `**/worker` glob: a new one then fails the DOM check until its tsconfig is added here on purpose,
