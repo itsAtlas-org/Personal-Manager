@@ -26,7 +26,7 @@ default:
 # `just ci-membership` asserts BOTH directions of that claim: every member below has a
 # step in pr.yml AND a hook in .pre-commit-config.yaml. The claim used to be prose only,
 # and pre-commit had drifted to 9 of the 13 — missing, of all things, the drift guards.
-check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers license-subset ci-membership sync-set ipc-commands calendar-write-fence script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
+check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
 
 # Everything a PR is gated on (adds the compile/test/supply-chain/security checks).
 check: check-fast frontend-test build-frontend build-mods clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
@@ -209,6 +209,7 @@ zizmor:
 # --- bespoke gates (pure Node, no deps) -----------------------------------
 
 # Version lockstep + changelog; pass --base <ref> to require a bump, --tag <vX.Y.Z> to match a tag.
+# With --base, a change that touches only mods/ is exempt from PM's bump and owes its mod's own (D12).
 version *args:
     node scripts/check-version-lockstep.mjs {{args}}
 
@@ -228,6 +229,14 @@ files:
 
 headers:
     node scripts/check-spdx-headers.mjs
+
+# The mods folder (Mods spec §7, I-25), from source alone: each manifest passes package.rs's rules,
+# id = folder, atlas.* and first party, a changelog that matches, nothing under mods/ in any tauri
+# bundle's resources, nothing in src/ importing mods/. It never reads built output: this runs in
+# pr.yml's hygiene job, which has no build (`pack-mod --verify`, inside build-mods, does that).
+# `--base <ref>` adds "a changed mod bumped its version"; `just version --base` runs that same check.
+mods *args:
+    node scripts/check-mods.mjs {{args}}
 
 # Licence allow-lists agree: everything deny.toml permits (PR gate) is attributable
 # in about.toml's accepted set (release NOTICE), so NOTICE generation can't hit an

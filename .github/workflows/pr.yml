@@ -384,6 +384,8 @@ jobs:
         run: just files
       - name: SPDX headers + licence integrity
         run: just headers
+      - name: Mods folder (manifests, no mod in the installer, nothing in src/ imports mods/)
+        run: just mods
       - name: Licence allow-lists agree (deny ⊆ about)
         run: just license-subset
       - name: CI membership (justfile ⊆ pr.yml)

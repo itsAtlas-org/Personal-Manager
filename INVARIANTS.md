@@ -433,7 +433,7 @@ same bridge, and fails on any IPC escape or network leak on all three engines. W
 `mods/runtime.rs`'s serve decision (which file, and which as a document): its scheme is a small mirror of
 that, and runtime.rs's unit tests are what hold it.
 
-### I-25 · No mod ships in the installer — **Forward**
+### I-25 · No mod ships in the installer — **Enforced**
 
 A mod reaches a user only as a signed `.pmmod` release asset, installed through the Mods tab (Mods
 spec §1.1, §1.3). First-party mod source lives under `mods/` in this repo and is built into its own
@@ -444,9 +444,16 @@ spec §1.1, §1.3). First-party mod source lives under `mods/` in this repo and 
 switches, the blacklist and the user's own uninstall. A mod inside the installer would skip every one
 of those, and would ship to every user with each PM release.
 
-**Co-signers.** The first mod (the Map, spec §3) lands with `check-mods.mjs` (spec §7), which fails on
-a `mods/` path in a bundle's resources or a `src/` import of `mods/`; this entry is **Enforced** from
-then on.
+**Co-signers.** `scripts/check-mods.mjs` (`just mods`, in `check-fast`, pr.yml's hygiene job and
+pre-commit) fails on a `mods/` path in a bundle's resources and on a `src/` import of `mods/`. The
+resources are read the way Tauri reads them (each platform file merged onto the base per RFC 7386, a
+list or a map, a glob matched against `mods/`, a folder that holds the repository refused), and each
+import specifier is resolved against its file, so PM's own `src/components/mods/` is not confused for
+the top-level folder. It reads source only. What it does not read: a Rust `include_str!` or
+`include_bytes!` of a `mods/` path in non-test code; no such use exists, and a new one is a review
+item until the gate learns it. The same gate holds each
+manifest to `package.rs`'s rules, and `check-version-lockstep.mjs` uses it for D12: a change that
+touches only `mods/` owes the mod's own version bump, not PM's.
 
 ### I-26 · Every PM window is built through `mods::build_window` — **Held**
 
