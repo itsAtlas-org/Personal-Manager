@@ -987,11 +987,25 @@ function readStartTag(html, from) {
  * resumes right after the tag's NAME, never after its end, and each candidate tag is checked from
  * its own start. A `<x` inside a quoted value or a comment is read too, which can only ever refuse
  * more (fail closed). A generator, so the first refusal stops the work.
+ *
+ * Overlapping reads can cost quadratic time on markup whose every read runs on to a far quote or
+ * `>` (`<a b='` repeated, or `<a ` repeated with no `>`). Built output never looks like that (each
+ * tag ends at its own `>`, so the reads add up to about the file's length), so the reads share a
+ * budget and markup that spends past it is refused as too tangled to check (`tangled: true`), never
+ * left to run for minutes. This is a lint for the author's slips; the frame's CSP is the guard.
  */
+export const TAG_READ_BUDGET = (length) => 64 * length + 65536;
 function* startTags(html) {
   const open = /<([a-zA-Z][^\t\n\f\r />]*)/g;
+  const budget = TAG_READ_BUDGET(html.length);
+  let spent = 0;
   for (let m = open.exec(html); m !== null; m = open.exec(html)) {
     const { attrs, end, closed } = readStartTag(html, open.lastIndex);
+    spent += end - m.index;
+    if (spent > budget) {
+      yield { name: m[1].toLowerCase(), attrs: [], end, closed: true, tangled: true };
+      return;
+    }
     yield { name: m[1].toLowerCase(), attrs, end, closed };
   }
 }
@@ -1076,6 +1090,7 @@ function checkBuiltHtml(html, where) {
     where(`has a type=module (only classic scripts load in the frame; ${RAW_RULE})`);
   }
   for (const tag of startTags(html)) {
+    if (tag.tangled) where("is too tangled for this check to read (its tags run into each other)");
     if (!tag.closed) where("has a tag that never ends");
     const all = (name) => tag.attrs.filter((a) => a.name === name).map((a) => a.value);
     const names = tag.attrs.map((a) => a.name);

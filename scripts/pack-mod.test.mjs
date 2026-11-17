@@ -2082,6 +2082,17 @@ describe("built-output rules", () => {
     expect(() => html(hide("<img src=x alt=y>"))).not.toThrow();
   });
 
+  it("refuses markup whose overlapping tag reads would run long, and quickly", () => {
+    // Every read runs on to the far end of the file, so the reads would cost quadratic time.
+    for (const body of ["<a b='".repeat(20000) + "'>", "<a ".repeat(20000) + ">"]) {
+      const started = performance.now();
+      refused(() => html(page(body)), "too tangled");
+      expect(performance.now() - started).toBeLessThan(2000);
+    }
+    // A long, ordinary page (each tag ends at its own >) is nowhere near the budget.
+    expect(() => html(page("<p class=a>x</p>".repeat(20000)))).not.toThrow();
+  });
+
   it("still accepts local references, navigation links and a > inside a quoted value", () => {
     for (const src of ["./a.js", "a.js", "/a.js", "../a.js", "assets/a.js?x=1&y=2", "a.js#top"]) {
       expect(() => html(page("", `<script src="${src}"></script>`)), src).not.toThrow();
