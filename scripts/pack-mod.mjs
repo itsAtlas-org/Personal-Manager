@@ -348,6 +348,11 @@ const INVISIBLE = [
 /**
  * package.rs `MAX_STACKED_MARKS`: the most combining marks (category M) one letter may carry. Real
  * scripts stack three or four; more than this in a row is refused.
+ *
+ * `\p{M}` here is the Unicode version of this Node's ICU, and package.rs's is its regex crate's
+ * (Node 24.19's is newer: about 40 marks added since, e.g. U+1AE0). So this lint can only be
+ * stricter than package.rs, never looser (a code point is a mark in the newer table whenever it is
+ * one in the older), which is the safe direction for "--verify never accepts what Rust refuses".
  */
 export const MAX_STACKED_MARKS = 4;
 const MARK_RUN = new RegExp(`\\p{M}{${MAX_STACKED_MARKS + 1}}`, "u");
@@ -923,6 +928,14 @@ export function checkSignatureFile(bytes, manifest) {
 }
 
 /**
+ * HTML's whitespace is these five characters only. JS's `\s` also matches a no-break space, a
+ * vertical tab, U+2028 and U+FEFF, which a browser reads as part of a name or an unquoted value:
+ * a tokenizer that skips them sees a quote where the browser sees none, and so a different end of
+ * the tag. Every whitespace test that models a start tag uses this set, never `\s`.
+ */
+const isHtmlSpace = (ch) => ch !== undefined && /^[\t\n\f\r ]$/.test(ch);
+
+/**
  * The attributes of one start tag whose name ends at `from`, and where the tag ends: a quoted
  * attribute value may hold ">", an attribute may follow a closing quote or a "/" with no space.
  * `closed` is false for a tag the text ends inside.
@@ -933,7 +946,7 @@ function readStartTag(html, from) {
   let i = from;
   let closed = false;
   while (i < n) {
-    while (i < n && /[\s/]/.test(html[i])) i++;
+    while (i < n && (html[i] === "/" || isHtmlSpace(html[i]))) i++;
     if (i >= n) break;
     if (html[i] === ">") {
       closed = true;
@@ -941,21 +954,21 @@ function readStartTag(html, from) {
       break;
     }
     const nameAt = i++; // a leading "=" belongs to the name, as in HTML
-    while (i < n && !/[\s/>=]/.test(html[i])) i++;
+    while (i < n && !isHtmlSpace(html[i]) && !"/>=".includes(html[i])) i++;
     const name = html.slice(nameAt, i).toLowerCase();
     let value = "";
     let j = i;
-    while (j < n && /\s/.test(html[j])) j++;
+    while (j < n && isHtmlSpace(html[j])) j++;
     if (html[j] === "=") {
       j++;
-      while (j < n && /\s/.test(html[j])) j++;
+      while (j < n && isHtmlSpace(html[j])) j++;
       if (html[j] === '"' || html[j] === "'") {
         const end = html.indexOf(html[j], j + 1);
         value = html.slice(j + 1, end < 0 ? n : end);
         i = end < 0 ? n : end + 1;
       } else {
         const valueFrom = j;
-        while (j < n && !/[\s>]/.test(html[j])) j++;
+        while (j < n && !isHtmlSpace(html[j]) && html[j] !== ">") j++;
         value = html.slice(valueFrom, j);
         i = j;
       }
@@ -972,7 +985,7 @@ function readStartTag(html, from) {
  */
 function startTags(html) {
   const tags = [];
-  const open = /<([a-zA-Z][^\s/>]*)/g;
+  const open = /<([a-zA-Z][^\t\n\f\r />]*)/g;
   for (let m = open.exec(html); m !== null; m = open.exec(html)) {
     const { attrs, end, closed } = readStartTag(html, open.lastIndex);
     tags.push({ name: m[1].toLowerCase(), attrs, end, closed });
@@ -981,19 +994,25 @@ function startTags(html) {
   return tags;
 }
 
+/**
+ * An attribute value with its numeric character references (any letter or digit can be spelled one)
+ * and the few named ones that matter for a URL decoded.
+ */
+function decodeReferences(value) {
+  const named = { colon: ":", tab: "\t", newline: "\n", sol: "/", bsol: "\\" };
+  return value.replace(
+    /&#x([0-9a-f]{1,6});?|&#([0-9]{1,7});?|&(colon|tab|newline|sol|bsol);/gi,
+    (_, h, d, w) => {
+      if (w) return named[w.toLowerCase()];
+      const code = h ? parseInt(h, 16) : Number(d);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    },
+  );
+}
+
 /** An attribute value as a browser reads it for a URL: character references decoded, tabs and newlines gone. */
 function urlText(value) {
-  const named = { colon: ":", tab: "\t", newline: "\n", sol: "/", bsol: "\\" };
-  const decoded = value
-    .replace(
-      /&#x([0-9a-f]{1,6});?|&#([0-9]{1,7});?|&(colon|tab|newline|sol|bsol);/gi,
-      (_, h, d, w) => {
-        if (w) return named[w.toLowerCase()];
-        const code = h ? parseInt(h, 16) : Number(d);
-        return code <= 0x10ffff ? String.fromCodePoint(code) : "";
-      },
-    )
-    .replace(/[\t\n\r]/g, "");
+  const decoded = decodeReferences(value).replace(/[\t\n\r]/g, "");
   // A URL's leading C0 controls and spaces are stripped (a char-code loop: a control-character
   // regex is a lint error).
   let start = 0;
@@ -1019,12 +1038,12 @@ function checkScripts(html, where) {
   const re = /<script/gi;
   for (let m = re.exec(html); m !== null; m = re.exec(html)) {
     const after = html[m.index + 7];
-    if (after !== undefined && !/[\s/>]/.test(after)) {
+    if (after !== undefined && after !== "/" && after !== ">" && !isHtmlSpace(after)) {
       where(`has a "<script" that isn't a script tag (${RAW_RULE})`);
     }
     const tag = readStartTag(html, m.index + 7);
     if (!tag.closed) where("has a script tag that never ends");
-    const close = /^\s*<\/script>/i.exec(html.slice(tag.end));
+    const close = /^[\t\n\f\r ]*<\/script>/i.exec(html.slice(tag.end));
     if (!close) {
       where(
         /<\/script/i.test(html.slice(tag.end))
@@ -1060,9 +1079,21 @@ function checkBuiltHtml(html, where) {
     const names = tag.attrs.map((a) => a.name);
     if (names.includes("style")) where("has an inline style attribute");
     if (names.some((a) => a.startsWith("on"))) where("has an inline event handler");
-    if (all("rel").some((v) => v.toLowerCase().split(/\s+/).includes("modulepreload"))) {
+    // `rel` as a browser reads it: references decoded, split on HTML whitespace.
+    if (
+      all("rel").some((v) =>
+        decodeReferences(v)
+          .toLowerCase()
+          .split(/[\t\n\f\r ]+/)
+          .includes("modulepreload"),
+      )
+    ) {
       where("preloads a module");
     }
+    // A `srcdoc` is a whole HTML document held in a character-reference-encoded attribute, which
+    // the raw `<script` rule cannot see; nothing a mod ships needs one.
+    if (names.includes("srcdoc"))
+      where("has a srcdoc attribute (its HTML is hidden from this check)");
     for (const name of ["href", "src", "action", "formaction", "xlink:href"]) {
       if (all(name).some((v) => /^javascript:/i.test(urlText(v)))) where("has a javascript: URL");
     }

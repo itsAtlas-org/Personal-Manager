@@ -2008,6 +2008,49 @@ describe("built-output rules", () => {
     refused(() => html("<p>ok</p><script src=a.js"), "never ends");
   });
 
+  // HTML whitespace is tab, LF, FF, CR and space. A character JS's `\s` also matches but a browser
+  // does not (no-break space, VT, U+2028, U+FEFF) before a quote makes the VALUE unquoted for the
+  // browser, so a tokenizer that skips it reads a different end of the tag.
+  it.each([
+    ["no-break space", " "],
+    ["vertical tab", "\u000b"],
+    ["U+2028", " "],
+    ["U+FEFF", "﻿"],
+  ])("refuses markup hidden behind a %s before a quote", (_name, ch) => {
+    for (const [text, why] of [
+      [`<script a=${ch}'>alert(1)//' src=x></script>`, "inline script"],
+      [`<script src=x a=${ch}'></script><script>alert(1)</script>' ></script>`, "inline script"],
+      [`<div a=${ch}' style=x>'>`, "inline style attribute"],
+      [`<div a=${ch}' onclick=alert(1)>'>`, "event handler"],
+      [`<script${ch}src=x></script>`, "isn't a script tag"],
+    ]) {
+      refused(() => html(page(text)), why);
+    }
+  });
+
+  it("still accepts a no-break space where it is only text or inside a quoted value", () => {
+    expect(() => html(page('<p title="a b">x y</p>'))).not.toThrow();
+    expect(() => html(page('<script src="a.js" data-x=" "></script>'))).not.toThrow();
+  });
+
+  it("refuses markup a character reference hides from the raw-text rules", () => {
+    refused(
+      () => html(page('<iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe>')),
+      "srcdoc",
+    );
+    refused(() => html(page("<IFRAME SrcDoc=x></IFRAME>")), "srcdoc");
+    refused(
+      () => html(page("", '<link rel="module&#112;reload" href="a.js">')),
+      "preloads a module",
+    );
+    refused(
+      () => html(page("", '<link rel="module&#x70;reload" href="a.js">')),
+      "preloads a module",
+    );
+    // a lookalike in plain text is not an attribute
+    expect(() => html(page("<p>srcdoc is not an attribute here</p>"))).not.toThrow();
+  });
+
   it("refuses a tag the text ends inside", () => {
     refused(() => html("<p>ok</p><div onclick="), "never ends");
     refused(() => html("<img src='a.png"), "never ends");
