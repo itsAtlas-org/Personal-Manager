@@ -30,6 +30,7 @@ vi.mock("../../lib/ipc", () => ({
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
+  vaultStatus: () => Promise.resolve({ vault_id: "vault-a" }),
   modCall: () => Promise.resolve({ kind: "value", value: null }),
   modEventsAck: () => Promise.resolve(),
   modThemeChanged: () => Promise.resolve(),
@@ -148,6 +149,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // The Mods tab's in-flight work and refusals are module-level (lib/modActions): nothing carries over.
   resetModActions();
+  localStorage.clear();
   faulted = null;
   changed = null;
   let n = 0;
@@ -383,6 +385,38 @@ describe("a mod waiting for its first open (D17)", () => {
     await act(async () => finish({ state: "active", reason: null, serving: true }));
     await waitFor(() => expect(iframe()).not.toBeNull());
     expect(screen.queryByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeNull();
+  });
+
+  it("makes going from one waiting mod's tab to another's a new screen: counted, unticked, its own answers", async () => {
+    // The first ever showing is already counted, so the next one is the second and offers the box.
+    const KEY = "pm.mods.disclaimerShown.vault-a";
+    localStorage.setItem(KEY, JSON.stringify({ v: 1, shown: 1, hide: false }));
+    const a = mod({ ...waiting([perm("tasks.read")]), id: "a", name: "Mod A" });
+    const b = mod({ ...waiting([perm("documents.meta")]), id: "b", name: "Mod B" });
+    const stored = () => JSON.parse(localStorage.getItem(KEY) ?? "{}");
+    const tabFor = (modId: string) => (
+      <ModRowsContext.Provider value={rowsValue([a, b])}>
+        <ModTab modId={modId} onOpenMods={onOpenMods} onOpenSettings={onOpenSettings} />
+      </ModRowsContext.Provider>
+    );
+    const view = render(tabFor("a"));
+    await waitFor(() => expect(stored().shown).toBe(2));
+    const box = await screen.findByRole("checkbox", { name: "Don't show this again" });
+    fireEvent.click(box);
+    expect((box as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Allow: Read your tasks/ }));
+
+    view.rerender(tabFor("b"));
+    expect(screen.getByRole("heading", { name: "Turn on “Mod B”?" })).toBeTruthy();
+    // Mod B's screen is its own showing (the third), with the box unticked.
+    await waitFor(() => expect(stored().shown).toBe(3));
+    const next = await screen.findByRole("checkbox", { name: "Don't show this again" });
+    expect((next as HTMLInputElement).checked).toBe(false);
+    // Turn on sends B's own answers, and A's tick was not carried over.
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    await waitFor(() => expect(consentMod).toHaveBeenCalledTimes(1));
+    expect(consentMod).toHaveBeenCalledWith("b", { "documents.meta": true });
+    expect(stored().hide).toBe(false);
   });
 
   it("says why when the backend refuses, keeps the screen, and lets the user try again", async () => {

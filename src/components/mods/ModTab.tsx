@@ -116,7 +116,10 @@ export function ModTab({ modId, onOpenMods, onOpenSettings }: ModTabProps) {
   }
 
   if (mod.state.kind === "waiting-for-you") {
-    return <ModFirstOpen mod={mod} onTurnedOn={refresh} />;
+    // Keyed by the mod: going from one waiting mod's tab to another's reuses this ModTab, and the
+    // screen's own state (its counted showing, the "Don't show this again" tick, the permission
+    // answers) belongs to one mod's screen, so each mod's screen is a new one.
+    return <ModFirstOpen key={mod.id} mod={mod} onTurnedOn={refresh} />;
   }
 
   if (mod.state.kind === "running" && mod.state.running) {
