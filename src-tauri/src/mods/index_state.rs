@@ -964,9 +964,11 @@ mod tests {
         // A crash between the write and the rename leaves a whole or partial temp file.
         let leftover = dir.path().join(temp_name(STATE_FILE, "0123456789abcdef"));
         fs::write(&leftover, b"{\"format\":1,\"seq\":9999").unwrap();
-        // Names that aren't this module's are never touched.
+        // Names that aren't this module's are never touched. The upper-case one uses different
+        // digits from the leftover on purpose: NTFS and APFS fold case, so with the SAME digits it
+        // is the leftover's own file there (written over, then rightly removed with it).
         let others = [
-            ".mods-index.json.0123456789ABCDEF.tmp",
+            ".mods-index.json.FEDCBA9876543210.tmp",
             ".mods-index.json.tmp",
             "mods-index.json.0123456789abcdef.tmp",
             ".vault-pointer.json.0123456789abcdef.tmp",
@@ -982,6 +984,17 @@ mod tests {
         }
         assert!(is_temp_name(
             &temp_name(STATE_FILE, &disk::random_name().unwrap()),
+            STATE_FILE
+        ));
+        // The matcher itself is exact-case on every platform (we only ever make lower-case names),
+        // so the upper-case spelling of the leftover's name is not ours even where a filesystem
+        // would call it the same file.
+        assert!(is_temp_name(
+            ".mods-index.json.0123456789abcdef.tmp",
+            STATE_FILE
+        ));
+        assert!(!is_temp_name(
+            ".mods-index.json.0123456789ABCDEF.tmp",
             STATE_FILE
         ));
     }
