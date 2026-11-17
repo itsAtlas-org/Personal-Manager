@@ -165,13 +165,20 @@ describe("hideFinished", () => {
 
   it("reads an event ending at 00:00 as ending the day before, in the zone it's in", () => {
     vi.stubEnv("TZ", "Europe/London");
+    // Wednesday 10:00 in London, made after the zone changes: the file's NOW is 10:00 in this
+    // machine's zone, which from UTC+10 east is London's midnight or earlier, with the event not over.
+    const now = new Date(2026, 10, 11, 10, 0);
     // 23:00-00:00 on the 10th is over by Wednesday morning; the row's last day is the 10th.
     const late = timed("late", "11-10T23:00", "11-11T00:00");
-    const { shown, hidden } = hideFinished([late], { ...input, fromDay: new Date(2026, 10, 10) });
+    const { shown, hidden } = hideFinished([late], {
+      ...input,
+      now,
+      fromDay: new Date(2026, 10, 10),
+    });
     expect(shown).toEqual([]);
     expect(hidden).toBe(1);
     // …and with the first day drawn being the 11th, it was never on the list.
-    expect(hideFinished([late], { ...input, fromDay: new Date(2026, 10, 11) }).hidden).toBe(0);
+    expect(hideFinished([late], { ...input, now, fromDay: new Date(2026, 10, 11) }).hidden).toBe(0);
   });
 });
 
