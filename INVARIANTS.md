@@ -667,22 +667,24 @@ the app outside `vault/migrate.rs` (its rollback copy never leaves the vault fol
 fixtures. The test reads every page of the stripped file decrypted (free pages included), so a
 value left in the file is found where grepping the encrypted bytes could not. A restore's commit
 (`switch_to_vault`) runs `backup::adopt_mods::reset_for_adopt`: developer mode off for EVERY device
-(`devmode::all_devices_off`: an empty per-device record, so the old row cannot be carried over
-afterwards, and the old row off), `mcp_clients` cleared, MCP off (PR C's switch), all in one
+(`devmode::all_devices_off`: an empty per-device record, and the old row written `"false"` for an
+older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, MCP off (PR C's switch), all in one
 transaction, before the store is attached, so before the first load of its mods; that load pauses
 each active unsigned mod with the reason `dev-mode` (I-34), the same state switching developer mode
 off leaves. A reset that fails refuses the switch. Joining a shared vault (`adopt_shared_vault`)
-resets nothing: developer mode is per device (I-34), so the joiner's device has no entry in the
+writes nothing: developer mode is per device (I-34), so the joiner's device has no entry in the
 record and reads as off while the vault's other devices keep theirs, and the connected apps are per
-device too; the store is the vault's, in use by its other accounts and machines. The join's one
-write is `adopt_mods::joiner_inherits_no_dev_mode`, run before the store is attached (so before
-the writer's open, which is where the first device to look would be handed the old row's "on"): a
-store with NO per-device record gets the empty one and its old `dev_mode` row turned off
-(`devmode::drop_inherited_on_at_join`; sealing it also closes a carry-over for an old row that only
-turns `"true"` later; the owner's device switches it on again), and a store that has a record is
-neither written nor locked (a plain read decides); a failure refuses the join. **Only `mods/devmode.rs` names the old row**
-(besides `settings.rs`'s and `commands_dev.rs`'s key lists): `only_devmode_names_the_old_dev_mode_row`
-fails the moment any other Rust code reads it. The copy is refused when the open store isn't the store the caller
+device too; the store is the vault's, in use by its other accounts and machines. The join has no
+developer-mode step at all (an earlier design sealed an empty record at the join, to stop a
+carry-over from the old row; the carry-over is gone, so the seal is too, and a joiner's first open
+can never be handed an "on"): `a_join_names_no_developer_mode_code_and_a_restore_resets_before_it_attaches`
+reads the join's source and fails on any mention of developer mode, the old row, the record or the
+restore's reset in it, and on any caller of `all_devices_off` but the restore's. **Only
+`mods/devmode.rs` names the old row, and only to write it off** (`all_devices_off`; the constant is
+private to it): `the_old_dev_mode_row_is_named_only_by_devmode_and_only_to_write_it_off` fails the
+moment any other Rust code names it, or `devmode.rs` uses it in any way but that one `UPDATE`.
+Nothing reads it: not a carry-over, not a migration, not the Dev tab (its value shows redacted).
+The copy is refused when the open store isn't the store the caller
 read its metadata and Markdown folder from (`snapshot_for_leaving`'s `Origin`: the vault id AND the
 vault folder, because a restore keeps the vault id and its copy sits beside the original as a
 second store of one vault; vault switching doesn't take the backup run's busy flag), so an archive
@@ -760,11 +762,16 @@ otherwise copy an id from one record (the Mods disclaimer's) into this one; the 
 holds a differently-separated value, `tab::device::credential`, and a record in the old raw form
 reads as off), never a vault-wide switch, so a restore onto another machine, a joined shared vault or a copied database carries no
 "on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
-or writes it: the old webview-written `dev_mode` row is out of the page's allow-list, read once to
-carry an old "on" over to the first device that asks (and no other), and turned off by the restore
-reset (`devmode::all_devices_off`, which also writes an empty record so nothing is carried over
-afterwards) and by a shared-vault join that would otherwise hand that old "on" to the joiner's
-device (I-32: the join's one write). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+or writes it, and **nothing but a record that lists the device switches it on, ever**: asking
+(`devmode::is_on`) is a pure read, so a vault with no record is off for every device, and a record
+that is deleted (by a member of a shared vault, who holds the store key) leaves everyone off. The
+old webview-written `dev_mode` row is out of the page's allow-list and is **never read** (an earlier
+build carried an old "on" over to the first device that asked, which made a deleted record plus a
+written old row switch a victim's device on with no click: unsigned mods the victim had paused
+resumed and the install gate opened; removed, so upgrading turns developer mode off once and each
+person switches it on again in Settings > Developer). Rust writes the old row in one place only: the
+restore reset (`devmode::all_devices_off`, which also writes an empty record) sets it `"false"` for
+an older PM sharing the vault. A shared-vault join writes nothing (I-32). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row

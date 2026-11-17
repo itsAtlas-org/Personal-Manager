@@ -17,16 +17,14 @@
 //! cached list before it loads a row (`ledger::after_writer_open`), which is before any frame can
 //! mount.
 //!
-//! **Joining a shared vault resets almost nothing.** Its store is the vault's, in use by the vault's
+//! **Joining a shared vault writes nothing.** Its store is the vault's, in use by the vault's
 //! other accounts and machines at the same time, so switching dev mode off or deleting the
 //! connected apps there would do it for them. Dev mode is per device (a joiner's device has no
-//! entry, so it reads off), and the connected apps have a seam where PR C makes that true
-//! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The one
-//! write is [`joiner_inherits_no_dev_mode`]: a store with no per-device record yet could hand an old
-//! vault-wide "on" to the joiner's device when it first looks (whether the old row says "true"
-//! now or only later), so the join gives that store the empty record and turns the old row off,
-//! whatever the old row says, before the store is attached. A store that has a record is neither
-//! written nor locked.
+//! entry in the record, so it reads off, and nothing else ever switches it on: the old row is
+//! never read, `mods::devmode`), and the connected apps have a seam where PR C makes that true
+//! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The
+//! join has no dev-mode step at all; `a_join_names_no_developer_mode_code_and_a_restore_resets_before_it_attaches`
+//! reads its source to keep it so.
 //!
 //! **The report** ([`describe`]) is one row per mod the restored store lists, in the words the
 //! restore card shows. It is pending until the open and the same-machine recovery have run (a
@@ -52,8 +50,8 @@ use crate::AppState;
 /// caller's to treat as "don't adopt". A restore's commit only: never a shared vault's join.
 pub fn reset_for_adopt(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    // Dev mode off for EVERY device: an empty per-device record (so the old row can't be carried
-    // over to this one later) and the old row off. The unsigned rows need no write here: the load
+    // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
+    // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no write here: the load
     // that follows the store's open reads the record first and pauses each active unsigned row
     // with the reason `dev-mode` (`ledger::after_writer_open`), the same pause switching it off
     // makes; the page asks the backend (`dev_mode_state`), not its own copy.
@@ -69,23 +67,6 @@ pub fn reset_for_adopt(conn: &Connection) -> Result<()> {
 /// function and add its test beside `adopting_turns_dev_mode_off_and_clears_connected_apps`.
 fn switch_mcp_off(_conn: &Connection) -> Result<()> {
     Ok(())
-}
-
-/// A joiner's dev mode is off: it is per device (`mods::devmode`), so the device that has just
-/// joined has no entry in the shared store's record and reads as off, while the vault's other
-/// devices keep theirs. The one thing that would break that is a store with no record yet: the
-/// first device to look gets the old vault-wide row's "on" (`devmode::ensure`), and the joiner's
-/// device would be it, whether the old row says `"true"` now or only turns so later (a member on an
-/// earlier build writes it). So a store with no record gets the empty one, and the old row is
-/// turned off ([`devmode::drop_inherited_on_at_join`]; the owner's device switches it on again).
-/// Says whether it wrote. A store that has a record is not written at all, and no write lock is
-/// taken for it.
-///
-/// Called by `commands::vaults::adopt_shared_vault` on the opened store BEFORE it is attached, so
-/// before the writer's open (`ledger::after_writer_open`) looks developer mode up. A failure
-/// refuses the join: continuing would let the open hand the old "on" over.
-pub fn joiner_inherits_no_dev_mode(conn: &Connection) -> Result<bool> {
-    Ok(devmode::drop_inherited_on_at_join(conn)?)
 }
 
 /// PR C: `mcp_clients` are per device; a joiner never accepts another device's clients. PR C binds
@@ -354,11 +335,15 @@ mod tests {
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    /// The old webview-written row. Named by its key here, in test code only (the tripwire below
+    /// reads production code).
+    const OLD_ROW: &str = "dev_mode";
+
     fn set_legacy(conn: &Connection, value: &str) {
         conn.execute(
             "INSERT INTO settings(key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![devmode::LEGACY_ROW, value],
+            rusqlite::params![OLD_ROW, value],
         )
         .unwrap();
     }
@@ -366,7 +351,7 @@ mod tests {
     fn legacy(conn: &Connection) -> Option<String> {
         conn.query_row(
             "SELECT value FROM settings WHERE key = ?1",
-            [devmode::LEGACY_ROW],
+            [OLD_ROW],
             |r| r.get(0),
         )
         .ok()
@@ -410,12 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn adopting_a_store_that_never_had_developer_mode_leaves_nothing_to_carry_over() {
+    fn adopting_a_store_that_never_had_developer_mode_writes_the_empty_record_and_no_old_row() {
         let (_d, conn) = store_conn();
         assert_eq!(record(&conn), None);
         reset_for_adopt(&conn).unwrap();
         assert!(record(&conn).is_some(), "an empty record is written");
-        // Even an old "on" that turns up afterwards is never handed to a device.
+        assert_eq!(legacy(&conn), None, "an old row is not invented");
+        // Even an old "on" that turns up afterwards is never read.
         set_legacy(&conn, "true");
         assert!(!devmode::is_on(&conn, A).unwrap());
     }
@@ -436,28 +422,30 @@ mod tests {
     }
 
     #[test]
-    fn a_join_of_a_store_with_no_record_and_an_old_on_switches_everyone_off() {
-        let (_d, conn) = store_conn();
-        set_legacy(&conn, "true");
-        assert!(joiner_inherits_no_dev_mode(&conn).unwrap());
-        // The joiner's device would have been the first to look, and the store would have given it
-        // the vault's old "on".
-        assert!(!devmode::is_on(&conn, A).unwrap());
-        assert!(!devmode::is_on(&conn, B).unwrap());
-        assert!(record(&conn).is_some(), "the record is written, empty");
-    }
-
-    #[test]
-    fn a_join_of_a_store_that_has_a_record_writes_nothing() {
-        let (_d, mut conn) = store_conn();
-        set_legacy(&conn, "true");
-        devmode::write(&mut conn, B, true).unwrap();
-        let before = (record(&conn), legacy(&conn));
-        assert!(!joiner_inherits_no_dev_mode(&conn).unwrap());
-        assert_eq!((record(&conn), legacy(&conn)), before);
-        // The owner's device keeps its switch and the joiner's device was never on.
-        assert!(devmode::is_on(&conn, B).unwrap());
-        assert!(!devmode::is_on(&conn, A).unwrap());
+    fn what_a_join_does_with_developer_mode_leaves_both_rows_as_they_were() {
+        // A join does nothing about developer mode (the command can't run without an app, so
+        // `a_join_names_no_developer_mode_code...` reads its source). Everything a joiner's device
+        // does with the store on the way in is asking whether it is on: that, for a store with no
+        // record plus an old "true", for one whose record names only another device, and for one
+        // with a record and no old row, changes neither row.
+        for (record_for, old) in [
+            (None, Some("true")),
+            (Some(B), Some("true")),
+            (Some(B), None),
+        ] {
+            let (_d, mut conn) = store_conn();
+            if let Some(old) = old {
+                set_legacy(&conn, old);
+            }
+            if let Some(device) = record_for {
+                devmode::write(&mut conn, device, true).unwrap();
+            }
+            let before = (record(&conn), legacy(&conn));
+            assert!(!devmode::is_on(&conn, A).unwrap(), "the joiner is off");
+            assert_eq!((record(&conn), legacy(&conn)), before);
+            // The owner's device keeps its switch.
+            assert_eq!(devmode::is_on(&conn, B).unwrap(), record_for.is_some());
+        }
     }
 
     /// Production code of a source file: every line outside a test MODULE, less comment lines.
@@ -497,14 +485,33 @@ mod tests {
         kept.join("\n")
     }
 
+    /// What in a join's code (production, comments cut) touches developer mode or the connected
+    /// apps: the devmode module, the old row, the per-device record, the restore's reset, or the
+    /// apps' table. Empty is the rule: a join writes none of it.
+    fn join_touches(join: &str) -> Vec<&'static str> {
+        [
+            "devmode",
+            "dev_mode",
+            "mods_dev_devices",
+            "SETTING_DEV_DEVICES",
+            "all_devices_off",
+            "reset_for_adopt",
+            "joiner_inherits",
+            "drop_inherited",
+            "mcp_clients",
+        ]
+        .into_iter()
+        .filter(|name| join.contains(name))
+        .collect()
+    }
+
     #[test]
-    fn a_join_writes_only_through_devmode_before_it_attaches_and_a_restore_resets_before_it_attaches(
-    ) {
+    fn a_join_names_no_developer_mode_code_and_a_restore_resets_before_it_attaches() {
         // The join's command can't run without an app, so its source is read: it must not run the
         // restore's reset on the shared store (that disconnected the apps of the vault's other
-        // accounts and machines), its one dev-mode write goes through the devmode function and
-        // comes before the attach (whose engage is the first look at developer mode), and it names
-        // no settings key itself.
+        // accounts and machines), and it must not touch developer mode at all (a join writes
+        // nothing: the joiner's device has no entry in the record, so it is off, and the old row is
+        // never read).
         let vaults = production(include_str!("../commands/vaults.rs"));
         let join = vaults
             .split("pub fn adopt_shared_vault(")
@@ -515,15 +522,23 @@ mod tests {
             !vaults.contains("reset_for_adopt("),
             "no vault command resets a store it shares"
         );
-        assert!(!join.contains("mcp_clients") && !join.contains("\"dev_mode\""));
+        assert_eq!(join_touches(join), Vec::<&str>::new());
         assert!(join.contains("adopt_mods::joiner_accepts_only_its_own_clients()"));
-        let drop_on = join
-            .find("adopt_mods::joiner_inherits_no_dev_mode(&conn)")
-            .expect("the join drops an inherited developer-mode on");
-        let attach = join
-            .find("attach_profile_here(")
-            .expect("and attaches the store");
-        assert!(drop_on < attach, "before anything looks developer mode up");
+        assert!(join.contains("attach_profile_here("));
+        // Nothing but the restore's reset writes the per-device record wholesale, anywhere.
+        for (rel, source) in source_tree() {
+            if rel.contains("/tests/") {
+                continue;
+            }
+            let prod = production(&source);
+            let callers = prod.matches("all_devices_off(").count();
+            match rel.as_str() {
+                // Its definition, and the restore's one call.
+                "mods/devmode.rs" => assert_eq!(callers, 1, "{rel}"),
+                "backup/adopt_mods.rs" => assert_eq!(callers, 1, "{rel}"),
+                _ => assert_eq!(callers, 0, "{rel} calls the restore's reset"),
+            }
+        }
         // The restore's commit resets, once, and before the store is attached (so before the
         // engage that loads its mods).
         let backups = production(include_str!("../commands/backups.rs"));
@@ -538,21 +553,61 @@ mod tests {
         assert!(reset < attach, "the reset comes before the attach");
     }
 
-    /// The files (path under `src/`, production code) that name the old vault-wide `dev_mode` row,
-    /// other than the ones allowed to: `mods/devmode.rs` owns it (the carry-over and the two resets
-    /// that go through `devmode::all_devices_off` / `drop_inherited_on_at_join`), and the two key
-    /// lists that already mention it (the webview's allow-list in `settings.rs`, which asserts it
-    /// is NOT readable from the page, and the Dev tab's list of values safe to show). A file under
-    /// a `tests/` directory is all test code (it has no `#[cfg(test)]` line to cut at), so it may
-    /// plant the row to prove what the production code does with it.
-    fn readers_of_the_old_row(files: &[(String, String)]) -> Vec<String> {
-        const ALLOWED: [&str; 3] = ["mods/devmode.rs", "settings.rs", "commands_dev.rs"];
+    /// The WRITE-OFF, the one use of the old row there is: the `UPDATE` in `all_devices_off`.
+    const WRITE_OFF: &str = "UPDATE settings SET value = 'false' WHERE key = ?1";
+
+    /// Whether `devmode.rs`'s production code uses the old row in any way but the write-off: it
+    /// may define the constant and name it once, as the parameter of [`WRITE_OFF`] inside
+    /// `all_devices_off`; any other mention (a read, a second use, a `SELECT` in that function, the
+    /// key as a literal) fails, and so does a file that no longer has the write-off.
+    fn devmode_uses_the_old_row_beyond_the_write_off(source: &str) -> bool {
+        let prod = production(source);
+        let mut rest = Vec::new();
+        let mut body = String::new();
+        let mut in_body = false;
+        for line in prod.lines() {
+            if line.contains("const LEGACY_ROW") {
+                continue;
+            }
+            if line.starts_with("pub fn all_devices_off(") {
+                in_body = true;
+            }
+            if in_body {
+                body.push_str(line);
+                body.push('\n');
+                if line == "}" {
+                    in_body = false;
+                }
+            } else {
+                rest.push(line);
+            }
+        }
+        let names = |text: &str| text.contains("\"dev_mode\"") || text.contains("LEGACY_ROW");
+        names(&rest.join("\n"))
+            || body.matches("LEGACY_ROW").count() != 1
+            || body.contains("\"dev_mode\"")
+            || body.contains("SELECT")
+            || !body.contains(WRITE_OFF)
+    }
+
+    /// The files (path under `src/`, production code) that use the old vault-wide `dev_mode` row at
+    /// all, other than `mods/devmode.rs` and only for its write-off (see above). No other file may
+    /// name it, not even the webview's key lists (the page's allow-list in `settings.rs` is
+    /// asserted not to hold it, in test code; the Dev tab shows its value redacted like any other
+    /// unlisted key). A file under a `tests/` directory is all test code (it has no
+    /// `#[cfg(test)]` line to cut at), so it may plant the row to prove what the production code
+    /// does with it.
+    fn misusers_of_the_old_row(files: &[(String, String)]) -> Vec<String> {
         files
             .iter()
-            .filter(|(rel, _)| !ALLOWED.contains(&rel.as_str()) && !rel.contains("/tests/"))
-            .filter(|(_, source)| {
-                let prod = production(source);
-                prod.contains("\"dev_mode\"") || prod.contains("LEGACY_ROW")
+            .filter(|(rel, _)| !rel.contains("/tests/"))
+            .filter(|(rel, source)| {
+                if rel == "mods/devmode.rs" {
+                    devmode_uses_the_old_row_beyond_the_write_off(source)
+                } else {
+                    let prod = production(source);
+                    prod.contains("\"dev_mode\"") || prod.contains("LEGACY_ROW")
+                }
             })
             .map(|(rel, _)| rel.clone())
             .collect()
@@ -581,23 +636,82 @@ mod tests {
     }
 
     #[test]
-    fn only_devmode_names_the_old_dev_mode_row() {
-        // Developer mode is per device, decided by `mods::devmode` from its own record. The old
-        // row is the vault's, written by whichever device last switched it on, so a Rust reader of
-        // it anywhere else would gate on another device's choice.
+    fn the_old_dev_mode_row_is_named_only_by_devmode_and_only_to_write_it_off() {
+        // Developer mode is per device, decided by `mods::devmode` from its own record, and only
+        // a record that lists the device switches it on. The old row is the vault's, and anyone
+        // who holds a shared store's key can write it, so a Rust READER of it anywhere (a
+        // carry-over, a "migration", a display that gates on it) is an attack surface. The one
+        // thing Rust does with it is write it "false" in the restore reset, in `devmode.rs`.
         let files = source_tree();
-        for allowed in ["mods/devmode.rs", "settings.rs", "commands_dev.rs"] {
-            assert!(
-                files.iter().any(|(rel, _)| rel == allowed),
-                "{allowed} still exists"
-            );
-        }
-        let readers = readers_of_the_old_row(&files);
         assert!(
-            readers.is_empty(),
-            "{readers:?} read the old dev_mode row, which is the vault's and not this device's: \
-             ask `mods::devmode`"
+            files.iter().any(|(rel, _)| rel == "mods/devmode.rs"),
+            "mods/devmode.rs still exists"
         );
+        let misusers = misusers_of_the_old_row(&files);
+        assert!(
+            misusers.is_empty(),
+            "{misusers:?} use the old dev_mode row, which is the vault's and not this device's, \
+             and is never read: ask `mods::devmode`"
+        );
+    }
+
+    #[test]
+    fn the_old_row_check_fails_for_a_change_in_devmode_itself() {
+        // Teeth for the one file that may name the row: the real devmode.rs passes, and each of
+        // these edits of it (a reader, a second use inside the write-off, a read in place of the
+        // write, the key as a literal, the write-off gone) is caught.
+        let files = source_tree();
+        let real = files
+            .iter()
+            .find(|(rel, _)| rel == "mods/devmode.rs")
+            .map(|(_, s)| s.clone())
+            .expect("mods/devmode.rs exists");
+        assert!(!devmode_uses_the_old_row_beyond_the_write_off(&real));
+        assert!(real.contains(WRITE_OFF), "the write-off is there to mutate");
+        let bad = [
+            // A reader beside the others.
+            format!("{real}\nfn peek(conn: &Connection) {{ let _ = read(conn, LEGACY_ROW); }}\n"),
+            // The key spelled out.
+            format!("{real}\nfn peek(conn: &Connection) {{ let _ = read(conn, \"dev_mode\"); }}\n"),
+            // A read inside the write-off function.
+            real.replace(
+                "[LEGACY_ROW],\n    )?;",
+                "[LEGACY_ROW],\n    )?;\n    let _ = read(conn, LEGACY_ROW);",
+            ),
+            // The write-off turned into a SELECT.
+            real.replace(WRITE_OFF, "SELECT value FROM settings WHERE key = ?1"),
+            // The write-off removed.
+            real.replace(
+                WRITE_OFF,
+                "UPDATE settings SET value = 'true' WHERE key = ?1",
+            ),
+        ];
+        for (i, source) in bad.iter().enumerate() {
+            assert_ne!(source, &real, "edit {i} applied");
+            assert!(devmode_uses_the_old_row_beyond_the_write_off(source), "{i}");
+            let mut tree = files.clone();
+            tree.retain(|(rel, _)| rel != "mods/devmode.rs");
+            tree.push(("mods/devmode.rs".into(), source.clone()));
+            assert_eq!(misusers_of_the_old_row(&tree), ["mods/devmode.rs"], "{i}");
+        }
+    }
+
+    #[test]
+    fn the_join_check_fails_for_a_join_that_touches_developer_mode() {
+        assert!(join_touches("fn j() { attach_profile_here(); }").is_empty());
+        for body in [
+            "devmode::write(&mut c, d, false)",
+            "crate::backup::adopt_mods::joiner_inherits_no_dev_mode(&conn)",
+            "devmode::drop_inherited_on_at_join(&conn)",
+            "devmode::all_devices_off(&conn)",
+            "conn.execute(\"DELETE FROM settings WHERE key = 'dev_mode'\", [])",
+            "conn.execute(\"UPDATE settings SET value = '' WHERE key = 'mods_dev_devices'\", [])",
+            "store::SETTING_DEV_DEVICES",
+            "reset_for_adopt(&conn)",
+            "conn.execute(\"DELETE FROM mcp_clients\", [])",
+        ] {
+            assert!(!join_touches(body).is_empty(), "{body}");
+        }
     }
 
     #[test]
@@ -605,7 +719,7 @@ mod tests {
         // Teeth: the same check over the real tree plus one more file that reads the row, by its
         // key or through the constant, in production code (a test or a comment doesn't count).
         let mut files = source_tree();
-        assert!(readers_of_the_old_row(&files).is_empty());
+        assert!(misusers_of_the_old_row(&files).is_empty());
         for (path, body) in [
             ("mods/policy.rs", "fn f() { get(\"dev_mode\"); }"),
             (
@@ -614,21 +728,21 @@ mod tests {
             ),
         ] {
             files.push((path.into(), body.into()));
-            assert_eq!(readers_of_the_old_row(&files), [path]);
+            assert_eq!(misusers_of_the_old_row(&files), [path]);
             files.pop();
         }
         files.push((
             "mods/policy.rs".into(),
             "// \"dev_mode\" is the old row\nfn f() {}\n#[cfg(test)]\nmod t { const K: &str = \"dev_mode\"; }".into(),
         ));
-        assert!(readers_of_the_old_row(&files).is_empty());
+        assert!(misusers_of_the_old_row(&files).is_empty());
         // An early test-only item must not hide the production code after it (the first
         // `#[cfg(test)]` of many files is a helper, not the test module).
         files.push((
             "mods/policy.rs".into(),
             "#[cfg(test)]\npub fn helper() {}\n\nfn f() { get(\"dev_mode\"); }\n\n#[cfg(test)]\n#[allow(clippy::x)]\nmod tests {}\n".into(),
         ));
-        assert_eq!(readers_of_the_old_row(&files), ["mods/policy.rs"]);
+        assert_eq!(misusers_of_the_old_row(&files), ["mods/policy.rs"]);
         files.pop();
         // An early test MODULE (a `mod tests;` line, or a block) must not hide the production code
         // after it either: `mods/api/mod.rs`, `paths.rs` and `mods/retag.rs` all have one.
@@ -639,7 +753,7 @@ mod tests {
         ] {
             files.push(("mods/policy.rs".into(), early.into()));
             assert_eq!(
-                readers_of_the_old_row(&files),
+                misusers_of_the_old_row(&files),
                 ["mods/policy.rs"],
                 "{early}"
             );
@@ -650,14 +764,14 @@ mod tests {
             "mods/policy.rs".into(),
             "#[cfg(test)]\nmod a {\n    const K: &str = \"dev_mode\";\n}\n\nfn f() {}\n".into(),
         ));
-        assert!(readers_of_the_old_row(&files).is_empty());
+        assert!(misusers_of_the_old_row(&files).is_empty());
         files.pop();
         // ...and a read inside the test module itself is still not production.
         files.push((
             "mods/policy.rs".into(),
             "#[cfg(test)]\nuse x::y;\nfn f() {}\n#[cfg(test)]\nmod tests { const K: &str = \"dev_mode\"; }\n".into(),
         ));
-        assert!(readers_of_the_old_row(&files).is_empty());
+        assert!(misusers_of_the_old_row(&files).is_empty());
     }
 
     fn row(signed: bool, state: &str, reason: Option<&str>) -> ModRow {

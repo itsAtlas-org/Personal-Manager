@@ -139,9 +139,10 @@ release remain the open post-v1 work.
     data, then vacuumed, made in `data_dir/copies-in-progress/`; INVARIANTS.md I-32) and
     `adopt_mods.rs` what a restore's commit resets (developer mode off for every device, the
     connected apps cleared; a developer's test folder never leaves, I-35), plus the mod list a
-    restore shows. Joining a shared vault resets nothing: developer mode (`mods/devmode.rs`) and the
-    connected apps are per device, and the join's one write is switching developer mode off for
-    everyone when the store has no per-device record yet and an old vault-wide "on".
+    restore shows. Joining a shared vault resets and writes nothing: developer mode
+    (`mods/devmode.rs`) and the connected apps are per device, and developer mode is on only where
+    the per-device record lists that device (the old `dev_mode` row is never read; the restore's
+    reset only writes it off).
   - **Platform** — `secrets.rs` (OS keychain: API key + background key + DB key + OAuth
     tokens + feed URLs), `openrouter.rs` (streaming SSE + non-streaming `complete()`; the key
     stays in Rust), `cost.rs`, `applock.rs` / `lock_session.rs`, `components.rs` (the Storage
