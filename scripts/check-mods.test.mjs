@@ -778,6 +778,55 @@ describe("bundle.resources", () => {
       expectRefused(withBundle(bundle), "I-25");
     });
 
+    // Tauri's serde takes a kebab-case alias for most of these keys (and `macos` for `macOS`); a
+    // gate that read one spelling alone would stay green while the installer copied the file.
+    // The key in the message is the spelling the config used.
+    it.each([
+      ["license-file", { "license-file": "../mods/x" }],
+      ["external-bin", { "external-bin": ["../mods/x"] }],
+      ["windows.nsis.installer-hooks", { windows: { nsis: { "installer-hooks": "../mods/x" } } }],
+      ["windows.nsis.install-icon", { windows: { nsis: { "install-icon": "../mods/x" } } }],
+      ["windows.nsis.header-image", { windows: { nsis: { "header-image": "../mods/x" } } }],
+      ["windows.nsis.sidebar-image", { windows: { nsis: { "sidebar-image": "../mods/x" } } }],
+      ["windows.wix.fragment-paths", { windows: { wix: { "fragment-paths": ["../mods/x"] } } }],
+      ["windows.wix.banner-path", { windows: { wix: { "banner-path": "../mods/x" } } }],
+      ["windows.wix.dialog-image-path", { windows: { wix: { "dialog-image-path": "../mods/x" } } }],
+      ["linux.deb.desktop-template", { linux: { deb: { "desktop-template": "../mods/x" } } }],
+      ["linux.deb.pre-install-script", { linux: { deb: { "pre-install-script": "../mods/x" } } }],
+      ["linux.rpm.post-install-script", { linux: { rpm: { "post-install-script": "../mods/x" } } }],
+      ["linux.rpm.pre-remove-script", { linux: { rpm: { "pre-remove-script": "../mods/x" } } }],
+      ["linux.rpm.post-remove-script", { linux: { rpm: { "post-remove-script": "../mods/x" } } }],
+      ["macos.info-plist", { macos: { "info-plist": "../mods/x" } }],
+      [
+        "windows.webview-install-mode.path",
+        { windows: { "webview-install-mode": { path: "../mods/x" } } },
+      ],
+    ])("refuses a mod source under the kebab-case spelling bundle.%s", (key, bundle) => {
+      expectRefused(withBundle(bundle), `bundle.${key} source`);
+    });
+
+    // Keys that Tauri 2.10 declares as paths and that were missing from the list.
+    it.each([
+      ["macOS.infoPlist", { macOS: { infoPlist: "../mods/x" } }],
+      ["windows.nsis.uninstallerIcon", { windows: { nsis: { uninstallerIcon: "../mods/x" } } }],
+      [
+        "windows.nsis.uninstaller-header-image",
+        { windows: { nsis: { "uninstaller-header-image": "../mods/x" } } },
+      ],
+      [
+        "windows.nsis.customLanguageFiles",
+        { windows: { nsis: { customLanguageFiles: { en: "../mods/x" } } } },
+      ],
+      [
+        "windows.wix.language.en-US.localePath",
+        { windows: { wix: { language: { "en-US": { localePath: "../mods/x" } } } } },
+      ],
+      ["iOS.template", { iOS: { template: "../mods/x" } }],
+      ["ios.info-plist", { ios: { "info-plist": "../mods/x" } }],
+    ])("refuses a mod source under bundle.%s", (key, bundle) => {
+      expectRefused(withBundle(bundle), `bundle.${key} source`);
+    });
+
     it("refuses a glob, a whole-repository folder and an absolute path there too", () => {
       expectRefused(
         withBundle({ linux: { deb: { files: { "/usr/share/m": "../mods/**" } } } }),

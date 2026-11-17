@@ -911,50 +911,60 @@ export function checkSignatureFile(bytes, manifest) {
 }
 
 /**
- * The start tags of HTML text, tokenized the way a browser does it, which a `<[^>]*>` pattern is
- * not: a quoted attribute value may hold ">", an attribute may follow a closing quote or a "/"
- * with no space, and every name counts. `closed` is false for a tag the text ends inside.
+ * The attributes of one start tag whose name ends at `from`, and where the tag ends: a quoted
+ * attribute value may hold ">", an attribute may follow a closing quote or a "/" with no space.
+ * `closed` is false for a tag the text ends inside.
+ */
+function readStartTag(html, from) {
+  const attrs = [];
+  const n = html.length;
+  let i = from;
+  let closed = false;
+  while (i < n) {
+    while (i < n && /[\s/]/.test(html[i])) i++;
+    if (i >= n) break;
+    if (html[i] === ">") {
+      closed = true;
+      i++;
+      break;
+    }
+    const nameAt = i++; // a leading "=" belongs to the name, as in HTML
+    while (i < n && !/[\s/>=]/.test(html[i])) i++;
+    const name = html.slice(nameAt, i).toLowerCase();
+    let value = "";
+    let j = i;
+    while (j < n && /\s/.test(html[j])) j++;
+    if (html[j] === "=") {
+      j++;
+      while (j < n && /\s/.test(html[j])) j++;
+      if (html[j] === '"' || html[j] === "'") {
+        const end = html.indexOf(html[j], j + 1);
+        value = html.slice(j + 1, end < 0 ? n : end);
+        i = end < 0 ? n : end + 1;
+      } else {
+        const valueFrom = j;
+        while (j < n && !/[\s>]/.test(html[j])) j++;
+        value = html.slice(valueFrom, j);
+        i = j;
+      }
+    }
+    attrs.push({ name, value });
+  }
+  return { attrs, end: i, closed };
+}
+
+/**
+ * The start tags of HTML text, tokenized by `readStartTag` rather than a `<[^>]*>` pattern, and
+ * with every name counted. It models this one corner of a browser's tokenizer (attributes, quotes,
+ * slashes), not the whole parser: see `checkBuiltFile`.
  */
 function startTags(html) {
   const tags = [];
-  const n = html.length;
   const open = /<([a-zA-Z][^\s/>]*)/g;
   for (let m = open.exec(html); m !== null; m = open.exec(html)) {
-    const attrs = [];
-    let i = open.lastIndex;
-    let closed = false;
-    while (i < n) {
-      while (i < n && /[\s/]/.test(html[i])) i++;
-      if (i >= n) break;
-      if (html[i] === ">") {
-        closed = true;
-        i++;
-        break;
-      }
-      const nameAt = i++; // a leading "=" belongs to the name, as in HTML
-      while (i < n && !/[\s/>=]/.test(html[i])) i++;
-      const name = html.slice(nameAt, i).toLowerCase();
-      let value = "";
-      let j = i;
-      while (j < n && /\s/.test(html[j])) j++;
-      if (html[j] === "=") {
-        j++;
-        while (j < n && /\s/.test(html[j])) j++;
-        if (html[j] === '"' || html[j] === "'") {
-          const end = html.indexOf(html[j], j + 1);
-          value = html.slice(j + 1, end < 0 ? n : end);
-          i = end < 0 ? n : end + 1;
-        } else {
-          const from = j;
-          while (j < n && !/[\s>]/.test(html[j])) j++;
-          value = html.slice(from, j);
-          i = j;
-        }
-      }
-      attrs.push({ name, value });
-    }
-    tags.push({ name: m[1].toLowerCase(), attrs, end: i, closed });
-    open.lastIndex = i;
+    const { attrs, end, closed } = readStartTag(html, open.lastIndex);
+    tags.push({ name: m[1].toLowerCase(), attrs, end, closed });
+    open.lastIndex = end;
   }
   return tags;
 }
@@ -984,11 +994,23 @@ function urlText(value) {
  * `--!>` closes one: a plain `-->` search would swallow the markup after them and never look at it.
  * Inside a raw-text or RCDATA element (title, textarea, style, script, ...) `<!--` is plain text and
  * the element ends at its own end tag, so a comment opener there hides nothing: that content is kept
- * whole, and the tags after it are still read.
+ * whole, and the tags after it are still read. noscript is in the list because the frame runs
+ * scripts, and with scripting on a browser reads noscript's content as raw text. A start tag is read
+ * whole (`readStartTag`), because `<!--` inside a quoted attribute value is text too.
  */
+const RAW_TEXT = new Set([
+  "title",
+  "textarea",
+  "style",
+  "script",
+  "xmp",
+  "iframe",
+  "noembed",
+  "noframes",
+  "noscript",
+]);
 function stripComments(text) {
-  const re =
-    /<!--(?:-?>|[\s\S]*?--!?>)|<(title|textarea|style|script|xmp|iframe|noembed|noframes)(?=[\s/>])/gi;
+  const re = /<!--(?:-?>|[\s\S]*?--!?>)|<([a-zA-Z][^\s/>]*)/g;
   let out = "";
   let from = 0;
   for (let m = re.exec(text); m !== null; m = re.exec(text)) {
@@ -997,8 +1019,12 @@ function stripComments(text) {
       from = re.lastIndex;
       continue;
     }
-    const close = new RegExp(`</${m[1]}[\\s/>]`, "i").exec(text.slice(re.lastIndex));
-    const end = close ? re.lastIndex + close.index : text.length;
+    const name = m[1].toLowerCase();
+    let end = readStartTag(text, re.lastIndex).end;
+    if (RAW_TEXT.has(name)) {
+      const close = new RegExp(`</${name}[\\s/>]`, "i").exec(text.slice(end));
+      end = close ? end + close.index : text.length;
+    }
     out += text.slice(from, end);
     from = end;
     re.lastIndex = end;
@@ -1052,8 +1078,9 @@ function checkBuiltHtml(text, where) {
  * Rules for built output, which package.rs does not have (a package is data to it) but the frame
  * does. They catch a build that went wrong or an author's slip, and the frame's CSP is what holds
  * against a hostile page: this is a slip-catcher, not the security control. HTML is tokenized (see
- * `startTags`) after its comments are dropped (`stripComments`, which leaves raw-text elements
- * alone); it does not model the rest of a browser's parser. CSS and JS are text rules.
+ * `startTags`) after its comments are dropped (`stripComments`, which leaves raw-text elements and
+ * quoted attribute values alone); it does not model the rest of a browser's parser. CSS and JS are
+ * text rules.
  */
 export function checkBuiltFile(path, bytes) {
   const where = (why) => refuse(`${quote(path)} ${why}`);

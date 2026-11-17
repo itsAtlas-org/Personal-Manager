@@ -440,9 +440,11 @@ spec §1.1, §1.3). First-party mod source lives under `mods/` in this repo and 
 `.pmmod` files: nothing under `mods/` is in any `bundle.resources` (or any other bundle key the gate
 reads that copies repo files into the installer: `linux.{deb,rpm,appimage}.files`, `macOS.files`,
 `externalBin`, and the path-valued keys `icon`, `licenseFile`, `macOS.frameworks`, the NSIS and WiX
-templates, hooks and fragments, and the deb/rpm scripts, all listed in `PATH_KEYS`), and nothing in
-`src/` imports `mods/`. A new Tauri bundle key that copies files is not seen until it is added to
-that list: adding a key to a tauri config is a review item for it.
+templates, hooks and fragments, and the deb/rpm scripts, all listed in `PATH_KEYS`, each read under
+every spelling Tauri accepts: camelCase, kebab-case aliases such as `license-file`, and `macos`), and
+nothing in `src/` imports `mods/`. The list is Tauri 2.10's path-valued bundle keys as of writing: a
+new Tauri bundle key that copies files is not seen until it is added to it, so adding a key to a tauri
+config is a review item for it.
 
 **Why.** An installed mod is one the ledger recorded after the verifier accepted it, under the
 switches, the blacklist and the user's own uninstall. A mod inside the installer would skip every one

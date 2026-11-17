@@ -1877,7 +1877,8 @@ describe("built-output rules", () => {
   it("does not let a comment opener inside a raw-text element hide the markup after it", () => {
     // In <title> and <textarea> (RCDATA) a `<!--` is plain text, so the element ends at its own end
     // tag and the script that follows runs.
-    for (const tag of ["title", "textarea", "TITLE", "title\n"]) {
+    // noscript is raw text too, because the frame runs scripts.
+    for (const tag of ["title", "textarea", "TITLE", "title\n", "noscript", "NoScript"]) {
       refused(
         () => html(`<${tag}><!--</${tag.trim()}><script>alert(1)</script>-->`),
         "inline script",
@@ -1888,6 +1889,20 @@ describe("built-output rules", () => {
     expect(() => html(page("<title>a</title><!-- <script>x</script> -->"))).not.toThrow();
     // An unclosed raw element keeps the rest of the file in view.
     refused(() => html("<title><!--<script>alert(1)</script>"), "inline script");
+  });
+
+  it("does not read a comment opener inside a quoted attribute value as a comment", () => {
+    // `<!--` in an attribute value is plain text to a browser, so the script after the tag runs.
+    for (const q of ['"', "'"]) {
+      refused(
+        () => html(`<a title=${q}<!--${q}><script>alert(1)</script><a title=${q}-->${q}>`),
+        "inline script",
+      );
+    }
+    // A real comment after such a tag, and an attribute value that only looks like one, still work.
+    expect(() => html(page('<a title="<!--">x</a><!-- <script>x</script> -->'))).not.toThrow();
+    // An unterminated value keeps the rest of the file in view.
+    refused(() => html('<a title="<!--><script>alert(1)</script>'), "never ends");
   });
 
   it("refuses a tag the text ends inside", () => {

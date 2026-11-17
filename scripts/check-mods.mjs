@@ -381,24 +381,32 @@ function resourceSources(resources) {
 }
 
 // Bundle keys whose value is a path (or a list of paths) to a repo file that goes into the installer.
-// Tauri's serde accepts the macOS key as `macOS` and as the alias `macos`; both spellings are listed
-// so a lowercase one cannot slip past.
-const MACOS_PATH_KEYS = ["frameworks", "entitlements", "license", ["dmg", "background"]];
+// Each is written once, in Tauri's camelCase spelling; `keyed` below reads every spelling Tauri's serde
+// accepts for it (kebab-case aliases such as `license-file`, and `macos` for `macOS`).
 const PATH_KEYS = [
   ["icon"],
   ["licenseFile"],
   ["license"],
-  ...["macOS", "macos"].flatMap((m) =>
-    MACOS_PATH_KEYS.map((k) => [m, ...(Array.isArray(k) ? k : [k])]),
-  ),
-  ...["template", "installerHooks", "license", "headerImage", "sidebarImage", "installerIcon"].map(
-    (k) => ["windows", "nsis", k],
-  ),
+  ...["frameworks", "entitlements", "license", "infoPlist"].map((k) => ["macOS", k]),
+  ["macOS", "dmg", "background"],
+  ...["template", "frameworks", "infoPlist"].map((k) => ["iOS", k]),
+  ...[
+    "template",
+    "installerHooks",
+    "license",
+    "headerImage",
+    "sidebarImage",
+    "installerIcon",
+    "uninstallerIcon",
+    "uninstallerHeaderImage",
+  ].map((k) => ["windows", "nsis", k]),
   ...["template", "fragmentPaths", "bannerPath", "dialogImagePath", "license"].map((k) => [
     "windows",
     "wix",
     k,
   ]),
+  // `language` is a map from a language name to { localePath }; `*` is any key.
+  ["windows", "wix", "language", "*", "localePath"],
   ["windows", "webviewInstallMode", "path"],
   ...["deb", "rpm"].flatMap((kind) =>
     [
@@ -411,6 +419,39 @@ const PATH_KEYS = [
     ].map((k) => ["linux", kind, k]),
   ),
 ];
+const FILE_MAPS = [
+  ["linux", "deb", "files"],
+  ["linux", "rpm", "files"],
+  ["linux", "appimage", "files"],
+  ["macOS", "files"],
+  ["windows", "nsis", "customLanguageFiles"],
+];
+
+// One spelling-blind form of a config key: Tauri's serde accepts kebab-case aliases (`license-file`,
+// `external-bin`, `installer-hooks`...) next to camelCase, and `macos` next to `macOS`, and one alias
+// is not the camelCase of its field (`install-icon` for `installerIcon`). Dropping hyphens and case
+// folds all of them; reading a spelling Tauri would refuse is harmless, missing one it takes is not.
+const KEY_ALIASES = { installicon: "installericon" };
+const foldKey = (k) => {
+  const f = k.replace(/[-_]/g, "").toLowerCase();
+  return KEY_ALIASES[f] ?? f;
+};
+
+/**
+ * Every value at `keyPath` under `root`, with the path as WRITTEN in the config (so a message points at
+ * the line the author typed). `*` matches any key.
+ */
+function keyed(root, keyPath, written = []) {
+  if (keyPath.length === 0) return [[written, root]];
+  if (!isObject(root)) return [];
+  const [head, ...rest] = keyPath;
+  const want = foldKey(head);
+  const out = [];
+  for (const [k, v] of Object.entries(root)) {
+    if (head === "*" || foldKey(k) === want) out.push(...keyed(v, rest, [...written, k]));
+  }
+  return out;
+}
 
 /**
  * Every repo path a bundle config copies into the installer, with the key that named it. Not only
@@ -418,8 +459,9 @@ const PATH_KEYS = [
  * map from destination to SOURCE path) and `externalBin` pull in arbitrary files, so a gate that read
  * `resources` alone would stay green while a mod shipped through one of the others. The plain path
  * keys (`PATH_KEYS`: icons, licence files, frameworks, templates, hooks, scripts, WiX fragments) copy
- * a repo file into the installer too, so they are read the same way. The list is the path-valued
- * keys of Tauri 2's bundle config as known when this was written; a new Tauri key that copies files
+ * a repo file into the installer too, so they are read the same way, under every spelling Tauri
+ * accepts (`keyed`). The list is the path-valued keys of Tauri 2.10's bundle config as known when this
+ * was written; a new Tauri key that copies files
  * is not seen until it is added there.
  */
 export function bundleSources(bundle) {
@@ -429,29 +471,26 @@ export function bundleSources(bundle) {
     source,
   }));
   for (const keyPath of PATH_KEYS) {
-    let value = bundle;
-    for (const part of keyPath) value = isObject(value) ? value[part] : undefined;
-    const sources = Array.isArray(value) ? value : [value];
-    for (const source of sources) {
-      if (typeof source === "string") out.push({ key: `bundle.${keyPath.join(".")}`, source });
+    for (const [key, value] of keyed(bundle, keyPath)) {
+      for (const source of Array.isArray(value) ? value : [value]) {
+        if (typeof source === "string") out.push({ key: `bundle.${key.join(".")}`, source });
+      }
     }
   }
-  const fileMap = (key, files) => {
-    if (!isObject(files)) return;
-    for (const source of Object.values(files)) {
-      if (typeof source === "string") out.push({ key, source });
+  // Maps whose VALUES are source paths (the keys are destinations or languages).
+  for (const keyPath of FILE_MAPS) {
+    for (const [key, files] of keyed(bundle, keyPath)) {
+      if (!isObject(files)) continue;
+      for (const source of Object.values(files)) {
+        if (typeof source === "string") out.push({ key: `bundle.${key.join(".")}`, source });
+      }
     }
-  };
-  for (const kind of ["deb", "rpm", "appimage"]) {
-    fileMap(`bundle.linux.${kind}.files`, bundle.linux?.[kind]?.files);
   }
-  // Tauri's serde accepts the key as `macOS` and as the alias `macos`; read both so a lowercase
-  // spelling cannot slip past.
-  fileMap("bundle.macOS.files", bundle.macOS?.files);
-  fileMap("bundle.macos.files", bundle.macos?.files);
-  if (Array.isArray(bundle.externalBin)) {
-    for (const source of bundle.externalBin) {
-      if (typeof source === "string") out.push({ key: "bundle.externalBin", source });
+  // A list only: Tauri refuses a bare string there, so a string is not a source.
+  for (const [key, list] of keyed(bundle, ["externalBin"])) {
+    if (!Array.isArray(list)) continue;
+    for (const source of list) {
+      if (typeof source === "string") out.push({ key: `bundle.${key.join(".")}`, source });
     }
   }
   return out;
