@@ -25,6 +25,8 @@
 //!   screened and pinned (calendar feeds and a mod's `net.fetch` share it), and the hop-fetcher
 //!   seam that lets its rules be tested with no network.
 //! - [`store`]: the closed value sets of the v60 mod tables (`db/migrations.rs`).
+//! - [`secrets`]: where a mod's typed keys live (`mod_secrets`, encrypted store), bound to the
+//!   manifest slot's host and header, never handed to a frame (§1.7).
 //! - [`ledger`]: install, update, repair and uninstall, and the writer's startup load and sweep
 //!   (§1.3); [`policy`] its pure decisions, [`disk`] the only code that writes under
 //!   `data_dir/mods` (§1.3, §6).
@@ -75,6 +77,7 @@ pub mod policy;
 pub mod refresh;
 pub mod runtime;
 pub mod safety;
+pub mod secrets;
 pub mod store;
 pub mod tab;
 pub mod updater;

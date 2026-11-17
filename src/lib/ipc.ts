@@ -15,6 +15,7 @@ import type {
   InstallResult,
   ModIcon,
   ModInfo,
+  ModSecretSlot,
   ModNotice,
   ModStandingAfter,
   ModUninstalled,
@@ -2387,6 +2388,21 @@ export const consentMod = (modId: string, decisions: Record<string, boolean>) =>
  *  `grant-refused` where unsigned mods may not hold both reads and the internet. */
 export const modPermissionDecide = (modId: string, permission: string, granted: boolean) =>
   invoke<void>("mod_permission_decide", { modId, permission, granted });
+
+/** Save the key the user typed for one of a mod's declared slots, in PM's encrypted store, bound to
+ *  the slot's host and header. An empty value deletes it. Answers the mod's slots (a bool each,
+ *  never the key) and rejects with fixed words that never quote what was typed. The component that
+ *  calls this clears its field the moment it settles. */
+export const modSecretSave = (modId: string, name: string, value: string) =>
+  invoke<ModSecretSlot[]>("mod_secret_save", { modId, name, value });
+
+/** Delete the key of one slot. */
+export const modSecretClear = (modId: string, name: string) =>
+  invoke<void>("mod_secret_clear", { modId, name });
+
+/** The mod's slots and whether each has a key now. */
+export const modSecretStatus = (modId: string) =>
+  invoke<ModSecretSlot[]>("mod_secret_status", { modId });
 
 /** Whether this device has accepted the Mods disclaimer in this vault (per device AND per vault). */
 export const modsDisclaimerState = () => invoke<ModsDisclaimerState>("mods_disclaimer_state");

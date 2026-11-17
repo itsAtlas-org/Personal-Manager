@@ -53,6 +53,7 @@ use crate::mods::keys::TrustedKeys;
 use crate::mods::ledger::{self, Ledger, Mint, Source, Standing};
 use crate::mods::refresh::{self, RefreshError};
 use crate::mods::safety::{self, Mode, SafetyCheck};
+use crate::mods::secrets;
 use crate::mods::store;
 use crate::mods::MAIN_LABEL;
 use crate::AppState;
@@ -648,6 +649,64 @@ pub async fn mod_permission_decide(
         announce(app, &told);
         refresh::emit_changed(app, refresh::CHANGED_DECIDED);
         Ok(())
+    })
+    .await
+}
+
+// ---- Keys a mod's slots hold (Mods spec §1.7) --------------------------------------------------------
+//
+// The three commands below are the only way a key gets into `mod_secrets`, and none of them returns
+// one: the value goes in, the page gets back a bool per slot. They are the PM-drawn field's
+// backend (the Mods row's Details and the Developer tab's Test keys), so the typed text crosses the
+// webview once, into Rust, and is never echoed, logged or kept (`mods::secrets`). A frame cannot
+// call them: `mod_call` has no row that does.
+
+/// Save the key typed for slot `name` of `mod_id` (an empty value deletes it): stored encrypted,
+/// bound to the manifest slot's host and header. Answers the mod's slots, a bool each.
+#[tauri::command]
+pub async fn mod_secret_save(
+    webview: Webview,
+    mod_id: String,
+    name: String,
+    value: String,
+) -> Result<Vec<secrets::SlotStatus>> {
+    let id = parse_id(&mod_id)?;
+    let slots = blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let mut conn = state.conn().map_err(|_| ModsError::no_store())?;
+        secrets::save(&mut conn, id.as_str(), &name, &value)?;
+        Ok(secrets::status(&conn, id.as_str())?)
+    })
+    .await?;
+    refresh::emit_changed(webview.app_handle(), refresh::CHANGED_SECRET);
+    Ok(slots)
+}
+
+/// Delete the key of slot `name`.
+#[tauri::command]
+pub async fn mod_secret_clear(webview: Webview, mod_id: String, name: String) -> Result<()> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        Ok(secrets::clear(&conn, id.as_str(), &name)?)
+    })
+    .await?;
+    refresh::emit_changed(webview.app_handle(), refresh::CHANGED_SECRET);
+    Ok(())
+}
+
+/// The mod's slots and whether each has a key now (never the key).
+#[tauri::command]
+pub async fn mod_secret_status(
+    webview: Webview,
+    mod_id: String,
+) -> Result<Vec<secrets::SlotStatus>> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        Ok(secrets::status(&conn, id.as_str())?)
     })
     .await
 }

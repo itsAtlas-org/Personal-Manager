@@ -10,7 +10,7 @@
 //! access as the dispatcher would answer it now (`grants::decide`, D3 and the sealed engine
 //! included), so the tab shows what is true and not what the policy table alone would say.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -23,6 +23,7 @@ use crate::mods::index::Index;
 use crate::mods::ledger::{self, Resumed, Waiting, WaitingKind};
 use crate::mods::package::ApiRange;
 use crate::mods::policy;
+use crate::mods::secrets::{self, SlotStatus};
 use crate::mods::store;
 
 /// The largest icon PM will show (also `icon::ICON_CAP`): a small raster, not a photo.
@@ -53,6 +54,9 @@ pub struct ModDto {
     pub state: Standing,
     pub permissions: Vec<PermissionDto>,
     pub internet_hosts: Vec<String>,
+    /// The key slots the manifest declares, each with its host, its header and whether a key is
+    /// stored for it. Never the key.
+    pub secrets: Vec<SlotStatus>,
     /// The sidebar tab's label, when the mod has one.
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
@@ -197,6 +201,8 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     } else {
         Vec::new()
     };
+    // Which slots have a key: names, hosts and headers only, never the value column.
+    let bound = secrets::bound_pairs(conn)?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -207,6 +213,7 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                 waiting.get(&row.id),
                 resumed.iter().rev().find(|r| r.id == row.id),
                 &held,
+                &bound,
                 ctx,
             )
         })
@@ -375,6 +382,7 @@ fn dto(
     waiting: Option<&Waiting>,
     resumed: Option<&Resumed>,
     held: &[(PolicyTier, Class)],
+    bound: &BTreeSet<(String, String, String, String)>,
     ctx: &Ctx<'_>,
 ) -> ModDto {
     let m = read_manifest(&row.manifest);
@@ -428,6 +436,7 @@ fn dto(
         state,
         permissions,
         internet_hosts: m.internet_hosts.clone(),
+        secrets: secrets::statuses(&row.id, &row.manifest, bound),
         nav_tab: m.nav_tab.clone(),
         calendar_overlay: m.calendar_overlay.clone(),
         has_icon: icon_path(m.icon.as_deref(), &row.files).is_some(),
@@ -729,6 +738,49 @@ mod tests {
         let map = &listed[0];
         assert!(map.permissions.is_empty() && !map.has_icon && map.nav_tab.is_none());
         assert_eq!(map.state.fix, words::Fix::Uninstall);
+    }
+
+    /// The row's key slots, each with whether a key is stored AND still bound to the slot: a
+    /// moved or planted row reads as not set, and nothing in the DTO can carry the value.
+    #[test]
+    fn a_listed_mod_shows_its_key_slots_set_or_not_and_never_a_value() {
+        let (_dir, c) = test_store();
+        let mut m = manifest(&["internet"]);
+        m["internetHosts"] = json!(["a.example.com"]);
+        m["secrets"] = json!([
+            {"name": "set", "host": "a.example.com", "header": "X-A"},
+            {"name": "unset", "host": "a.example.com", "header": "X-B"},
+            {"name": "moved", "host": "a.example.com", "header": "X-C"},
+        ]);
+        insert(
+            &c,
+            &Row {
+                manifest: m,
+                ..Row::default()
+            },
+        );
+        c.execute(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'set', 'a.example.com', 'X-A', 'sentinel-value-1'), \
+             ('atlas.map', 'moved', 'old.example.com', 'X-C', 'sentinel-value-2')",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        let got: Vec<(&str, bool)> = listed[0]
+            .secrets
+            .iter()
+            .map(|s| (s.name.as_str(), s.set))
+            .collect();
+        assert_eq!(got, [("set", true), ("unset", false), ("moved", false)]);
+        assert_eq!(listed[0].secrets[0].host, "a.example.com");
+        assert_eq!(listed[0].secrets[0].header, "X-A");
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(!wire.contains("sentinel-value"), "{wire}");
+        // A mod that declares none lists none.
+        let (_d2, c2) = test_store();
+        insert(&c2, &Row::default());
+        assert!(list(&c2, &CTX).unwrap()[0].secrets.is_empty());
     }
 
     #[test]

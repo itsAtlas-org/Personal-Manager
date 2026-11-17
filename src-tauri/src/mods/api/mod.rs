@@ -48,7 +48,7 @@ pub mod events;
 pub mod grants;
 mod handlers;
 pub mod limits;
-mod net;
+pub(crate) mod net;
 pub mod permissions;
 mod storage;
 pub mod table;

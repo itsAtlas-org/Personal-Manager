@@ -175,6 +175,16 @@ export interface ModResumed {
   text: string;
 }
 
+/** One key slot a mod's manifest declares: the one host the key goes to and the one header it goes
+ *  in, and whether a key is stored for it now (bound to this host and header). The key itself is
+ *  never sent to the page; the user types it into PM's own field (`modSecretSave`). */
+export interface ModSecretSlot {
+  name: string;
+  host: string;
+  header: string;
+  set: boolean;
+}
+
 export interface ModInfo {
   id: string;
   name: string;
@@ -192,6 +202,8 @@ export interface ModInfo {
   state: ModStanding;
   permissions: ModPermission[];
   internetHosts: string[];
+  /** The key slots the manifest declares (empty for most mods). */
+  secrets: ModSecretSlot[];
   /** The sidebar tab's label, when the mod has one. */
   navTab: string | null;
   calendarOverlay: string | null;
@@ -553,7 +565,8 @@ export type ModsChangedCause =
   | "loaded"
   | "decided"
   | "dev-mode"
-  | "test-mod";
+  | "test-mod"
+  | "secret";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

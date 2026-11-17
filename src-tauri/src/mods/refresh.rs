@@ -500,6 +500,9 @@ pub const CHANGED_DEV_MODE: &str = "dev-mode";
 /// unloaded. A frame of it that was open has ended (`replaced` or `uninstalled`): the page mounts it
 /// again if its tab is showing.
 pub const CHANGED_TEST_MOD: &str = "test-mod";
+/// A mod's key was saved or removed (a bool on its row, never the key): the rows' `secrets` flags
+/// are read again.
+pub const CHANGED_SECRET: &str = "secret";
 
 /// What `mods://changed` carries.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -916,6 +919,7 @@ mod tests {
             CHANGED_DECIDED,
             CHANGED_DEV_MODE,
             CHANGED_TEST_MOD,
+            CHANGED_SECRET,
         ];
         let source = include_str!("refresh.rs");
         let declared = source

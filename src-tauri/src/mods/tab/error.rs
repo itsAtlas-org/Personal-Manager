@@ -16,6 +16,7 @@ use crate::mods::fetch::FetchError;
 use crate::mods::ledger::{ChangeRefusal, LedgerError};
 use crate::mods::package::{PackageError, Refusal as PackageRefusal};
 use crate::mods::policy::Refusal;
+use crate::mods::secrets;
 
 /// The closed set of reasons a command refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -193,6 +194,22 @@ impl From<LedgerError> for ModsError {
     }
 }
 
+/// A refused key command, in fixed sentences. The typed text is never in one, and neither is a
+/// database error's (`internal` logs that, and a store error does not carry parameter values).
+impl From<secrets::Refused> for ModsError {
+    fn from(r: secrets::Refused) -> Self {
+        match r {
+            secrets::Refused::NotInstalled => Self::not_installed(),
+            secrets::Refused::NoSuchSlot => Self::bad_request("That mod has no key by that name."),
+            secrets::Refused::Unusable => Self::bad_request(
+                "PM can't send that key. It may be too long, or hold a line break or a character \
+                 a request can't carry.",
+            ),
+            secrets::Refused::Db(e) => Self::internal(e),
+        }
+    }
+}
+
 impl From<FetchError> for ModsError {
     fn from(e: FetchError) -> Self {
         match e {
@@ -281,6 +298,22 @@ pub(crate) mod tests {
         let e: ModsError = GrantError::Db("table mod_grants has no column".into()).into();
         assert_eq!(e.code, Code::Internal);
         assert!(!e.message.contains("column"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_refused_key_command_is_a_fixed_sentence_that_quotes_nothing() {
+        assert_eq!(code_of(secrets::Refused::NotInstalled), Code::NotInstalled);
+        for r in [secrets::Refused::NoSuchSlot, secrets::Refused::Unusable] {
+            assert_eq!(code_of(r), Code::BadRequest);
+        }
+        // A store error is told in the one fixed sentence, whatever it said.
+        let e: ModsError = secrets::Refused::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(19),
+            Some("UNIQUE constraint failed: mod_secrets.value = typed-text".into()),
+        ))
+        .into();
+        assert_eq!(e.code, Code::Internal);
+        assert!(!e.message.contains("typed-text"), "{}", e.message);
     }
 
     #[test]

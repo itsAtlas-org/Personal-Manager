@@ -106,6 +106,7 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
     state: RUNNING,
     permissions: [],
     internetHosts: [],
+    secrets: [],
     navTab: "Acme Tool",
     calendarOverlay: null,
     hasIcon: false,

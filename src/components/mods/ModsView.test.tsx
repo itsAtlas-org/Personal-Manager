@@ -164,6 +164,7 @@ describe("refreshing on mods://changed", () => {
     "decided",
     "dev-mode",
     "test-mod",
+    "secret",
   ];
 
   it.each(CAUSES)("reads the rows and the strips again after %s", async (cause) => {

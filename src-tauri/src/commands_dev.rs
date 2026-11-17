@@ -880,6 +880,20 @@ mod tests {
         assert!(table_page(&c, "secrets", 50, 0).is_err());
     }
 
+    /// A mod's typed keys (`mod_secrets`, Mods spec §1.7) are never browsable, even redacted: the
+    /// table is not on the allow-list, so showing it would take a deliberate edit that fails here.
+    #[test]
+    fn the_inspector_never_reads_a_mods_keys() {
+        let c = fixture();
+        c.execute_batch(
+            "CREATE TABLE mod_secrets (mod_id TEXT, name TEXT, host TEXT, header TEXT, value TEXT);
+             INSERT INTO mod_secrets VALUES ('acme.tool', 'k', 'h.example.com', 'X-K', 'sentinel');",
+        )
+        .unwrap();
+        assert!(table_page(&c, "mod_secrets", 50, 0).is_err());
+        assert!(TABLES.iter().all(|t| t.name != "mod_secrets"));
+    }
+
     #[test]
     fn an_allowed_table_returns_only_its_projected_columns() {
         let c = fixture();
