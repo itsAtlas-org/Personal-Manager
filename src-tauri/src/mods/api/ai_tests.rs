@@ -915,6 +915,33 @@ async fn a_settle_with_the_store_shut_keeps_its_reservation() {
     *host.store().db.lock().unwrap() = Some(held);
 }
 
+/// A guard whose booking was already settled (the slot is empty: the normal end of every call)
+/// never touches the store, so it cannot stall behind a job that holds the connection. Without the
+/// peek the drop would block on the DB mutex until the holder let go.
+#[test]
+fn a_settled_guard_drops_without_touching_the_store() {
+    let (host, _s) = setup();
+    let slot: Arc<std::sync::Mutex<Option<money::Reservation>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let held = host.store().conn().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = {
+        let host = host.clone();
+        let slot = Arc::clone(&slot);
+        std::thread::spawn(move || {
+            ai::settle_failed_in(&host, &slot, true);
+            let _ = tx.send(());
+        })
+    };
+    let done = rx.recv_timeout(Duration::from_secs(5));
+    drop(held);
+    worker.join().unwrap();
+    assert!(
+        done.is_ok(),
+        "an empty slot must not wait for the DB connection"
+    );
+}
+
 // --- the deadline on what runs before the booking ----------------------------------------------
 
 /// A local endpoint's address lookup that never returns is bounded (PREP_TIMEOUT): the route

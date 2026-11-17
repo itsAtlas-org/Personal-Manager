@@ -293,6 +293,13 @@ pub(super) fn settle_failed_in<H: Host>(
     slot: &Mutex<Option<money::Reservation>>,
     reached_wire: bool,
 ) {
+    // An empty slot is the normal end of every call (it was settled or never booked): that must
+    // not touch the store at all, or each finished call would block an async worker on the DB
+    // mutex behind whatever job holds it. Only this guard and the blocking steps it was shared
+    // with ever fill or empty the slot, so a peek cannot miss a booking that matters.
+    if lock(slot).is_none() {
+        return;
+    }
     let store = host.store();
     let Ok(mut conn) = store.conn() else {
         return;
