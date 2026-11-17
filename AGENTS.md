@@ -150,7 +150,8 @@ release remain the open post-v1 work.
     (the Local AI switch, enforced in Rust), `tray.rs` / `popout.rs` (the briefing panel and
     the pop-out Calendar windows), `net_screen.rs` (the public-internet screen: an untrusted
     URL's host is resolved, every address screened, and the survivors pinned onto the client;
-    calendar feeds use it, and a mod's `net.fetch` will).
+    calendar feeds use it, and so does a mod's `net.fetch`, through `mods/netfetch.rs`: only hosts the
+    mod declares, no proxy).
   - **Mods** — `mods/` (the Mods spec). `engine.rs` seals the webview engine: the sinkhole proxy,
     the navigation guard, the init scripts and the per-engine switches, with no `crate::` path so
     the sealed-frame regression app can include it. `mod.rs` builds every window through
@@ -170,7 +171,10 @@ release remain the open post-v1 work.
     `documents.importance` calls `events::note_listing_change` around its UPDATE and a writer of a
     new document calls `events::note_landed` after its commit (a test pins the list of writers);
     a frame is told what happened to it (`paused`, `uninstalled`, `replaced`) by which
-    `ModRuntime` call ends its session; and
+    `ModRuntime` call ends its session;
+    `secrets.rs` is where a mod's user-typed keys live (`mod_secrets` in the encrypted database, not
+    the keychain; bound to one host and header, never handed to the frame, stripped from backups and
+    exports); and
     `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
     `embeddings.documentVectors` share. `keys.rs` embeds the two
     Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
@@ -274,7 +278,10 @@ otherwise). Implemented in `src/lib/format.ts`.
 
 1. **Never commit personal data or secrets.** Code lives in Git; the user's data
    (the encrypted `pm.sqlite` and the Markdown `vault/`) lives in a git-ignored
-   data directory outside the repo. Secrets live only in the OS keychain.
+   data directory outside the repo. Secrets live only in the OS keychain, with one stated
+   exception: a mod's saved keys (`mod_secrets`) live in the encrypted database, readable by anyone
+   who can open the vault (a shared vault's co-users included), and are stripped from backups and
+   exports. Never put any other secret there.
 2. **Encryption stays on.** The store is opened with `PRAGMA key`; don't add code
    paths that open it unencrypted.
 3. **Migrations are additive.** Never write a migration that drops or rewrites
@@ -323,7 +330,8 @@ artifact, or read by any tool/CI step with filesystem access.
   downloaded models) — never data that must stay private. If a file's safety depends on
   staying private, it is in the wrong place.
 - **Secrets live only in their proper stores, never in the tree.** Runtime secrets
-  (API keys, the DB encryption key, OAuth tokens, calendar feed URLs) → the OS keychain;
+  (API keys, the DB encryption key, OAuth tokens, calendar feed URLs) → the OS keychain (a mod's
+  user-typed keys are the one exception, rule 1);
   CI secrets (the updater signing key + its password) → GitHub Actions repo secrets; user
   data → the OS app-data dir outside the repo (rules 1 and 5 above).
 - **Never move a secret into the tree to "make it work"** — not a committed file, a

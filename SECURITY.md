@@ -15,7 +15,7 @@ token and chats in the clear to a public address); a launch-time update check ag
 signed release feed (and the download if you accept an update); a fetch of PM's signed mod safety
 list (two small files from the project's public `PM-Mods` GitHub release, at launch and every six
 hours, sending nothing but a generic `PM-mods/1` user agent, accepted only with the project's
-signature; plus, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); a one-time first-run download
+signature; plus, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); the websites each installed mod declares it will fetch from and you allow (a mod reaches only those exact hostnames, over HTTPS on the standard port, to the public internet only and never to an address on this machine or your network, with no proxy, and a fixed `PM-mod/1` user agent), and, if a mod uses AI, the requests it makes through your own Background AI route (see below); a one-time first-run download
 of PM's on-device models and Python dependencies (your local model runner, if you use one, fetches
 model weights itself — PM does not); and, only if you configure them, a calendar fetch
 (read-only unless you turn on editing for a Google account, after which PM also sends the
@@ -62,7 +62,13 @@ shares it loses it and nothing needs reconnecting. Two limits follow: a secret t
 keeps roaming, even when PM replaces its value, until it is removed and saved again (by
 disconnecting and reconnecting an account, or, for the OpenRouter keys and the database key, only
 through Remove PM data), and on a roaming profile shared with a PC running an older PM, that PC may
-still save roaming copies. Wherever they are
+still save roaming copies. **A mod's saved keys are the one exception to "the OS keychain".** A key you type for a mod (a
+password or API key for a site the mod declares) is kept in PM's encrypted database, not in the
+keychain, because the keychain holds the database key itself and Windows caps how much one item can
+hold. Anyone who can open the vault can read it, which includes another account that shares
+the vault. A key is bound to the one site and header the mod declared when you saved it and is only ever
+added by PM to a request to that site; the mod never sees the value. Backups and exports leave mod keys
+out, so after a restore you type them again. Wherever PM's secrets are
 stored, the secrets themselves never leave the Rust backend. Your **documents live in a plaintext Markdown vault**,
 so their at-rest protection relies on your own OS full-disk encryption (BitLocker /
 FileVault) — a deliberate choice to keep your notes openable by any tool, not a gap
@@ -76,6 +82,13 @@ PM act on your behalf. The areas where a bug would matter most are: the
 holds your API key, the database key, and any OAuth tokens), and the **signed
 release / auto-updater pipeline** (a bad update is the highest-leverage way to
 reach a user's machine). Reports that touch those areas are the most valuable.
+
+**A mod's AI use and its money limit.** A mod that asks for `ai` uses your own Background AI route
+(Settings → AI & Models), every model in that list including a local one, and PM asks for a
+monthly limit in US dollars before it first can cost money. Cloud calls ask for zero data retention
+and a local model stays on your own endpoint. The limit and the spend are kept in PM's database
+with the mod's record, so two edges are accepted: uninstalling and reinstalling a mod starts its month's spend at
+zero again, and restoring an older backup puts the spend back to what it was then.
 
 ## Supported versions
 
