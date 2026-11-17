@@ -663,8 +663,10 @@ fn a_landing_is_announced_as_the_lists_own_dto_and_nothing_more() {
     assert_eq!(documents[0]["tags"], json!(["a"]));
     // Nothing a mod must never see is anywhere in what was sent.
     let text = serde_json::to_string(&f.rec.all()).unwrap();
-    for secret in FORBIDDEN {
-        assert!(!text.contains(secret), "{secret} reached the frame: {text}");
+    // `needle`, not `secret`: CodeQL reads a value NAMED like a secret as sensitive and an assert
+    // message as a log, so the old name raised rust/cleartext-logging on these test-only strings.
+    for needle in FORBIDDEN {
+        assert!(!text.contains(needle), "{needle} reached the frame: {text}");
     }
 }
 
@@ -963,8 +965,10 @@ fn archiving_is_announced_as_a_deletion_and_unarchiving_as_an_addition() {
     assert_eq!(documents[0]["importance"], "high");
     assert_eq!(documents[0].as_object().unwrap().len(), DTO_FIELDS.len());
     let text = serde_json::to_string(&f.rec.all()).unwrap();
-    for secret in FORBIDDEN {
-        assert!(!text.contains(secret), "{secret} reached the frame: {text}");
+    // `needle`, not `secret`: CodeQL reads a value NAMED like a secret as sensitive and an assert
+    // message as a log, so the old name raised rust/cleartext-logging on these test-only strings.
+    for needle in FORBIDDEN {
+        assert!(!text.contains(needle), "{needle} reached the frame: {text}");
     }
     assert!(blind.rec.all().is_empty());
 
