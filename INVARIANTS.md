@@ -707,8 +707,8 @@ Mod secrets are the user's typed credentials and the connected apps' tokens belo
 that issued them; neither may travel. A restored store arrives with the other place's developer-mode
 record, which would otherwise let unsigned installs run where nobody chose them. A joined store is
 not another place's copy but the same store its other users are using: resetting it at a join would
-switch dev mode off for them and disconnect their apps, which is why the join writes only the one
-case where the old vault-wide "on" would otherwise land on the joiner's device.
+switch dev mode off for them and disconnect their apps, which is why the join writes nothing about
+developer mode or the apps (I-32).
 
 **Co-signers.** A change to the mod tables adds the new table to `strip` (the child-table guard
 test fails on a table that references `mods` and isn't listed) or says why it is safe; a new place
