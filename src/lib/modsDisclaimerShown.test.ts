@@ -12,9 +12,11 @@ vi.mock("./ipc", () => ({ vaultStatus: () => vaultStatus() }));
 
 import {
   beginShowing,
+  isHidden,
   offersHide,
   readShown,
   rememberHide,
+  showAgain,
   vaultKeyOf,
   type Showing,
 } from "./modsDisclaimerShown";
@@ -160,5 +162,28 @@ describe("offersHide and rememberHide", () => {
   it("can't remember a showing that had no vault", () => {
     rememberHide({ number: 5, hide: false, key: null });
     expect(localStorage.length).toBe(0);
+  });
+});
+
+describe("isHidden and showAgain", () => {
+  it("read the open vault's fold and turn it off, keeping the count", async () => {
+    localStorage.setItem(A, JSON.stringify({ v: 1, shown: 4, hide: true }));
+    localStorage.setItem(B, JSON.stringify({ v: 1, shown: 2, hide: true }));
+    expect(await isHidden()).toBe(true);
+    await showAgain();
+    expect(readShown(A)).toEqual({ shown: 4, hide: false });
+    expect(readShown(B)).toEqual({ shown: 2, hide: true });
+    expect(await isHidden()).toBe(false);
+  });
+
+  it("do nothing when the vault can't be told, and write nothing when nothing is folded", async () => {
+    vaultStatus.mockRejectedValue(new Error("locked"));
+    localStorage.setItem(A, JSON.stringify({ v: 1, shown: 4, hide: true }));
+    expect(await isHidden()).toBe(false);
+    await showAgain();
+    expect(readShown(A)).toEqual({ shown: 4, hide: true });
+    vaultStatus.mockResolvedValue({ vault_id: "vault-b" });
+    await showAgain();
+    expect(localStorage.getItem(B)).toBeNull();
   });
 });

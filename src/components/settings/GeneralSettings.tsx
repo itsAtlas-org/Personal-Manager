@@ -50,6 +50,7 @@ import {
   type BriefingFloat,
 } from "../../lib/briefingPrefs";
 import { setBriefingWindowVisible } from "../../lib/ipc";
+import { useModsNoticeFolded } from "../../lib/useModsNoticeFolded";
 import { TrayIconRow } from "./TrayIconRow";
 import { readConfirmDelete, writeConfirmDelete } from "../../lib/pinboard/prefs";
 import { navPlacementIsDefault, resetNavPlacement, useNavPlacement } from "../../lib/nav";
@@ -306,6 +307,9 @@ export function GeneralSettings() {
     window.addEventListener("pm:settings-changed", onChanged);
     return () => window.removeEventListener("pm:settings-changed", onChanged);
   }, []);
+  // The Mods notice, folded on a mod's first screen by "Don't show this again". Its one home is the
+  // row below (it appears only while folded); Reset General brings the notice back too.
+  const modsNotice = useModsNoticeFolded();
   // The whole tab, minus the deliberately-excluded time zone (device-derived, not a preference).
   const generalIsDefault =
     appearanceIsDefault &&
@@ -315,6 +319,7 @@ export function GeneralSettings() {
     calendarIsDefault &&
     chatSectionsDefault &&
     sidebarIsDefault &&
+    !modsNotice.folded &&
     helpIsDefault;
 
   function resetMap() {
@@ -358,6 +363,7 @@ export function GeneralSettings() {
     setChatSectionsDefault(true);
     resetNavPlacement(); // every tab back where it ships, nothing pinned or hidden
     help.setEnabled(false);
+    void modsNotice.showAgain(); // the Mods notice, back on a new mod's first screen
     // Time zone is intentionally left alone — it's derived from the device, not a taste preference.
   }
 
@@ -856,6 +862,28 @@ export function GeneralSettings() {
         </SectionInfo>
       </div>
 
+      {modsNotice.folded && (
+        <div className="mt-4 border-t border-border pt-4">
+          <SettingRow
+            label="Mods notice"
+            helpId="settings-mods-notice"
+            description="You chose not to see the whole Mods notice again, so it is folded to one line on a new mod's first screen."
+            spacing="none"
+          >
+            {(a11y) => (
+              <Button
+                size="sm"
+                aria-describedby={a11y["aria-describedby"]}
+                onClick={() => void modsNotice.showAgain()}
+                className="shrink-0"
+              >
+                Show it again
+              </Button>
+            )}
+          </SettingRow>
+        </div>
+      )}
+
       <div
         id="sec-general-help"
         data-settings-section
@@ -887,8 +915,9 @@ export function GeneralSettings() {
             pinboard delete confirmation, the Focus tab (which panels it shows and where the
             briefing appears), where the Calendar opens, how far a swipe moves it and its Hide done
             and All-day filters (off), the Chats sidebar's folds, the chat Thinking button (back to
-            off), the sidebar's tabs (nothing pinned or hidden), and help mode to their defaults.
-            Your time zone is left as-is.
+            off), the sidebar's tabs (nothing pinned or hidden), the Mods notice (shown in full
+            again on a new mod's first screen), and help mode to their defaults. Your time zone is
+            left as-is.
           </>
         }
       />

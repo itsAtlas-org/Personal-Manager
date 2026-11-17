@@ -539,6 +539,10 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Spend by mod",
     body: "What each mod's AI requests have used, all time, from the same log as the table above (a mod's requests are in that table too). A mod you have uninstalled keeps its history under 'removed mod'. A dash means nothing it used could be priced yet; the total then says 'at least'. A mod's monthly limit, in the Mods tab, is counted from its own ledger and can differ a little from this log.",
   },
+  "settings-mods-notice": {
+    title: "Mods notice",
+    body: "You ticked 'Don't show this again' on a mod's first screen, so the Mods notice is folded to one line there, on this computer and in this vault. 'Show it again' brings the whole notice back, and the box is offered again the next time. This row is only here while the notice is folded. Nothing else changes: what a mod asks to do is always listed.",
+  },
   "settings-help-mode": {
     title: "Help mode",
     body: "The switch you're using right now. While it's on, hovering any highlighted section shows an explanation like this one.",
