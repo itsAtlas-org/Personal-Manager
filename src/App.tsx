@@ -32,6 +32,8 @@ import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
 import { ModsRoute } from "./components/mods/ModsRoute";
+import { ModKeyAsks } from "./components/mods/ModKeyAsk";
+import { ModNoticeStrips } from "./components/mods/ModNoticeStrips";
 import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
@@ -1146,6 +1148,12 @@ export default function App() {
                 which draws them itself. Settings draws its own copy while it is open, as its scrim
                 covers this one. */}
             {!showSettings && <ModsAppStrips view={view} onOpenMods={() => setView("mods")} />}
+            {/* What a mod said through `notify` (text and a Dismiss, on every tab), and the key
+                field a mod's `secrets.set` asked for. Both wait while Settings is open: its scrim
+                covers the strips (it draws its own copy), and a second dialog would fight it for
+                focus. */}
+            {!showSettings && <ModNoticeStrips />}
+            {!showSettings && <ModKeyAsks />}
             <div
               className={`relative flex flex-1 overflow-hidden ${leftBar.resizing ? "select-none" : ""}`}
             >

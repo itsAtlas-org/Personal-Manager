@@ -25,9 +25,13 @@ const approveUpdate = vi.fn();
 const modPermissionDecide = vi.fn();
 const modIcon = vi.fn();
 const modAiCapSet = vi.fn();
+const modSecretSave = vi.fn();
+const modSecretClear = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modAiCapSet: (id: string, cap: number | null) => modAiCapSet(id, cap),
+  modSecretSave: (id: string, name: string, value: string) => modSecretSave(id, name, value),
+  modSecretClear: (id: string, name: string) => modSecretClear(id, name),
   resumeMod: (id: string) => resumeMod(id),
   pauseMod: (id: string) => pauseMod(id),
   repairMod: (id: string) => repairMod(id),
@@ -814,5 +818,59 @@ describe("a name made of stacked marks", () => {
     const heading = screen.getByRole("heading", { level: 3 });
     expect(heading.textContent).toBe(`A${MARK_ABOVE.repeat(3)}`);
     expect(heading.className).toContain("overflow-hidden");
+  });
+});
+
+describe("a mod's keys", () => {
+  const slots = [{ name: "weather", host: "api.example.com", header: "X-Api-Key", set: false }];
+  const withKeys = (extra: Partial<ModInfo> = {}) => mod({ secrets: slots, ...extra });
+  const keyField = () => screen.getByLabelText(/Key: weather/) as HTMLInputElement;
+
+  it("shows a masked field in Details that says where the key goes", () => {
+    draw(withKeys());
+    openDetails();
+    expect(keyField().type).toBe("password");
+    expect(screen.getByText(/only to api.example.com, in the X-Api-Key header/)).toBeTruthy();
+  });
+
+  it("shows none for a mod with no key slots", () => {
+    draw(mod());
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+  });
+
+  it("shows none until the person has turned the mod on, or after the safety list removed it", () => {
+    draw(withKeys({ consented: false }));
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+    cleanup();
+    draw(withKeys({ state: standing("removed-by-safety-list") }));
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+  });
+
+  it("saves through the backend, empties the field and reads the rows again", async () => {
+    modSecretSave.mockResolvedValue([{ ...slots[0], set: true }]);
+    draw(withKeys());
+    openDetails();
+    fireEvent.change(keyField(), { target: { value: "typed-not-a-real-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save the key weather" }));
+    expect(modSecretSave).toHaveBeenCalledExactlyOnceWith(
+      "acme.tool",
+      "weather",
+      "typed-not-a-real-key",
+    );
+    expect(keyField().value).toBe("");
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("is held while another command for the mod runs", async () => {
+    let settle: () => void = () => {};
+    pauseMod.mockReturnValue(new Promise<void>((r) => (settle = r)));
+    draw(withKeys({ state: standing("running", { running: true }) }));
+    openDetails();
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
+    await waitFor(() => expect(keyField().disabled).toBe(true));
+    await act(async () => settle());
   });
 });

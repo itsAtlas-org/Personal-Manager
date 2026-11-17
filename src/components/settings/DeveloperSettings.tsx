@@ -7,6 +7,7 @@ import { failureText } from "../../lib/modsTypes";
 import { Button, SectionInfo, SectionLabel, SettingRow, Toggle } from "../ui";
 import { DevSection, DeveloperKit } from "./DeveloperKit";
 import { OFF_HINT } from "./kitWords";
+import { TestKeys } from "./TestKeys";
 import { TestMods } from "./TestMods";
 
 /** The Developer-mode Settings tab. `devMode` is switched for THIS device by the backend, which
@@ -14,8 +15,8 @@ import { TestMods } from "./TestMods";
  *  when the write fails it stays where it was and says why. `onOpenDev` jumps to the Dev tab.
  *
  *  Under the switch sit the kit's rail sections (registry.ts): the API, endpoints and limits PM
- *  answers for (DeveloperKit) and "Load a test mod" (TestMods). They are always there, so the rail's
- *  links land, and say so while developer mode is off. */
+ *  answers for (DeveloperKit), "Load a test mod" (TestMods) and "Test keys" (TestKeys). They are
+ *  always there, so the rail's links land, and say so while developer mode is off. */
 export function DeveloperSettings({ onOpenDev }: { onOpenDev?: () => void }) {
   const { devMode, setDevMode } = useDevMode();
   const [busy, setBusy] = useState(false);
@@ -90,6 +91,10 @@ export function DeveloperSettings({ onOpenDev }: { onOpenDev?: () => void }) {
         title="Load a test mod"
       >
         {devMode ? <TestMods /> : <p className="text-sm text-ink3">{OFF_HINT}</p>}
+      </DevSection>
+
+      <DevSection id="sec-dev-testkeys" helpId="settings-developer-testkeys" title="Test keys">
+        {devMode ? <TestKeys /> : <p className="text-sm text-ink3">{OFF_HINT}</p>}
       </DevSection>
     </>
   );

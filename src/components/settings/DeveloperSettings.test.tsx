@@ -5,7 +5,7 @@
 // The Developer settings tab: the toggle waits for the backend, a failure leaves it where it was
 // and says why, and the copy says what developer mode does now (it allows unsigned mods).
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const setDevMode = vi.fn<(on: boolean) => Promise<void>>();
@@ -31,8 +31,9 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
 }));
 
 import { HELP } from "../../lib/help";
+import { ModRowsContext } from "../../lib/modRows";
 import { failureText } from "../../lib/modsTypes";
-import { devKit } from "../mods/modFixtures";
+import { devKit, mod } from "../mods/modFixtures";
 import { DeveloperSettings } from "./DeveloperSettings";
 import { OFF_HINT } from "./kitWords";
 import { SETTINGS_TABS } from "./registry";
@@ -134,7 +135,13 @@ describe("the rest of the tab", () => {
   it("has every anchor the rail names, whether or not developer mode is on", async () => {
     for (const on of [false, true]) {
       devMode = on;
-      const { unmount } = render(<DeveloperSettings />);
+      const { unmount } = render(
+        <ModRowsContext.Provider
+          value={{ rows: [], loaded: true, problem: null, refresh: () => Promise.resolve() }}
+        >
+          <DeveloperSettings />
+        </ModRowsContext.Provider>,
+      );
       for (const id of railIds()) {
         const el = document.getElementById(id);
         expect(el, `${id} with developer mode ${on ? "on" : "off"}`).not.toBeNull();
@@ -152,6 +159,33 @@ describe("the rest of the tab", () => {
     expect(listTestMods).not.toHaveBeenCalled();
     const gated = document.getElementById("sec-dev-testmods")?.textContent?.includes(OFF_HINT);
     expect(gated).toBe(true);
+    // Test keys too: there is no test mod to type a key for.
+    expect(document.getElementById("sec-dev-testkeys")?.textContent).toContain(OFF_HINT);
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+  });
+
+  it("offers 'Test keys' once it is on, listing the loaded test mods only", () => {
+    devMode = true;
+    const slot = { name: "weather", host: "api.example.com", header: "X-Api-Key", set: false };
+    render(
+      <ModRowsContext.Provider
+        value={{
+          rows: [
+            mod({ id: "test.one", name: "Test One", installedFrom: "folder", secrets: [slot] }),
+            mod({ id: "real.one", name: "Real One", installedFrom: "catalogue", secrets: [slot] }),
+          ],
+          loaded: true,
+          problem: null,
+          refresh: () => Promise.resolve(),
+        }}
+      >
+        <DeveloperSettings />
+      </ModRowsContext.Provider>,
+    );
+    const section = document.getElementById("sec-dev-testkeys")!;
+    expect(section.textContent).toContain("Test One");
+    expect(section.textContent).not.toContain("Real One");
+    expect(within(section).getAllByLabelText(/Key: weather/)).toHaveLength(1);
   });
 
   it("reads the kit and offers 'Load a test mod' once it is on", async () => {

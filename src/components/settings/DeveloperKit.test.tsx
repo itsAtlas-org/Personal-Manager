@@ -308,6 +308,7 @@ describe("help", () => {
       "sec-dev-limits",
       "sec-dev-running",
       "sec-dev-testmods",
+      "sec-dev-testkeys",
     ]);
   });
 });

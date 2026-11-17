@@ -5,7 +5,7 @@
 // deprecation window and the experimental methods, the endpoints, the limits, and what is running
 // now. Every figure and every row is PM's own answer (`devKitInfo`, from the dispatch table and the
 // build-time limits in Rust), so this page keeps no copy of any of it that could drift; the only words
-// of its own are the labels. Test keys are not here: they need `secrets.set`, which is a later change.
+// of its own are the labels. (Test keys are their own section, TestKeys.)
 //
 // Each is a section of the tab's rail (registry.ts). While developer mode is off the kit can't be
 // read (the backend refuses), so each section says that instead of showing nothing, and the rail's

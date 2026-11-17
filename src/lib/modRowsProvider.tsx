@@ -16,12 +16,14 @@
 //   and drops what the Mods tab remembered about the vault that went away (modActions
 //   `forgetVaultState`: its notes, staged install screens and refusals). `recovered` is NOT a
 //   switch: the background pass sends it seconds after `loaded`, for the same vault, and the install
-//   screens staged meanwhile are still good, so it only reads again.
+//   screens staged meanwhile are still good, so it only reads again. `loaded` also drops the notices
+//   and key fields mods put on screen (modSurface), and every read drops those of a mod that is gone.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listMods, onModsChanged } from "./ipc";
 import { forgetVaultState } from "./modActions";
 import { ModRowsContext, type ModRows } from "./modRows";
+import { forgetModSurface, keepOnlyMods } from "./modSurface";
 import { failureText, type ModInfo } from "./modsTypes";
 import { subscribeUntilCleanup } from "./subscribe";
 
@@ -40,7 +42,11 @@ export function ModRowsProvider({ children }: { children: ReactNode }) {
     const mine = ++asked.current;
     try {
       const rows = await listMods();
-      if (alive.current && mine === asked.current) setRead({ rows, loaded: true, problem: null });
+      if (alive.current && mine === asked.current) {
+        setRead({ rows, loaded: true, problem: null });
+        // A mod that is gone (or a key slot it dropped) takes its notices and key field with it.
+        keepOnlyMods(new Map(rows.map((r) => [r.id, r.secrets.map((s) => s.name)])));
+      }
     } catch (e) {
       if (alive.current && mine === asked.current) {
         const problem = failureText(e, "PM couldn't read the list of mods.");
@@ -56,6 +62,7 @@ export function ModRowsProvider({ children }: { children: ReactNode }) {
       onModsChanged((e) => {
         if (e.cause === "loaded") {
           forgetVaultState();
+          forgetModSurface();
           setRead({ rows: [], loaded: false, problem: null });
         }
         void refresh();

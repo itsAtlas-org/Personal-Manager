@@ -38,6 +38,7 @@ import { toneSurface } from "../ui/tone";
 import { DevModeOffMark } from "./DevModeOffMark";
 import { ModAiLimit } from "./ModAiLimit";
 import { ModIconView } from "./ModIconView";
+import { ModSecretFields } from "./ModSecretFields";
 import { modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
@@ -377,6 +378,17 @@ export function ModRow({
                 onSave={(cap) =>
                   act("Saving", "PM couldn't save that limit.", () => modAiCapSet(mod.id, cap))
                 }
+              />
+            )}
+
+            {canDecide && mod.secrets.length > 0 && (
+              // The keys the manifest declares. The same field the Test keys section and a mod's
+              // `secrets.set` dialog use; the rows are read again after a save or a remove.
+              <ModSecretFields
+                modId={mod.id}
+                slots={mod.secrets}
+                disabled={working !== null}
+                onChanged={() => void refresh()}
               />
             )}
 

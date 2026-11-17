@@ -2319,7 +2319,8 @@ export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch
 /** The Developer kit's readouts, all from Rust so the page keeps no copy that could drift: the API
  *  version and its deprecation window, every row of the dispatch table, the build-time limits, the
  *  web engine's seal, and each mounted frame's event counters. Read-only. Rejects `dev-mode-off`
- *  while developer mode is off for this device. (The Test keys fields ship with `secrets.set`.) */
+ *  while developer mode is off for this device. (The Test keys section is drawn from the shared mod
+ *  rows and `modSecretSave`, not from this.) */
 export const devKitInfo = () => invoke<DevKitInfo>("dev_kit_info");
 
 /** Read the developer's unpacked folder at `path` (an absolute path) and return the stark screen,

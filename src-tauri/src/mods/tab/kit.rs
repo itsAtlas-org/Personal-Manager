@@ -15,9 +15,9 @@
 //!   sinkhole;
 //! - **Sessions**: each mounted frame's event counters (sent, acknowledged, dropped).
 //!
-//! **Not here yet: Test keys.** A mod's test secrets are stored "like any mod secret" (§1.15), and a
-//! secret is written by PM's own field, which is PR B's (X4's commands, X8's fields). The section
-//! ships with them; nothing here pretends otherwise.
+//! **Not here: Test keys.** A test mod's keys are stored "like any mod secret" (§1.15) and typed into
+//! PM's own field (`mod_secret_save`, the page's `ModSecretFields`), which reads the test mods from
+//! the shared mod rows; none of it passes through this readout.
 //!
 //! Main window only, and only while developer mode is on for this device (the tab it feeds exists
 //! only then). It reads, and changes nothing. [`build`] is pure.

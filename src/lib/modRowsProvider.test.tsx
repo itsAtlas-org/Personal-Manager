@@ -6,7 +6,7 @@
 // tab share (lib/modRows): read on mount and on every `mods://changed`, answers applied in the order
 // the questions were asked, a failed read keeping what was known.
 
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { consentScreen } from "../components/mods/modFixtures";
 import {
@@ -16,6 +16,13 @@ import {
   runModAction,
   setModScreen,
 } from "./modActions";
+import {
+  addNotice,
+  forgetModSurface,
+  openKeyAsk,
+  useModKeyAsks,
+  useModNotices,
+} from "./modSurface";
 import type { ModInfo, ModsChanged } from "./modsTypes";
 
 const listMods = vi.fn();
@@ -43,7 +50,8 @@ function Probe() {
   );
 }
 
-const row = (id: string) => ({ id }) as ModInfo;
+const row = (id: string, slots: string[] = []) =>
+  ({ id, secrets: slots.map((name) => ({ name })) }) as ModInfo;
 const state = () => screen.getByTestId("state").textContent;
 
 /** A read that finishes when the test says. */
@@ -71,10 +79,12 @@ beforeEach(() => {
   listMods.mockReset();
   unlisten.mockReset();
   resetModActions();
+  forgetModSurface();
 });
 afterEach(() => {
   cleanup();
   resetModActions();
+  forgetModSurface();
 });
 
 describe("ModRowsProvider", () => {
@@ -91,6 +101,58 @@ describe("ModRowsProvider", () => {
     await act(async () => changed?.({ cause: "paused" }));
     expect(state()).toBe("loaded|acme.b|");
     expect(listMods).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the notices and key field of a mod that is gone, or of a slot it dropped, and keeps the rest", async () => {
+    const a = { modId: "acme.a", name: "A", tier: "third" as const };
+    const b = { modId: "acme.b", name: "B", tier: "third" as const };
+    listMods
+      .mockResolvedValueOnce([row("acme.a", ["k"]), row("acme.b", ["k"])])
+      .mockResolvedValueOnce([row("acme.a", ["k"])])
+      .mockResolvedValueOnce([row("acme.a", [])]);
+    await mount();
+    act(() => {
+      addNotice(a, { text: "from a", tone: "info" });
+      addNotice(b, { text: "from b", tone: "info" });
+      openKeyAsk(a, { name: "k", host: "h", header: "X", set: false });
+      openKeyAsk(b, { name: "k", host: "h", header: "X", set: false });
+    });
+    // b is uninstalled.
+    await act(async () => changed?.({ cause: "uninstalled" }));
+    const surface = renderHook(() => ({ n: useModNotices(), k: useModKeyAsks() })).result.current;
+    expect(surface.n.map((n) => n.notice.text)).toEqual(["from a"]);
+    expect(surface.k.map((x) => x.from.modId)).toEqual(["acme.a"]);
+    // a's update drops its slot: the field goes, the notice stays.
+    await act(async () => changed?.({ cause: "updated" }));
+    const after = renderHook(() => ({ n: useModNotices(), k: useModKeyAsks() })).result.current;
+    expect(after.n).toHaveLength(1);
+    expect(after.k).toEqual([]);
+  });
+
+  it("a failed read keeps what mods put on screen (nothing is known to be gone)", async () => {
+    const a = { modId: "acme.a", name: "A", tier: "third" as const };
+    listMods
+      .mockResolvedValueOnce([row("acme.a")])
+      .mockRejectedValueOnce({ code: "locked", message: "PM is locked." });
+    await mount();
+    act(() => addNotice(a, { text: "from a", tone: "info" }));
+    await act(async () => changed?.({ cause: "paused" }));
+    expect(renderHook(() => useModNotices()).result.current).toHaveLength(1);
+  });
+
+  it("a store that opens forgets what the old vault's mods put on screen", async () => {
+    const a = { modId: "acme.a", name: "A", tier: "third" as const };
+    listMods.mockResolvedValue([row("acme.a")]);
+    await mount();
+    act(() => {
+      addNotice(a, { text: "from a", tone: "info" });
+      openKeyAsk(a, { name: "k", host: "h", header: "X", set: false });
+    });
+    // The vault switch, whose first read of the new vault fails: nothing from the old one survives.
+    listMods.mockRejectedValueOnce({ code: "locked", message: "PM is locked." });
+    await act(async () => changed?.({ cause: "loaded" }));
+    expect(renderHook(() => useModNotices()).result.current).toEqual([]);
+    expect(renderHook(() => useModKeyAsks()).result.current).toEqual([]);
   });
 
   it("applies answers in the order the questions were asked", async () => {
