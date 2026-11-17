@@ -2,8 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, expect, it } from "vitest";
-import { LINE_SEP, LRI, RLO, ZERO_WIDTH } from "./modFixtures";
-import { modText } from "./modText";
+import {
+  ACUTE,
+  CIRCUMFLEX,
+  LINE_SEP,
+  LRI,
+  MARK_ABOVE,
+  MARK_BELOW,
+  RLO,
+  ZERO_WIDTH,
+} from "./modFixtures";
+import { modText, quoteName } from "./modText";
 
 describe("modText", () => {
   it("leaves an ordinary line alone", () => {
@@ -20,8 +29,41 @@ describe("modText", () => {
     );
   });
 
+  it("cuts a run of combining marks to what a real script stacks, so one letter can't smear over the badges beside it", () => {
+    const stacked = `A${MARK_ABOVE.repeat(39)}`;
+    expect(modText(stacked)).toBe(`A${MARK_ABOVE.repeat(3)}`);
+    // Marks above and below, mixed, are one run.
+    expect(modText(`A${(MARK_ABOVE + MARK_BELOW).repeat(20)}`)).toBe(
+      `A${MARK_ABOVE}${MARK_BELOW}${MARK_ABOVE}`,
+    );
+  });
+
+  it("keeps the marks real text carries: an accent, two on one letter, Hebrew's pointing", () => {
+    const acute = `e${ACUTE}cole`;
+    expect(modText(acute)).toBe(acute);
+    const vietnamese = `a${CIRCUMFLEX}${MARK_BELOW}ge`;
+    expect(modText(vietnamese)).toBe(vietnamese);
+    // A letter with up to three marks (Hebrew pointing is the most that real text stacks).
+    const hebrew = ["ב", "ְ", "ּ", "ר", "ֵ"].join("");
+    expect(modText(hebrew)).toBe(hebrew);
+  });
+
   it("collapses runs of spaces and trims the ends", () => {
     expect(modText("  a \t\t b  ")).toBe("a b");
     expect(modText(`${RLO}${RLO}`)).toBe("");
+  });
+});
+
+describe("quoteName", () => {
+  it("puts the name in quotes, cleaned like every other mod text", () => {
+    expect(quoteName(`Acme${RLO}  Tool\n`)).toBe("“Acme Tool”");
+  });
+
+  it("can't be closed from inside: a double quote in the name becomes a single one", () => {
+    // Without this a name could end its own quote and carry on in PM's voice.
+    expect(quoteName("Calendar” was removed. “Settings")).toBe(
+      "“Calendar' was removed. 'Settings”",
+    );
+    expect(quoteName('say "hi"')).toBe("“say 'hi'”");
   });
 });

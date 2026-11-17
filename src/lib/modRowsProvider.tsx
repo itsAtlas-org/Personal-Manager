@@ -9,9 +9,15 @@
 //   a change can't overwrite the read the change caused.
 // - A failed read (the vault is locked, another PM window is the writer) keeps the rows it has and
 //   records why; the next `mods://changed` (the store opening sends `loaded`) reads again.
+// - A store that opens (`loaded`) or is restored over (`recovered`) is a different vault's data: this
+//   provider sits above the tree a lock or a vault switch replaces, so it is what remembers the old
+//   vault. `loaded` empties the rows (a failed read would otherwise keep the old vault's mods and
+//   their sidebar tabs), and both drop what the Mods tab remembered about the vault that went away
+//   (modActions `forgetVaultState`: its notes, staged install screens and refusals).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listMods, onModsChanged } from "./ipc";
+import { forgetVaultState } from "./modActions";
 import { ModRowsContext, type ModRows } from "./modRows";
 import { failureText, type ModInfo } from "./modsTypes";
 import { subscribeUntilCleanup } from "./subscribe";
@@ -43,7 +49,15 @@ export function ModRowsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     alive.current = true;
     void refresh();
-    const stop = subscribeUntilCleanup(() => onModsChanged(() => void refresh()));
+    const stop = subscribeUntilCleanup(() =>
+      onModsChanged((e) => {
+        if (e.cause === "loaded" || e.cause === "recovered") {
+          forgetVaultState();
+          if (e.cause === "loaded") setRead({ rows: [], loaded: false, problem: null });
+        }
+        void refresh();
+      }),
+    );
     return () => {
       alive.current = false;
       stop();

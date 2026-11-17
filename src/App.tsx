@@ -32,6 +32,7 @@ import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
 import { ModsRoute } from "./components/mods/ModsRoute";
+import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsView } from "./components/SettingsView";
@@ -1163,6 +1164,10 @@ export default function App() {
             {/* A browser sign-in in progress, with its link for another browser. Settings shows it
                 itself while open, as its scrim covers this; renders nothing otherwise. */}
             {!showSettings && <SignInStrip />}
+            {/* The safety list's notices (a mod paused or removed), on every tab but the Mods tab,
+                which draws them itself. Settings draws its own copy while it is open, as its scrim
+                covers this one. */}
+            {!showSettings && <ModsAppStrips view={view} onOpenMods={() => setView("mods")} />}
             <div
               className={`relative flex flex-1 overflow-hidden ${leftBar.resizing ? "select-none" : ""}`}
             >

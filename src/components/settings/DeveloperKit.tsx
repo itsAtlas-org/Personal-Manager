@@ -15,7 +15,7 @@ import type { ReactNode } from "react";
 import { useDevKit } from "../../lib/useDevKit";
 import type { DevKitInfo, KitEndpoint } from "../../lib/modsTypes";
 import { modText } from "../mods/modText";
-import { Button, Callout, Collapsible, SectionLabel } from "../ui";
+import { Button, Callout, Collapsible, HScroll, SectionLabel } from "../ui";
 import { LIMIT_KEYS, LIMIT_ROWS, OFF_HINT } from "./kitWords";
 
 /** One section of the Developer tab: the rail's anchor, the help id and a heading. */
@@ -55,7 +55,7 @@ function sinceWords(e: KitEndpoint): string {
 
 function EndpointTable({ rows, label }: { rows: readonly KitEndpoint[]; label: string }) {
   return (
-    <div className="overflow-x-auto">
+    <HScroll label={`${label}, scrollable`}>
       <table aria-label={label} className="w-full text-left text-xs">
         <thead className="font-mono uppercase tracking-wide text-ink4">
           <tr className="border-b border-border">
@@ -76,7 +76,7 @@ function EndpointTable({ rows, label }: { rows: readonly KitEndpoint[]; label: s
           ))}
         </tbody>
       </table>
-    </div>
+    </HScroll>
   );
 }
 

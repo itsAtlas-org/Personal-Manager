@@ -11,7 +11,7 @@
 // `load` events, post its messages with the frame as `source`, and talk to PM over the port PM hands
 // it.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,9 +32,12 @@ const modCall = vi.fn();
 const modEventsAck = vi.fn();
 const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
+const modPermissionDecide = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
+  modPermissionDecide: (id: string, permission: string, granted: boolean) =>
+    modPermissionDecide(id, permission, granted),
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
@@ -807,5 +810,210 @@ describe("ModFrame events", () => {
     await settle();
     expect(modThemeChanged).not.toHaveBeenCalled();
     root.style.removeProperty("--fg");
+  });
+});
+
+// FIRST USE (spec §1.5): a call the backend refuses with MOD-2002 and a permission becomes PM's own
+// question, drawn outside the frame. The call is held until it is answered.
+describe("the first-use question", () => {
+  const NEEDS = {
+    kind: "error",
+    error: {
+      code: "MOD-2002",
+      message: "This needs your permission first (calendar.details).",
+      permission: "calendar.details",
+    },
+  };
+  const VALUE = { kind: "value", value: { events: [] } };
+  const WORDS = "Read your calendar events' guests, organiser, description and links";
+  const channel = () =>
+    modFrameOpen.mock.calls[modFrameOpen.mock.calls.length - 1][1] as (message: unknown) => void;
+
+  /** Everything the frame's port receives from now on. */
+  function listen(port: MessagePort): unknown[] {
+    const got: unknown[] = [];
+    port.onmessage = (e: MessageEvent) => got.push(e.data);
+    return got;
+  }
+  const settle = () => act(() => new Promise((r) => setTimeout(r, 20)));
+  const question = () => screen.findByRole("dialog", { name: "Let “Acme Tool” do this?" });
+  const call = (port: MessagePort, id = 7) =>
+    port.postMessage({ id, method: "calendar.events", args: null });
+
+  beforeEach(() => {
+    modPermissionDecide.mockResolvedValue(undefined);
+  });
+
+  it("asks in PM's own words and holds the call; Allow records the yes and retries it once", async () => {
+    modCall.mockResolvedValueOnce(NEEDS).mockResolvedValueOnce(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await question();
+    expect(dialog.textContent).toContain(WORDS);
+    expect(dialog.textContent).toContain("Reviewed by Atlas");
+    // Held: the frame has heard nothing, and the dialog is PM's, outside the frame.
+    await settle();
+    expect(got).toEqual([]);
+    expect(modCall).toHaveBeenCalledTimes(1);
+    expect(frameNow()!.contains(dialog)).toBe(false);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(got).toEqual([{ id: 7, ok: true, result: { events: [] } }]));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "calendar.details", true);
+    // The same call, under the same session, once more.
+    expect(modCall).toHaveBeenCalledTimes(2);
+    expect(modCall.mock.calls[1]).toEqual(modCall.mock.calls[0]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("No records the no and tells the mod it isn't granted, without a retry", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    fireEvent.click(within(await question()).getByRole("button", { name: "No" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "calendar.details", false);
+    expect(got[0]).toEqual({
+      id: 7,
+      ok: false,
+      error: { code: MOD_ERRORS.notGranted, message: "That permission is off for this mod." },
+    });
+    expect(modCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("Not now records nothing, gives the mod the backend's own refusal, and isn't asked again this session", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port, 1);
+    fireEvent.click(within(await question()).getByRole("button", { name: "Not now" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).not.toHaveBeenCalled();
+    expect(got[0]).toMatchObject({ id: 1, ok: false, error: { code: "MOD-2002" } });
+    // A mod calling in a loop gets one question, not one per call.
+    call(port, 2);
+    await waitFor(() => expect(got).toHaveLength(2));
+    expect(got[1]).toMatchObject({ id: 2, ok: false, error: { code: "MOD-2002" } });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Escape is Not now", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    await question();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).not.toHaveBeenCalled();
+  });
+
+  it("two calls that need the same permission share one question, and its answer releases both", async () => {
+    modCall.mockResolvedValueOnce(NEEDS).mockResolvedValueOnce(NEEDS).mockResolvedValue(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port, 1);
+    call(port, 2);
+    await waitFor(() => expect(modCall).toHaveBeenCalledTimes(2));
+    expect(await screen.findAllByRole("dialog")).toHaveLength(1);
+    fireEvent.click(within(await question()).getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(got).toHaveLength(2));
+    expect(modPermissionDecide).toHaveBeenCalledTimes(1);
+    expect(new Set(got.map((m) => (m as { id: number }).id))).toEqual(new Set([1, 2]));
+    expect(got.every((m) => (m as { ok: boolean }).ok)).toBe(true);
+  });
+
+  it("a save that fails keeps the question with the backend's sentence, and the call waits", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    modPermissionDecide.mockRejectedValueOnce({
+      code: "grant-refused",
+      message: "A mod nobody has checked can read your data or use the internet, not both.",
+    });
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await question();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow" }));
+    expect(
+      await within(dialog).findByText(
+        "A mod nobody has checked can read your data or use the internet, not both.",
+      ),
+    ).toBeTruthy();
+    expect(got).toEqual([]);
+    // Still answerable: the person can leave it.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Not now" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(got[0]).toMatchObject({ ok: false, error: { code: "MOD-2002" } });
+  });
+
+  it("takes the question down, and sends the mod nothing, when the session ends under it", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    await question();
+    channel()({ seq: 1, name: "mod.paused", payload: {} });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await settle();
+    expect(got.filter((m) => (m as { id?: number }).id === 7)).toEqual([]);
+    expect(modPermissionDecide).not.toHaveBeenCalled();
+  });
+
+  it("answers an unusable MOD-2002 (no permission named, or an id that isn't one) as it is, asking nothing", async () => {
+    modCall
+      .mockResolvedValueOnce({ kind: "error", error: { code: "MOD-2002", message: "ask" } })
+      .mockResolvedValueOnce({
+        kind: "error",
+        error: { code: "MOD-2002", message: "ask", permission: "x<img src=x>" },
+      });
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port, 1);
+    call(port, 2);
+    await waitFor(() => expect(got).toHaveLength(2));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(got.every((m) => (m as { ok: boolean }).ok === false)).toBe(true);
+  });
+
+  it("only the backend's reply starts a question: a refusal the frame sends for itself never does", async () => {
+    mount();
+    const { port } = connect(await theFrame());
+    // An oversized call is refused by PM's own page, not by the backend.
+    await ask(port, { id: 3, method: "calendar.events", args: "x".repeat(2_000_000) });
+    expect(modCall).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("says nobody has checked a third-party mod, and still names the mod in quotes", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    mount("third");
+    const { port } = connect(await theFrame());
+    call(port);
+    const dialog = await question();
+    expect(dialog.textContent).toContain("Third party");
+    expect(dialog.textContent).toContain("Nobody has checked this mod");
+  });
+
+  it("goes away with the frame, releasing the held call quietly", async () => {
+    modCall.mockResolvedValue(NEEDS);
+    const view = mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    await question();
+    view.unmount();
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(got).toEqual([]);
   });
 });

@@ -30,7 +30,8 @@ import {
   type ModActionResult,
   type ScreenRestart,
 } from "./modActions";
-import { modsErrorOf, type ConsentScreen, type InstallResult } from "./modsTypes";
+import { quoteName } from "./modTextClean";
+import { failureText, modsErrorOf, type ConsentScreen, type InstallResult } from "./modsTypes";
 
 /** The busy/error key of an install from a file (no mod id is known until the file is read). A
  *  catalogue install is keyed by the catalogue entry's mod id, as everything else about a mod is. */
@@ -142,9 +143,10 @@ export const DOING: Record<InstallKind, string> = {
 /**
  * Finish the install a screen staged. `decisions` holds an answer for every permission the screen
  * marked `answerRequired` (the backend refuses a screen that leaves one out); `confirmId` is what the
- * person typed for a stark screen (the backend checks it). A `consent-expired` answer marks the screen
- * out of date, so its dialog offers to start again instead of a button that can't work. `name` is the
- * mod's name already made a plain line (it is the mod's own text, and this one lands in a note).
+ * person typed for a stark screen (the backend checks it). Any failure marks the screen spent (the
+ * token is taken before anything is checked), so its dialog offers to start again instead of a button
+ * that can't work. `name` is the mod's name already made a plain line (it is the mod's own text, and
+ * this one lands in a note, where it is quoted).
  */
 export function finishInstall(
   screen: ConsentScreen,
@@ -161,7 +163,16 @@ export function finishInstall(
       try {
         return await installModConsented(screen.token, decisions, confirmId);
       } catch (e) {
-        if (modsErrorOf(e)?.code === "consent-expired") markScreenExpired(screen.id);
+        // The backend takes the token before it does anything else, so ANY failure here has spent
+        // it: a retry on the same screen could only answer "ran out of time", blaming the clock for
+        // what was really a full disk or a refused answer. The screen is marked spent and carries
+        // the real sentence (null for a late one, which has nothing to add).
+        markScreenExpired(
+          screen.id,
+          modsErrorOf(e)?.code === "consent-expired"
+            ? null
+            : failureText(e, "PM couldn't finish that."),
+        );
         throw e;
       }
     },
@@ -170,7 +181,7 @@ export function finishInstall(
       if (!done.grantsSaved) {
         addModNote(
           "warning",
-          `${name} was ${kind === "update" ? "updated" : "installed"}, but PM couldn't save your answers: ${done.grantsProblem?.message ?? "no reason given"} Everything it asked for is off until you turn it on in the Mods tab.`,
+          `${quoteName(name)} was ${kind === "update" ? "updated" : "installed"}, but PM couldn't save your answers: ${done.grantsProblem?.message ?? "no reason given"} Everything it asked for is off until you turn it on in the Mods tab.`,
         );
       }
     },

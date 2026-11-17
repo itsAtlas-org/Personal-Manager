@@ -78,11 +78,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "mods-safety": {
     title: "The safety list",
-    body: "PM keeps a list of known problems with mods and can pause or remove a mod on it. A paused mod keeps its data and turns back on by itself when the fix arrives; a removed one is switched off and its files go, and what it saved and made waits for you to uninstall it. This area also says when PM hasn't been able to check the list for over 30 days, or when its record of the list on this computer is damaged: 'Reset the safety list' clears that record and downloads the list again.",
+    body: "PM keeps a list of known problems with mods and can pause or remove a mod on it. A paused mod keeps its data and turns back on by itself when the fix arrives; a removed one is switched off and its files go, and what it saved and made waits for you to uninstall it. These notices show at the top of the app on every tab, and inside Settings, so you see a pause or a removal wherever you are. They also say when PM hasn't been able to check the list for over 30 days, or when its record of the list on this computer is damaged: 'Reset the safety list' clears that record and downloads the list again.",
   },
   "mods-reset-safety": {
     title: "Reset the safety list",
-    body: "Clears PM's record on this computer of the newest safety list it accepted and of any signing keys that list cancelled, then downloads the list again. Until that finishes PM can't tell an old list from a new one, which is why it asks first. Your mods and their data are not touched.",
+    body: "Clears PM's note on this computer of the newest safety list it has seen and of any maker keys that list has switched off, then downloads the list again. Until that finishes PM can't tell an old list from a new one, which is why it asks first. Your mods and their data are not touched.",
   },
   "mods-installed": {
     title: "Installed mods",
@@ -94,7 +94,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "mods-permissions": {
     title: "What a mod can do",
-    body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. PM asks again the first time a mod uses something sensitive.",
+    body: "Each line is one thing the mod asked for, in PM's words, with the maker's reason beside it. 'Allow' and 'Turn off' change it for this mod only, and take effect at once. A mod nobody has checked can be allowed to read your data or to use the internet, never both. For something sensitive PM asks you the first time the mod uses it; 'Allow now' answers that question ahead of time.",
+  },
+  "mods-permission-prompt": {
+    title: "A mod asks to do something",
+    body: "A mod just tried to do something it said it would need, and you haven't answered yet. PM asks here, in its own window, so the mod can't draw or press anything in it. Allow remembers your yes and lets the mod carry on; No remembers your no and tells the mod it isn't allowed. Not now leaves it unanswered: the mod is told it needs permission and PM won't ask again until the mod is next opened. You can change either answer any time in the Mods tab.",
   },
   "mods-consent": {
     title: "Approve an install or an update",
@@ -102,11 +106,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "mods-consent-unsigned": {
     title: "A mod nobody has checked",
-    body: "This mod comes from a file or folder nobody has signed or reviewed. Its name, maker and repository are only what the file says about itself. Each thing it asks for starts at no, and you allow only what you want. A mod like this may read your data or use the internet, never both, counting your other unchecked mods too. To install it you type its id exactly, so it can't happen by accident.",
+    body: "This mod comes from a file or folder nobody has signed or reviewed. Its name, maker and repository are only what the file says about itself. Each thing it asks for starts at no, and you allow only what you want. A mod like this may read your data or use the internet, never both, counting your other unchecked mods too (the screen says so whatever this file asks for, because another mod may already hold one side). To install it you type its id exactly, so it can't happen by accident.",
   },
   "mods-consent-expired": {
     title: "A screen that ran out of time",
-    body: "An install screen only works for ten minutes, and locking PM or switching vaults ends it sooner. Nothing was installed. 'Start again' reads the file or downloads the mod again and shows a fresh screen.",
+    body: "An install screen works once and only for ten minutes: locking PM or switching vaults ends it sooner, and so does a try that fails (the screen then says what went wrong). Nothing was installed. 'Start again' reads the file or downloads the mod again and shows a fresh screen.",
   },
   "mods-available": {
     title: "Available mods",

@@ -21,7 +21,7 @@ import { clearModError, runModAction, setModScreen, useModActions } from "../../
 import { modFoldKey } from "../../lib/modFolds";
 import { useModTab } from "../../lib/nav";
 import type { ModInfo, ModPermission, ModStandingKind } from "../../lib/modsTypes";
-import { Button, Callout, Card, Collapsible } from "../ui";
+import { Button, Callout, Card, Collapsible, VisuallyHidden } from "../ui";
 import { toneSurface } from "../ui/tone";
 import { ModIconView } from "./ModIconView";
 import { modText } from "./modText";
@@ -41,7 +41,7 @@ const STANDING: Record<ModStandingKind, { label: string; attention: boolean }> =
   "files-missing": { label: "Files missing", attention: true },
   "files-changed": { label: "Files changed", attention: true },
   "record-unreadable": { label: "Can't be read", attention: true },
-  "api-unsupported": { label: "Needs another PM", attention: true },
+  "api-unsupported": { label: "Doesn't work with this PM", attention: true },
   parked: { label: "Parked", attention: true },
   installing: { label: "Installing", attention: false },
   "paused-other": { label: "Paused", attention: true },
@@ -106,7 +106,10 @@ export function ModRow({
           <ModIconView modId={mod.id} version={mod.version} name={name} hasIcon={mod.hasIcon} />
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h3 className="break-words font-head text-sm font-semibold text-ink">{name}</h3>
+              {/* Clipped to its own box: a name of stacked accents can't paint over the badges. */}
+              <h3 className="overflow-hidden break-words font-head text-sm font-semibold text-ink">
+                {name}
+              </h3>
               <span className="text-xs text-ink3">version {mod.version}</span>
             </div>
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -135,6 +138,7 @@ export function ModRow({
               <Button
                 variant="primary"
                 disabled={working !== null}
+                aria-label={`Review and turn on ${name}`}
                 onClick={() => onTurnOn(mod.id)}
               >
                 Review and turn on
@@ -144,6 +148,7 @@ export function ModRow({
               <Button
                 variant="primary"
                 disabled={working !== null}
+                aria-label={`Resume ${name}`}
                 onClick={() =>
                   act("Resuming", "PM couldn't resume this mod.", () => resumeMod(mod.id))
                 }
@@ -155,6 +160,7 @@ export function ModRow({
               <Button
                 variant="primary"
                 disabled={working !== null}
+                aria-label={`Repair ${name}`}
                 onClick={() =>
                   act("Repairing", "PM couldn't repair this mod.", () => repairMod(mod.id))
                 }
@@ -166,6 +172,7 @@ export function ModRow({
               <Button
                 variant="danger"
                 disabled={working !== null}
+                aria-label={`Uninstall ${name}`}
                 onClick={() => onUninstall(mod.id)}
               >
                 Uninstall…
@@ -175,6 +182,7 @@ export function ModRow({
               <Button
                 variant="secondary"
                 disabled={working !== null}
+                aria-label={`Pause ${name}`}
                 onClick={() =>
                   act("Pausing", "PM couldn't pause this mod.", () => pauseMod(mod.id))
                 }
@@ -183,7 +191,7 @@ export function ModRow({
               </Button>
             )}
             {tab.state === "hidden" && (
-              <Button variant="secondary" onClick={tab.show}>
+              <Button variant="secondary" aria-label={`Show tab for ${name}`} onClick={tab.show}>
                 Show tab
               </Button>
             )}
@@ -204,6 +212,7 @@ export function ModRow({
                 <Button
                   variant="primary"
                   disabled={working !== null}
+                  aria-label={`Review update for ${name}`}
                   onClick={() =>
                     act("Getting the update", "PM couldn't get the update.", async () =>
                       // `restart` is how its screen is asked for again if it runs out of time.
@@ -231,7 +240,15 @@ export function ModRow({
           </Callout>
         )}
 
-        <Collapsible title="Details" open={open} onOpenChange={setOpen}>
+        <Collapsible
+          title={
+            <>
+              Details <VisuallyHidden>of {name}</VisuallyHidden>
+            </>
+          }
+          open={open}
+          onOpenChange={setOpen}
+        >
           <div className="space-y-3 pt-2 text-sm text-ink2">
             {mod.description && <p className="break-words">{modText(mod.description)}</p>}
             <p className="break-words text-xs text-ink3">
@@ -246,7 +263,11 @@ export function ModRow({
 
             <div data-help="mods-permissions">
               <Collapsible
-                title="What it can do"
+                title={
+                  <>
+                    What it can do <VisuallyHidden>for {name}</VisuallyHidden>
+                  </>
+                }
                 meta={mod.permissions.length}
                 open={permsOpen}
                 onOpenChange={setPermsOpen}
@@ -280,19 +301,38 @@ export function ModRow({
                               <p className="text-xs text-ink2">{permissionStanding(p)}</p>
                             </div>
                             {canDecide && (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={working !== null}
-                                aria-label={`${on ? "Turn off" : "Allow"}: ${words}`}
-                                onClick={() =>
-                                  act("Saving", "PM couldn't change that.", () =>
-                                    modPermissionDecide(mod.id, p.id, !on),
-                                  )
-                                }
-                              >
-                                {on ? "Turn off" : "Allow"}
-                              </Button>
+                              <div className="flex flex-none flex-wrap justify-end gap-2">
+                                {/* "Asks" counts as on (a "Turn off" records the no), but it is
+                                    not yet a yes: "Allow now" answers the prompt ahead of time. */}
+                                {p.access === "asks" && (
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    disabled={working !== null}
+                                    aria-label={`Allow now: ${words} for ${name}`}
+                                    onClick={() =>
+                                      act("Saving", "PM couldn't change that.", () =>
+                                        modPermissionDecide(mod.id, p.id, true),
+                                      )
+                                    }
+                                  >
+                                    Allow now
+                                  </Button>
+                                )}
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  disabled={working !== null}
+                                  aria-label={`${on ? "Turn off" : "Allow"}: ${words} for ${name}`}
+                                  onClick={() =>
+                                    act("Saving", "PM couldn't change that.", () =>
+                                      modPermissionDecide(mod.id, p.id, !on),
+                                    )
+                                  }
+                                >
+                                  {on ? "Turn off" : "Allow"}
+                                </Button>
+                              </div>
                             )}
                           </div>
                         </li>
@@ -313,6 +353,7 @@ export function ModRow({
                 <Button
                   variant="danger"
                   disabled={working !== null}
+                  aria-label={`Uninstall ${name}`}
                   onClick={() => onUninstall(mod.id)}
                 >
                   Uninstall…

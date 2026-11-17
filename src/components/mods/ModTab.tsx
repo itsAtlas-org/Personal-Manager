@@ -29,12 +29,15 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { onModsChanged, onVaultFault, repairMod, resumeMod } from "../../lib/ipc";
+import { runModAction, useModActions } from "../../lib/modActions";
 import { useModRows } from "../../lib/modRows";
-import { failureText, type ModInfo } from "../../lib/modsTypes";
+import type { ModInfo } from "../../lib/modsTypes";
 import { subscribeUntilCleanup } from "../../lib/subscribe";
 import { Button, Callout } from "../ui";
 import { ModFirstOpen } from "./ModFirstOpen";
 import { ModFrame } from "./ModFrame";
+import { ModName } from "./ModName";
+import { modText } from "./modText";
 
 interface ModTabProps {
   /** The mod's id (the part of the view after `mod:`). */
@@ -67,7 +70,7 @@ export function ModTab({ modId, onOpenMods, onOpenSettings }: ModTabProps) {
 
   if (storeLost) {
     return (
-      <Panel title={mod?.name ?? "Mod"}>
+      <Panel title={mod ? modText(mod.name) || "Mod" : "Mod"}>
         <p className="text-sm text-ink2">
           PM can&apos;t reach your vault right now, so this mod was stopped. It comes back when PM
           can reach the vault again.
@@ -156,7 +159,7 @@ function RunningMod({
 
   if (ended !== null) {
     return (
-      <Panel title={mod.name}>
+      <Panel title={modText(mod.name) || mod.id}>
         <p className="text-sm text-ink2">{ENDED[ended] ?? ENDED.other}</p>
         <Actions>
           {ended !== "paused" && ended !== "uninstalled" && (
@@ -179,7 +182,13 @@ function RunningMod({
   }
 
   return (
-    <ModFrame key={opening} modId={mod.id} name={mod.name} tier={mod.tier} onClosed={onClosed} />
+    <ModFrame
+      key={opening}
+      modId={mod.id}
+      name={modText(mod.name) || mod.id}
+      tier={mod.tier}
+      onClosed={onClosed}
+    />
   );
 }
 
@@ -203,31 +212,42 @@ function StatusPanel({
   onOpenSettings: () => void;
 }) {
   const { kind, fix, text } = mod.state;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // In flight in the shared store, keyed by the mod like its row in the Mods tab: a Resume pressed
+  // there shows here too, and one pressed here survives a tab switch, so none can be sent twice.
+  const { busy: inFlight, errors } = useModActions();
+  const working = inFlight.get(mod.id) ?? null;
+  const busy = working !== null;
+  const error = errors.get(mod.id) ?? null;
+  const name = modText(mod.name) || mod.id;
 
-  async function run(action: () => Promise<unknown>, fallback: string) {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await action();
-    } catch (e) {
-      setError(failureText(e, fallback));
-    }
+  function run(doing: string, action: () => Promise<unknown>, fallback: string) {
     // Read the rows whether or not it worked: a refusal ("the safety list still names it") is also
     // a change in what the row says.
-    await refresh();
-    setBusy(false);
+    void runModAction(mod.id, doing, fallback, action).then(() => refresh());
   }
 
   const installing = kind === "installing";
   return (
-    <Panel title={installing ? `Installing ${mod.name}` : mod.name}>
+    <Panel
+      title={
+        installing ? (
+          <>
+            Installing <ModName name={name} />
+          </>
+        ) : (
+          name
+        )
+      }
+    >
       <p className="break-words text-sm text-ink2">
         {text ||
           (installing ? "Installing. This tab stays here until it is ready." : "It isn't running.")}
       </p>
+      {working && (
+        <p className="text-xs text-ink3" role="status">
+          {working}…
+        </p>
+      )}
       {kind === "paused-dev-mode" && (
         <p className="text-sm text-ink3">
           You can switch developer mode on in Settings, under Developer.
@@ -239,7 +259,7 @@ function StatusPanel({
           <Button
             variant="primary"
             disabled={busy}
-            onClick={() => void run(() => resumeMod(mod.id), "PM couldn't resume this mod.")}
+            onClick={() => run("Resuming", () => resumeMod(mod.id), "PM couldn't resume this mod.")}
           >
             Resume
           </Button>
@@ -248,7 +268,9 @@ function StatusPanel({
           <Button
             variant="primary"
             disabled={busy}
-            onClick={() => void run(() => repairMod(mod.id), "PM couldn't repair this mod.")}
+            onClick={() =>
+              run("Repairing", () => repairMod(mod.id), "PM couldn't repair this mod.")
+            }
           >
             Repair
           </Button>
@@ -278,11 +300,14 @@ function StatusPanel({
 // --- the shell ----------------------------------------------------------------------------------
 
 /** One panel PM draws where a mod's frame would be. `title` may be a mod's own name: plain text. */
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function Panel({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto" data-help="mod-tab-status">
       <div className="mx-auto max-w-xl space-y-4 px-6 py-8">
-        <h1 className="break-words font-head text-lg font-semibold text-ink">{title}</h1>
+        {/* Clipped to its own box: whatever a name is made of can't paint over what is below. */}
+        <h1 className="overflow-hidden break-words font-head text-lg font-semibold text-ink">
+          {title}
+        </h1>
         {children}
       </div>
     </div>

@@ -108,7 +108,7 @@ describe("ModsRoute", () => {
 
   it("draws one mod's own tab for 'mod:<id>', never the Mods tab", () => {
     route("mod:acme.tool");
-    expect(screen.getByRole("heading", { name: "Turn on Acme Tool?" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Installed" })).toBeNull();
   });
 

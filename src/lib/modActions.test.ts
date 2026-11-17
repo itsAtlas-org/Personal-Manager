@@ -14,6 +14,7 @@ import {
   clearModError,
   currentModActions,
   dismissModNote,
+  forgetVaultState,
   markScreenExpired,
   resetModActions,
   runModAction,
@@ -190,9 +191,9 @@ describe("errors, notes and screens", () => {
   });
 });
 
-describe("a staged screen's way to start again, and running out of time", () => {
-  const screenFor = (id: string) => ({ id, token: "t" }) as unknown as ConsentScreen;
+const screenFor = (id: string) => ({ id, token: "t" }) as unknown as ConsentScreen;
 
+describe("a staged screen's way to start again, and running out of time", () => {
   it("keeps the restart with its screen and drops it with the screen", () => {
     const restart = () => Promise.resolve(screenFor("acme"));
     act(() => setModScreen("acme", screenFor("acme"), restart));
@@ -227,5 +228,59 @@ describe("a staged screen's way to start again, and running out of time", () => 
     expect(currentModActions().expired.size).toBe(0);
     act(() => setModScreen("ghost", screenFor("ghost")));
     expect(currentModActions().expired.has("ghost")).toBe(false);
+  });
+});
+
+describe("a screen's mark says why it is spent", () => {
+  it("keeps the sentence that spent it, or null for one that just ran out of time", () => {
+    act(() => setModScreen("acme", screenFor("acme")));
+    act(() => markScreenExpired("acme", "The disk is full."));
+    expect(currentModActions().expired.get("acme")).toBe("The disk is full.");
+    // The first reason stands: a second mark doesn't replace what the person was told.
+    act(() => markScreenExpired("acme", "Something else."));
+    expect(currentModActions().expired.get("acme")).toBe("The disk is full.");
+    act(() => setModScreen("acme", screenFor("acme")));
+    act(() => markScreenExpired("acme"));
+    expect(currentModActions().expired.get("acme")).toBeNull();
+  });
+});
+
+describe("forgetVaultState", () => {
+  it("drops the notes, staged screens, ways to start again, spent marks and refusals", async () => {
+    act(() => addModNote("info", "“X” was uninstalled."));
+    act(() => setModScreen("acme", screenFor("acme"), () => Promise.resolve(screenFor("acme"))));
+    act(() => markScreenExpired("acme", "No."));
+    await runModAction("acme", "Doing", "It failed.", () => Promise.reject(new Error("boom")));
+    expect(currentModActions().errors.size).toBe(1);
+
+    act(() => forgetVaultState());
+    const now = currentModActions();
+    expect(now.notes).toEqual([]);
+    expect(now.screens.size).toBe(0);
+    expect(now.restarts.size).toBe(0);
+    expect(now.expired.size).toBe(0);
+    expect(now.errors.size).toBe(0);
+  });
+
+  it("keeps work in flight: it still finishes, and its follow-up still runs", async () => {
+    const slow = gate<number>();
+    let followed = 0;
+    const running = runModAction(
+      "acme",
+      "Pausing",
+      "x",
+      () => slow.promise,
+      () => {
+        followed += 1;
+      },
+    );
+    act(() => forgetVaultState());
+    expect(currentModActions().busy.get("acme")).toBe("Pausing");
+    await act(async () => {
+      slow.resolve(1);
+      await running;
+    });
+    expect(followed).toBe(1);
+    expect(currentModActions().busy.has("acme")).toBe(false);
   });
 });

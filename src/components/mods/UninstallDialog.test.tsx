@@ -13,7 +13,8 @@ import { readFold, writeFold } from "../../lib/foldPrefs";
 import { resetModActions, useModActions } from "../../lib/modActions";
 import { NAV_PLACEMENT_KEY, parsePlacement, writeNavPlacement } from "../../lib/nav";
 import type { ModUninstalled, UninstallPreview } from "../../lib/modsTypes";
-import { LRI, RLO } from "./modFixtures";
+import { ModRowsContext } from "../../lib/modRows";
+import { LRI, mod, RLO, standing } from "./modFixtures";
 import { plural, uninstallNote } from "./uninstallNote";
 
 const uninstallPreview = vi.fn();
@@ -87,7 +88,7 @@ describe("the preview", () => {
     uninstallPreview.mockResolvedValue(preview());
     open();
     expect(screen.getByText("Looking at what it has…")).toBeTruthy();
-    const dialog = await screen.findByRole("dialog", { name: "Uninstall Acme Tool?" });
+    const dialog = await screen.findByRole("dialog", { name: "Uninstall “Acme Tool”?" });
     expect(dialog.textContent).toContain("What it saved (2 KB)");
     expect(dialog.textContent).toContain("Its files (1 MB)");
     expect(dialog.textContent).toContain("Its tab in the sidebar, “Acme Tool”");
@@ -142,6 +143,38 @@ describe("the preview", () => {
     );
   });
 
+  it("shows the reason the safety list removed it, from the row, when opened where no row or strip says it", async () => {
+    uninstallPreview.mockResolvedValue(preview({ removedBySafetyList: true }));
+    const removed = mod({
+      state: standing("removed-by-safety-list", {
+        fix: "uninstall",
+        text: `PM removed “Acme Tool”${RLO}: it was copying notes to a stranger's server.`,
+      }),
+    });
+    render(
+      <ModRowsContext.Provider
+        value={{ rows: [removed], loaded: true, problem: null, refresh: () => Promise.resolve() }}
+      >
+        <UninstallDialog modId="acme.tool" refresh={refresh} onClose={onClose} />
+      </ModRowsContext.Provider>,
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("PM's safety list switched this mod off.");
+    // The backend's sentence, as plain text with the invisible character taken out.
+    expect(dialog.textContent).toContain(
+      "PM removed “Acme Tool” : it was copying notes to a stranger's server.",
+    );
+    expect(dialog.textContent).not.toContain(RLO);
+  });
+
+  it("says no reason it doesn't have: a removed mod whose row isn't read yet shows the plain line only", async () => {
+    uninstallPreview.mockResolvedValue(preview({ removedBySafetyList: true }));
+    open();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("PM's safety list switched this mod off.");
+    expect(dialog.textContent).not.toContain("PM removed");
+  });
+
   it("says the backend's sentence when the preview can't be made, and only offers Cancel", async () => {
     uninstallPreview.mockRejectedValue({
       code: "not-installed",
@@ -160,7 +193,8 @@ describe("the preview", () => {
     open();
     const dialog = await screen.findByRole("dialog");
     expect(dialog.querySelector("img")).toBeNull();
-    expect(dialog.textContent).toContain(evil);
+    // The title quotes the name, and a double quote inside it can't close that quote.
+    expect(dialog.textContent).toContain("<img src=x onerror='alert(1)'>");
   });
 
   it("draws the mod's name and tab with invisible and direction-changing characters taken out", async () => {
@@ -171,7 +205,7 @@ describe("the preview", () => {
       }),
     );
     open();
-    const dialog = await screen.findByRole("dialog", { name: "Uninstall Acme Tool PM?" });
+    const dialog = await screen.findByRole("dialog", { name: "Uninstall “Acme Tool PM”?" });
     expect(dialog.textContent).toContain("Its tab in the sidebar, “Tab x”");
     expect(dialog.textContent).not.toContain(RLO);
     expect(dialog.textContent).not.toContain(LRI);
@@ -183,7 +217,7 @@ describe("the preview", () => {
     open();
     await screen.findByRole("dialog");
     fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
-    expect(await screen.findByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
   });
 });
 
@@ -251,7 +285,7 @@ describe("uninstalling", () => {
     open();
     await screen.findByRole("dialog");
     fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
-    expect(await screen.findByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
   });
 
   it("is working, and can't be closed or pressed again, until the backend answers", async () => {
@@ -299,7 +333,7 @@ describe("uninstalling", () => {
     expect(parsePlacement(localStorage.getItem(NAV_PLACEMENT_KEY)).hidden).toEqual([]);
     // Back on the tab, the note is there to be read.
     render(<Notes />);
-    expect(screen.getByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(screen.getByText("“Acme Tool” was uninstalled.")).toBeTruthy();
   });
 
   it("says the backend's refusal, keeps the dialog open, and prunes nothing", async () => {
@@ -326,7 +360,7 @@ describe("what is said afterwards", () => {
   it("a plain uninstall is good news", () => {
     expect(uninstallNote("Acme", done())).toEqual({
       warning: false,
-      text: "Acme was uninstalled.",
+      text: "“Acme” was uninstalled.",
     });
   });
 
@@ -353,6 +387,6 @@ describe("what is said afterwards", () => {
       "Acme",
       done({ giftsDeleted: { tasks: 0, milestones: 0, documents: 0, problem: null } }),
     );
-    expect(note).toEqual({ warning: false, text: "Acme was uninstalled." });
+    expect(note).toEqual({ warning: false, text: "“Acme” was uninstalled." });
   });
 });

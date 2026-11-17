@@ -36,6 +36,7 @@ import { AccessibilitySettings } from "./settings/AccessibilitySettings";
 import { SearchSettings } from "./settings/SearchSettings";
 import { ModelListEditor } from "./ModelListEditor";
 import { OnboardingLocalConnect } from "./onboarding/OnboardingLocalConnect";
+import { ModsStrips } from "./mods/ModsStrips";
 import { SignInStrip } from "./SignInStrip";
 import { StorageSettings } from "./StorageSettings";
 import type { LanguageOptions } from "../lib/types";
@@ -587,6 +588,8 @@ export function SettingsView({
       {/* A browser sign-in started from a tab here, with its link for another browser. It has to
           be in here: the app's own strip is under this dialog's scrim. */}
       <SignInStrip />
+      {/* The safety list's notices (a mod paused or removed): App's copy is under this scrim too. */}
+      <ModsStrips variant="app" />
 
       <div className="flex min-h-0 flex-1">
         <nav className="w-52 shrink-0 overflow-y-auto border-r border-border p-3">

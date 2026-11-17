@@ -30,6 +30,7 @@ import { useTheme, type Depth } from "../theme";
 import { useDevMode } from "./capabilities";
 import type { MenuItem } from "./contextMenu";
 import { useModRows } from "./modRows";
+import { cleanModChars, quoteName } from "./modTextClean";
 import type { ModInfo } from "./modsTypes";
 import { isTearingDown } from "./teardown";
 
@@ -216,10 +217,7 @@ export const MOD_TAB_HELP_ID = "nav-mod-tab";
 export function modTabLabel(navTab: string | null, name: string): string {
   for (const raw of [navTab, name]) {
     if (raw === null) continue;
-    const clean = raw
-      .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const clean = cleanModChars(raw).replace(/\s+/g, " ").trim();
     if (clean === "") continue;
     const chars = Array.from(clean);
     return chars.length > MOD_TAB_LABEL_MAX
@@ -396,7 +394,9 @@ export function showEntry(
 
 /** "Review and Teach"; "Map". */
 function names(unit: readonly NavEntryDef[]): string {
-  const labels = unit.map((e) => e.label);
+  // A mod chose its tab's name, so in a menu item it is quoted and marked (the sidebar and Ctrl K
+  // mark it too): "Hide “Review” (mod)" can't be taken for PM's own Review tab.
+  const labels = unit.map((e) => (e.source === "mod" ? `${quoteName(e.label)} (mod)` : e.label));
   return labels.length <= 1
     ? (labels[0] ?? "")
     : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;

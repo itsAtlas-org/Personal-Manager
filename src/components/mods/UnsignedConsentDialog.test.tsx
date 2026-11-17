@@ -112,7 +112,7 @@ describe("what it says", () => {
   it("says plainly that nobody has checked it, and that the maker's words are only claims", () => {
     open(unsigned());
     const dialog = screen.getByRole("dialog", {
-      name: "Install Acme Tool, which nobody has checked?",
+      name: "Install “Acme Tool”, which nobody has checked?",
     });
     expect(dialog.textContent).toContain("Nobody has checked this mod.");
     expect(dialog.textContent).toContain("Atlas hasn't reviewed it or signed it");
@@ -123,6 +123,28 @@ describe("what it says", () => {
     expect(dialog.textContent).toContain("Commit: abcdef0123456789");
     // It never claims a review.
     expect(dialog.textContent).not.toContain("reviewed by Atlas at commit");
+  });
+
+  it("always says unchecked mods are judged together, whatever this file asks for (D3)", () => {
+    // A file that only reads still finds reading off when another unchecked mod holds the internet,
+    // and without this line nothing on the screen would say why.
+    open(
+      unsigned({
+        permissions: [
+          ask("tasks.read", {
+            access: "off",
+            offBecause: "Another unchecked mod uses the internet.",
+          }),
+        ],
+      }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain(
+      "PM judges all your unchecked mods together: between them they may read your data or use the internet, never both.",
+    );
+    expect(dialog.textContent).toContain("Another unchecked mod uses the internet.");
+    // The choice between the two sides is only drawn when this file asks for both.
+    expect(screen.queryByRole("group", { name: /Reading your data or the internet/ })).toBeNull();
   });
 
   it("lists every permission in the backend's order with the file's reason", () => {
@@ -146,7 +168,7 @@ describe("what it says", () => {
         permissions: [ask("tasks.read", { why: evil })],
       }),
     );
-    const dialog = screen.getByRole("dialog", { name: /Install Ac me, which nobody/ });
+    const dialog = screen.getByRole("dialog", { name: /Install “Ac me”, which nobody/ });
     expect(dialog.querySelector("img")).toBeNull();
     expect(dialog.querySelector("a")).toBeNull();
     expect(dialog.textContent).not.toContain(RLO);
@@ -176,7 +198,7 @@ describe("what it says", () => {
 
   it("a test folder says where it is read from and that it lasts until PM restarts", () => {
     open(unsigned({ from: "folder" }, { testFolder: "/home/dev/my-mod" }));
-    const dialog = screen.getByRole("dialog", { name: "Load Acme Tool as a test mod?" });
+    const dialog = screen.getByRole("dialog", { name: "Load “Acme Tool” as a test mod?" });
     expect(dialog.textContent).toContain("/home/dev/my-mod");
     expect(dialog.textContent).toContain("never copies or changes it");
     expect(dialog.textContent).toContain("last until PM restarts");
@@ -456,7 +478,7 @@ describe("while it works, and when it can't", () => {
     await waitFor(() => expect(screen.getByTestId("staged").textContent).toBe(""));
   });
 
-  it("developer mode switched off meanwhile: the backend's sentence, and the screen stays", async () => {
+  it("developer mode switched off meanwhile: the backend's sentence, and a screen that has to be started again", async () => {
     installModConsented.mockRejectedValue({
       code: "dev-mode-off",
       message: "Developer mode is off on this computer.",
@@ -465,6 +487,9 @@ describe("while it works, and when it can't", () => {
     typeId("acme.tool");
     fireEvent.click(install());
     expect(await screen.findByText("Developer mode is off on this computer.")).toBeTruthy();
+    // The token went with the attempt: no Install button that can only answer "ran out of time".
+    expect(screen.getByRole("dialog", { name: "This didn't go through" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
     expect(screen.getByTestId("staged").textContent).toBe("acme.tool");
   });
 
@@ -490,7 +515,7 @@ describe("while it works, and when it can't", () => {
     typeId("acme.tool");
     fireEvent.click(install());
     fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
-    await screen.findByRole("dialog", { name: /Install Acme Tool, which nobody/ });
+    await screen.findByRole("dialog", { name: /Install “Acme Tool”, which nobody/ });
     expect(restart).toHaveBeenCalledTimes(1);
     expect(install().disabled).toBe(true);
     expect((screen.getByLabelText(/To go on, type the mod's id/) as HTMLInputElement).value).toBe(
@@ -509,7 +534,7 @@ describe("while it works, and when it can't", () => {
     fireEvent.click(install());
     expect(
       await screen.findByText(
-        /Acme Tool was installed, but PM couldn't save your answers: The store was busy\./,
+        /“Acme Tool” was installed, but PM couldn't save your answers: The store was busy\./,
       ),
     ).toBeTruthy();
   });

@@ -38,7 +38,7 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
 
-import { ModsStrips } from "./ModsStrips";
+import { ModsAppStrips, ModsStrips } from "./ModsStrips";
 
 /** The notes the actions left (they are drawn by ModsView, so a test reads them from the store). */
 function Notes() {
@@ -94,7 +94,7 @@ describe("the strips", () => {
     draw();
     expect(
       await screen.findByText(
-        "Acme is paused while we fix a problem: It leaks. Your data is safe. It will turn back on by itself when the fix arrives.",
+        "“Acme” is paused while we fix a problem: It leaks. Your data is safe. It will turn back on by itself when the fix arrives.",
       ),
     ).toBeTruthy();
   });
@@ -126,7 +126,7 @@ describe("the strips", () => {
     );
     draw();
     expect(
-      await screen.findByText(/^Acme is paused while we fix a problem\. Your data is safe\./),
+      await screen.findByText(/^“Acme” is paused while we fix a problem\. Your data is safe\./),
     ).toBeTruthy();
   });
 
@@ -137,7 +137,7 @@ describe("the strips", () => {
       ]),
     );
     draw();
-    const text = (await screen.findByText(/Acme was removed by PM's safety list: Steals notes\./))
+    const text = (await screen.findByText(/“Acme” was removed by PM's safety list: Steals notes\./))
       .textContent!;
     expect(text).toContain("switched off and its files are gone");
     expect(text).toContain("What it saved and what it made are still here");
@@ -154,12 +154,12 @@ describe("the strips", () => {
     draw();
     expect(
       await screen.findByText(
-        /Acme has an update, version 2\.0\.0, that asks for more than you allowed\./,
+        /“Acme” has an update, version 2\.0\.0, that asks for more than you allowed\./,
       ),
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Beta has a newer version, 3.0.0, that needs a newer PM. Update PM to get it.",
+        "“Beta” has a newer version, 3.0.0, that needs a newer PM. Update PM to get it.",
       ),
     ).toBeTruthy();
   });
@@ -190,7 +190,9 @@ describe("the strips", () => {
     );
     const { container } = draw();
     await screen.findByText(/is paused while we fix a problem/);
-    expect(container.textContent).toContain("Ac me is paused while we fix a problem: bad PM says");
+    expect(container.textContent).toContain(
+      "“Ac me” is paused while we fix a problem: bad PM says",
+    );
     expect(container.textContent).not.toContain(RLO);
   });
 
@@ -205,10 +207,10 @@ describe("the strips", () => {
     await act(async () =>
       notice?.({ kind: "updateWaiting", id: "a.b", name: "Acme", version: "2" }),
     );
-    expect(await screen.findByText(/Acme has an update/)).toBeTruthy();
+    expect(await screen.findByText(/“Acme” has an update/)).toBeTruthy();
     modsSafetyStatus.mockResolvedValue(safety());
     await act(async () => changed?.({ cause: "updated" }));
-    await waitFor(() => expect(screen.queryByText(/Acme has an update/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/“Acme” has an update/)).toBeNull());
   });
 
   it("says when it can't read the status, and offers Try again", async () => {
@@ -228,7 +230,7 @@ describe("back on", () => {
     modsSafetyStatus.mockResolvedValueOnce(withNotices([resumed])).mockResolvedValue(safety());
     dismissModResumed.mockResolvedValue(undefined);
     draw();
-    expect(await screen.findByText("Acme is back on, fixed in version 1.0.1.")).toBeTruthy();
+    expect(await screen.findByText("“Acme” is back on, fixed in version 1.0.1.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(dismissModResumed).toHaveBeenCalledWith("a.b"));
     await waitFor(() => expect(screen.queryByText(/is back on/)).toBeNull());
@@ -289,7 +291,7 @@ describe("a damaged or unreadable record", () => {
     expect(resetSafetyRecord).not.toHaveBeenCalled();
     const dialog = screen.getByRole("dialog", { name: "Reset the safety list?" });
     expect(dialog.textContent).toContain(
-      "forgets which list was newest and which keys were cancelled",
+      "forgets which list was newest and which maker keys were switched off",
     );
     expect(dialog.textContent).toContain("Your mods and their data are not touched");
     // Cancel leaves it as it was.
@@ -380,7 +382,7 @@ describe("a damaged or unreadable record", () => {
     const dialog = screen.getByRole("dialog", { name: "Reset the safety list?" });
     expect(dialog.textContent).toContain("Yours can't be read right now");
     expect(dialog.textContent).toContain(
-      "forgets which list was newest and which keys were cancelled",
+      "forgets which list was newest and which maker keys were switched off",
     );
   });
 
@@ -417,5 +419,94 @@ describe("a damaged or unreadable record", () => {
     draw();
     expect(await screen.findByText("The record is damaged.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reset the safety list" })).toBeTruthy();
+  });
+});
+
+// A mod paused or removed has to be told wherever the person is: PM sends no OS notification, and a
+// mod with no tab of its own has nowhere else to say it. App draws these on every tab but the Mods tab
+// (which draws them itself), and Settings draws its own copy because its scrim covers App's.
+describe("the strips outside the Mods tab", () => {
+  const removed = withNotices([
+    { kind: "removed", id: "a.b", name: "Acme", version: "1", reason: "Steals notes." },
+  ]);
+  const paused = withNotices([
+    { kind: "paused", id: "a.b", name: "Acme", version: "1", reason: "Bad", fixedIn: null },
+  ]);
+  const onOpenMods = vi.fn();
+
+  it("draws a paused mod's strip on another tab, with the way to its row", async () => {
+    modsSafetyStatus.mockResolvedValue(paused);
+    render(<ModsAppStrips view="focus" onOpenMods={onOpenMods} />);
+    expect(await screen.findByText(/“Acme” is paused while we fix a problem: Bad/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open the Mods tab" }));
+    expect(onOpenMods).toHaveBeenCalledTimes(1);
+  });
+
+  it("says where the row is without saying 'below', since nothing is below it", async () => {
+    modsSafetyStatus.mockResolvedValue(removed);
+    render(<ModsAppStrips view="calendar" onOpenMods={onOpenMods} />);
+    const text = (await screen.findByText(/was removed by PM's safety list/)).textContent!;
+    expect(text).toContain("use Uninstall on its row in the Mods tab.");
+    expect(text).not.toContain("below");
+  });
+
+  it("is a full-width strip, not a box", async () => {
+    modsSafetyStatus.mockResolvedValue(paused);
+    render(<ModsAppStrips view="focus" onOpenMods={onOpenMods} />);
+    const strip = (await screen.findByText(/is paused while we fix/)).closest("[role='status']")!;
+    expect(strip.className).toContain("border-b");
+    expect(strip.className).not.toContain("rounded");
+  });
+
+  it("draws nothing on the Mods tab, which draws the same notices itself", async () => {
+    modsSafetyStatus.mockResolvedValue(paused);
+    const { container } = render(<ModsAppStrips view="mods" onOpenMods={onOpenMods} />);
+    await act(async () => {});
+    expect(modsSafetyStatus).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("");
+  });
+
+  it("keeps the Mods tab's own 'its row below' wording", async () => {
+    modsSafetyStatus.mockResolvedValue(removed);
+    draw();
+    const text = (await screen.findByText(/was removed by PM's safety list/)).textContent!;
+    expect(text).toContain("use Uninstall on its row below.");
+  });
+
+  it("leaves out the quiet lines: 'never checked yet' and a failed read of the notices", async () => {
+    modsSafetyStatus.mockResolvedValue(
+      safety({
+        checked: { kind: "never", at: null, text: "PM hasn't checked the safety list yet." },
+      }),
+    );
+    const first = render(<ModsAppStrips view="focus" onOpenMods={onOpenMods} />);
+    await act(async () => {});
+    expect(first.container.textContent).toBe("");
+    first.unmount();
+    modsSafetyStatus.mockRejectedValue(new Error("no store"));
+    const second = render(<ModsAppStrips view="focus" onOpenMods={onOpenMods} />);
+    await act(async () => {});
+    expect(second.container.textContent).toBe("");
+  });
+
+  it("says a safety list not checked for over 30 days on every tab", async () => {
+    modsSafetyStatus.mockResolvedValue(
+      safety({
+        checked: {
+          kind: "stale",
+          at: "2026-09-01T00:00:00Z",
+          text: "Not checked since 01-09-2026.",
+        },
+      }),
+    );
+    render(<ModsAppStrips view="chat" onOpenMods={onOpenMods} />);
+    expect(await screen.findByText("Not checked since 01-09-2026.")).toBeTruthy();
+  });
+
+  it("has no Open button inside Settings, where there is no way to the Mods tab behind the scrim", async () => {
+    modsSafetyStatus.mockResolvedValue(removed);
+    render(<ModsStrips variant="app" />);
+    await screen.findByText(/was removed by PM's safety list/);
+    expect(screen.queryByRole("button", { name: "Open the Mods tab" })).toBeNull();
   });
 });

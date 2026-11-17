@@ -281,7 +281,7 @@ describe("Uninstall", () => {
     await waitFor(() => expect(screen.queryByText("Acme Tool")).toBeNull());
     expect(listStorageComponents).toHaveBeenCalledTimes(2);
     // Said here, where the Mods tab's notes aren't on screen.
-    expect(modsSection().getByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(modsSection().getByText("“Acme Tool” was uninstalled.")).toBeTruthy();
     expect(localStorage.getItem("pm.fold.mods.mod.acme.tool")).toBeNull();
   });
 
@@ -402,7 +402,7 @@ describe("Remove all mods", () => {
     listStorageComponents.mockResolvedValue(report(tool));
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove all mods" }));
     const note = await modsSection().findByText(/Removed 1 mod\./);
-    expect(note.textContent).toContain("Acme Tool stayed: PM's data isn't open right now.");
+    expect(note.textContent).toContain("“Acme Tool” stayed: PM's data isn't open right now.");
     expect(uninstallMod).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText("Acme Tool").length).toBeGreaterThan(0);
   });
@@ -414,7 +414,7 @@ describe("Remove all mods", () => {
     listStorageComponents.mockResolvedValue(report());
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove all mods" }));
     const note = await modsSection().findByText(/Removed 2 mods\./);
-    expect(note.textContent).toContain("PM couldn't delete all the files of Beta");
+    expect(note.textContent).toContain("PM couldn't delete all the files of “Beta”");
   });
 
   it("can't be started twice, and the per-mod buttons wait while it runs", async () => {

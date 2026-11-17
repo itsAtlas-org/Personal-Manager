@@ -170,3 +170,9 @@ export const LRI = String.fromCharCode(0x2066);
 export const LINE_BREAK = "\n";
 export const LINE_SEP = String.fromCharCode(0x2028);
 export const ZERO_WIDTH = String.fromCharCode(0x200b);
+// Combining marks: one above a letter (grave), one below it (dot), and the acute and circumflex a
+// real name carries. A name of one letter and dozens of these stacks tens of ems up and down.
+export const MARK_ABOVE = String.fromCharCode(0x300);
+export const ACUTE = String.fromCharCode(0x301);
+export const CIRCUMFLEX = String.fromCharCode(0x302);
+export const MARK_BELOW = String.fromCharCode(0x323);

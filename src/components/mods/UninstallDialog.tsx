@@ -15,8 +15,10 @@ import { useEffect, useState } from "react";
 import { uninstallPreview } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
 import { clearModError, useModActions } from "../../lib/modActions";
+import { useModRows } from "../../lib/modRows";
 import { failureText, type UninstallPreview } from "../../lib/modsTypes";
 import { Button, Callout, Dialog } from "../ui";
+import { ModName } from "./ModName";
 import { modText } from "./modText";
 import { uninstallAction } from "./uninstallActions";
 import { plural, uninstallNote } from "./uninstallNote";
@@ -59,6 +61,10 @@ export function UninstallDialog({
 
   const working = busy.has(modId);
   const error = errors.get(modId) ?? null;
+  // The row's sentence says why the safety list removed it; the preview carries no reason.
+  const { rows } = useModRows();
+  const row = rows.find((r) => r.id === modId);
+  const reason = row?.state.kind === "removed-by-safety-list" ? modText(row.state.text) : "";
 
   if (!preview) {
     return (
@@ -109,7 +115,11 @@ export function UninstallDialog({
     <Dialog
       open
       tone="danger"
-      title={`Uninstall ${modText(preview.name)}?`}
+      title={
+        <>
+          Uninstall <ModName name={preview.name} />?
+        </>
+      }
       helpId="mods-uninstall"
       onClose={working ? () => {} : onClose}
       widthClassName="max-w-md"
@@ -126,10 +136,15 @@ export function UninstallDialog({
     >
       <div className="mt-2 space-y-3 text-sm leading-relaxed text-ink2">
         {preview.removedBySafetyList && (
-          <p>
-            PM&apos;s safety list switched this mod off. What it saved and what it made are still
-            here until you remove them.
-          </p>
+          <div className="space-y-1">
+            <p>
+              PM&apos;s safety list switched this mod off. What it saved and what it made are still
+              here until you remove them.
+            </p>
+            {/* Why, in the backend's own sentence from the row (this dialog is also opened from
+                Settings, where no strip or row says it). */}
+            {reason && <p className="break-words text-ink3">{reason}</p>}
+          </div>
         )}
         <div>
           <p className="font-medium text-ink">What goes</p>

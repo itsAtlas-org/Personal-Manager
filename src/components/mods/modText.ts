@@ -6,11 +6,11 @@
 // override in a name reorders what follows it, so a mod can be made to read as something it isn't, and
 // a line break lets a "reason" pose as a separate PM sentence. Control, format (which includes the
 // bidirectional controls and zero-width characters) and line/paragraph separators become spaces, runs
-// of spaces collapse, and the ends are trimmed. The sidebar cleans a mod's tab name the same way
-// (lib/nav.ts).
+// of spaces collapse, and the ends are trimmed. A run of combining marks is cut short too (a name of
+// one letter and thirty-nine accents would stack over the badges beside it). The rule is
+// lib/modTextClean; the sidebar cleans a mod's tab name the same way (lib/nav.ts).
+//
+// `quoteName` is for a name inside one of PM's own sentences or titles: quoted, so it can't pose as
+// the words around it.
 
-const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
-
-export function modText(text: string): string {
-  return text.replace(INVISIBLE, " ").replace(/ {2,}/g, " ").trim();
-}
+export { plainLine as modText, quoteName } from "../../lib/modTextClean";

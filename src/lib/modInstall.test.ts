@@ -5,7 +5,7 @@
 // The install flows of the Mods tab outside any view: which command a file goes to (the signed screen,
 // or, after the backend's `unsigned`, developer mode asked and the stark screen), what is staged with
 // a way to start again, what the person is told when a step refuses, and the finish that marks a
-// screen out of date only when the backend says so.
+// screen spent on ANY failure (the backend takes its single-use token first).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -302,17 +302,37 @@ describe("finishing an install", () => {
     await q;
   });
 
-  it("marks the screen out of date only when the backend says it expired", async () => {
+  it("a late answer marks the screen out of date, with nothing to add to it", async () => {
     setModScreen(signed.id, signed);
-    installModConsented.mockRejectedValueOnce({ code: "refused", message: "No." });
-    await finishInstall(signed, "Acme", {});
-    expect(getSnapshotForTest().expired.has("acme.signed")).toBe(false);
     installModConsented.mockRejectedValueOnce({ code: "consent-expired", message: "Old." });
     await finishInstall(signed, "Acme", {});
-    expect(getSnapshotForTest().expired.has("acme.signed")).toBe(true);
+    expect(getSnapshotForTest().expired.get("acme.signed")).toBeNull();
     // A fresh screen for the same mod is not expired.
     setModScreen(signed.id, { ...signed, token: "tok-2" });
     expect(getSnapshotForTest().expired.has("acme.signed")).toBe(false);
+  });
+
+  it("any other failure spends the token too, and the screen keeps the real sentence", async () => {
+    // The backend takes the single-use token before it checks anything, so a refusal (a full disk, a
+    // grant it won't give, developer mode switched off meanwhile) leaves a screen whose button could
+    // only ever answer "ran out of time". It is marked spent, carrying why.
+    setModScreen(signed.id, signed);
+    installModConsented.mockRejectedValueOnce({
+      code: "refused",
+      message: "This mod wasn't installed: the disk is full.",
+    });
+    const r = await finishInstall(signed, "Acme", {});
+    expect(r).toEqual({ ok: false, error: "This mod wasn't installed: the disk is full." });
+    expect(getSnapshotForTest().expired.get("acme.signed")).toBe(
+      "This mod wasn't installed: the disk is full.",
+    );
+  });
+
+  it("a failure that isn't a typed refusal is spent too, with PM's fallback sentence", async () => {
+    setModScreen(signed.id, signed);
+    installModConsented.mockRejectedValueOnce(new Error("channel closed"));
+    await finishInstall(signed, "Acme", {});
+    expect(getSnapshotForTest().expired.get("acme.signed")).toBe("channel closed");
   });
 
   it("says when the answers could not be saved, using the cleaned name it was given", async () => {
@@ -324,8 +344,9 @@ describe("finishing an install", () => {
     await finishInstall(signed, "Clean Name", {});
     const note = getSnapshotForTest().notes[0];
     expect(note.tone).toBe("warning");
+    // The name sits in PM's own sentence, so it is quoted.
     expect(note.text).toContain(
-      "Clean Name was installed, but PM couldn't save your answers: Busy.",
+      "“Clean Name” was installed, but PM couldn't save your answers: Busy.",
     );
   });
 });

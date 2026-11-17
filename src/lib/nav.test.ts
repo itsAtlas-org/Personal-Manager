@@ -9,6 +9,7 @@
 // whose capability is off or hide one that must always be there.
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { ACUTE, MARK_ABOVE } from "../components/mods/modFixtures";
 import type { MenuItem } from "./contextMenu";
 import { HELP } from "./help";
 import {
@@ -304,6 +305,13 @@ describe("mods' own tabs", () => {
     expect(modTabLabel(emoji, "n")).toBe(emoji);
   });
 
+  it("cuts a run of stacked combining marks, which would paint over the row beside the tab", () => {
+    const stacked = `A${MARK_ABOVE.repeat(39)}`;
+    expect(modTabLabel(stacked, "n")).toBe(`A${MARK_ABOVE.repeat(3)}`);
+    // Ordinary accents, and a letter with a few of them, are left alone.
+    expect(modTabLabel(`e${ACUTE}cole`, "n")).toBe(`e${ACUTE}cole`);
+  });
+
   it("keeps a hidden mod tab reachable, and drops one that is gone", () => {
     const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
     const hidden = resolveNav(entries, { hidden: ["mod:acme.tool"], pinned: [] }, STANDARD);
@@ -340,6 +348,26 @@ describe("navMenuItems", () => {
       "Hide",
       "—",
       "Show Map",
+    ]);
+  });
+
+  it("quotes and marks a mod's tab, so a name like PM's own can't pass for it", () => {
+    // A mod may call its tab "Settings" or "Review"; the item then acts on the mod's tab, not PM's.
+    const entries = [
+      ...CORE_NAV,
+      ...modNavEntries([{ id: "acme.tool", name: "x", navTab: "Review" }]),
+    ];
+    // Pin and Hide act on the tab under the pointer and name nothing; Show names what comes back.
+    const items = navMenuItems("mod:acme.tool", entries, NONE, STANDARD, () => {});
+    expect(labels(items)).toEqual(["Pin to the top", "Hide"]);
+    const hidden = { hidden: ["mod:acme.tool"], pinned: [] };
+    expect(labels(navMenuItems(null, entries, hidden, STANDARD, () => {}))).toContain(
+      "Show “Review” (mod)",
+    );
+    // PM's own tabs are named as they always were.
+    expect(labels(navMenuItems("review", entries, NONE, STANDARD, () => {}))).toEqual([
+      "Pin Review and Teach to the top",
+      "Hide Review and Teach",
     ]);
   });
 

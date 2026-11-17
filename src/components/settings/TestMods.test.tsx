@@ -132,7 +132,9 @@ describe("choosing a folder", () => {
     expect(openDialog).toHaveBeenCalledWith({ directory: true, multiple: false });
     const dialog = await screen.findByRole("dialog");
     expect(loadTestMod).toHaveBeenCalledWith(FOLDER);
-    expect(within(dialog).getByText("Load Acme Tool as a test mod?")).toBeTruthy();
+    expect(
+      within(dialog).getByRole("heading", { name: "Load “Acme Tool” as a test mod?" }),
+    ).toBeTruthy();
     // Which folder, and that it is read where it is and lasts until PM restarts.
     expect(
       within(dialog).getByText(/PM reads the folder \/home\/dev\/acme-tool where it is/),
@@ -250,7 +252,9 @@ describe("a screen that ran out of time", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start again" }));
     await waitFor(() => expect(loadTestMod).toHaveBeenCalledTimes(2));
     expect(loadTestMod).toHaveBeenLastCalledWith(FOLDER);
-    expect(await screen.findByText("Load Acme Tool as a test mod?")).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Load “Acme Tool” as a test mod?" }),
+    ).toBeTruthy();
   });
 });
 
@@ -487,7 +491,9 @@ describe("a folder's screen is this section's, not the Mods tab's", () => {
   it("draws a folder screen staged from anywhere", async () => {
     render(view());
     act(() => setModScreen("acme.tool", folderScreen()));
-    expect(await screen.findByText("Load Acme Tool as a test mod?")).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Load “Acme Tool” as a test mod?" }),
+    ).toBeTruthy();
   });
 
   it("does not draw a file's screen", async () => {

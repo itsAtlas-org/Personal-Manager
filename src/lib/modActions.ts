@@ -19,8 +19,13 @@
 //            and a stale one is answered by the backend's own `consent-expired`.
 //   restarts how to get a fresh screen for a staged one (read the file again, download again), so
 //            an expired screen can offer "Start again" instead of a dead end.
-//   expired  the staged screens the backend has said are out of date (nothing more can be done with
-//            their token).
+//   expired  the staged screens whose token is spent (nothing more can be done with it): the backend
+//            said it ran out of time (value null), or an install attempt failed (value: its sentence).
+//            The backend takes the token before it does anything else, so a failed finish spends it
+//            as surely as a late one, and a second press could only ever answer "ran out of time".
+//
+// A lock or a vault switch replaces the view tree but not this module, so `forgetVaultState` drops what
+// belongs to the vault that went away (notes, staged screens, refusals), keeping the work in flight.
 //
 // `run` follows its action to the end whether or not anything is mounted: the follow-up (pruning an
 // uninstalled mod's tab and folds, reading the rows again) is part of the action, not of a component.
@@ -42,7 +47,7 @@ export interface ModActionsSnapshot {
   notes: readonly ModNote[];
   screens: ReadonlyMap<string, ConsentScreen>;
   restarts: ReadonlyMap<string, ScreenRestart>;
-  expired: ReadonlySet<string>;
+  expired: ReadonlyMap<string, string | null>;
 }
 
 /** Asks the backend for a fresh consent screen for the same thing (the file read again, the mod
@@ -55,7 +60,7 @@ const EMPTY: ModActionsSnapshot = {
   notes: [],
   screens: new Map(),
   restarts: new Map(),
-  expired: new Set(),
+  expired: new Map(),
 };
 let snapshot: ModActionsSnapshot = EMPTY;
 let nextNote = 1;
@@ -131,7 +136,8 @@ export function setModScreen(
   screen: ConsentScreen | null,
   restart?: ScreenRestart,
 ): void {
-  const expired = new Set(snapshot.expired);
+  // A new screen is never spent.
+  const expired = new Map(snapshot.expired);
   expired.delete(modId);
   publish({
     screens: withKey(snapshot.screens, modId, screen),
@@ -140,10 +146,24 @@ export function setModScreen(
   });
 }
 
-/** The backend said the staged screen for `modId` is out of date: its token can't be used again. */
-export function markScreenExpired(modId: string): void {
+/** The staged screen for `modId` can't be used again: the backend said it ran out of time (`because`
+ *  null), or finishing the install failed for `because`, which the screen then says. */
+export function markScreenExpired(modId: string, because: string | null = null): void {
   if (!snapshot.screens.has(modId) || snapshot.expired.has(modId)) return;
-  publish({ expired: new Set(snapshot.expired).add(modId) });
+  publish({ expired: new Map(snapshot.expired).set(modId, because) });
+}
+
+/** A lock or a vault switch: what the Mods tab remembered about the vault that went away is dropped,
+ *  so the next one doesn't show its notes, its staged install screens (whose tokens died with it) or
+ *  its refusals. Work still in flight stays (`busy`): it finishes, and its follow-up is its own. */
+export function forgetVaultState(): void {
+  publish({
+    errors: new Map(),
+    notes: [],
+    screens: new Map(),
+    restarts: new Map(),
+    expired: new Map(),
+  });
 }
 
 function subscribe(listener: () => void): () => void {

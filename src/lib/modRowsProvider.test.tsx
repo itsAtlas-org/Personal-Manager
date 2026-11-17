@@ -8,6 +8,14 @@
 
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { consentScreen } from "../components/mods/modFixtures";
+import {
+  addModNote,
+  currentModActions,
+  resetModActions,
+  runModAction,
+  setModScreen,
+} from "./modActions";
 import type { ModInfo, ModsChanged } from "./modsTypes";
 
 const listMods = vi.fn();
@@ -62,8 +70,12 @@ beforeEach(() => {
   changed = null;
   listMods.mockReset();
   unlisten.mockReset();
+  resetModActions();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  resetModActions();
+});
 
 describe("ModRowsProvider", () => {
   it("has no answer yet, then reads the rows on mount", async () => {
@@ -99,10 +111,41 @@ describe("ModRowsProvider", () => {
       .mockRejectedValueOnce({ code: "locked", message: "PM is locked." })
       .mockResolvedValueOnce([row("acme.a"), row("acme.c")]);
     await mount();
-    await act(async () => changed?.({ cause: "loaded" }));
+    await act(async () => changed?.({ cause: "paused" }));
     expect(state()).toBe("loaded|acme.a|PM is locked.");
-    await act(async () => changed?.({ cause: "loaded" }));
+    await act(async () => changed?.({ cause: "paused" }));
     expect(state()).toBe("loaded|acme.a,acme.c|");
+  });
+
+  it("a store that opens drops the old vault's rows even when the first read of the new one fails", async () => {
+    // The provider sits above the tree a lock or a vault switch replaces, so it is what would keep
+    // vault A's mods (and their sidebar tabs) showing in vault B.
+    listMods
+      .mockResolvedValueOnce([row("acme.a")])
+      .mockRejectedValueOnce({ code: "locked", message: "PM is locked." });
+    await mount();
+    await act(async () => changed?.({ cause: "loaded" }));
+    expect(state()).toBe("not loaded||PM is locked.");
+  });
+
+  it("a store that opens or is restored over forgets the old vault's notes, staged screens and refusals, and keeps work in flight", async () => {
+    listMods.mockResolvedValue([row("acme.a")]);
+    await mount();
+    addModNote("info", "“X” was uninstalled.");
+    setModScreen("acme.x", consentScreen({ id: "acme.x" }));
+    void runModAction("acme.y", "Pausing", "No.", () => new Promise(() => {}));
+    await act(async () => changed?.({ cause: "installed" }));
+    expect(currentModActions().notes).toHaveLength(1);
+    expect(currentModActions().screens.size).toBe(1);
+    await act(async () => changed?.({ cause: "loaded" }));
+    expect(currentModActions().notes).toHaveLength(0);
+    expect(currentModActions().screens.size).toBe(0);
+    expect(currentModActions().busy.has("acme.y")).toBe(true);
+    addModNote("info", "again");
+    setModScreen("acme.x", consentScreen({ id: "acme.x" }));
+    await act(async () => changed?.({ cause: "recovered" }));
+    expect(currentModActions().notes).toHaveLength(0);
+    expect(currentModActions().screens.size).toBe(0);
   });
 
   it("is not loaded while the first read has failed, and says why", async () => {

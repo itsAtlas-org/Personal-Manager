@@ -16,7 +16,7 @@ import { uninstallMod } from "../../lib/ipc";
 import { addModNote, runModAction, type ModActionResult } from "../../lib/modActions";
 import { pruneAfterUninstall } from "../../lib/modFolds";
 import type { ModUninstalled } from "../../lib/modsTypes";
-import { modText } from "./modText";
+import { modText, quoteName } from "./modText";
 import { plural, uninstallNote } from "./uninstallNote";
 
 /** The busy/error key of "Remove all mods". */
@@ -61,10 +61,10 @@ export interface RemoveAllResult {
 export function removeAllNote(r: RemoveAllResult): { warning: boolean; text: string } {
   const parts: string[] = [];
   if (r.removed.length > 0) parts.push(`Removed ${plural(r.removed.length, "mod", "mods")}.`);
-  for (const f of r.failed) parts.push(`${f.name} stayed: ${f.error}`);
+  for (const f of r.failed) parts.push(`${quoteName(f.name)} stayed: ${f.error}`);
   if (r.filesLeft.length > 0) {
     parts.push(
-      `PM couldn't delete all the files of ${r.filesLeft.join(", ")}, and will clear them out itself later.`,
+      `PM couldn't delete all the files of ${r.filesLeft.map(quoteName).join(", ")}, and will clear them out itself later.`,
     );
   }
   if (parts.length === 0) parts.push("There were no mods to remove.");

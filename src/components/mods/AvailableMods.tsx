@@ -99,7 +99,9 @@ function Entry({
           <ModIconView modId={entry.id} version={entry.version} name={name} hasIcon={false} />
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h3 className="break-words font-head text-sm font-semibold text-ink">{name}</h3>
+              <h3 className="overflow-hidden break-words font-head text-sm font-semibold text-ink">
+                {name}
+              </h3>
               <span className="text-xs text-ink3">version {modText(entry.version)}</span>
             </div>
             <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink3">

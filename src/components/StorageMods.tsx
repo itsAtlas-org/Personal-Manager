@@ -91,7 +91,10 @@ export function StorageMods({
                 >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2">
-                      <span className="break-words text-sm text-ink2">{name}</span>
+                      {/* Clipped to its own box: a name of stacked accents can't paint over its row. */}
+                      <span className="inline-block max-w-full overflow-hidden break-words align-bottom text-sm text-ink2">
+                        {name}
+                      </span>
                       <span className="shrink-0 font-mono text-xs text-ink4">{modSize(m)}</span>
                       <span className="shrink-0 font-mono text-xs text-ink4">
                         {modText(m.version)}
@@ -177,7 +180,7 @@ export function StorageMods({
           </p>
           <ul className="max-h-40 list-disc overflow-y-auto pl-5">
             {mods.map((m) => (
-              <li key={m.id} className="break-words">
+              <li key={m.id} className="overflow-hidden break-words">
                 {modText(m.name) || m.id}
               </li>
             ))}

@@ -115,7 +115,7 @@ describe("first open", () => {
       }),
     );
     draw([]);
-    expect(await screen.findByText(/Acme was removed by PM's safety list/)).toBeTruthy();
+    expect(await screen.findByText(/“Acme” was removed by PM's safety list/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Before you use mods" })).toBeTruthy();
   });
 
@@ -207,7 +207,9 @@ describe("refreshing on mods://changed", () => {
       }),
     );
     await act(async () => notice({ kind: "resumed", id: "x", name: "x", version: "1" }));
-    expect(await screen.findByText(/Acme Tool is paused while we fix a problem: Bad/)).toBeTruthy();
+    expect(
+      await screen.findByText(/“Acme Tool” is paused while we fix a problem: Bad/),
+    ).toBeTruthy();
   });
 });
 
@@ -224,8 +226,8 @@ describe("turning on a mod PM installed", () => {
 
   it("Review and turn on opens the first-open screen in a dialog, even for a mod with no tab", async () => {
     draw([{ ...waiting(), navTab: null }]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on" }));
-    const dialog = screen.getByRole("dialog", { name: "Turn on Acme Tool?" });
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
+    const dialog = screen.getByRole("dialog", { name: "Turn on “Acme Tool”?" });
     expect(dialog.textContent).toContain("About mods");
     expect(dialog.textContent).toContain("What this mod asks to do");
     expect(consentMod).not.toHaveBeenCalled();
@@ -234,7 +236,7 @@ describe("turning on a mod PM installed", () => {
   it("Turn on sends an answer for each install-time permission, reads the rows, and closes", async () => {
     consentMod.mockResolvedValue({ state: "active", reason: null, serving: true });
     const { rerender } = draw([waiting()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
     const dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByRole("checkbox", { name: /Allow: Ask an AI model/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Turn on" }));
@@ -250,7 +252,7 @@ describe("turning on a mod PM installed", () => {
 
   it("Not now closes it without turning anything on", async () => {
     draw([waiting()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(consentMod).not.toHaveBeenCalled();
@@ -258,16 +260,50 @@ describe("turning on a mod PM installed", () => {
 
   it("closes by itself when the row stops waiting (turned on elsewhere)", async () => {
     const { rerender } = draw([waiting()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
     expect(screen.getByRole("dialog")).toBeTruthy();
     rerender(view([mod()]));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("stays open while Turning on is in flight, so a refusal that arrives is seen, not lost", async () => {
+    // Closing the dialog would put the refusal on a screen nobody is looking at, and the row would
+    // go on saying "Waiting for you" with nothing to say why.
+    let refuse!: (e: unknown) => void;
+    consentMod.mockReturnValue(
+      new Promise((_, reject) => {
+        refuse = reject;
+      }),
+    );
+    draw([waiting()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Turn on" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("button", { name: "Turning on…" })).toBeTruthy(),
+    );
+    // Escape, the scrim and Not now all leave it be.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    const notNow = within(dialog).getByRole("button", { name: "Not now" }) as HTMLButtonElement;
+    expect(notNow.disabled).toBe(true);
+    fireEvent.click(notNow);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    // The refusal lands in the dialog, once, and the dialog can be closed again.
+    await act(async () => refuse({ code: "grant-refused", message: "PM couldn't turn that on." }));
+    expect(await within(dialog).findByText("PM couldn't turn that on.")).toBeTruthy();
+    expect(screen.getAllByText("PM couldn't turn that on.")).toHaveLength(1);
+    expect(
+      (within(dialog).getByRole("button", { name: "Not now" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("says the backend's refusal in the dialog and lets the person try again", async () => {
     consentMod.mockRejectedValue({ code: "locked", message: "PM is locked." });
     draw([waiting()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review and turn on Acme Tool" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Turn on" }));
     expect(await screen.findByText("PM is locked.")).toBeTruthy();
     expect(
@@ -300,9 +336,9 @@ describe("approving an update", () => {
   it("Review update shows the widening consent the backend returned", async () => {
     approveUpdate.mockResolvedValue(screenFor());
     draw([waitingUpdate()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review update for Acme Tool" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Update Acme Tool to version 1.3.0?",
+      name: "Update “Acme Tool” to version 1.3.0?",
     });
     expect(dialog.textContent).toContain("This update asks for more than you allowed before:");
     expect(dialog.textContent).toContain(
@@ -313,12 +349,12 @@ describe("approving an update", () => {
   it("the staged screen waits for the person when the view goes away and comes back", async () => {
     approveUpdate.mockResolvedValue(screenFor());
     const first = draw([waitingUpdate()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review update for Acme Tool" }));
     await screen.findByRole("dialog");
     first.unmount();
     draw([waitingUpdate()]);
     expect(
-      await screen.findByRole("dialog", { name: "Update Acme Tool to version 1.3.0?" }),
+      await screen.findByRole("dialog", { name: "Update “Acme Tool” to version 1.3.0?" }),
     ).toBeTruthy();
   });
 
@@ -330,7 +366,7 @@ describe("approving an update", () => {
       }),
     );
     const first = draw([waitingUpdate()]);
-    fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review update for Acme Tool" }));
     first.unmount();
     await act(async () => arrive(screenFor()));
     draw([waitingUpdate()]);
@@ -365,8 +401,8 @@ describe("uninstalling from a row", () => {
     draw([mod()]);
     const detailsToggle = await screen.findByRole("button", { name: /Details/ });
     fireEvent.click(detailsToggle);
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall…" }));
-    expect(await screen.findByRole("dialog", { name: "Uninstall Acme Tool?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
+    expect(await screen.findByRole("dialog", { name: "Uninstall “Acme Tool”?" })).toBeTruthy();
     expect(uninstallMod).not.toHaveBeenCalled();
   });
 
@@ -377,17 +413,17 @@ describe("uninstalling from a row", () => {
     writeFold("mods.mod.acme.tool:permissions", true);
     const first = draw([mod()]);
     fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
     fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
-    expect(await screen.findByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
     expect(readFold("mods.mod.acme.tool")).toBeNull();
     expect(readFold("mods.mod.acme.tool:permissions")).toBeNull();
     // Leave and come back: the note is still there, and Dismiss clears it.
     first.unmount();
     draw([]);
-    expect(await screen.findByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
     fireEvent.click(screen.getAllByRole("button", { name: "Dismiss" })[0]);
-    expect(screen.queryByText("Acme Tool was uninstalled.")).toBeNull();
+    expect(screen.queryByText("“Acme Tool” was uninstalled.")).toBeNull();
   });
 
   it("a view that comes back mid-uninstall sees the row busy and can't start another action", async () => {
@@ -400,19 +436,19 @@ describe("uninstalling from a row", () => {
     );
     const first = draw([mod()]);
     fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
     fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await screen.findByRole("button", { name: "Uninstalling…" });
     first.unmount();
     draw([mod()]);
     expect(await screen.findByText("Uninstalling…")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Pause" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    expect(
+      (screen.getByRole("button", { name: "Pause Acme Tool" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
     expect(pauseMod).not.toHaveBeenCalled();
     await act(async () => finish(gone));
-    expect(await screen.findByText("Acme Tool was uninstalled.")).toBeTruthy();
+    expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("Uninstalling…")).toBeNull());
   });
 });

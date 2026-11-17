@@ -18,8 +18,11 @@
 
 import { useState } from "react";
 import { consentMod } from "../../lib/ipc";
-import { failureText, type ModInfo } from "../../lib/modsTypes";
+import { runModAction, useModActions } from "../../lib/modActions";
+import { useModRows } from "../../lib/modRows";
+import type { ModInfo } from "../../lib/modsTypes";
 import { Button, Callout, Card } from "../ui";
+import { ModName } from "./ModName";
 import { modText } from "./modText";
 import { ModsDisclaimer } from "./ModsDisclaimer";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
@@ -40,23 +43,29 @@ export function ModFirstOpen({
   const [answers, setAnswers] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(asked.map((p) => [p.id, p.decision !== "denied"])),
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // In flight in the shared store (lib/modActions), keyed by the mod like its row's buttons: this
+  // screen, the Mods tab's row and its dialog all see one pending "Turning on", whichever of them
+  // was on screen when it was pressed, and none can send a second.
+  const { busy: inFlight, errors } = useModActions();
+  const { problem } = useModRows();
+  const busy = inFlight.has(mod.id);
+  const error = errors.get(mod.id) ?? null;
+  // The backend accepted the answers. If the rows then can't be read again this screen would sit on
+  // the old row, so it says so and offers the read, instead of a button that looks stuck.
+  const [saved, setSaved] = useState(false);
 
-  async function turnOn() {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
+  function turnOn() {
+    void runModAction(mod.id, "Turning on", "PM couldn't turn this mod on.", async () => {
       await consentMod(mod.id, answers);
-    } catch (e) {
-      setError(failureText(e, "PM couldn't turn this mod on."));
-      setBusy(false);
-      return;
-    }
-    // Stays busy: the row says "running" once it is read again, and this screen goes away with
-    // it. A second press in the gap would ask the backend to turn on what is already on.
-    await onTurnedOn();
+      setSaved(true);
+      // Part of the action, so the button stays off until the row says "running" (this screen goes
+      // away with it): a second press in the gap would turn on what is already on.
+      await onTurnedOn();
+    });
+  }
+
+  function readAgain() {
+    void runModAction(mod.id, "Reading the list again", "PM couldn't read the list.", onTurnedOn);
   }
 
   // Embedded (the Mods tab's row offers the same screen in a dialog, for a mod that has no tab of its
@@ -67,7 +76,7 @@ export function ModFirstOpen({
       <div className={titleId ? "space-y-5" : "mx-auto max-w-2xl space-y-5 px-6 py-6"}>
         <header className="space-y-1">
           <Heading id={titleId} className="break-words font-head text-lg font-semibold text-ink">
-            Turn on {modText(mod.name)}?
+            Turn on <ModName name={mod.name} />?
           </Heading>
           <p className="flex flex-wrap items-center gap-2 text-xs text-ink3">
             <TierBadge tier={mod.tier} />
@@ -147,9 +156,21 @@ export function ModFirstOpen({
         </section>
 
         {error && <Callout size="md">{error}</Callout>}
+        {saved && !busy && problem && (
+          <Callout size="md">
+            <p className="break-words">
+              PM turned it on, but couldn&apos;t read the list of mods again: {problem}
+            </p>
+            <div className="pt-1">
+              <Button variant="secondary" size="sm" onClick={readAgain}>
+                Read the list again
+              </Button>
+            </div>
+          </Callout>
+        )}
 
         <div className="flex items-center gap-3">
-          <Button variant="primary" onClick={() => void turnOn()} disabled={busy}>
+          <Button variant="primary" onClick={turnOn} disabled={busy || saved}>
             {busy ? "Turning on…" : "Turn on"}
           </Button>
           <p className="text-xs text-ink3">

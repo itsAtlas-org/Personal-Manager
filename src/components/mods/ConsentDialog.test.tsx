@@ -94,7 +94,7 @@ const update = (extra: Partial<ConsentScreen> = {}) =>
 describe("what it shows", () => {
   it("names the update and who made it, with the review for a second-party mod", () => {
     open(update());
-    const dialog = screen.getByRole("dialog", { name: "Update Acme Tool to version 1.3.0?" });
+    const dialog = screen.getByRole("dialog", { name: "Update “Acme Tool” to version 1.3.0?" });
     expect(dialog.textContent).toContain("Reviewed by Atlas");
     expect(dialog.textContent).toContain("Made by Acme · reviewed by Atlas at commit abcdef012345");
     expect(dialog.textContent).toContain("Does a thing.");
@@ -115,10 +115,10 @@ describe("what it shows", () => {
   it("says nothing about widening for a plain repair or install, whatever the screen carries", () => {
     open(update({ kind: "repair", widening: ["permission:ai"] }));
     expect(screen.queryByText(/asks for more than you allowed/)).toBeNull();
-    expect(screen.getByRole("dialog", { name: "Put Acme Tool back?" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Put “Acme Tool” back?" })).toBeTruthy();
     cleanup();
     open(consentScreen({ kind: "fresh", id: "acme.new" }));
-    expect(screen.getByRole("dialog", { name: "Install Acme Tool?" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Install “Acme Tool”?" })).toBeTruthy();
   });
 
   it("lists every permission in the order the backend gave, marks what is new, and shows the maker's reason", () => {
@@ -178,7 +178,7 @@ describe("what it shows", () => {
         widening: [`host:w${RLO}.example`],
       }),
     );
-    const dialog = screen.getByRole("dialog", { name: "Update Ac me to version 1.3.0?" });
+    const dialog = screen.getByRole("dialog", { name: "Update “Ac me” to version 1.3.0?" });
     expect(dialog.textContent).toContain("Made by Mal lory");
     expect(dialog.textContent).toContain("one PM says: fine");
     expect(dialog.textContent).toContain("Sites it may reach: h .example");
@@ -242,25 +242,54 @@ describe("answers and the button", () => {
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     expect(
       await screen.findByText(
-        /Acme Tool was updated, but PM couldn't save your answers: The store was busy\. Everything it asked for is off until you turn it on in the Mods tab\./,
+        /“Acme Tool” was updated, but PM couldn't save your answers: The store was busy\. Everything it asked for is off until you turn it on in the Mods tab\./,
       ),
     ).toBeTruthy();
   });
 
-  it("shows the backend's sentence when the install is refused, and keeps the screen to try again", async () => {
+  it("a refused install shows the backend's sentence and takes the button away: the single-use token is spent", async () => {
+    // The backend takes the token before it checks anything, so pressing the same button again could
+    // only answer "ran out of time" and blame the clock for what was a refusal.
     installModConsented.mockRejectedValue({
       code: "refused",
       message: "This mod wasn't installed: it is older than the one you have.",
     });
     open(update());
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
-    expect(
-      await screen.findByText("This mod wasn't installed: it is older than the one you have."),
-    ).toBeTruthy();
-    expect(screen.getByTestId("staged").textContent).toBe("acme.tool");
-    expect((screen.getByRole("button", { name: "Update" }) as HTMLButtonElement).disabled).toBe(
-      false,
+    const dialog = await screen.findByRole("dialog", { name: "This didn't go through" });
+    expect(dialog.textContent).toContain("Nothing was installed.");
+    expect(dialog.textContent).toContain(
+      "This mod wasn't installed: it is older than the one you have.",
     );
+    // It does not say the clock ran out, and offers no button that can't work.
+    expect(dialog.textContent).not.toContain("ten minutes");
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+    expect(installModConsented).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a refusal, Start again gets a fresh screen whose token is the one used", async () => {
+    installModConsented.mockRejectedValueOnce({ code: "refused", message: "The disk is full." });
+    const restart = vi.fn().mockResolvedValue(update({ token: "tok-3" }));
+    open(update(), restart);
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+    expect(await screen.findByRole("dialog", { name: /Update “Acme Tool”/ })).toBeTruthy();
+    installModConsented.mockResolvedValue(result());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await waitFor(() =>
+      expect(installModConsented).toHaveBeenLastCalledWith("tok-3", expect.any(Object), undefined),
+    );
+  });
+
+  it("quotes the mod's name in the title, so it can't fake the words around it", async () => {
+    open(update({ name: 'Calendar. Nothing was changed."' }));
+    // A double quote inside the name can't close the quote around it.
+    const dialog = screen.getByRole("dialog", {
+      name: "Update “Calendar. Nothing was changed.'” to version 1.3.0?",
+    });
+    // And the name is clipped to its own box, so what it is made of can't paint over the dialog.
+    const clipped = within(dialog).getByText("“Calendar. Nothing was changed.'”");
+    expect(clipped.className).toContain("overflow-hidden");
   });
 
   it("Cancel drops the screen and installs nothing", () => {
@@ -305,7 +334,7 @@ describe("the tiers of a signed screen", () => {
 
   it("first party: says who made it and lists what it asks, with no review line", () => {
     open(fresh({ tier: "first", author: "Atlas" }));
-    const dialog = screen.getByRole("dialog", { name: "Install Acme Tool?" });
+    const dialog = screen.getByRole("dialog", { name: "Install “Acme Tool”?" });
     expect(dialog.textContent).toContain("First party");
     expect(dialog.textContent).toContain("Made by Atlas");
     expect(dialog.textContent).not.toContain("reviewed by Atlas");
@@ -315,7 +344,7 @@ describe("the tiers of a signed screen", () => {
 
   it("second party: adds 'made by X, reviewed by Atlas at commit abc'", () => {
     open(fresh({ tier: "second", author: "Friend", commit: "0123456789abcdef0123" }));
-    const dialog = screen.getByRole("dialog", { name: "Install Acme Tool?" });
+    const dialog = screen.getByRole("dialog", { name: "Install “Acme Tool”?" });
     expect(dialog.textContent).toContain("Reviewed by Atlas");
     expect(dialog.textContent).toContain(
       "Made by Friend · reviewed by Atlas at commit 0123456789ab",
@@ -395,7 +424,7 @@ describe("a screen that ran out of time", () => {
     open(update(), restart);
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
-    expect(await screen.findByRole("dialog", { name: /Update Acme Tool/ })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: /Update “Acme Tool”/ })).toBeTruthy();
     expect(restart).toHaveBeenCalledTimes(1);
     installModConsented.mockResolvedValue(result());
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
@@ -426,7 +455,7 @@ describe("a screen that ran out of time", () => {
     open(update(), restart);
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
-    await screen.findByRole("dialog", { name: /Update Acme Tool/ });
+    await screen.findByRole("dialog", { name: /Update “Acme Tool”/ });
     expect(screen.getByTestId("staged").textContent).toBe("acme.other");
   });
 

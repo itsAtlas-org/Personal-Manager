@@ -42,7 +42,7 @@ describe("uninstalling one mod", () => {
     expect(r.ok).toBe(true);
     expect(uninstallMod).toHaveBeenCalledWith("acme.tool", true);
     expect(localStorage.getItem("pm.fold.mods.mod.acme.tool")).toBeNull();
-    expect(notes()).toEqual(["info: Acme Tool was uninstalled."]);
+    expect(notes()).toEqual(["info: “Acme Tool” was uninstalled."]);
   });
 
   it("says nothing when asked to be quiet, but still forgets the folds", async () => {
@@ -102,7 +102,7 @@ describe("the sentence after Remove all", () => {
       }),
     ).toEqual({
       warning: true,
-      text: "Removed 1 mod. B stayed: It is busy. PM couldn't delete all the files of A, and will clear them out itself later.",
+      text: "Removed 1 mod. “B” stayed: It is busy. PM couldn't delete all the files of “A”, and will clear them out itself later.",
     });
   });
 

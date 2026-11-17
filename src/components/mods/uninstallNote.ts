@@ -6,6 +6,7 @@
 // backend's).
 
 import type { ModUninstalled } from "../../lib/modsTypes";
+import { quoteName } from "./modText";
 
 export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -13,7 +14,7 @@ export function uninstallNote(
   name: string,
   done: ModUninstalled,
 ): { warning: boolean; text: string } {
-  const parts = [`${name} was uninstalled.`];
+  const parts = [`${quoteName(name)} was uninstalled.`];
   if (!done.filesRemoved) {
     parts.push("PM couldn't delete all of its files, and will clear them out itself later.");
   }

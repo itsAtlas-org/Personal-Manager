@@ -112,6 +112,19 @@ describe("the endpoints", () => {
     expect(within(events).getByText("documents.added")).toBeTruthy();
   });
 
+  it("puts each table in a named scroll region the keyboard can reach, so a hidden column isn't lost at a large text size", async () => {
+    devKitInfo.mockResolvedValue(devKit({ endpoints: [endpoint(), endpoint({ kind: "event" })] }));
+    render(<DeveloperKit on />);
+    const endpoints = section("sec-dev-endpoints");
+    fireEvent.click(await endpoints.findByRole("button", { name: /Calls a mod makes/ }));
+    const region = endpoints.getByRole("region", { name: "Calls a mod makes, scrollable" });
+    // A scroll container with nothing focusable inside can't be scrolled from the keyboard unless it
+    // is itself a tab stop.
+    expect(region.getAttribute("tabindex")).toBe("0");
+    expect(region.className).toContain("overflow-x-auto");
+    expect(within(region).getByRole("table", { name: "Calls a mod makes" })).toBeTruthy();
+  });
+
   it("starts folded, so a long table doesn't push the rest away", async () => {
     devKitInfo.mockResolvedValue(devKit());
     render(<DeveloperKit on />);

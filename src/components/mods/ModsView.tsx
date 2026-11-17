@@ -41,15 +41,19 @@ const TURN_ON_TITLE = "mods-turn-on-title";
 export function ModsView() {
   const { rows, loaded, problem, refresh } = useModRows();
   const { catalogue, problem: catalogueProblem, refresh: refreshCatalogue } = useCatalogue();
-  const { notes, screens } = useModActions();
+  const { notes, screens, busy } = useModActions();
   const [uninstallId, setUninstallId] = useState<string | null>(null);
   const [turnOnId, setTurnOnId] = useState<string | null>(null);
 
   const turnOn = rows.find((r) => r.id === turnOnId && r.state.kind === "waiting-for-you");
+  // While "Turning on" is in flight the dialog stays: closing it would hide a refusal that arrives
+  // after (the row would just go on saying "Waiting for you" with nothing to say why).
+  const turningOn = turnOn !== undefined && busy.has(turnOn.id);
+  const closeTurnOn = turningOn ? () => {} : () => setTurnOnId(null);
   // A test folder's screen is Settings → Developer's (lib/modInstall `isFolderScreen`).
   const staged = [...screens.values()].find((s) => !isFolderScreen(s));
   // A dialog for a mod says its refusals itself, so its row doesn't repeat them.
-  const dialogFor = uninstallId ?? staged?.id ?? null;
+  const dialogFor = uninstallId ?? staged?.id ?? turnOn?.id ?? null;
 
   return (
     <div className="flex h-full flex-col">
@@ -164,12 +168,7 @@ export function ModsView() {
       )}
       {staged && <ConsentDialog key={staged.token} screen={staged} refresh={refresh} />}
       {turnOn && (
-        <Modal
-          open
-          onClose={() => setTurnOnId(null)}
-          labelledBy={TURN_ON_TITLE}
-          widthClassName="max-w-2xl"
-        >
+        <Modal open onClose={closeTurnOn} labelledBy={TURN_ON_TITLE} widthClassName="max-w-2xl">
           <div className="space-y-4 p-5">
             <ModFirstOpen
               mod={turnOn}
@@ -180,7 +179,7 @@ export function ModsView() {
               }}
             />
             <div className="flex justify-end">
-              <Button variant="tertiary" onClick={() => setTurnOnId(null)}>
+              <Button variant="tertiary" onClick={closeTurnOn} disabled={turningOn}>
                 Not now
               </Button>
             </div>

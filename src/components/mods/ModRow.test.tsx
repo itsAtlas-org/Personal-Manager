@@ -15,7 +15,7 @@ import { resetModActions, useModActions } from "../../lib/modActions";
 import { ModRowsContext } from "../../lib/modRows";
 import { NAV_PLACEMENT_KEY, parsePlacement, writeNavPlacement } from "../../lib/nav";
 import type { ModInfo } from "../../lib/modsTypes";
-import { consentScreen, LRI, mod, perm, RLO, standing } from "./modFixtures";
+import { consentScreen, LRI, MARK_ABOVE, mod, perm, RLO, standing } from "./modFixtures";
 
 const resumeMod = vi.fn();
 const pauseMod = vi.fn();
@@ -133,7 +133,7 @@ describe("what the row says", () => {
     ["files-missing", "Files missing"],
     ["files-changed", "Files changed"],
     ["record-unreadable", "Can't be read"],
-    ["api-unsupported", "Needs another PM"],
+    ["api-unsupported", "Doesn't work with this PM"],
     ["parked", "Parked"],
     ["installing", "Installing"],
     ["paused-other", "Paused"],
@@ -213,7 +213,7 @@ describe("what the row says", () => {
 describe("the one button for each standing", () => {
   it("waiting for you: Review and turn on opens the first-open screen", () => {
     draw(mod({ consented: false, state: standing("waiting-for-you", { fix: "turn-on" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Review and turn on" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review and turn on Acme Tool" }));
     expect(onTurnOn).toHaveBeenCalledWith("acme.tool");
     expect(pauseMod).not.toHaveBeenCalled();
   });
@@ -221,7 +221,7 @@ describe("the one button for each standing", () => {
   it("paused by you: Resume resumes, and the rows are read again", async () => {
     resumeMod.mockResolvedValue({ state: "active", reason: null, serving: true });
     draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume Acme Tool" }));
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     expect(resumeMod).toHaveBeenCalledWith("acme.tool");
   });
@@ -232,14 +232,14 @@ describe("the one button for each standing", () => {
       message: "PM's safety list still names this version.",
     });
     draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume Acme Tool" }));
     expect(await screen.findByText("PM's safety list still names this version.")).toBeTruthy();
     // The row was read again anyway: a refusal can change what the row says.
     expect(refresh).toHaveBeenCalled();
     // And the button is back for another try.
-    expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
+    expect(
+      (screen.getByRole("button", { name: "Resume Acme Tool" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText("PM's safety list still names this version.")).toBeNull();
   });
@@ -247,7 +247,7 @@ describe("the one button for each standing", () => {
   it("files changed: Repair repairs", async () => {
     repairMod.mockResolvedValue({ id: "acme.tool", version: "1.2.0", state: "active" });
     draw(mod({ state: standing("files-changed", { fix: "repair" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Repair" }));
+    fireEvent.click(screen.getByRole("button", { name: "Repair Acme Tool" }));
     await waitFor(() => expect(repairMod).toHaveBeenCalledWith("acme.tool"));
     await waitFor(() => expect(refresh).toHaveBeenCalled());
   });
@@ -258,7 +258,7 @@ describe("the one button for each standing", () => {
       message: "This mod came from a file, so PM can't fetch it again.",
     });
     draw(mod({ state: standing("files-changed", { fix: "repair" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Repair" }));
+    fireEvent.click(screen.getByRole("button", { name: "Repair Acme Tool" }));
     expect(
       await screen.findByText("This mod came from a file, so PM can't fetch it again."),
     ).toBeTruthy();
@@ -268,10 +268,10 @@ describe("the one button for each standing", () => {
     draw(
       mod({ state: standing("removed-by-safety-list", { fix: "uninstall", text: "Removed." }) }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
     expect(onUninstall).toHaveBeenCalledWith("acme.tool");
     // One Uninstall… on the row, not two: the one in Details is for a mod that has another fix.
-    expect(screen.getAllByRole("button", { name: "Uninstall…" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Uninstall Acme Tool" })).toHaveLength(1);
   });
 
   it("offers no button of its own where the fix is elsewhere", () => {
@@ -287,25 +287,25 @@ describe("the one button for each standing", () => {
   it("Pause is offered to a running mod only, and pauses it", async () => {
     pauseMod.mockResolvedValue(undefined);
     draw(mod());
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
     await waitFor(() => expect(pauseMod).toHaveBeenCalledWith("acme.tool"));
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     cleanup();
     draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
-    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pause Acme Tool" })).toBeNull();
   });
 
   it("Pause says why when it can't", async () => {
     pauseMod.mockRejectedValue({ code: "not-installed", message: "That mod isn't installed." });
     draw(mod());
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
     expect(await screen.findByText("That mod isn't installed.")).toBeTruthy();
   });
 
   it("a dialog for this mod says its own refusals, so the row doesn't say them twice", async () => {
     pauseMod.mockRejectedValue({ code: "refused", message: "Said once." });
     const view = draw(mod(), false);
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
     expect(await screen.findByText("Said once.")).toBeTruthy();
     view.rerender(<Row row={mod()} quiet />);
     expect(screen.queryByText("Said once.")).toBeNull();
@@ -316,17 +316,17 @@ describe("Show tab", () => {
   it("is offered for a mod tab the person hid, and brings it back", () => {
     writeNavPlacement({ hidden: ["mod:acme.tool"], pinned: [] });
     draw(mod());
-    fireEvent.click(screen.getByRole("button", { name: "Show tab" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show tab for Acme Tool" }));
     const placement = parsePlacement(localStorage.getItem(NAV_PLACEMENT_KEY));
     expect(placement.hidden).not.toContain("mod:acme.tool");
   });
 
   it("isn't offered for a tab that is showing, or a mod with no tab", () => {
     draw(mod());
-    expect(screen.queryByRole("button", { name: "Show tab" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show tab for Acme Tool" })).toBeNull();
     cleanup();
     draw(mod({ navTab: null }));
-    expect(screen.queryByRole("button", { name: "Show tab" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show tab for Acme Tool" })).toBeNull();
   });
 });
 
@@ -355,7 +355,7 @@ describe("an update waiting", () => {
     );
     expect(screen.getByText("Update waiting")).toBeTruthy();
     expect(screen.getByText("Version 1.3.0 asks for more than you allowed.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Review update" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review update for Acme Tool" }));
     await waitFor(() => expect(approveUpdate).toHaveBeenCalledWith("acme.tool"));
     // The screen is kept outside the row, so it survives the view going away.
     await waitFor(() => expect(seen[seen.length - 1].get("acme.tool")).toBe(screenFor));
@@ -364,14 +364,14 @@ describe("an update waiting", () => {
   it("says why the update can't be fetched", async () => {
     approveUpdate.mockRejectedValue({ code: "offline", message: "PM is offline." });
     draw(mod({ update: waiting }));
-    fireEvent.click(screen.getByRole("button", { name: "Review update" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review update for Acme Tool" }));
     expect(await screen.findByText("PM is offline.")).toBeTruthy();
   });
 
   it("an update that needs a newer PM has no button: PM itself must update first", () => {
     draw(mod({ update: { ...waiting, kind: "newer-pm", text: "Update PM to get 1.3.0." } }));
     expect(screen.getByText("Update PM to get 1.3.0.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Review update" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review update for Acme Tool" })).toBeNull();
   });
 });
 
@@ -423,7 +423,7 @@ describe("what the mod can do", () => {
     draw(mod({ permissions: rows, state: standing("paused-by-you", { fix: "resume" }) }));
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Turn off: See your documents' titles, projects, tags, dates and types",
+        name: "Turn off: See your documents' titles, projects, tags, dates and types for Acme Tool",
       }),
     );
     await waitFor(() =>
@@ -432,12 +432,34 @@ describe("what the mod can do", () => {
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Allow: Send and fetch things from sites on the internet",
+        name: "Allow: Send and fetch things from sites on the internet for Acme Tool",
       }),
     );
     await waitFor(() =>
       expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "internet", true),
     );
+  });
+
+  it("a permission PM will ask about offers Allow now beside Turn off, and Allow now says yes ahead of time", async () => {
+    modPermissionDecide.mockResolvedValue(undefined);
+    draw(mod({ permissions: rows, state: standing("paused-by-you", { fix: "resume" }) }));
+    const words = "Ask an AI model to do things for it, which can cost money";
+    // Only the one that asks gets it: an allowed one has Turn off, a denied one has Allow.
+    expect(screen.getAllByRole("button", { name: /^Allow now:/ })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: `Turn off: ${words} for Acme Tool` })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: `Allow now: ${words} for Acme Tool` }));
+    await waitFor(() => expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", true));
+  });
+
+  it("Turn off on a permission that asks records the no", async () => {
+    modPermissionDecide.mockResolvedValue(undefined);
+    draw(mod({ permissions: rows, state: standing("paused-by-you", { fix: "resume" }) }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Turn off: Ask an AI model to do things for it, which can cost money for Acme Tool",
+      }),
+    );
+    await waitFor(() => expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", false));
   });
 
   it("shows the backend's refusal when a grant isn't allowed (an unsigned mod may not read AND reach out)", async () => {
@@ -448,7 +470,7 @@ describe("what the mod can do", () => {
     draw(mod({ permissions: rows, state: standing("paused-by-you", { fix: "resume" }) }));
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Allow: Send and fetch things from sites on the internet",
+        name: "Allow: Send and fetch things from sites on the internet for Acme Tool",
       }),
     );
     expect(
@@ -497,7 +519,7 @@ describe("what the mod can do", () => {
   it("Uninstall… in the details opens the dialog", () => {
     draw(mod());
     openDetails();
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall Acme Tool" }));
     expect(onUninstall).toHaveBeenCalledWith("acme.tool");
   });
 });
@@ -548,14 +570,14 @@ describe("an action in flight outlives the view", () => {
       }),
     );
     const first = draw(mod());
-    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
     expect(await screen.findByText("Pausing…")).toBeTruthy();
     // The person switches tab: the view unmounts. The backend's work doesn't stop.
     first.unmount();
     // ...and comes back.
     draw(mod());
     expect(screen.getByText("Pausing…")).toBeTruthy();
-    const pause = screen.getByRole("button", { name: "Pause" }) as HTMLButtonElement;
+    const pause = screen.getByRole("button", { name: "Pause Acme Tool" }) as HTMLButtonElement;
     expect(pause.disabled).toBe(true);
     fireEvent.click(pause);
     expect(pauseMod).toHaveBeenCalledTimes(1);
@@ -571,7 +593,7 @@ describe("an action in flight outlives the view", () => {
       }),
     );
     const first = draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume Acme Tool" }));
     first.unmount();
     await act(async () => fail({ code: "refused", message: "Not yet." }));
     draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
@@ -579,5 +601,55 @@ describe("an action in flight outlives the view", () => {
     expect(
       within(screen.getByText("Not yet.").parentElement!).getByRole("button", { name: "Dismiss" }),
     ).toBeTruthy();
+  });
+});
+
+describe("which mod each control acts on", () => {
+  // With three mods installed a list of identical "Pause", "Details" and "Uninstall…" is useless to a
+  // screen reader: every control names its mod, starting with the words on the control.
+  it("gives every button of the row, and its folds, the mod's name", () => {
+    draw(
+      mod({
+        name: "Zeta Tool",
+        update: {
+          version: "1.3.0",
+          kind: "approval",
+          widenings: [],
+          needsApi: null,
+          text: "Version 1.3.0 asks for more.",
+        },
+        permissions: [
+          perm("documents.meta", { access: "allowed", decision: "granted", class: "read" }),
+          perm("ai", { access: "asks", when: "first-use", class: "money" }),
+        ],
+        state: standing("running", { running: true }),
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Details of Zeta Tool" })).toBeTruthy();
+    // (The fold also carries a count after its name.)
+    expect(screen.getByRole("button", { name: /^What it can do for Zeta Tool/ })).toBeTruthy();
+    for (const name of ["Pause Zeta Tool", "Review update for Zeta Tool", "Uninstall Zeta Tool"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    const unnamed = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "")
+      // Dismiss is only there for a refusal; the folds and the actions are what is checked.
+      .filter((label) => !label.includes("Zeta Tool"));
+    expect(unnamed).toEqual([]);
+  });
+
+  it("keeps the words on the control at the front of its name (label in name)", () => {
+    draw(mod({ state: standing("paused-by-you", { fix: "resume" }) }));
+    expect(screen.getByRole("button", { name: "Resume Acme Tool" }).textContent).toBe("Resume");
+  });
+});
+
+describe("a name made of stacked marks", () => {
+  it("is cut to a few marks and clipped to its own heading, so it can't paint over the badges", () => {
+    draw(mod({ name: `A${MARK_ABOVE.repeat(39)}` }));
+    const heading = screen.getByRole("heading", { level: 3 });
+    expect(heading.textContent).toBe(`A${MARK_ABOVE.repeat(3)}`);
+    expect(heading.className).toContain("overflow-hidden");
   });
 });

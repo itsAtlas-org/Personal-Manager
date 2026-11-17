@@ -24,6 +24,7 @@ import { finishInstall } from "../../lib/modInstall";
 import { clearModError, setModScreen, useModActions } from "../../lib/modActions";
 import type { ConsentPermission, ConsentScreen } from "../../lib/modsTypes";
 import { Button, Callout, Dialog, Input, RadioChoice } from "../ui";
+import { ModName } from "./ModName";
 import { modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
@@ -123,7 +124,17 @@ export function UnsignedConsentDialog({
       open
       chrome="bar"
       tone="danger"
-      title={folder ? `Load ${name} as a test mod?` : `Install ${name}, which nobody has checked?`}
+      title={
+        folder ? (
+          <>
+            Load <ModName name={name} /> as a test mod?
+          </>
+        ) : (
+          <>
+            Install <ModName name={name} />, which nobody has checked?
+          </>
+        )
+      }
       onClose={working ? () => {} : close}
       closeDisabled={working}
       widthClassName="max-w-2xl"
@@ -146,6 +157,12 @@ export function UnsignedConsentDialog({
             Atlas hasn&apos;t reviewed it or signed it, and PM can&apos;t tell what it really does.
             It runs in a sealed box and can only do what you allow below. Go on only if you made it
             or you trust the person who did.
+          </p>
+          {/* Always said, whatever this file asks for (D3): a file that only reads can still find
+              that reading is off because another unchecked mod already holds the internet. */}
+          <p>
+            PM judges all your unchecked mods together: between them they may read your data or use
+            the internet, never both.
           </p>
         </Callout>
 

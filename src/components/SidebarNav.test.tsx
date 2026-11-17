@@ -221,7 +221,8 @@ describe("SidebarNav: mod tabs", () => {
     expect(tabs()).not.toContain("mod:acme.tool");
 
     rightClick(screen.getByRole("button", { name: "Focus" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Show Acme Tool" }));
+    // Named as a mod's tab (quoted and marked), so it can't pass for one of PM's own.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show “Acme Tool” (mod)" }));
     expect(tabs()).toContain("mod:acme.tool");
   });
 

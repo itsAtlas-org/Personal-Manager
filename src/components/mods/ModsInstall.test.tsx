@@ -142,7 +142,7 @@ describe("from the catalogue", () => {
     installModConsented.mockResolvedValue(done());
     render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Install Map" }));
-    const dialog = await screen.findByRole("dialog", { name: "Install Map?" });
+    const dialog = await screen.findByRole("dialog", { name: "Install “Map”?" });
     expect(installModConsented).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
     await waitFor(() =>
@@ -178,7 +178,7 @@ describe("from the catalogue", () => {
     );
     const first = render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Install Map" }));
-    const dialog = await screen.findByRole("dialog", { name: "Install Map?" });
+    const dialog = await screen.findByRole("dialog", { name: "Install “Map”?" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
     // The dialog's button and the entry's both say so.
     expect(
@@ -202,14 +202,14 @@ describe("from the catalogue", () => {
     render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Install Map" }));
     fireEvent.click(
-      within(await screen.findByRole("dialog", { name: "Install Map?" })).getByRole("button", {
+      within(await screen.findByRole("dialog", { name: "Install “Map”?" })).getByRole("button", {
         name: "Install",
       }),
     );
     await screen.findByRole("dialog", { name: "This screen ran out of time" });
     installFromCatalogue.mockResolvedValueOnce(mapScreen({ token: "tok-map-2" }));
     fireEvent.click(screen.getByRole("button", { name: "Start again" }));
-    const again = await screen.findByRole("dialog", { name: "Install Map?" });
+    const again = await screen.findByRole("dialog", { name: "Install “Map”?" });
     installModConsented.mockResolvedValue(done());
     fireEvent.click(within(again).getByRole("button", { name: "Install" }));
     await waitFor(() =>
@@ -227,12 +227,14 @@ describe("from the catalogue", () => {
     installModConsented.mockRejectedValue({ code: "refused", message: "This one can't go in." });
     render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Install Map" }));
-    const dialog = await screen.findByRole("dialog", { name: "Install Map?" });
+    const dialog = await screen.findByRole("dialog", { name: "Install “Map”?" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
-    await within(dialog).findByText("This one can't go in.");
+    // The attempt spent the single-use token, so the dialog becomes the one that says so.
+    const spent = await screen.findByRole("dialog", { name: "This didn't go through" });
+    await within(spent).findByText("This one can't go in.");
     expect(screen.getAllByText("This one can't go in.").length).toBe(1);
-    // Cancelling forgets it: the entry doesn't keep nagging about a screen that is gone.
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    // Closing forgets it: the entry doesn't keep nagging about a screen that is gone.
+    fireEvent.click(within(spent).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.queryByText("This one can't go in.")).toBeNull();
   });
@@ -256,7 +258,7 @@ describe("from a file", () => {
     installModConsented.mockResolvedValue(done());
     render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Choose a mod file…" }));
-    const dialog = await screen.findByRole("dialog", { name: "Install Map?" });
+    const dialog = await screen.findByRole("dialog", { name: "Install “Map”?" });
     expect(dialog.textContent).toContain("From a file you chose.");
     fireEvent.click(within(dialog).getByRole("button", { name: "Install" }));
     await waitFor(() => expect(installModConsented).toHaveBeenCalledTimes(1));
@@ -284,7 +286,7 @@ describe("from a file", () => {
     render(view());
     fireEvent.click(await screen.findByRole("button", { name: "Choose a mod file…" }));
     const dialog = await screen.findByRole("dialog", {
-      name: "Install Raw, which nobody has checked?",
+      name: "Install “Raw”, which nobody has checked?",
     });
     expect(dialog.textContent).toContain("Nobody has checked this mod.");
     const go = within(dialog).getByRole("button", { name: "Install" }) as HTMLButtonElement;
@@ -332,7 +334,9 @@ describe("from a file", () => {
     act(() => setModScreen("acme.raw", rawScreen()));
     const dialogs = await screen.findAllByRole("dialog");
     expect(dialogs).toHaveLength(1);
-    expect(within(dialogs[0]).getByText(/Install Raw, which nobody has checked/)).toBeTruthy();
+    expect(
+      within(dialogs[0]).getByRole("heading", { name: /Install “Raw”, which nobody has checked/ }),
+    ).toBeTruthy();
     expect(screen.queryByText(/as a test mod/)).toBeNull();
   });
 

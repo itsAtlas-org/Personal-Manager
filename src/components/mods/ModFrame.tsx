@@ -38,6 +38,14 @@
 //   posted it (`modThemeChanged`) and Rust tells the frame, if its mod may hear it.
 // - A height request is a number PM clamps. Nothing a mod sends ever becomes an attribute, a class, a
 //   style string or markup.
+// - FIRST USE (spec §1.5). A call the backend refuses with MOD-2002 and a `permission` is a mod using
+//   something it declared and the person hasn't answered. The call is HELD (it still counts as in
+//   flight, so a mod can't pile up more than MAX_IN_FLIGHT of them) while PM asks in its own dialog
+//   (ModPermissionPrompt); the answer is recorded through `mod_permission_decide`, and after an Allow
+//   the call is made once more under the same session. A No tells the mod it isn't granted; "Not now"
+//   gives it the backend's MOD-2002 as it was and is remembered for this session, so a mod that calls
+//   in a loop gets one question, not one per call. Only the backend's own reply can start a question:
+//   a frame's `refuse` message is a refusal the page sends back to it and never asks anything.
 //
 // - While mounted it keeps the frozen-page watchdog's heartbeat going (`modWatchdog.ts`).
 // - ModTab (the mod's tab) mounts it, and only while the mod's row says it can run. The frame's
@@ -46,20 +54,30 @@
 //   replaces the frame. A store that closes under a mounted frame sends no goodbye, so the owner
 //   unmounts it (ModTab does, on the vault fault).
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { modCall, modEventsAck, modFrameClose, modFrameOpen, modThemeChanged } from "../../lib/ipc";
+import {
+  modCall,
+  modEventsAck,
+  modFrameClose,
+  modFrameOpen,
+  modPermissionDecide,
+  modThemeChanged,
+} from "../../lib/ipc";
+import { failureText } from "../../lib/modsTypes";
 import { frameMounted } from "../../lib/modWatchdog";
 import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
+import { ModPermissionPrompt } from "./ModPermissionPrompt";
 import { TierBadge } from "./TierBadge";
 import {
   EventPump,
   FloodGate,
   INTERNAL_MESSAGE,
   MAX_IN_FLIGHT,
+  MOD_ERRORS,
   PORT_MESSAGE,
   callError,
   callResult,
@@ -228,6 +246,47 @@ function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageCont
   }
 }
 
+/** How a first-use question ended: recorded yes, recorded no, left unanswered, or moot because the
+ *  session ended while it was open. */
+type Outcome = "allowed" | "denied" | "later" | "gone";
+
+/** The permission a MOD-2002 reply asks about, if it is one worth asking about: the backend names a
+ *  permission by its id, so anything else (no id, a malformed one) goes to the mod as it is. */
+function permissionToAsk(reply: BackendReply): string | null {
+  if (reply.kind !== "error" || reply.error.code !== MOD_ERRORS.needsPrompt) return null;
+  const permission = reply.error.permission;
+  return typeof permission === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(permission)
+    ? permission
+    : null;
+}
+
+/** One call from the frame, start to answer: the backend's reply, and for a first-use refusal the
+ *  question, held until the person answers, then a single retry after a yes. */
+async function runCall(
+  live: Live,
+  message: { id: number; method: string; args: string },
+  page: { current: PageContext },
+  ask: (permission: string) => Promise<Outcome>,
+): Promise<void> {
+  const call = async () => readReply(await modCall(live.session, message.method, message.args));
+  let backend = await call();
+  const permission = permissionToAsk(backend);
+  if (permission !== null) {
+    const outcome = await ask(permission);
+    // The session ended while the question was open: nothing is sent to a frame PM has stopped.
+    if (outcome === "gone" || live.ended || live.over) return;
+    if (outcome === "allowed") backend = await call();
+    else if (outcome === "denied") {
+      backend = {
+        kind: "error",
+        error: refusal("notGranted", "That permission is off for this mod."),
+      };
+    }
+    // "later": the backend's own MOD-2002 stands.
+  }
+  answerCall(live, message.id, backend, page.current);
+}
+
 /** The reason a `session.closed` carries, as a short string; null for anything else. The backend
  *  writes it, but it crossed IPC as JSON, so it is read as untrusted. */
 function closeReason(payload: unknown): string | null {
@@ -244,6 +303,67 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
   const [height, setHeight] = useState<number | null>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const liveRef = useRef<Live | null>(null);
+
+  // First-use questions (see the header). `asking` is what is on screen, oldest first; the calls
+  // held for each permission wait in `waitingRef` and are all released by its one answer. `snoozed`
+  // holds the permissions left unanswered this session, which are not asked about again.
+  const [asking, setAsking] = useState<string[]>([]);
+  const [deciding, setDeciding] = useState(false);
+  const [decideError, setDecideError] = useState<string | null>(null);
+  const waitingRef = useRef(new Map<string, Array<(outcome: Outcome) => void>>());
+  const snoozedRef = useRef(new Set<string>());
+
+  const settle = useCallback((permission: string, outcome: Outcome) => {
+    const waiters = waitingRef.current.get(permission) ?? [];
+    waitingRef.current.delete(permission);
+    if (outcome === "later") snoozedRef.current.add(permission);
+    setAsking((queue) => queue.filter((p) => p !== permission));
+    setDeciding(false);
+    setDecideError(null);
+    for (const release of waiters) release(outcome);
+  }, []);
+
+  /** The session is over (or the frame was stopped): every held call is released unanswered and the
+   *  question comes down. */
+  const dropQuestions = useCallback(() => {
+    const held = [...waitingRef.current.values()].flat();
+    waitingRef.current.clear();
+    setAsking([]);
+    setDeciding(false);
+    setDecideError(null);
+    for (const release of held) release("gone");
+  }, []);
+  useEffect(() => dropQuestions, [dropQuestions]);
+
+  const ask = useCallback((permission: string): Promise<Outcome> => {
+    if (snoozedRef.current.has(permission)) return Promise.resolve("later");
+    return new Promise((resolve) => {
+      const waiting = waitingRef.current.get(permission);
+      if (waiting) {
+        waiting.push(resolve);
+        return;
+      }
+      waitingRef.current.set(permission, [resolve]);
+      setAsking((queue) => [...queue, permission]);
+    });
+  }, []);
+
+  async function answerQuestion(allow: boolean) {
+    const permission = asking[0];
+    if (permission === undefined || deciding) return;
+    setDeciding(true);
+    setDecideError(null);
+    try {
+      await modPermissionDecide(modId, permission, allow);
+    } catch (e) {
+      // Nothing was recorded: the question stays, with the backend's reason, and can be tried again
+      // or left ("Not now").
+      setDeciding(false);
+      setDecideError(failureText(e, "PM couldn't save that."));
+      return;
+    }
+    settle(permission, allow ? "allowed" : "denied");
+  }
   // What a page action reads: the theme on screen when the answer is made, not when the frame's
   // listener was set up, and the app's own document reader.
   const theme = useTheme();
@@ -273,7 +393,11 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
       mine.events.push(message);
       const event = readEvent(message);
       const name = event?.event;
-      if (name === "mod.paused" || name === "session.closed") mine.over = true;
+      if (name === "mod.paused" || name === "session.closed") {
+        mine.over = true;
+        // A question about a call of a session that is over has nothing left to decide.
+        dropQuestions();
+      }
       if (name === "session.closed") onClosedRef.current?.(closeReason(event?.payload));
     }).then(
       (opened) => {
@@ -295,7 +419,7 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
       liveRef.current = null;
       if (live) endSession(live);
     };
-  }, [modId]);
+  }, [modId, dropQuestions]);
 
   // A layout effect: it runs in the same task as the commit that mounts the frame, so the listener is
   // in place before the frame's first message (a task of its own) can arrive.
@@ -308,6 +432,7 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
     const stopFlooding = (live: Live) => {
       endSession(live);
       if (liveRef.current === live) liveRef.current = null;
+      dropQuestions();
       setPhase({ kind: "stopped", reason: "flooded" });
     };
 
@@ -340,13 +465,10 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
             return;
           }
           live.inFlight += 1;
-          void modCall(live.session, message.method, message.args)
-            .then(
-              (raw) => answerCall(live, message.id, readReply(raw), pageRef.current),
-              // The backend answers every refusal as a reply; a rejection is the IPC itself
-              // failing, and its text is PM's, not the mod's to read.
-              () => reply(live, callError(message.id, refusal("internal", INTERNAL_MESSAGE))),
-            )
+          void runCall(live, message, pageRef, ask)
+            // The backend answers every refusal as a reply; a rejection is the IPC itself
+            // failing, and its text is PM's, not the mod's to read.
+            .catch(() => reply(live, callError(message.id, refusal("internal", INTERNAL_MESSAGE))))
             .finally(() => {
               live.inFlight -= 1;
             });
@@ -375,7 +497,7 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
 
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [open]);
+  }, [open, ask, dropQuestions]);
 
   // `theme.changed`: whenever PM's theme snapshot differs from the last one this frame was given, post
   // it for this frame's session (Rust decides whether its mod may hear it). The theme provider applies
@@ -420,6 +542,7 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
     if (live.loads > 1) {
       endSession(live);
       liveRef.current = null;
+      dropQuestions();
       setPhase({ kind: "stopped", reason: "navigated" });
     }
   };
@@ -438,6 +561,17 @@ function SealedFrame({ modId, name, tier, onClosed }: ModFrameProps) {
           className={cn("block w-full border-0", height === null ? "min-h-0 flex-1" : "flex-none")}
           style={height === null ? undefined : { height }}
           onLoad={onLoad}
+        />
+      )}
+      {phase.kind === "open" && asking.length > 0 && (
+        <ModPermissionPrompt
+          name={name}
+          tier={tier}
+          permission={asking[0]}
+          working={deciding}
+          error={decideError}
+          onAnswer={(allow) => void answerQuestion(allow)}
+          onLater={() => settle(asking[0], "later")}
         />
       )}
       {phase.kind === "opening" && <p className="px-4 py-3 text-sm text-ink3">Starting the mod…</p>}

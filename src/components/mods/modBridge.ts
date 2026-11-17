@@ -62,11 +62,15 @@ export const FLOOD_BURST = 200;
 export const MIN_FRAME_HEIGHT = 64;
 export const MAX_FRAME_HEIGHT = 4096;
 
-/** The codes the page itself answers with; the backend answers with the rest. A test in error.rs pins
- *  each to the backend's code of the same name. */
+/** The codes the page itself answers with or reads; the backend answers with the rest. A test in
+ *  error.rs pins each to the backend's code of the same name. `needsPrompt` is the one the page
+ *  turns into PM's first-use question; `notGranted` is what a mod is told after the person says no
+ *  to it. */
 export const MOD_ERRORS = {
   unknownMethod: "MOD-1001",
   badArgs: "MOD-1003",
+  notGranted: "MOD-2001",
+  needsPrompt: "MOD-2002",
   tooLarge: "MOD-3002",
   internal: "MOD-9001",
 } as const;

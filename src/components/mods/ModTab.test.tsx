@@ -12,9 +12,10 @@ import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HELP } from "../../lib/help";
+import { resetModActions, runModAction } from "../../lib/modActions";
 import { ModRowsContext, type ModRows } from "../../lib/modRows";
 import type { ModInfo, ModPermission, ModStanding, ModsChanged } from "../../lib/modsTypes";
-import { LRI, RLO } from "./modFixtures";
+import { LRI, MARK_ABOVE, RLO } from "./modFixtures";
 
 const modFrameOpen = vi.fn();
 const modFrameClose = vi.fn();
@@ -139,6 +140,8 @@ const goodbye = (reason: string, seq = 1) =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The Mods tab's in-flight work and refusals are module-level (lib/modActions): nothing carries over.
+  resetModActions();
   faulted = null;
   changed = null;
   let n = 0;
@@ -292,7 +295,7 @@ describe("a mod waiting for its first open (D17)", () => {
     await act(async () => {});
     expect(modFrameOpen).not.toHaveBeenCalled();
     expect(iframe()).toBeNull();
-    expect(screen.getByRole("heading", { name: "Turn on Acme Tool?" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeTruthy();
     expect(screen.getByText("What PM checks.")).toBeTruthy();
     expect(screen.getByText("What PM can't check.")).toBeTruthy();
     // PM's words for each permission, in the backend's order, with the maker's reason beside them.
@@ -373,7 +376,7 @@ describe("a mod waiting for its first open (D17)", () => {
     expect(modFrameOpen).not.toHaveBeenCalled();
     await act(async () => finish({ state: "active", reason: null, serving: true }));
     await waitFor(() => expect(iframe()).not.toBeNull());
-    expect(screen.queryByRole("heading", { name: "Turn on Acme Tool?" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeNull();
   });
 
   it("says why when the backend refuses, keeps the screen, and lets the user try again", async () => {
@@ -429,7 +432,7 @@ describe("a mod that can't run", () => {
       />,
     );
     await act(async () => {});
-    expect(screen.getByRole("heading", { name: "Installing Acme Tool" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Installing “Acme Tool”" })).toBeTruthy();
     expect(screen.getByText(/PM tries again at the next safety list check/)).toBeTruthy();
     expect(modFrameOpen).not.toHaveBeenCalled();
   });
@@ -441,7 +444,7 @@ describe("a mod that can't run", () => {
     const first = render(<Tab rows={rows} />);
     first.unmount();
     render(<Tab rows={rows} />);
-    expect(screen.getByRole("heading", { name: "Installing Acme Tool" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Installing “Acme Tool”" })).toBeTruthy();
   });
 
   it("resumes a mod the user paused, then reads the rows again", async () => {
@@ -646,7 +649,7 @@ describe("what a mod supplied is plain text", () => {
       />,
     );
     const text = document.body.textContent ?? "";
-    expect(text).toContain("Turn on Ac me?");
+    expect(text).toContain("Turn on “Ac me”?");
     expect(text).toContain("one PM says: fine");
     expect(text).toContain("Made by Mal lory");
     expect(text).toContain("The maker says: “to map”");
@@ -690,11 +693,137 @@ describe("help", () => {
       expect.arrayContaining([
         "mod-first-open",
         "mod-tab-status",
+        "mods-permission-prompt",
         "mods-view",
         "nav-mod-tab",
         "nav-mods",
       ]),
     );
     for (const id of named) expect(HELP[id], id).toBeDefined();
+  });
+});
+
+// In-flight work lives in lib/modActions (the Mods tab's rows use it too), because the tab router
+// unmounts a view on every switch and the backend keeps working: a view that comes back must see the
+// work still going, not an idle button that invites a second press.
+describe("work in flight outlives the tab", () => {
+  const waitingRow = (permissions: ModPermission[]) =>
+    mod({
+      tier: "first",
+      consented: false,
+      state: { ...RUNNING, kind: "waiting-for-you", fix: "turn-on", running: false },
+      permissions,
+    });
+  const paused = () =>
+    mod({ state: standing("paused-by-you", { reason: "user", text: "Paused.", fix: "resume" }) });
+
+  it("Resume pressed here, then leaving and coming back, still shows Resuming and can't be sent twice", async () => {
+    let finish: (v: unknown) => void = () => {};
+    resumeMod.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const first = render(<Tab rows={[paused()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(await screen.findByText("Resuming…")).toBeTruthy();
+    first.unmount();
+
+    render(<Tab rows={[paused()]} />);
+    expect(screen.getByText("Resuming…")).toBeTruthy();
+    const again = screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement;
+    expect(again.disabled).toBe(true);
+    fireEvent.click(again);
+    expect(resumeMod).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ state: "active", reason: null, serving: true }));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+  });
+
+  it("a refusal that arrives while the tab was away is waiting when it comes back", async () => {
+    let refuse: (e: unknown) => void = () => {};
+    repairMod.mockReturnValue(new Promise((_, reject) => (refuse = reject)));
+    const row = () =>
+      mod({
+        state: standing("files-changed", { reason: "files-changed", text: "x", fix: "repair" }),
+      });
+    const first = render(<Tab rows={[row()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Repair" }));
+    await screen.findByText("Repairing…");
+    first.unmount();
+    await act(async () => refuse({ code: "offline", message: "PM couldn't reach the catalogue." }));
+    render(<Tab rows={[row()]} />);
+    expect(screen.getByText("PM couldn't reach the catalogue.")).toBeTruthy();
+  });
+
+  it("a Resume pressed in the Mods tab's row shows here as in progress too (one key per mod)", async () => {
+    let finish: (v: unknown) => void = () => {};
+    resumeMod.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    void runModAction("acme.tool", "Resuming", "x", () => resumeMod("acme.tool"));
+    render(<Tab rows={[paused()]} />);
+    expect(screen.getByText("Resuming…")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    await act(async () => finish({}));
+  });
+
+  it("Turn on pressed here shows Turning on after a switch away and back, and can't be sent twice", async () => {
+    let finish: (v: unknown) => void = () => {};
+    consentMod.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const row = () => [waitingRow([perm("tasks.read")])];
+    const first = render(<Tab rows={row()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    first.unmount();
+    render(<Tab rows={row()} />);
+    const button = screen.getByRole("button", { name: "Turning on…" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(consentMod).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ state: "active", reason: null, serving: true }));
+  });
+
+  it("when PM turned it on but the rows can't be read again, says so and offers to read them", async () => {
+    // The backend accepted the answers; the row still says waiting. Without this the button just sits
+    // on "Turning on…" for ever with nothing to say why.
+    const stale = [waitingRow([perm("tasks.read")])];
+    render(<Tab rows={stale} extra={{ problem: "PM is locked." }} />);
+    await act(async () => {});
+    // Nothing is said before the answers were accepted: an old problem isn't this one.
+    expect(screen.queryByText(/PM turned it on, but/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    expect(
+      await screen.findByText(
+        /PM turned it on, but couldn't read the list of mods again: PM is locked\./,
+      ),
+    ).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Turn on" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    refresh.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Read the list again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(consentMod).toHaveBeenCalledTimes(1);
+  });
+
+  it("clips a name of stacked marks to its own heading, and draws it cleaned", () => {
+    render(
+      <Tab
+        rows={[
+          mod({
+            name: `A${MARK_ABOVE.repeat(39)}`,
+            state: standing("paused-by-you", { text: "Paused.", fix: "resume" }),
+          }),
+        ]}
+      />,
+    );
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading.textContent).toBe(`A${MARK_ABOVE.repeat(3)}`);
+    expect(heading.className).toContain("overflow-hidden");
+  });
+
+  it("draws a name with a direction override as one plain line, in the panel and in the frame's band", async () => {
+    render(<Tab rows={[mod({ name: `Ac${RLO}me` })]} />);
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    expect(screen.getByLabelText("Mod: Ac me")).toBeTruthy();
   });
 });

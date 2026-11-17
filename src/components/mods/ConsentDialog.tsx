@@ -23,20 +23,34 @@
 // is on screen (lib/modActions, lib/modInstall), and the staged screen is kept there so it survives a
 // tab switch.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { clearModError, setModScreen, useModActions } from "../../lib/modActions";
 import { DOING, finishInstall, restartScreen } from "../../lib/modInstall";
 import type { ConsentScreen } from "../../lib/modsTypes";
 import { Button, Callout, Dialog } from "../ui";
-import { modText } from "./modText";
+import { ModName } from "./ModName";
+import { modText, quoteName } from "./modText";
 import { classWords, permissionWords, standingLine, wideningWords } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 import { UnsignedConsentDialog } from "./UnsignedConsentDialog";
 
-const TITLE: Record<ConsentScreen["kind"], (name: string, version: string) => string> = {
-  update: (name, version) => `Update ${name} to version ${version}?`,
-  repair: (name) => `Put ${name} back?`,
-  fresh: (name) => `Install ${name}?`,
+// The mod's name sits in PM's own title, so it is quoted and clipped to its own box (ModName).
+const TITLE: Record<ConsentScreen["kind"], (name: string, version: string) => ReactNode> = {
+  update: (name, version) => (
+    <>
+      Update <ModName name={name} /> to version {version}?
+    </>
+  ),
+  repair: (name) => (
+    <>
+      Put <ModName name={name} /> back?
+    </>
+  ),
+  fresh: (name) => (
+    <>
+      Install <ModName name={name} />?
+    </>
+  ),
 };
 const GO: Record<ConsentScreen["kind"], string> = {
   update: "Update",
@@ -59,18 +73,28 @@ export function ConsentDialog({
 }) {
   const { expired, restarts } = useModActions();
   if (expired.has(screen.id)) {
-    return <ExpiredDialog screen={screen} restart={restarts.get(screen.id)} />;
+    return (
+      <ExpiredDialog
+        screen={screen}
+        restart={restarts.get(screen.id)}
+        because={expired.get(screen.id) ?? null}
+      />
+    );
   }
   if (screen.unsigned) return <UnsignedConsentDialog screen={screen} refresh={refresh} />;
   return <SignedConsentDialog screen={screen} refresh={refresh} />;
 }
 
+/** A screen that can't be used again: it ran out of time (`because` null), or the install was tried and
+ *  failed for `because` (the backend's sentence). Either way the token is gone. */
 function ExpiredDialog({
   screen,
   restart,
+  because,
 }: {
   screen: ConsentScreen;
   restart: (() => Promise<ConsentScreen>) | undefined;
+  because: string | null;
 }) {
   const { busy, errors } = useModActions();
   // The refusal that expired the screen is not news here; only a failed "Start again" is.
@@ -87,7 +111,7 @@ function ExpiredDialog({
   return (
     <Dialog
       open
-      title="This screen ran out of time"
+      title={because === null ? "This screen ran out of time" : "This didn't go through"}
       onClose={working ? () => {} : () => closeScreen(screen)}
       widthClassName="max-w-md"
       helpId="mods-consent-expired"
@@ -105,10 +129,21 @@ function ExpiredDialog({
       }
     >
       <div className="mt-2 space-y-3 text-sm text-ink2">
-        <p>
-          Nothing was installed. The install screen for {modText(screen.name)} only lasts ten
-          minutes, and locking PM or switching to another vault ends it sooner.
-        </p>
+        {because === null ? (
+          <p>
+            Nothing was installed. The install screen for {quoteName(screen.name)} only lasts ten
+            minutes, and locking PM or switching to another vault ends it sooner.
+          </p>
+        ) : (
+          <>
+            <p>Nothing was installed. PM couldn&apos;t finish {quoteName(screen.name)}:</p>
+            <Callout size="md">{because}</Callout>
+            <p>
+              An install screen works only once, even when it fails, so it can&apos;t be pressed
+              again.
+            </p>
+          </>
+        )}
         <p>
           {restart
             ? "Start again to get a fresh one."
