@@ -1,0 +1,9 @@
+/* SPDX-FileCopyrightText: 2026 Bobby Yu */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+/* A stub stylesheet. The frame's CSP forbids inline styles and data: images, so a mod's look lives in
+   files like this one, over the theme variables PM hands it (theme.get). */
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}

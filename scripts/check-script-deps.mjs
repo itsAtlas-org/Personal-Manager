@@ -84,6 +84,13 @@ const ALLOWED = [
       "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
   },
   {
+    file: "scripts/check-files-in-place.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. The gate had no test of its own, and its mods rules (a tracked packed mod or stage dir, a mod test no runner collects, the mods root entry) each fail silently in the passing direction if a regex drifts; the test runs a copy of the gate in a throwaway git repo. `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
     file: "scripts/check-calendar-write-fence.test.mjs",
     specifier: "vitest",
     why: "The repo's existing test runner, on the same terms as the entries around it. This gate is what keeps every model path away from the code that changes someone's Google Calendar (#884), and a text fence is only as good as the shapes it is shown — each rule is pinned against a tree that breaks it; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",

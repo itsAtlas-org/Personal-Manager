@@ -47,6 +47,11 @@ sidecar/.venv/
 # by scripts/fetch-python.mjs and shipped as a Windows resource, never committed.
 /src-tauri/python/
 
+# A packed mod (`just build-mods`, scripts/pack-mod.mjs) is built output. The signed one comes only
+# from the pm-mods pipeline; scripts/check-files-in-place.mjs proves none is tracked. (A mod's stage
+# dir, mods/<id>/dist, is already covered by the bare `dist` rule at the top.)
+*.pmmod
+
 # Claude Code: the shared project settings.json is committed; the per-developer
 # settings.local.json (personal permission overrides) stays local.
 .claude/settings.local.json

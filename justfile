@@ -48,13 +48,18 @@ prettier:
 eslint:
     npx eslint .
 
-# Type-check both TS projects: the app (src) and the Node-side config (vite.config.ts,
+# Type-check every TS project: the app (src), the Node-side config (vite.config.ts,
 # via the tsconfig.node.json project reference) — plain `tsc` only checks the root
-# project, so vite.config.ts went unchecked (T1-9). Two `-p` passes, not `tsc -b`:
-# build mode requires composite refs to emit, which --noEmit forbids (TS6310).
+# project, so vite.config.ts went unchecked (T1-9) — and the mods. Separate `-p` passes, not
+# `tsc -b`: build mode requires composite refs to emit, which --noEmit forbids (TS6310).
+# The mods get two passes because a Worker has a different global scope (lib WebWorker, no DOM) and
+# the two libs cannot share a config: `mods` is the page, `mods/atlas.map/src/worker` the Map's Worker
+# (each further mod worker folder adds a line here and an `exclude` in mods/tsconfig.json).
 tsc:
     npx tsc --noEmit
     npx tsc -p tsconfig.node.json --noEmit
+    npx tsc -p mods --noEmit
+    npx tsc -p mods/atlas.map/src/worker --noEmit
 
 # Frontend unit tests (vitest). Started as T-07 over the pure src/lib/** modules the audit flagged as
 # guarded by nothing (date formatting, the markdown sanitize allowlist), and now also covers component

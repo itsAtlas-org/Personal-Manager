@@ -1,0 +1,28 @@
+{
+  "id": "atlas.map",
+  "name": "Map",
+  "description": "Your documents, laid out on one map by meaning or by project.",
+  "version": "1.0.0",
+  "apiVersion": { "min": "1.0", "target": "1.0" },
+  "publisher": {
+    "tier": "first",
+    "author": "Atlas",
+    "sourceRepo": "itsAtlas-org/Personal-Manager",
+    "commit": "0000000000000000000000000000000000000000"
+  },
+  "licence": "AGPL-3.0-or-later",
+  "permissions": [
+    { "id": "storage", "why": "Remembers your map settings and where it placed your documents." },
+    { "id": "ui.tab", "why": "Shows the map in its own tab." },
+    { "id": "documents.meta", "why": "Draws each document's title, project and date as a dot." },
+    { "id": "documents.vectors", "why": "Places similar documents near each other." }
+  ],
+  "contributions": {
+    "nav.tab": { "label": "Map" }
+  },
+  "data": {
+    "keys": [{ "key": "settings", "class": "content" }]
+  },
+  "entry": { "page": "app/index.html" },
+  "engines": { "frame": true }
+}

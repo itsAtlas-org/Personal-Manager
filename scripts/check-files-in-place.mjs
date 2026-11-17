@@ -54,6 +54,18 @@ const FORBIDDEN = [
   { re: /(^|\/)target\//, why: "Rust build output" },
   { re: /^dist(-ssr)?\//, why: "frontend build output" },
   { re: /\.(onnx|ort)$/, why: "downloaded ML model weights (fetched at runtime, never committed)" },
+  {
+    // A packed mod is built, and a mod's signed file comes only from the pm-mods pipeline. A
+    // committed archive could never be told from one that pipeline made, and nothing would rebuild it.
+    re: /\.pmmod$/i,
+    why: "a packed mod (built output: `just build-mods` makes it and the pm-mods pipeline signs it)",
+  },
+  {
+    // The Vite stage dir the mod loader and pack-mod read (mods/<id>/dist). `.gitignore`'s bare
+    // `dist` already skips it; this proves the tracked set holds none, as for the root dist/ above.
+    re: /^mods\/[^/]+\/dist\//,
+    why: "a mod's built stage dir (frontend build output)",
+  },
   { re: /(^|\/)\.env(\.|$)/, why: "environment file (may hold secrets)" },
   { re: /^docs\//, why: "docs/ is intentionally git-ignored (local-only until the repo move)" },
   { re: /^PUBLISH\.md$/, why: "internal publish runbook (never published)" },
@@ -98,6 +110,7 @@ const ALLOWED_ROOT = new Set([
   "eslint.config.js",
   "index.html",
   "justfile",
+  "mods", // first-party mods' source (Mods spec §7); built output is git-ignored, never tracked
   "package-lock.json",
   "package.json",
   "ruff.toml",
@@ -139,6 +152,7 @@ for (const f of tracked) {
 // Rust is deliberately absent — `cargo test` finds `#[cfg(test)]` by compilation, not by path.
 const COLLECTED = [
   { re: /^src\/.+\.test\.tsx?$/, by: "vitest (src/**/*.test.{ts,tsx})" },
+  { re: /^mods\/.+\.test\.tsx?$/, by: "vitest (mods/**/*.test.{ts,tsx})" },
   { re: /^scripts\/.+\.test\.mjs$/, by: "vitest (scripts/**/*.test.mjs)" },
   { re: /^sidecar\/test_.+\.py$/, by: "just sidecar-test" },
 ];

@@ -23,7 +23,10 @@ export default defineConfig({
     // would have been collected by nothing at all. A test file that is never collected reports
     // nothing and looks exactly like a passing one. `check-files-in-place.mjs` proves the tracked
     // set holds no test file this misses.
-    include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
+    //
+    // `mods/**` is listed on purpose: it is a top-level folder, so `src/**` never reached it and a
+    // mod's tests would have been collected by nothing. Same proof: check-files-in-place.mjs.
+    include: ["src/**/*.test.{ts,tsx}", "mods/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
     environment: "node",
   },
 });

@@ -2966,6 +2966,28 @@ pub(crate) mod tests {
         assert_eq!(pkg.manifest.version, semver::Version::new(2, 0, 0));
     }
 
+    /// The Map's source manifest (`mods/atlas.map`, PR B) is read by two programs: PM's Rust here and
+    /// the node gate `scripts/check-mods.mjs`. The rust job has no node build, so this is the one place
+    /// a drift in what the committed file says shows up there. The file's commit is the all-zero
+    /// placeholder (a manifest cannot hold the hash of its own commit), which has the right shape.
+    #[test]
+    fn the_committed_atlas_map_manifest_parses() {
+        let text = include_str!("../../../mods/atlas.map/manifest.json");
+        let mut files = BTreeMap::new();
+        files.insert(
+            "app/index.html".to_string(),
+            VerifiedFile {
+                sha256: [0; 32],
+                bytes: Vec::new(),
+            },
+        );
+        let m = parse_manifest(text.as_bytes(), &files).expect("the committed manifest parses");
+        assert_eq!(m.id.as_str(), "atlas.map");
+        assert_eq!(m.publisher.tier, Tier::First);
+        assert_eq!(m.publisher.commit, "0".repeat(40));
+        assert_eq!(m.contributions.nav_tab.as_deref(), Some("Map"));
+    }
+
     #[test]
     fn a_quoted_name_cant_fake_the_message_around_it() {
         let q = quote("x\", and it's fine\n");
