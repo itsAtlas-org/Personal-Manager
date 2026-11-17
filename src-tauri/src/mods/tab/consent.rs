@@ -35,6 +35,8 @@ use crate::mods::api::permissions::{self, Class, PolicyTier, When};
 use crate::mods::ids::ModId;
 use crate::mods::store;
 
+use super::error::ModsError;
+
 /// The user's answers: permission id to granted (true) or refused (false).
 pub type Answers = BTreeMap<String, bool>;
 
@@ -387,6 +389,19 @@ impl From<rusqlite::Error> for DecideError {
     }
 }
 
+/// The gate on `mod_ai_prompt_info`: PM tells the page which model the person uses, and whether it
+/// is paid, only for a mod that is installed and that asked for the AI. Any other mod would learn
+/// about the person's setup for nothing. A pure read of the mod's row.
+pub fn ai_prompt_target(conn: &Connection, id: &ModId) -> Result<(), ModsError> {
+    let facts = grants::read_mod(conn, id)
+        .map_err(ModsError::internal)?
+        .ok_or_else(ModsError::not_installed)?;
+    if !facts.declared.contains("ai") {
+        return Err(ModsError::bad_request("That mod didn't ask for the AI."));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,6 +661,34 @@ mod tests {
             r.get(0)
         })
         .unwrap()
+    }
+
+    /// `mod_ai_prompt_info` answers only for an installed mod that asked for the AI: no other mod
+    /// may learn which model the person uses or whether it is paid.
+    #[test]
+    fn the_prompt_facts_go_only_to_an_installed_mod_that_asked_for_the_ai() {
+        use crate::mods::tab::error::Code;
+        let (_dir, c) = test_store();
+        assert_eq!(
+            ai_prompt_target(&c, &id("acme.chat")).unwrap_err().code,
+            Code::NotInstalled
+        );
+        insert(
+            &c,
+            &Row {
+                id: "acme.notes",
+                signed: true,
+                tier: "second",
+                manifest: manifest(&["storage"]),
+                ..Row::default()
+            },
+        );
+        assert_eq!(
+            ai_prompt_target(&c, &id("acme.notes")).unwrap_err().code,
+            Code::BadRequest
+        );
+        chat(&c);
+        assert!(ai_prompt_target(&c, &id("acme.chat")).is_ok());
     }
 
     /// The money prompt's yes: the grant and the limit are one write.

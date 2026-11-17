@@ -697,14 +697,16 @@ pub async fn complete(
         max_tokens,
     );
 
-    let response = HTTP
-        .post(ENDPOINT)
-        // A total deadline fits here (unlike `stream_chat`): the whole answer arrives at once.
-        .timeout(std::time::Duration::from_secs(120))
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await?;
+    // Through `wire_mark::send` so a mod's `ai.complete` can tell a request that never connected
+    // (its booking is given back) from one that may have left; a plain send for everyone else.
+    let response = crate::wire_mark::send(
+        HTTP.post(ENDPOINT)
+            // A total deadline fits here (unlike `stream_chat`): the whole answer arrives at once.
+            .timeout(std::time::Duration::from_secs(120))
+            .bearer_auth(api_key)
+            .json(&body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();

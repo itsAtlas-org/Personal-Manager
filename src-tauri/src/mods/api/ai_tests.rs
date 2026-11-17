@@ -796,6 +796,172 @@ async fn a_session_that_ends_after_the_booking_releases_it_unspent() {
     assert_eq!(ledger(&host), (Some(1.0), 0.0));
 }
 
+// --- a request that never left costs nothing (D-19) ---------------------------------------------
+
+/// Every way a call can end with no answer before a request reached the provider gives the booking
+/// back, on every route that has a cloud arm: Local AI switched off between the route and the call,
+/// an offline connect, and a deadline hit while still queued behind a chat. A mod that retries
+/// offline must not burn its cap on $0 of real spend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_that_never_reached_the_wire_is_released_not_charged() {
+    for plan in [
+        PlanSpec::Cloud(CLOUD),
+        PlanSpec::LocalThenCloud(CLOUD),
+        PlanSpec::Power(CLOUD),
+    ] {
+        for (answer, deadline, want) in [
+            (
+                Answer::FailBeforeWire,
+                60_000,
+                ModError::model_call_failed(),
+            ),
+            (Answer::ConnectFail, 60_000, ModError::model_call_failed()),
+            (Answer::HangBeforeWire, 80, ModError::call_timed_out()),
+        ] {
+            let (host, s) = setup();
+            set_cap(&host, Some(1.0));
+            host.model().set_plan(plan);
+            host.model().set_answer(answer.clone());
+            let auth = authorised(&host, &s);
+            let e = ai::run(
+                &host,
+                &auth,
+                &ask("hi", 100),
+                Duration::from_millis(deadline),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(e, want, "{plan:?} {answer:?}");
+            assert_eq!(host.model().entered(), 1);
+            assert_eq!(
+                ledger(&host),
+                (Some(1.0), 0.0),
+                "{plan:?} {answer:?}: nothing was spent"
+            );
+            assert!(close(booked(&host), 0.0), "{plan:?} {answer:?}: released");
+            assert!(usage(&host).is_empty());
+        }
+    }
+}
+
+/// A leg that may have left still counts, however the call then ends: a failure after the request
+/// went out, and a deadline with the request in flight (the opposite of the test above, so the
+/// release can never become "free on every error").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_whose_request_may_have_left_still_counts() {
+    for (answer, deadline, want) in [
+        (Answer::Fail, 60_000, ModError::model_call_failed()),
+        (Answer::Hang, 80, ModError::call_timed_out()),
+    ] {
+        let (host, s) = setup();
+        set_cap(&host, Some(1.0));
+        host.model().set_plan(PlanSpec::LocalThenCloud(CLOUD));
+        host.model().set_answer(answer.clone());
+        let auth = authorised(&host, &s);
+        let e = ai::run(
+            &host,
+            &auth,
+            &ask("hi", 100),
+            Duration::from_millis(deadline),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e, want);
+        assert!(close(ledger(&host).1, WORST), "{answer:?}");
+        assert!(close(booked(&host), 0.0));
+    }
+}
+
+/// A call cancelled while its request never left (still queued) is released by the guard too; one
+/// cancelled with the request out counts (`a_call_dropped_mid_flight_settles_through_the_guard`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_dropped_before_the_wire_is_released_by_the_guard() {
+    let (host, s) = setup();
+    set_cap(&host, Some(1.0));
+    host.model().set_plan(PlanSpec::LocalThenCloud(CLOUD));
+    host.model().set_answer(Answer::HangBeforeWire);
+    let auth = authorised(&host, &s);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(150),
+        ai::run(&host, &auth, &ask("hi", 100), Duration::from_secs(60)),
+    )
+    .await;
+    assert!(cancelled.is_err());
+    assert_eq!(host.model().entered(), 1);
+    assert_eq!(ledger(&host), (Some(1.0), 0.0));
+    assert!(close(booked(&host), 0.0));
+}
+
+/// A settle that cannot get the store leaves the reservation where it is (it is taken from the slot
+/// only once the connection is held), and one that can settles it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settle_with_the_store_shut_keeps_its_reservation() {
+    let (host, _s) = setup();
+    set_cap(&host, Some(1.0));
+    let epoch = host.store().store_epoch();
+    // `reserve` wants `&mut Connection`, so book through the guard the way the handler does.
+    let slot = {
+        let mut conn = host.store().conn().unwrap();
+        let r = money::reserve(&mut conn, epoch, MOD, "2026-11", WORST, true).unwrap();
+        std::sync::Mutex::new(Some(r))
+    };
+    assert!(close(booked(&host), WORST));
+    let held = host.store().take_conn().unwrap().unwrap();
+    ai::settle_failed_in(&host, &slot, true);
+    assert!(
+        slot.lock().unwrap().is_some(),
+        "a shut store must not lose the reservation"
+    );
+    *host.store().db.lock().unwrap() = Some(held);
+}
+
+// --- the deadline on what runs before the booking ----------------------------------------------
+
+/// A local endpoint's address lookup that never returns is bounded (PREP_TIMEOUT): the route
+/// prices as unknown and the call is refused (MOD-5005) with nothing booked and the model never
+/// reached. Without the bound the call would sit on its admission for good. Paused time, so the
+/// fifteen seconds cost none.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_address_lookup_refuses_the_call_and_books_nothing() {
+    let (host, s) = setup();
+    set_cap(&host, Some(1.0));
+    host.model().set_plan(PlanSpec::Local);
+    host.model().stall_class.store(true, Ordering::SeqCst);
+    let e = error(call(&host, &s, ask("hi", 10)).await);
+    assert_eq!(e, ModError::price_unknown());
+    assert_eq!(host.model().entered(), 0);
+    assert_eq!(ledger(&host), (Some(1.0), 0.0));
+    assert!(close(booked(&host), 0.0));
+}
+
+/// The same for the price refresh, with no price cached to fall back on.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_price_refresh_refuses_the_call_and_books_nothing() {
+    let (host, s) = setup();
+    set_cap(&host, Some(1.0));
+    host.sql(|c| c.execute("DELETE FROM model_pricing", []).unwrap());
+    host.model().set_plan(PlanSpec::Cloud(CLOUD));
+    host.model().stall_prices.store(true, Ordering::SeqCst);
+    let e = error(call(&host, &s, ask("hi", 10)).await);
+    assert_eq!(e, ModError::price_unknown());
+    assert_eq!(host.model().refreshes(), 1);
+    assert_eq!(host.model().entered(), 0);
+    assert_eq!(ledger(&host), (Some(1.0), 0.0));
+    assert!(close(booked(&host), 0.0));
+}
+
+/// And for the money prompt's own lookup: a stalled address lookup tells the page the route is
+/// unpriced instead of hanging the prompt.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_address_lookup_tells_the_prompt_the_route_is_unpriced() {
+    let (host, _s) = setup();
+    host.model().set_plan(PlanSpec::Local);
+    host.model().stall_class.store(true, Ordering::SeqCst);
+    let told = ai::prompt_info(&host).await.unwrap();
+    assert!(told.unpriced, "{told:?}");
+    assert!(!told.paid);
+}
+
 // --- what the mod is told -----------------------------------------------------------------------
 
 /// A model that ignores its bound cannot send a mod more than the reply cap, and is cut at a

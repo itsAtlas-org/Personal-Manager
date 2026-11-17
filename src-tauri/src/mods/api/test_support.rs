@@ -25,6 +25,7 @@ use crate::mods::runtime::{InstalledMod, ModRuntime, ServedFile};
 use crate::openrouter::{ChatMessage, Completion, Usage};
 use crate::secret::Secret;
 use crate::sidecar::{SidecarManager, SidecarPaths};
+use crate::wire_mark::WireMark;
 use crate::AppState;
 
 /// A key made for tests only, as every other store test in the tree uses.
@@ -307,10 +308,17 @@ pub enum Answer {
         truncated: bool,
         local: bool,
     },
-    /// The route failed, with provider text that must never reach a mod.
+    /// The route failed after its request went out, with provider text that must never reach a mod.
     Fail,
-    /// The call never returns (a stalled model).
+    /// The call never returns (a stalled model), its request already sent.
     Hang,
+    /// The route refused before any request was made (Local AI switched off between the route
+    /// and the call): nothing went out.
+    FailBeforeWire,
+    /// The call is still queued (behind a chat, say) and never reaches the wire.
+    HangBeforeWire,
+    /// The request could not connect (offline): it was announced, and failed before a connection.
+    ConnectFail,
 }
 
 impl Answer {
@@ -367,6 +375,10 @@ pub struct FakeModel {
     pub on_complete: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Run when the route is read: before the call is checked, priced and booked.
     pub on_resolve: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// When set, the local endpoint's address lookup never returns.
+    pub stall_class: AtomicBool,
+    /// When set, the price refresh never returns.
+    pub stall_prices: AtomicBool,
 }
 
 impl Default for FakeModel {
@@ -384,6 +396,8 @@ impl Default for FakeModel {
             gate: tokio::sync::Semaphore::new(0),
             on_complete: Mutex::new(None),
             on_resolve: Mutex::new(None),
+            stall_class: AtomicBool::new(false),
+            stall_prices: AtomicBool::new(false),
         }
     }
 }
@@ -455,11 +469,17 @@ impl ModelEdge for FakeModel {
 
     async fn local_class(&self, _base_url: &str) -> Option<EndpointClass> {
         self.class_lookups.fetch_add(1, Ordering::SeqCst);
+        if self.stall_class.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         *self.class.lock().unwrap()
     }
 
     async fn refresh_prices(&self) {
         self.refreshes.fetch_add(1, Ordering::SeqCst);
+        if self.stall_prices.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn complete(
@@ -467,7 +487,13 @@ impl ModelEdge for FakeModel {
         plan: &RoutePlan,
         messages: &[ChatMessage],
         max_tokens: u32,
+        wire: &WireMark,
     ) -> crate::error::Result<LlmOutcome> {
+        // A request goes out unless the script says it was stopped first.
+        let answer = self.answer.lock().unwrap().clone();
+        if !matches!(answer, Answer::FailBeforeWire | Answer::HangBeforeWire) {
+            wire.sending();
+        }
         self.sent.lock().unwrap().push(Sent {
             messages: messages
                 .iter()
@@ -515,10 +541,16 @@ impl ModelEdge for FakeModel {
                     displaced_local_model: None,
                 },
             }),
-            Answer::Fail => Err(crate::error::Error::Other(
+            Answer::Fail | Answer::FailBeforeWire => Err(crate::error::Error::Other(
                 "PROVIDER-TEXT openrouter said: your prompt was refused".into(),
             )),
-            Answer::Hang => std::future::pending().await,
+            Answer::ConnectFail => {
+                wire.never_left();
+                Err(crate::error::Error::Other(
+                    "PROVIDER-TEXT error sending request".into(),
+                ))
+            }
+            Answer::Hang | Answer::HangBeforeWire => std::future::pending().await,
         }
     }
 }

@@ -674,13 +674,7 @@ pub async fn mod_ai_prompt_info(webview: Webview, mod_id: String) -> Result<Prom
     blocking(&webview, move |app| {
         let state = app.state::<AppState>();
         let conn = state.conn().map_err(|_| ModsError::no_store())?;
-        let facts = grants::read_mod(&conn, &id)
-            .map_err(ModsError::internal)?
-            .ok_or_else(ModsError::not_installed)?;
-        if !facts.declared.contains("ai") {
-            return Err(ModsError::bad_request("That mod didn't ask for the AI."));
-        }
-        Ok(())
+        consent::ai_prompt_target(&conn, &id)
     })
     .await?;
     // The DB guard is gone: the route's address lookup is a network wait.

@@ -23,12 +23,19 @@
 //!
 //! **A booking never leaks.** It is handed to a [`Booking`] guard the moment it is made. Every
 //! normal end settles it through the guard's slot, and a call dropped mid-flight (a future cancelled
-//! at an await) settles it from the guard's `Drop` as a call that may have reached the wire (the
-//! whole booking counts). Only a process kill leaves a row, which counts until the month ends (plan
-//! decision 4): the cap errs high, never low.
+//! at an await) settles it from the guard's `Drop` the way a failed call is settled (below). Only
+//! a process kill leaves a row, which counts until the month ends (plan decision 4): the cap errs
+//! high, never low. The one other way a row can stay is a store taken or swapped under the call:
+//! a booking belongs to the store (epoch) it was made in, so a settle in any other store is refused
+//! and the row counts to month's end the same way. The settle takes its connection before the
+//! reservation leaves the slot, so a shut store loses nothing PM still holds.
 //!
-//! **A failure costs the booking** (a timeout or any model error on a priced route settles as spent)
-//! because a request that left may have been billed and PM cannot always tell: the cap errs high.
+//! **A failure costs the booking only if a request may have left** (a timeout or a model error on a
+//! priced route): a request that left may have been billed and PM cannot always tell, so it settles
+//! as spent. A request that provably never reached the provider (Local AI switched off, no
+//! connection, a deadline hit while still queued behind a chat) costs nothing and its booking is
+//! released (plan D-19), so being offline cannot drain a cap. [`WireMark`] is how the model call
+//! says which; with no word, it counts as spent.
 //!
 //! **What the mod gets back** is `{text, truncated, model?}` and nothing else. Provider text never
 //! reaches a mod (`openrouter.rs` embeds provider detail in its errors): every failure is one of
@@ -51,6 +58,7 @@ use crate::llm_gateway::{CallMeta, LlmOutcome, RoutePlan};
 use crate::local_slot::EndpointClass;
 use crate::mods::ai as money;
 use crate::openrouter::{ChatMessage, Completion};
+use crate::wire_mark::WireMark;
 
 /// The longest PM waits for what only the network can say before a call is booked: a local
 /// endpoint's address class, and a price refresh. Past it the answer is "don't know", which prices
@@ -95,12 +103,17 @@ pub trait ModelEdge: Send + Sync {
     fn refresh_prices(&self) -> impl Future<Output = ()> + Send;
 
     /// Run the call on `plan`, every leg bounded by `max_tokens`. No cache prefix, nothing added
-    /// to `messages`.
+    /// to `messages`. `wire` is told when a paid request is about to be written, and when one
+    /// failed before it connected, so the caller can give the booking back for a call that never
+    /// left. Only a request that can be BILLED is announced (the OpenRouter one: a local endpoint
+    /// is on the person's own side and costs nothing), and a new paid arm must announce itself
+    /// too, or a call that fails on it would be given back as free.
     fn complete(
         &self,
         plan: &RoutePlan,
         messages: &[ChatMessage],
         max_tokens: u32,
+        wire: &WireMark,
     ) -> impl Future<Output = crate::error::Result<LlmOutcome>> + Send;
 }
 
@@ -118,13 +131,21 @@ impl ModelEdge for tauri::AppHandle {
         let _ = crate::commands::ensure_pricing_fresh(self).await;
     }
 
-    fn complete(
+    async fn complete(
         &self,
         plan: &RoutePlan,
         messages: &[ChatMessage],
         max_tokens: u32,
-    ) -> impl Future<Output = crate::error::Result<LlmOutcome>> + Send {
-        crate::llm_gateway::complete_capped(self, plan, messages, false, Some(max_tokens))
+        wire: &WireMark,
+    ) -> crate::error::Result<LlmOutcome> {
+        wire.scope(crate::llm_gateway::complete_capped(
+            self,
+            plan,
+            messages,
+            false,
+            Some(max_tokens),
+        ))
+        .await
     }
 }
 
@@ -133,7 +154,8 @@ impl ModelEdge for tauri::AppHandle {
 /// stays on the user's own endpoint; a direct provider (outside ZDR by design) would be a new
 /// [`RoutePlan`] variant and is not one. The match is exhaustive on purpose: adding a variant fails
 /// to compile here until someone decides whether a mod may use it (I-13: a mod call never runs on
-/// a non-ZDR arm).
+/// a non-ZDR arm). A new PAID arm must also announce its requests on the call's [`WireMark`]
+/// (`wire_mark::send`), or a call that fails on it would be given back as free.
 pub(super) fn serves_a_mod(plan: &RoutePlan) -> bool {
     match plan {
         RoutePlan::Cloud(_)
@@ -229,11 +251,13 @@ fn lock(slot: &Mutex<Option<money::Reservation>>) -> MutexGuard<'_, Option<money
 
 /// Holds a call's booking until it is settled. The booking lives in a slot the blocking steps share
 /// (so one that never ran leaves it here, and one that did has taken it): whoever takes it settles
-/// it, once. A call dropped while a booking is still here settles it as spent ([`money::settle_unknown`]):
-/// it may have reached the wire.
+/// it, once. A call dropped while a booking is still here settles it as a failed call, by what its
+/// [`WireMark`] says ([`settle_failed_in`]).
 struct Booking<H: Host> {
     host: H,
     slot: Slot,
+    /// What the model call's requests did, read at the end of a failed or dropped call.
+    wire: WireMark,
 }
 
 impl<H: Host> Booking<H> {
@@ -241,25 +265,49 @@ impl<H: Host> Booking<H> {
         Self {
             host: host.clone(),
             slot: Arc::new(Mutex::new(None)),
+            wire: WireMark::new(),
         }
     }
 }
 
 impl<H: Host> Drop for Booking<H> {
     fn drop(&mut self) {
-        let Some(res) = lock(&self.slot).take() else {
-            return;
-        };
         // A short synchronous write: a drop cannot await. The guard is taken here and nowhere an
         // await is pending, so the non-reentrant DB mutex is never taken twice by one thread.
-        // A closed or locked store: the booking row stays and counts until the month ends.
-        let store = self.host.store();
-        if let Ok(mut conn) = store.conn() {
-            let epoch = store.store_epoch();
-            if let Err(e) = money::settle_unknown(&mut conn, epoch, res) {
-                eprintln!("mods: ai.complete could not settle a dropped call: {e}");
-            }
-        }
+        // A closed or locked store: the booking stays in the slot, and its row counts until the
+        // month ends.
+        settle_failed_in(
+            &self.host,
+            &self.slot,
+            self.wire.may_have_reached_the_wire(),
+        );
+    }
+}
+
+/// A call that ended with no answer: if a request may have left, the whole booking counts as spent
+/// ([`money::settle_unknown`]); if none did, it is deleted ([`money::release`]). The connection is
+/// taken BEFORE the reservation leaves the slot, so a store that is shut right now leaves it there
+/// for the guard's `Drop` instead of losing it.
+pub(super) fn settle_failed_in<H: Host>(
+    host: &H,
+    slot: &Mutex<Option<money::Reservation>>,
+    reached_wire: bool,
+) {
+    let store = host.store();
+    let Ok(mut conn) = store.conn() else {
+        return;
+    };
+    let Some(reservation) = lock(slot).take() else {
+        return;
+    };
+    let epoch = store.store_epoch();
+    let done = if reached_wire {
+        money::settle_unknown(&mut conn, epoch, reservation).map(|_| ())
+    } else {
+        money::release(&mut conn, epoch, reservation)
+    };
+    if let Err(e) = done {
+        eprintln!("mods: ai.complete could not settle a failed call: {e}");
     }
 }
 
@@ -322,10 +370,10 @@ pub(super) async fn run<H: Host>(
             .await?;
     }
 
-    // 5. The model call.
+    // 5. The model call, its requests recorded on the booking's mark.
     let answered = within(limit, async {
         host.model()
-            .complete(&plan, &request.messages, request.max_tokens)
+            .complete(&plan, &request.messages, request.max_tokens, &booking.wire)
             .await
             .map_err(|_| {
                 // What a provider said can echo the prompt, so none of it is logged or sent on.
@@ -339,7 +387,7 @@ pub(super) async fn run<H: Host>(
     let outcome = match answered {
         Ok(outcome) => outcome,
         Err(e) => {
-            settle_unknown(host, &booking.slot).await;
+            settle_failed(host, &booking).await;
             return Err(e);
         }
     };
@@ -543,11 +591,13 @@ async fn settle<H: Host>(
     // blocking task that runs to its end, and the guard's drop is the backstop if it never starts.
     let (host, slot, plan) = (host.clone(), Arc::clone(slot), Arc::clone(plan));
     let _ = blocking(move || {
+        // The connection first: a store that is shut now leaves the reservation in the slot for
+        // the guard's `Drop` rather than losing it.
+        let store = host.store();
+        let mut conn = store.conn().map_err(|_| ModError::locked())?;
         let Some(reservation) = lock(&slot).take() else {
             return Ok(());
         };
-        let store = host.store();
-        let mut conn = store.conn().map_err(|_| ModError::locked())?;
         let epoch = store.store_epoch();
         let served = completion
             .model
@@ -568,19 +618,14 @@ async fn settle<H: Host>(
     .await;
 }
 
-/// A call that may have reached the wire and ended with no answer: the whole booking counts as spent.
-async fn settle_unknown<H: Host>(host: &H, slot: &Slot) {
-    let (host, slot) = (host.clone(), Arc::clone(slot));
+/// A call that ended with no answer (a model error or the deadline): see [`settle_failed_in`]. What
+/// the call's requests did is read here, once the model future is gone, and the work itself runs
+/// as a blocking task that is not skipped if this future is dropped at the await.
+async fn settle_failed<H: Host>(host: &H, booking: &Booking<H>) {
+    let (host, slot) = (host.clone(), Arc::clone(&booking.slot));
+    let reached_wire = booking.wire.may_have_reached_the_wire();
     let _ = blocking(move || {
-        let Some(reservation) = lock(&slot).take() else {
-            return Ok(());
-        };
-        let store = host.store();
-        let mut conn = store.conn().map_err(|_| ModError::locked())?;
-        let epoch = store.store_epoch();
-        if let Err(e) = money::settle_unknown(&mut conn, epoch, reservation) {
-            eprintln!("mods: ai.complete could not settle a failed call: {e}");
-        }
+        settle_failed_in(&host, &slot, reached_wire);
         Ok(())
     })
     .await;

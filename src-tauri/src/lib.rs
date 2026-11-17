@@ -144,6 +144,7 @@ mod tray;
 mod update_delivery;
 mod vault;
 mod wipe;
+mod wire_mark;
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
