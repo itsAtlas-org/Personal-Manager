@@ -556,6 +556,24 @@ mod tests {
     /// The WRITE-OFF, the one use of the old row there is: the `UPDATE` in `all_devices_off`.
     const WRITE_OFF: &str = "UPDATE settings SET value = 'false' WHERE key = ?1";
 
+    /// Whether `text` names the old row: the bare key `dev_mode` as a whole word, in any quoting
+    /// (`"dev_mode"` in Rust, `'dev_mode'` or `key = dev_mode` inside a SQL string), or the
+    /// constant `LEGACY_ROW`. A longer identifier (`dev_mode_state`, `set_dev_mode_for_device`)
+    /// is a different name and does not count.
+    fn names_the_old_row(text: &str) -> bool {
+        text.contains("LEGACY_ROW") || names_the_old_key(text)
+    }
+
+    /// [`names_the_old_row`] without the constant: only the key as a whole word.
+    fn names_the_old_key(text: &str) -> bool {
+        const KEY: &str = "dev_mode";
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        text.match_indices(KEY).any(|(at, _)| {
+            !text[..at].chars().next_back().is_some_and(word)
+                && !text[at + KEY.len()..].chars().next().is_some_and(word)
+        })
+    }
+
     /// Whether `devmode.rs`'s production code uses the old row in any way but the write-off: it
     /// may define the constant and name it once, as the parameter of [`WRITE_OFF`] inside
     /// `all_devices_off`; any other mention (a read, a second use, a `SELECT` in that function, the
@@ -582,10 +600,9 @@ mod tests {
                 rest.push(line);
             }
         }
-        let names = |text: &str| text.contains("\"dev_mode\"") || text.contains("LEGACY_ROW");
-        names(&rest.join("\n"))
+        names_the_old_row(&rest.join("\n"))
             || body.matches("LEGACY_ROW").count() != 1
-            || body.contains("\"dev_mode\"")
+            || names_the_old_key(&body)
             || body.contains("SELECT")
             || !body.contains(WRITE_OFF)
     }
@@ -605,8 +622,7 @@ mod tests {
                 if rel == "mods/devmode.rs" {
                     devmode_uses_the_old_row_beyond_the_write_off(source)
                 } else {
-                    let prod = production(source);
-                    prod.contains("\"dev_mode\"") || prod.contains("LEGACY_ROW")
+                    names_the_old_row(&production(source))
                 }
             })
             .map(|(rel, _)| rel.clone())
@@ -655,6 +671,32 @@ mod tests {
         );
     }
 
+    /// A reader in the form it would most likely take: the key in a single-quoted SQL literal.
+    const SQL_READ: &str = "SELECT value FROM settings WHERE key = 'dev_mode'";
+
+    #[test]
+    fn the_old_row_is_found_in_any_quoting_but_not_inside_a_longer_name() {
+        for text in [
+            SQL_READ,
+            "get(\"dev_mode\")",
+            "WHERE key = dev_mode",
+            "'dev_mode'",
+            "dev_mode",
+            "x(LEGACY_ROW)",
+        ] {
+            assert!(names_the_old_row(text), "{text}");
+        }
+        for text in [
+            "dev_mode_state(conn)",
+            "set_dev_mode_for_device()",
+            "is_dev_mode",
+            "unsigned_dev_mode2",
+            "",
+        ] {
+            assert!(!names_the_old_row(text), "{text}");
+        }
+    }
+
     #[test]
     fn the_old_row_check_fails_for_a_change_in_devmode_itself() {
         // Teeth for the one file that may name the row: the real devmode.rs passes, and each of
@@ -673,6 +715,13 @@ mod tests {
             format!("{real}\nfn peek(conn: &Connection) {{ let _ = read(conn, LEGACY_ROW); }}\n"),
             // The key spelled out.
             format!("{real}\nfn peek(conn: &Connection) {{ let _ = read(conn, \"dev_mode\"); }}\n"),
+            // The key inside a SQL string (single-quoted), beside the others.
+            format!("{real}\nfn peek(c: &Connection) {{ c.query_row(\"{SQL_READ}\", [], |r| r.get::<_, String>(0)); }}\n"),
+            // ...and inside the write-off function itself.
+            real.replace(
+                "[LEGACY_ROW],\n    )?;",
+                &format!("[LEGACY_ROW],\n    )?;\n    conn.query_row(\"{SQL_READ}\", [], |r| r.get::<_, String>(0))?;"),
+            ),
             // A read inside the write-off function.
             real.replace(
                 "[LEGACY_ROW],\n    )?;",
@@ -723,6 +772,10 @@ mod tests {
         for (path, body) in [
             ("mods/policy.rs", "fn f() { get(\"dev_mode\"); }"),
             (
+                "mods/policy.rs",
+                "fn f() { q(\"SELECT value FROM settings WHERE key = 'dev_mode'\"); }",
+            ),
+            (
                 "mods/tab/x.rs",
                 "fn f() { read(conn, devmode::LEGACY_ROW); }",
             ),
@@ -731,6 +784,13 @@ mod tests {
             assert_eq!(misusers_of_the_old_row(&files), [path]);
             files.pop();
         }
+        // A longer name is another thing (the page's `dev_mode_state` command is not the row).
+        files.push((
+            "mods/policy.rs".into(),
+            "fn f() { dev_mode_state(conn); }".into(),
+        ));
+        assert!(misusers_of_the_old_row(&files).is_empty());
+        files.pop();
         files.push((
             "mods/policy.rs".into(),
             "// \"dev_mode\" is the old row\nfn f() {}\n#[cfg(test)]\nmod t { const K: &str = \"dev_mode\"; }".into(),

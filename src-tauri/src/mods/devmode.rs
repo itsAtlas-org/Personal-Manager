@@ -34,6 +34,15 @@
 //! carried developer mode over turns it off once; each person switches it on again in Settings,
 //! under Developer.
 //!
+//! **What the record does not defend against.** A credential is a bearer value: nothing the device
+//! alone holds stands behind it (it is a one-way hash of the id, with no secret key). Whoever can
+//! write the store and has ever read this device's credential (it sits in the record while the
+//! device is on; an old copy of the store file keeps it) can write it back after the device was
+//! switched off or reset, and the device is then on again with no click. The record is therefore
+//! trustworthy only against a writer who has never seen this device's credential, which is what
+//! closing the carry-over achieves and all it claims. Closing the rest needs a device-local secret
+//! outside the store (a keyed MAC over each entry); that is a follow-up for the owner, not done here.
+//!
 //! **Fails toward off.** A record that isn't what PM writes reads as nobody being on; a device
 //! whose id can't be read is off; the list is capped (the oldest switch-on falls off first, and that
 //! device is then simply off).

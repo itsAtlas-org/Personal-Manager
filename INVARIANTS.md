@@ -771,7 +771,13 @@ written old row switch a victim's device on with no click: unsigned mods the vic
 resumed and the install gate opened; removed, so upgrading turns developer mode off once and each
 person switches it on again in Settings > Developer). Rust writes the old row in one place only: the
 restore reset (`devmode::all_devices_off`, which also writes an empty record) sets it `"false"` for
-an older PM sharing the vault. A shared-vault join writes nothing (I-32). The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+an older PM sharing the vault. A shared-vault join writes nothing (I-32). **Known limit:** a
+listed credential is a bearer value (a one-way hash of the device id, no device-held secret), so a
+store writer who has ever read this device's credential (it sits in the record while the device is
+on; an old copy of the store keeps it) can write it back after the device was switched off or
+reset, and the device is on again with no click. The record is trustworthy only against a writer who
+has never seen this device's credential; closing that needs a device-local secret outside the store
+(a keyed MAC over each entry), an open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row
