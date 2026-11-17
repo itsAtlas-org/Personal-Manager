@@ -776,8 +776,10 @@ listed credential is a bearer value (a one-way hash of the device id, no device-
 store writer who has ever read this device's credential (it sits in the record while the device is
 on; an old copy of the store keeps it) can write it back after the device was switched off or
 reset, and the device is on again with no click. The record is trustworthy only against a writer who
-has never seen this device's credential; closing that needs a device-local secret outside the store
-(a keyed MAC over each entry), an open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+has never seen this device's credential. A keyed MAC over each entry would not close that (a
+replayed entry still verifies); the device itself must remember whether it is on, so closing it
+means keeping the on/off answer on the device (`data_dir`, per vault) instead of in the store, an
+open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row

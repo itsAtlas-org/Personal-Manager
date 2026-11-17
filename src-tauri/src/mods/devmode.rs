@@ -40,8 +40,10 @@
 //! device is on; an old copy of the store file keeps it) can write it back after the device was
 //! switched off or reset, and the device is then on again with no click. The record is therefore
 //! trustworthy only against a writer who has never seen this device's credential, which is what
-//! closing the carry-over achieves and all it claims. Closing the rest needs a device-local secret
-//! outside the store (a keyed MAC over each entry); that is a follow-up for the owner, not done here.
+//! closing the carry-over achieves and all it claims. A keyed MAC over each entry would NOT close the
+//! rest (a replayed entry is the same bytes and still verifies): the device itself has to remember
+//! whether it is on, so closing it means keeping the on/off answer on the device (in `data_dir`,
+//! per vault) instead of in the store. That is a follow-up for the owner, not done here.
 //!
 //! **Fails toward off.** A record that isn't what PM writes reads as nobody being on; a device
 //! whose id can't be read is off; the list is capped (the oldest switch-on falls off first, and that
