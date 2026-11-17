@@ -45,7 +45,8 @@ import {
   type RangeBounds,
 } from "../../lib/calendarPrefs";
 import type { EventKinds } from "../../lib/calendarFilters";
-import { pageKeyHint } from "../../lib/calendarNavKey";
+import { pageKeyHint, todayKeyHint } from "../../lib/calendarNavKey";
+import { useCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
 import { useTheme, type Coords } from "../../theme";
 import {
@@ -195,8 +196,11 @@ export function CalendarHeader({
   const runway = view === "agenda" && agendaMode === "runway" && !!onAgendaModeChange;
   // ↑ and ↓ page too where the periods run down the screen (see `calendarNavKey`).
   const vertical = view === "month" || view === "year";
-  const prevKeys = pageKeyHint("prev", vertical);
-  const nextKeys = pageKeyHint("next", vertical);
+  // The letters are named only while Settings → Accessibility → Keyboard has them on.
+  const characterKeys = useCharacterShortcuts();
+  const prevKeys = pageKeyHint("prev", vertical, characterKeys);
+  const nextKeys = pageKeyHint("next", vertical, characterKeys);
+  const todayKeys = todayKeyHint(characterKeys);
 
   return (
     <header className="@container border-b border-rule px-4 py-2" data-help="calendar-header">
@@ -235,8 +239,12 @@ export function CalendarHeader({
                     ‹
                   </Button>
                 </Tooltip>
-                <Tooltip label="Jump to today · t">
-                  <Button variant="tertiary" onClick={onToday} aria-keyshortcuts="t">
+                <Tooltip label={todayKeys.tip}>
+                  <Button
+                    variant="tertiary"
+                    onClick={onToday}
+                    aria-keyshortcuts={todayKeys.shortcuts}
+                  >
                     Today
                   </Button>
                 </Tooltip>

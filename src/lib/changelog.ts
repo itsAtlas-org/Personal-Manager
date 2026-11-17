@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.182.0-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "You can now turn off the Calendar's single-letter shortcuts in Settings → Accessibility → Keyboard. That's t for today, c for a new event, Shift+C for a quick one, and j, n, k and p for next and previous. It's useful with speech input, where an ordinary word can press a key, or when keys get pressed by accident. The arrow keys and all the buttons still work, the tooltips stop naming the letters while it's off, and it applies to the pop-out Calendar too. It starts on, so nothing changes unless you turn it off, and Reset in Accessibility turns it back on.",
+    ],
+  },
+  {
     version: "3.181.1-alpha",
     date: "2026-11-16",
     highlights: [

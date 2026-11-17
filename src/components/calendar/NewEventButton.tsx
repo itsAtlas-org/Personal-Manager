@@ -14,6 +14,8 @@
 // the header's right end.
 
 import { useEffect, useId, useState, type Ref } from "react";
+import { createKeyHint } from "../../lib/calendarNavKey";
+import { useCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { Button, Tooltip, VisuallyHidden, cn } from "../ui";
 
 interface Props {
@@ -31,6 +33,8 @@ const SAID_MS = 6000;
 
 export function NewEventButton({ onCreate, createReason, createRef, compact = false }: Props) {
   const reasonId = useId();
+  // The keys are named only while single-key shortcuts are on (Settings → Accessibility → Keyboard).
+  const keys = createKeyHint(useCharacterShortcuts());
   // A click while none can be made: the reason, said for a moment (a tooltip shows only on hover or
   // focus, and a click doesn't focus a button in WebKit). Counted (0 = not said), so another click
   // starts the moment over and says it again as new text.
@@ -46,17 +50,14 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
 
   return (
     <div className={cn("flex items-center gap-2", compact && "relative w-full")} data-no-create="">
-      <Tooltip
-        label={createReason ?? "New event · c, or Shift+C for a quick event or task"}
-        className={compact ? "w-full" : undefined}
-      >
+      <Tooltip label={createReason ?? keys.tip} className={compact ? "w-full" : undefined}>
         <Button
           ref={createRef}
           variant="secondary"
           size={compact ? "xs" : "sm"}
           aria-disabled={createReason !== null || undefined}
           aria-describedby={createReason !== null ? reasonId : undefined}
-          aria-keyshortcuts="c"
+          aria-keyshortcuts={keys.shortcuts}
           // The same name in the corner, where only "+ New" fits on screen.
           aria-label={compact ? "+ New event" : undefined}
           className={cn(

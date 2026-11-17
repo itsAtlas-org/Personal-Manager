@@ -47,14 +47,51 @@ const PAGE_KEYS: { key: string; glyph: string; nav: "prev" | "next"; vertical?: 
   { key: "n", glyph: "n", nav: "next" },
 ];
 
+/** A key that is one character, so a shortcut under WCAG 2.2 SC 2.1.4 that Settings → Accessibility →
+ *  Keyboard can turn off. The arrows are named keys and stay. */
+const isCharacterKey = (key: string) => key.length === 1;
+
+/** The Calendar's other single-letter shortcuts: `t` jumps to today, `c` starts a new event (and
+ *  Shift+C the quick one). One table for the decision and for what the Today and + New event
+ *  controls say of them. */
+const LETTER_KEYS = { today: "t", create: "c" } as const;
+
+/** What the Today button says of its key: the tooltip, and `aria-keyshortcuts` (none when
+ *  `characterKeys` is off, since the letter then does nothing). */
+export function todayKeyHint(characterKeys = true): {
+  tip: string;
+  shortcuts: string | undefined;
+} {
+  return characterKeys
+    ? { tip: `Jump to today · ${LETTER_KEYS.today}`, shortcuts: LETTER_KEYS.today }
+    : { tip: "Jump to today", shortcuts: undefined };
+}
+
+/** What + New event says of its keys, as {@link todayKeyHint} does for Today. */
+export function createKeyHint(characterKeys = true): {
+  tip: string;
+  shortcuts: string | undefined;
+} {
+  return characterKeys
+    ? {
+        tip: `New event · ${LETTER_KEYS.create}, or Shift+${LETTER_KEYS.create.toUpperCase()} for a quick event or task`,
+        shortcuts: LETTER_KEYS.create,
+      }
+    : { tip: "New event", shortcuts: undefined };
+}
+
 /** What a ‹ or › button says of its keys: the glyphs for a tooltip ("←, ↑, k or p") and the key names
- *  for `aria-keyshortcuts` ("ArrowLeft ArrowUp k p"). `vertical` is the view's, as for
- *  {@link calendarNavKey}. */
+ *  for `aria-keyshortcuts` ("ArrowLeft ArrowUp k p"). `vertical` is the view's, and `characterKeys`
+ *  whether the single-letter shortcuts are on, as for {@link calendarNavKey}; off, only the arrows
+ *  are named. */
 export function pageKeyHint(
   nav: "prev" | "next",
   vertical: boolean,
+  characterKeys = true,
 ): { glyphs: string; shortcuts: string } {
-  const keys = PAGE_KEYS.filter((k) => k.nav === nav && (vertical || !k.vertical));
+  const keys = PAGE_KEYS.filter(
+    (k) => k.nav === nav && (vertical || !k.vertical) && (characterKeys || !isCharacterKey(k.key)),
+  );
   const glyphs = keys.map((k) => k.glyph);
   const last = glyphs.pop();
   return {
@@ -72,23 +109,28 @@ export function pageKeyHint(
  * and → are; false in the day grids and the agenda, where ↑ and ↓ scroll. The letters read `key`, as
  * `t` always has (`NavKeyEvent` has no `code`), so they all change together if a layout ever needs it,
  * and Caps Lock doesn't change them; `c` asks Shift itself, so Caps Lock types the full editor's `c`,
- * not quick create's.
+ * not quick create's. `characterKeys` is the Accessibility setting for single-key shortcuts (WCAG 2.2
+ * SC 2.1.4): off, every letter above does nothing and the arrows still page.
  */
 export function calendarNavKey(
   e: NavKeyEvent,
   dialogOpen: boolean,
   vertical = false,
+  characterKeys = true,
 ): CalendarNav | null {
   if (dialogOpen) return null;
   if (e.metaKey || e.ctrlKey || e.altKey) return null;
   if (isTypingTarget(e.target)) return null;
   const lower = e.key.toLowerCase();
   const page = PAGE_KEYS.find(
-    (k) => (vertical || !k.vertical) && (k.key.length === 1 ? k.key === lower : k.key === e.key),
+    (k) =>
+      (vertical || !k.vertical) &&
+      (isCharacterKey(k.key) ? characterKeys && k.key === lower : k.key === e.key),
   );
   if (page) return page.nav;
-  if (lower === "t") return "today";
-  if (lower === "c") return e.shiftKey ? "quick-create" : "create";
+  if (!characterKeys) return null;
+  if (lower === LETTER_KEYS.today) return "today";
+  if (lower === LETTER_KEYS.create) return e.shiftKey ? "quick-create" : "create";
   return null;
 }
 

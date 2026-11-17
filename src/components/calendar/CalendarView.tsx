@@ -145,6 +145,7 @@ import {
 import { useHorizontalWheelShift } from "../../lib/useHorizontalWheelShift";
 import { useSettledDate } from "../../lib/useSettledDate";
 import { calendarNavKey, calendarUndoKey } from "../../lib/calendarNavKey";
+import { readCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { isAnyDialogOpen } from "../../lib/useDialogLayer";
 import { resolveRangeBounds } from "../../lib/calendarGeom";
 import { formatDateLocal } from "../../lib/format";
@@ -1117,7 +1118,8 @@ export function CalendarView({
   // focused, a modifier is held (so app shortcuts and text entry are untouched), or anything is open
   // over the tab that a click on the grid would only close: a dialog (quick create included), the
   // event popover, or any other popover or the right-click menu, as `overlayShown` says (see
-  // `calendarNavKey`). Ctrl/Cmd+Z is the delete's Undo (`calendarUndoKey`).
+  // `calendarNavKey`). Ctrl/Cmd+Z is the delete's Undo (`calendarUndoKey`). The letters can be turned
+  // off in Settings → Accessibility → Keyboard (WCAG 2.2 SC 2.1.4); the arrows stay.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Ctrl/Cmd+Z presses the newest Undo on screen (a delete still waiting). Unlike the arrows it
@@ -1131,7 +1133,14 @@ export function CalendarView({
         }
         return;
       }
-      const nav = calendarNavKey(e, overlayShown(popoverOpenRef.current), pagesVertically);
+      // The single-letter keys follow Settings → Accessibility → Keyboard, read at the press so a
+      // change there (or in the other window) takes effect at once.
+      const nav = calendarNavKey(
+        e,
+        overlayShown(popoverOpenRef.current),
+        pagesVertically,
+        readCharacterShortcuts(),
+      );
       // The Runway runs from today: ←, → and t would move a cursor nothing on screen follows.
       if (runwayShown && (nav === "prev" || nav === "next" || nav === "today")) return;
       if (nav === "prev") {

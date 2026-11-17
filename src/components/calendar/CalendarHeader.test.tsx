@@ -9,7 +9,7 @@
 
 import { createRef, type ReactNode, type RefObject } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -21,6 +21,7 @@ import type { AgendaMode, CalendarViewMode } from "../../lib/calendarPrefs";
 import type { EventKinds } from "../../lib/calendarFilters";
 import { refreshDescription, refreshTip } from "../../lib/calendarRefresh";
 import { formatClock } from "../../lib/format";
+import { resetKeyboardPrefs, writeCharacterShortcuts } from "../../lib/keyboardPrefs";
 
 afterEach(() => {
   cleanup();
@@ -564,6 +565,107 @@ describe("CalendarHeader: the keys", () => {
       header({ view: "week" });
       expect(shown(prev())).toBe("Previous · ←, k or p");
       expect(shown(next())).toBe("Next · →, j or n");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// WCAG 2.2 SC 2.1.4: while Settings → Accessibility → Keyboard has single-key shortcuts off, nothing
+// advertises the letters (tooltip or aria-keyshortcuts), the arrows stay, and a flip is followed
+// while the header is mounted, as it is when made from Settings or the other window.
+describe("CalendarHeader: the keys with single-key shortcuts off", () => {
+  const prev = () => screen.getByRole("button", { name: "Previous" });
+  const next = () => screen.getByRole("button", { name: "Next" });
+  const today = () => screen.getByRole("button", { name: "Today" });
+  const newEvent = () => screen.getByRole("button", { name: "+ New event" });
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  function tip(button: HTMLElement): string | null {
+    fireEvent.focus(button);
+    act(() => void vi.advanceTimersByTime(200));
+    const text = screen.queryByRole("tooltip")?.textContent ?? null;
+    fireEvent.blur(button);
+    return text;
+  }
+
+  it("names only the arrows on ‹ ›, and nothing on Today and + New event", () => {
+    writeCharacterShortcuts(false);
+    header({ onCreate: vi.fn(), view: "month", createReason: null });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft ArrowUp");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight ArrowDown");
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(newEvent().hasAttribute("aria-keyshortcuts")).toBe(false);
+    cleanup();
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    expect(prev().getAttribute("aria-keyshortcuts")).toBe("ArrowLeft");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight");
+  });
+
+  it("says no letters in the tooltips", () => {
+    vi.useFakeTimers();
+    try {
+      writeCharacterShortcuts(false);
+      header({ onCreate: vi.fn(), view: "month", createReason: null });
+      tabbing();
+      expect(tip(prev())).toBe("Previous · ← or ↑");
+      expect(tip(next())).toBe("Next · → or ↓");
+      expect(tip(today())).toBe("Jump to today");
+      expect(tip(newEvent())).toBe("New event");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the letters again when the switch is on", () => {
+    vi.useFakeTimers();
+    try {
+      header({ onCreate: vi.fn(), view: "week", createReason: null });
+      tabbing();
+      expect(tip(prev())).toBe("Previous · ←, k or p");
+      expect(tip(today())).toBe("Jump to today · t");
+      expect(tip(newEvent())).toBe("New event · c, or Shift+C for a quick event or task");
+      expect(newEvent().getAttribute("aria-keyshortcuts")).toBe("c");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("follows a flip while mounted, both ways", () => {
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+    act(() => writeCharacterShortcuts(false));
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(newEvent().hasAttribute("aria-keyshortcuts")).toBe(false);
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight");
+    act(() => resetKeyboardPrefs());
+    expect(today().getAttribute("aria-keyshortcuts")).toBe("t");
+    expect(newEvent().getAttribute("aria-keyshortcuts")).toBe("c");
+    expect(next().getAttribute("aria-keyshortcuts")).toBe("ArrowRight j n");
+  });
+
+  it("follows the other window's change, which arrives as a storage event", () => {
+    header({ onCreate: vi.fn(), view: "week", createReason: null });
+    localStorage.setItem("pm:a11y:characterShortcuts", "false");
+    act(
+      () =>
+        void window.dispatchEvent(
+          new StorageEvent("storage", { key: "pm:a11y:characterShortcuts" }),
+        ),
+    );
+    expect(today().hasAttribute("aria-keyshortcuts")).toBe(false);
+  });
+
+  it("keeps the reason when no event can be made, whatever the switch says", () => {
+    vi.useFakeTimers();
+    try {
+      writeCharacterShortcuts(false);
+      header({ onCreate: vi.fn(), view: "week", createReason: REASON });
+      tabbing();
+      expect(tip(newEvent())).toBe(REASON);
     } finally {
       vi.useRealTimers();
     }
