@@ -4,9 +4,9 @@
 # sorting (I). mypy is intentionally deferred until the sidecar is type-annotated
 # (adding it now would only fail noisily). Format matches Ruff's defaults.
 
-# The sidecar runs on the user's interpreter (verified on 3.14); 3.9 is the floor
-# we still want to lint cleanly against.
-target-version = "py39"
+# The sidecar runs on the user's interpreter (verified on 3.14); 3.12 is the floor
+# PM enforces (MIN_PYTHON in sidecar.rs), so that is what we lint against.
+target-version = "py312"
 line-length = 100
 
 [lint]

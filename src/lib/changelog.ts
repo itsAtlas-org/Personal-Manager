@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.182.2-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "PM's document engine now needs Python 3.12 or newer, up from 3.11. After this update the engine sets itself up again once, the next time something needs it (or when you press Set it up now in Documents), and shows as not installed until then. On Windows and Linux that is quick, because the installers already bring their own Python 3.12 and nothing new is downloaded. On a Mac, PM still uses a Python of yours when it's new enough. If the engine was running on a Python 3.11, PM downloads its own Python 3.12 at that same moment and sets the engine up again, including any OCR or map add-ons you had installed. That needs internet access to GitHub; if the download is blocked, PM says so and offers Retry.",
+      "The list of parts the document engine is built from no longer carries older copies of a few of its libraries (one that reads web pages and two maths libraries), which were kept only for Python 3.11. The newer copies were already the ones in use on everything PM installs itself, so nothing about how your documents are read changes.",
+    ],
+  },
+  {
     version: "3.182.1-alpha",
     date: "2026-11-16",
     highlights: [

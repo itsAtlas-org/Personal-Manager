@@ -44,8 +44,8 @@
 #     whatever the resolver happens to pick.
 #
 #     13.0.0 is the only release carrying the fixes for the decoder advisories published from
-#     2026-10-17 (there is no 12.x after 12.3.0), and it needs Python 3.11 or newer, which is why
-#     MIN_PYTHON in sidecar.rs is (3, 11). fastembed 0.9.0 declared `pillow<13`, so until 0.9.1
+#     2026-10-17 (there is no 12.x after 12.3.0), and it needs Python 3.11 or newer (MIN_PYTHON in
+#     sidecar.rs is (3, 12) now, see the comment there). fastembed 0.9.0 declared `pillow<13`, so until 0.9.1
 #     (qdrant/fastembed#830 allows pillow 13) the same pin also sat in requirements-override.txt
 #     to lift that cap. That file is empty now; the lock still installs with `--no-deps`.
 #   defusedxml — hardens the stdlib XML parser (openpyxl's fallback) against entity-expansion / XXE
