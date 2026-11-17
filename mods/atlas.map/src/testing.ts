@@ -89,3 +89,6 @@ export function vectorsFor(docs: MapDoc[], dimension: number, seed = 7): Map<num
   }
   return out;
 }
+
+/** The last element (`Array.prototype.at` is newer than the mods' type-check library). */
+export const last = <T>(items: readonly T[]): T | undefined => items[items.length - 1];

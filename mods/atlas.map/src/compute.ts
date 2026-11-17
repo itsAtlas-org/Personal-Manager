@@ -27,13 +27,17 @@ export interface Compute {
   readonly mode: "worker" | "inline";
 }
 
+/** An event handler typed the way DOM handlers are (parameter bivariance), so a real `Worker`, whose
+ *  `onmessage` takes a `MessageEvent`, is a `WorkerLike` as well as a test's stand-in taking `{data}`. */
+type Handler<E> = { bivarianceHack(event: E): void }["bivarianceHack"];
+
 /** The part of a Worker `workerCompute` uses (a real Worker, or a test's stand-in). */
 export interface WorkerLike {
   postMessage(message: unknown, transfer: Transferable[]): void;
   terminate(): void;
-  onmessage: ((event: { data: unknown }) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onmessageerror: ((event: unknown) => void) | null;
+  onmessage: Handler<{ data: unknown }> | null;
+  onerror: Handler<unknown> | null;
+  onmessageerror: Handler<unknown> | null;
 }
 
 /** What a failed job says: one sentence of ours, never the worker's own text. */

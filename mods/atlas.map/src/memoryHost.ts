@@ -31,6 +31,8 @@ export interface MemoryHostOptions {
   growthBudget?: number;
   /** Storage keys the manifest declares as content: `storage.doc.set` refuses them. */
   contentKeys?: string[];
+  /** What `theme.get` answers (PM's page answers it: modTheme.ts). Default: a dark Slate-like theme. */
+  theme?: unknown;
 }
 
 export interface Call {
@@ -100,6 +102,10 @@ export interface MemoryHost {
   /** Deliver an event to the handlers the Map registered. */
   emit(event: HostEvent): void;
   handlers: Set<(event: HostEvent) => void>;
+  /** The ids `ui.openDocument` opened (PM's page opens its reader; here it is only recorded). */
+  opened: number[];
+  /** Change what `theme.get` answers from now on. */
+  setTheme(theme: unknown): void;
 }
 
 export function memoryHost(options: MemoryHostOptions): MemoryHost {
@@ -116,6 +122,15 @@ export function memoryHost(options: MemoryHostOptions): MemoryHost {
   const handlers = new Set<(event: HostEvent) => void>();
   const failures: { method: string; code: string; left: number }[] = [];
   const always = new Map<string, string>();
+  const opened: number[] = [];
+  let theme: unknown = options.theme ?? {
+    vars: { "--bg": "oklch(0.16 0.01 270)", "--ink": "oklch(0.95 0 0)" },
+    mode: "dark",
+    system: "slate",
+    accent: "mono",
+    colorblind: false,
+    depth: "standard",
+  };
 
   const embedded = () =>
     Array.from(vectors.keys())
@@ -179,6 +194,17 @@ export function memoryHost(options: MemoryHostOptions): MemoryHost {
           documents: page.map(dto),
           next: all.length > take ? page[page.length - 1].id : null,
         };
+      }
+      case "theme.get": {
+        only();
+        return JSON.parse(JSON.stringify(theme));
+      }
+      case "ui.openDocument": {
+        only("id");
+        // Archived and missing documents are the same answer, as in documents.rs.
+        if (typeof a.id !== "number" || !docs.has(a.id)) throw refuse("MOD-4002", "Not found.");
+        opened.push(a.id);
+        return null;
       }
       case "embeddings.signature": {
         only();
@@ -341,6 +367,10 @@ export function memoryHost(options: MemoryHostOptions): MemoryHost {
     kv,
     rows,
     handlers,
+    opened,
+    setTheme(next) {
+      theme = next;
+    },
     emit(event) {
       for (const h of Array.from(handlers)) h(event);
     },

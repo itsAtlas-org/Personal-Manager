@@ -233,9 +233,15 @@ describe("the real mods/atlas.map", () => {
     const result = pack.verifyArchive(bytes);
     expect(result.kind).toBe("pre-sign");
     expect(result.manifest).toMatchObject({ id: "atlas.map", tier: "first", commit: COMMIT });
-    expect(result.files.get("NOTICE.txt").toString()).toContain(
-      "This mod bundles no npm packages.",
-    );
+    // The Map's page bundles d3 (the by-project simulation, its timer and dispatch, and the hit-test
+    // quadtree), so its NOTICE reproduces those four packages' licences (spec section 7): the names the
+    // build record found in the bundle, and nothing else (the worker's own copy of d3-force is the
+    // same package, listed once).
+    const notice = result.files.get("NOTICE.txt").toString();
+    expect(notice).toContain("This mod bundles 4 npm packages.");
+    for (const name of ["d3-dispatch", "d3-force", "d3-quadtree", "d3-timer"]) {
+      expect(notice).toContain(`\n${name} `);
+    }
   });
 
   it("is refused as an unsigned file: an atlas. mod is never a developer's own", () => {

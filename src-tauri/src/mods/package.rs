@@ -3081,6 +3081,22 @@ pub(crate) mod tests {
         assert_eq!(m.publisher.tier, Tier::First);
         assert_eq!(m.publisher.commit, "0".repeat(40));
         assert_eq!(m.contributions.nav_tab.as_deref(), Some("Map"));
+        // The Map's help entries (B6) go through PM's own text rules here: the ids, the lengths, no
+        // control or invisible character. The node side holds the same rules in manifest.test.ts.
+        let help: Vec<&str> = m.contributions.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            help,
+            [
+                "map-overview",
+                "map-canvas",
+                "map-arrangement",
+                "map-cohesion",
+                "map-navigate",
+                "map-names",
+                "map-settings",
+                "map-updates"
+            ]
+        );
     }
 
     /// A folder of one `app/index.html` and the repo's own LICENCE.txt around a committed manifest:

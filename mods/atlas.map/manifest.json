@@ -18,7 +18,49 @@
     { "id": "documents.vectors", "why": "Places similar documents near each other." }
   ],
   "contributions": {
-    "nav.tab": { "label": "Map" }
+    "nav.tab": { "label": "Map" },
+    "help": [
+      {
+        "id": "map-overview",
+        "title": "Map",
+        "body": "Your documents laid out on one map, in one of two arrangements. By project puts each project in the middle of its documents. Semantic puts documents that are about similar things close together.\nHover a document to see its details, or click it to read it."
+      },
+      {
+        "id": "map-canvas",
+        "title": "Document map",
+        "body": "Each dot is a document. Its size is how much content it holds (its number of chunks) and its colour is its project, matching the legend.\nA dashed ring means the document is still awaiting review, or is index-only (it lives in a connected source like Drive rather than on this device).\nIn the Semantic arrangement a faded dot has not been placed yet: it waits at its project's spot until the map is worked out again.\nHover a dot for its details, or click it to open the document in PM's reader."
+      },
+      {
+        "id": "map-arrangement",
+        "title": "How the map is arranged",
+        "body": "Switch how documents are laid out.\nBy project (the default) groups documents by where you filed them: each project is a hub with its documents gathered around it and linked to it, so the map shows how your library is organised.\nSemantic places documents so that similar ones sit close together, worked out from their meaning on this computer. Here projects only colour the dots; they do not decide where a dot goes.\nThe Semantic layout is worked out once and saved, so the first time after big changes it can take a moment."
+      },
+      {
+        "id": "map-cohesion",
+        "title": "Project cohesion",
+        "body": "Cohesion is how strongly the Semantic arrangement pulls documents in the same project together. Off (the default) lays everything out purely by meaning. Low, Medium or High nudge same-project documents a little closer, so each project reads as a looser cluster while meaning still drives the overall shape.\nIt applies at once and changes nothing about how the layout is worked out or saved."
+      },
+      {
+        "id": "map-navigate",
+        "title": "Move around the map",
+        "body": "Zoom in or out, or fit the whole map back into view, with the buttons at the bottom right. You can also scroll to zoom (scroll sideways to pan left and right), drag anywhere to pan, and double-click to fit the map again."
+      },
+      {
+        "id": "map-names",
+        "title": "Show file names",
+        "body": "The Names button writes each document's file name inside its dot, so you can tell dots apart without hovering. The text is sized to the dot: small when you are zoomed out, larger as you zoom in. A long name is shortened to fit, showing its start; zoom into a bigger dot to read more.\nOff by default to keep a busy map uncluttered. Your choice is kept with your vault."
+      },
+      {
+        "id": "map-settings",
+        "title": "Map settings",
+        "body": "Most documents placed by meaning caps how many documents the Semantic arrangement places one by one, from 200 to 5,000. Above it, the rest are gathered at their project's spot. Raise it for a fuller picture, lower it on a slower computer.\nYour settings are kept with your vault, so they travel with a backup and with a shared vault."
+      },
+      {
+        "id": "map-updates",
+        "title": "Working it out, and refreshing",
+        "body": "The first time you open the Semantic arrangement after your documents change, the map is worked out on this computer, which can take a moment: a bar under the title says so. The result is saved, so the next opening is quick.\nIf documents are added or removed while the map is open, it does not move under you. A bar says so, and Refresh draws the map again."
+      }
+    ]
   },
   "data": {
     "keys": [

@@ -1,9 +1,514 @@
 /* SPDX-FileCopyrightText: 2026 Bobby Yu */
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 
-/* A stub stylesheet. The frame's CSP forbids inline styles and data: images, so a mod's look lives in
-   files like this one, over the theme variables PM hands it (theme.get). */
+/* The Map's look, hand-written over PM's theme variables (theme.get; theme.ts sets them on <html>). The
+   frame's CSP allows only this file as a style source: no style attribute, no <style>, no data: image,
+   no web font (fonts load only from the frame's own folder, and the Map ships none: it uses PM's --ui
+   and falls back to the system face). Every colour is a variable PM supplies, with a system colour as
+   its fallback so the page stays legible before the theme arrives or if it never does. No hex literal
+   lives here; the project palette (the one sanctioned exception) is palette.ts. */
+
+:root {
+  color-scheme: light dark;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  height: 100%;
+  /* PM's whole-UI text size (--font-scale): scaling the root scales every rem below, as in PM. */
+  font-size: calc(100% * var(--font-scale, 1));
+}
+
 body {
+  height: 100%;
   margin: 0;
-  font-family: system-ui, sans-serif;
+  background: var(--bg, Canvas);
+  color: var(--ink, CanvasText);
+  font-family: var(--ui, system-ui), system-ui, sans-serif;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+#app {
+  height: 100%;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+:where(button, select, input):focus-visible {
+  outline: 2px solid var(--accent-text, Highlight);
+  outline-offset: 2px;
+}
+
+.plain {
+  margin: 0;
+  padding: 1rem;
+  color: var(--ink3, GrayText);
+}
+
+.map {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- header ---- */
+
+.bar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border, GrayText);
+}
+
+.titles {
+  flex: none;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--head, var(--ui, system-ui)), system-ui, sans-serif;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.subtitle {
+  min-height: 1.05rem;
+  margin: 0.125rem 0 0;
+  color: var(--ink3, GrayText);
+  font-size: 0.75rem;
+}
+
+.bar-right {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem 1rem;
+  min-width: 0;
+}
+
+/* The legend can hold a name for every project in a big library: it wraps, and stops growing at about
+   three lines (the rest is clipped) so the header never eats the map. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.25rem 0.75rem;
+  min-width: 0;
+  max-height: 3.9rem;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--ink2, CanvasText);
+  font-size: 0.75rem;
+  list-style: none;
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.dot {
+  flex: none;
+  width: 0.625rem;
+  height: 0.625rem;
+}
+
+.controls {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--ink3, GrayText);
+  font-size: 0.75rem;
+}
+
+select,
+input[type="number"] {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--ink4, GrayText);
+  border-radius: var(--radius-sm, 0.5rem);
+  background: var(--surface, Field);
+  color: var(--ink, FieldText);
+  font-size: 0.75rem;
+}
+
+.chip {
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--ink4, GrayText);
+  border-radius: var(--radius-sm, 0.5rem);
+  background: transparent;
+  color: var(--ink3, GrayText);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--ink, CanvasText);
+}
+
+.chip.active {
+  background: var(--accent, Highlight);
+  color: var(--accent-ink, HighlightText);
+}
+
+.seg {
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--ink4, GrayText);
+  border-radius: var(--radius-sm, 0.5rem);
+  font-size: 0.75rem;
+}
+
+.seg-button {
+  padding: 0.25rem 0.625rem;
+  border: 0;
+  border-radius: calc(var(--radius-sm, 0.5rem) - 2px);
+  background: transparent;
+  color: var(--ink3, GrayText);
+  cursor: pointer;
+}
+
+.seg-button:hover {
+  color: var(--ink, CanvasText);
+}
+
+.seg-button.active {
+  background: var(--accent, Highlight);
+  color: var(--accent-ink, HighlightText);
+  box-shadow: inset 0 0 0 1px var(--ink4, GrayText);
+}
+
+/* ---- the settings popover ---- */
+
+.popover-anchor {
+  position: relative;
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 0.375rem);
+  right: 0;
+  z-index: 20;
+  box-sizing: border-box;
+  width: 18rem;
+  max-width: calc(100vw - 2rem);
+  padding: 1rem;
+  border: 1px solid var(--border2, GrayText);
+  border-radius: var(--radius, 0.75rem);
+  background: var(--surface, Canvas);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink, CanvasText) 22%, transparent);
+}
+
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.field-title {
+  color: var(--ink2, CanvasText);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.hint {
+  margin: 0.625rem 0 0;
+  color: var(--ink3, GrayText);
+  font-size: 0.75rem;
+}
+
+/* ---- strips ---- */
+
+.strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.75rem;
+  box-sizing: border-box;
+  padding: 0.375rem 1.5rem;
+  border-bottom: 1px solid var(--border, GrayText);
+  background: var(--panel, Canvas);
+  color: var(--ink3, GrayText);
+  font-size: 0.75rem;
+}
+
+.strip-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.strip-error {
+  box-shadow: inset 0.25rem 0 0 var(--st-due, GrayText);
+  color: var(--ink, CanvasText);
+}
+
+.pulse {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--ink4, GrayText);
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text, LinkText);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link.quiet {
+  color: var(--ink3, GrayText);
+  font-weight: 400;
+}
+
+/* ---- the stage ---- */
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+.canvas.is-hover {
+  cursor: pointer;
+}
+
+.canvas.is-grabbing {
+  cursor: grabbing;
+}
+
+.message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  padding: 1rem;
+  color: var(--ink4, GrayText);
+  text-align: center;
+}
+
+/* The shimmer while documents load: a cluster of dots in the shape of a map. */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
+}
+
+.skel-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 2.5rem;
+}
+
+.skel-row.wide {
+  align-items: center;
+  gap: 3rem;
+}
+
+.skel {
+  border-radius: 50%;
+  background: linear-gradient(
+    90deg,
+    var(--surface, Canvas),
+    var(--border, GrayText),
+    var(--surface, Canvas)
+  );
+  background-size: 200% 100%;
+}
+
+.s7 {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.s8 {
+  width: 2rem;
+  height: 2rem;
+}
+
+.s9 {
+  width: 2.25rem;
+  height: 2.25rem;
+}
+
+.s11 {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.s14 {
+  width: 3.5rem;
+  height: 3.5rem;
+}
+
+.s16 {
+  width: 4rem;
+  height: 4rem;
+}
+
+/* Motion only where it is welcome: with reduced motion asked for, the shimmer and the pulse rest. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.3;
+    }
+  }
+
+  .skel {
+    animation: shimmer 1.4s linear infinite;
+  }
+
+  .pulse {
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+}
+
+.nav {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.nav-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--ink4, GrayText);
+  border-radius: var(--radius-sm, 0.5rem);
+  background: var(--surface, Canvas);
+  color: var(--ink2, CanvasText);
+  cursor: pointer;
+}
+
+.nav-button:hover {
+  border-color: var(--ink2, CanvasText);
+  color: var(--ink, CanvasText);
+}
+
+.card {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 3;
+  box-sizing: border-box;
+  width: 18rem;
+  max-width: calc(100% - 2rem);
+  padding: 1rem;
+  border: 1px solid var(--border2, GrayText);
+  border-radius: var(--radius, 0.75rem);
+  background: var(--surface, Canvas);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink, CanvasText) 22%, transparent);
+}
+
+.card-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.card dl {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+}
+
+.card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.card dt {
+  color: var(--ink3, GrayText);
+}
+
+.card dd {
+  margin: 0;
+  color: var(--ink2, CanvasText);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.capitalise {
+  text-transform: capitalize;
+}
+
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+.tag {
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--radius-sm, 0.5rem);
+  background: var(--bg, Canvas);
+  color: var(--ink2, CanvasText);
+  font-size: 0.75rem;
 }

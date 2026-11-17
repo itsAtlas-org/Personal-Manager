@@ -1,8 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The Map's page. A stub until its engine and UI land: it only proves the mod builds and loads.
+// The Map's page: the one line that makes the real connection and the real worker, and starts it.
+// What starts is boot.ts, which a test drives with stand-ins; this file has no logic to test.
 import "./style.css";
-import { MOD_ID } from "./id";
+import workerSource from "inline-worker:./worker/layout.worker.ts";
+import { connectHost } from "../../../src/kit/host";
+import { spawnWorker } from "../../../src/kit/spawnWorker";
+import { boot } from "./boot";
 
-document.documentElement.dataset.mod = MOD_ID;
+void boot({
+  doc: document,
+  win: window,
+  connect: connectHost,
+  spawn: () => spawnWorker(workerSource),
+});

@@ -42,6 +42,13 @@ export const NO_JOB = -1;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
+/** A Float32Array by what it is, not by which realm's constructor made it: the frame SDK checks the
+ *  vectors PM sends the same way (src/kit/host.ts), and a message port can hand back an array whose
+ *  constructor is another realm's (a test's jsdom page over Node's channel does), which `instanceof`
+ *  would refuse although it is exactly the view the SDK vouched for. */
+const isFloat32Array = (v: unknown): v is Float32Array =>
+  ArrayBuffer.isView(v) && Object.prototype.toString.call(v) === "[object Float32Array]";
+
 /** A job's id, if the request has a usable one. */
 function idOf(request: unknown): number {
   return isRecord(request) && Number.isSafeInteger(request.id) ? (request.id as number) : NO_JOB;
@@ -82,7 +89,7 @@ export function handle(request: unknown): WorkerReply {
       case "reduce": {
         const { vectors, count, dimension } = request;
         if (
-          !(vectors instanceof Float32Array) ||
+          !isFloat32Array(vectors) ||
           typeof count !== "number" ||
           typeof dimension !== "number"
         ) {

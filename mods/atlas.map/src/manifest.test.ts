@@ -121,3 +121,96 @@ describe("what the engine does is covered by what the manifest asks for", () => 
     ]);
   });
 });
+
+describe("the help entries", () => {
+  const help = manifest.contributions.help;
+
+  it("are the eight the core Map had, reworded: an overview, the canvas, the arrangement, cohesion, moving, names, settings and refreshing", () => {
+    expect(help.map((h) => h.id)).toEqual([
+      "map-overview",
+      "map-canvas",
+      "map-arrangement",
+      "map-cohesion",
+      "map-navigate",
+      "map-names",
+      "map-settings",
+      "map-updates",
+    ]);
+  });
+
+  it("follow package.rs's rules for a help entry (the Rust parse of this file is a test of its own)", () => {
+    expect(help.length).toBeLessThanOrEqual(64);
+    expect(new Set(help.map((h) => h.id)).size).toBe(help.length);
+    for (const h of help) {
+      // is_word(id, 48, '-') and a lowercase first letter.
+      expect(h.id, h.id).toMatch(/^[a-z][a-z0-9-]{0,47}$/);
+      // plain_text: no edge space, no control character but a newline in a body, short enough.
+      for (const [what, text, max, newlines] of [
+        ["title", h.title, 80, false],
+        ["body", h.body, 2000, true],
+      ] as const) {
+        expect(text.length, `${h.id} ${what}`).toBeGreaterThan(0);
+        expect(Array.from(text).length, `${h.id} ${what}`).toBeLessThanOrEqual(max);
+        expect(text.trim(), `${h.id} ${what}`).toBe(text);
+        // Written as code points, not as the characters themselves, so this file holds none.
+        const controls = (c: number) =>
+          c < 32 || (c >= 127 && c <= 159) || c === 0x2028 || c === 0x2029;
+        const invisible = (c: number) =>
+          (c >= 0x200b && c <= 0x200f) ||
+          (c >= 0x202a && c <= 0x202e) ||
+          (c >= 0x2060 && c <= 0x206f) ||
+          c === 0xfeff;
+        for (const ch of text) {
+          const c = ch.codePointAt(0) as number;
+          const allowedNewline = newlines && c === 10;
+          expect(controls(c) && !allowedNewline, `${h.id} ${what} has a control character`).toBe(
+            false,
+          );
+          expect(invisible(c), `${h.id} ${what} has an invisible character`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("say nothing that is no longer so: no t-SNE, no Settings tab for the Map, nothing kept on this device", () => {
+    const all = help.map((h) => `${h.title}\n${h.body}`).join("\n");
+    expect(all).not.toMatch(/t-?sne/i);
+    expect(all).not.toMatch(/Memory map/i);
+    expect(all).not.toMatch(/remembered on this device/i);
+    expect(all).not.toMatch(/background/i);
+  });
+
+  it("describe the controls the page really has", () => {
+    const all = help.map((h) => h.body).join("\n");
+    for (const word of ["By project", "Semantic", "Cohesion", "Names"]) {
+      expect(all.toLowerCase()).toContain(word.toLowerCase());
+    }
+    // The settings entry names the cap by the label the page shows.
+    expect(help.find((h) => h.id === "map-settings")?.body).toContain(
+      "Most documents placed by meaning",
+    );
+    expect(help.find((h) => h.id === "map-settings")?.body).toMatch(/200 to 5,000/);
+  });
+
+  it("never offers a path or a file location: the Map is not given one", () => {
+    expect(help.map((h) => h.body).join("\n")).not.toMatch(/source path|file path/i);
+  });
+});
+
+describe("the page's own calls", () => {
+  it("theme.get and ui.openDocument are rows of the dispatch table under permissions the manifest asks for", () => {
+    for (const method of ["theme.get", "ui.openDocument"]) {
+      const permission = callRows.get(method);
+      expect(permission, `${method} is not a call of the dispatch table`).toBeDefined();
+      expect(permissions.has(permission as string), `${method} needs ${permission}`).toBe(true);
+    }
+    expect(callRows.get("theme.get")).toBe("storage");
+    expect(callRows.get("ui.openDocument")).toBe("documents.meta");
+    expect(eventRows.get("theme.changed")).toBe("storage");
+  });
+
+  it("the tab's label fits PM's limit and the description is plain text", () => {
+    expect(manifest.contributions["nav.tab"].label.length).toBeLessThanOrEqual(24);
+    expect(manifest.description.length).toBeLessThanOrEqual(200);
+  });
+});

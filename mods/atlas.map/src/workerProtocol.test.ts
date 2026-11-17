@@ -4,6 +4,8 @@
 // The Worker's one function, `handle`, with no Worker: what it answers for each job, and that it
 // answers (never throws) for anything else, because a throw in a worker strands every job waiting on it.
 
+// @ts-expect-error no @types/node (this repo has none: the root vite.config.ts says the same)
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { forceRequest, buildGraph } from "./layoutModel";
 import { simulate } from "./forceLayout";
@@ -27,6 +29,35 @@ describe("handle: reduce", () => {
     expect(reply.id).toBe(4);
     expect(reply.method).toBe("pca");
     expect(Array.from(reply.coords)).toEqual(Array.from(direct.coords));
+  });
+
+  it("takes vectors made by another realm's Float32Array (a message port's, in a test's jsdom page)", () => {
+    const v = vectors();
+    // A view whose constructor is another realm's: `instanceof Float32Array` is false for it.
+    const foreign = runInNewContext("(b) => new Float32Array(b)")(v.buffer) as Float32Array;
+    expect(foreign instanceof Float32Array).toBe(false);
+    const reply = handle({ id: 4, kind: "reduce", vectors: foreign, count: 6, dimension: 3 });
+    expect(reply.kind).toBe("reduce");
+    if (reply.kind !== "reduce") return;
+    expect(Array.from(reply.coords)).toEqual(Array.from(reduceToUnit(v, 6, 3).coords));
+  });
+
+  it("still refuses every other typed array, even one of another realm", () => {
+    for (const make of ["new Float64Array(18)", "new Int32Array(18)", "new Uint8Array(18)"]) {
+      const view = runInNewContext(make) as ArrayBufferView;
+      expect(
+        handle({ id: 1, kind: "reduce", vectors: view, count: 6, dimension: 3 }),
+      ).toMatchObject({
+        id: 1,
+        kind: "error",
+        message: "The layout request was not understood.",
+      });
+    }
+    // And an object that only says it is one.
+    const liar = { [Symbol.toStringTag]: "Float32Array", length: 18 };
+    expect(handle({ id: 1, kind: "reduce", vectors: liar, count: 6, dimension: 3 })).toMatchObject({
+      kind: "error",
+    });
   });
 
   it("moves the coordinates' buffer to the page instead of copying it", () => {
