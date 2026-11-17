@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { readFold } from "../../lib/foldPrefs";
+import { HELP } from "../../lib/help";
 import { resetModActions, useModActions } from "../../lib/modActions";
 import { ModRowsContext } from "../../lib/modRows";
 import { NAV_PLACEMENT_KEY, parsePlacement, writeNavPlacement } from "../../lib/nav";
@@ -129,7 +130,8 @@ describe("what the row says", () => {
     ["paused-frozen", "Stopped responding"],
     ["paused-by-safety-list", "Paused by the safety list"],
     ["removed-by-safety-list", "Removed by the safety list"],
-    ["paused-dev-mode", "Developer mode is off"],
+    // The reason is the mark beside the name, so the standing says only that it is paused.
+    ["paused-dev-mode", "Paused"],
     ["files-missing", "Files missing"],
     ["files-changed", "Files changed"],
     ["record-unreadable", "Can't be read"],
@@ -141,6 +143,44 @@ describe("what the row says", () => {
     draw(mod({ state: standing(kind, { text: `sentence for ${kind}` }) }));
     expect(screen.getByText(label)).toBeTruthy();
     expect(screen.getByText(`sentence for ${kind}`)).toBeTruthy();
+  });
+
+  it("puts a 'Developer mode off' mark beside the name of a mod paused for developer mode", () => {
+    draw(
+      mod({
+        tier: "third",
+        state: standing("paused-dev-mode", {
+          reason: "dev-mode",
+          text: "Paused because developer mode is off. Turn developer mode on to use it again.",
+        }),
+      }),
+    );
+    const name = screen.getByRole("heading", { name: "Acme Tool" });
+    const mark = screen.getByText("Developer mode off");
+    // On the top line with the name and version, not down with the badges.
+    expect(mark.parentElement).toBe(name.parentElement);
+    expect(mark.getAttribute("data-help")).toBe("mod-dev-mode-off");
+    expect(HELP["mod-dev-mode-off"]?.title).toBeTruthy();
+    expect(screen.getByText(/Paused because developer mode is off/)).toBeTruthy();
+  });
+
+  it.each([
+    "running",
+    "waiting-for-you",
+    "paused-by-you",
+    "paused-frozen",
+    "paused-by-safety-list",
+    "removed-by-safety-list",
+    "files-missing",
+    "files-changed",
+    "record-unreadable",
+    "api-unsupported",
+    "parked",
+    "installing",
+    "paused-other",
+  ] as const)("has no such mark for a mod that is %s", (kind) => {
+    draw(mod({ state: standing(kind, { text: `sentence for ${kind}`, reason: "dev-mode" }) }));
+    expect(screen.queryByText("Developer mode off")).toBeNull();
   });
 
   it("says “Not running” for a standing PM has no word for, never nothing", () => {

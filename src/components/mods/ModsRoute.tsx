@@ -6,6 +6,7 @@
 // (App itself can't be rendered), and so a `mod:` view can never fall through to a branch that draws
 // something else: every string App sends here gets one of the two.
 
+import type { SettingsTab } from "../settings/registry";
 import { ModTab } from "./ModTab";
 import { ModsView } from "./ModsView";
 
@@ -18,7 +19,7 @@ export function ModsRoute({
 }: {
   view: string;
   onOpenMods: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab: SettingsTab) => void;
 }) {
   if (view === "mods") return <ModsView />;
   return (

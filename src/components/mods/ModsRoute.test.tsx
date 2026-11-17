@@ -6,7 +6,7 @@
 // sends both here. A `mod:` view must never reach the branch that draws the chat (the last one in
 // App's chain), whatever follows the colon.
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import appSource from "../../App.tsx?raw";
@@ -110,6 +110,24 @@ describe("ModsRoute", () => {
     route("mod:acme.tool");
     expect(screen.getByRole("heading", { name: "Turn on “Acme Tool”?" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Installed" })).toBeNull();
+  });
+
+  it("hands a mod tab's Open Settings the Developer page, through to whoever opens Settings", () => {
+    const paused = {
+      ...row,
+      state: { ...row.state, kind: "paused-dev-mode", fix: "none", text: "Paused." },
+    } as unknown as ModInfo;
+    const onOpenSettings = vi.fn();
+    render(
+      <ModRowsContext.Provider
+        value={{ rows: [paused], loaded: true, problem: null, refresh: () => Promise.resolve() }}
+      >
+        <ModsRoute view="mod:acme.tool" onOpenMods={noop} onOpenSettings={onOpenSettings} />
+      </ModRowsContext.Provider>,
+    );
+    expect(screen.getByText("Developer mode off")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledExactlyOnceWith("developer");
   });
 
   it("says so for a mod that isn't there, whatever follows the colon", () => {

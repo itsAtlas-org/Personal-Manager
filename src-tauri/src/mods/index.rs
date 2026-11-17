@@ -1638,6 +1638,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_run_of_more_than_four_combining_marks_is_refused_in_the_index_too() {
+        use crate::mods::package::tests::stacked;
+        let keys = Keys::new();
+        let five = ['\u{0301}', '\u{0302}', '\u{0303}', '\u{0304}', '\u{0305}'];
+        // Hebrew with a dagesh, a vowel and two cantillation marks is four: real, and it passes.
+        let hebrew = stacked(
+            '\u{05D1}',
+            &['\u{05BC}', '\u{05B8}', '\u{05A5}', '\u{05AE}'],
+        );
+        let mut index = good_index(1);
+        index["mods"][0]["name"] = json!(hebrew.clone());
+        index["mods"][0]["author"] = json!(hebrew.clone());
+        index["mods"][0]["description"] = json!(format!("{hebrew}\n{hebrew}"));
+        index["blacklist"][0]["reason"] = json!(hebrew);
+        assert!(verify(&index, &keys.main, &keys.trusted()).is_ok());
+        // Five are refused in a catalogue entry's name, maker and description, and in a blacklist
+        // reason: PM draws every one of them.
+        for key in ["name", "author", "description"] {
+            assert_eq!(
+                refused_with(|i| i["mods"][0][key] = json!(stacked('a', &five))),
+                IndexRefusal::Field,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            refused_with(|i| i["blacklist"][0]["reason"] = json!(stacked('a', &five))),
+            IndexRefusal::Field
+        );
+    }
+
+    #[test]
     fn the_catalogue_is_ascending_unique_and_bounded() {
         let mut second = good_entry();
         second["id"] = json!("atlas.pinboard");

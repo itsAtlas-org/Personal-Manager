@@ -72,6 +72,22 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Turning on a mod for the first time",
     body: "PM installed this mod for you, so it asks before the mod runs. The screen says what mods are, lists what this one wants to do, and lets you say yes or no to each thing it asks to do. Nothing of the mod runs until you press Turn on. Pressing it also counts as accepting the Mods notice on this computer.",
   },
+  "mod-dev-mode-off": {
+    title: "Developer mode is off",
+    body: "PM paused this mod because it is one you loaded yourself (a test mod, or a file nobody has signed), and those only run while developer mode is on for this computer. Nothing it saved is lost. Open Settings, then Developer, switch developer mode on, and you can use it again.",
+  },
+  "mod-first-open-notice": {
+    title: "The Mods notice",
+    body: "What mods are, what PM checks and what it can't. It is shown in full every time you turn on a mod, and from the second time it has a box, 'Don't show this again', that you can tick if you would rather have it folded away.",
+  },
+  "mod-first-open-hide": {
+    title: "Don't show this again",
+    body: "Ticking it, and then pressing Turn on, folds the Mods notice to one line the next time a mod asks to be turned on, here on this computer and in this vault. It is not there the first time you see the notice, so you read it at least twice before you can fold it. It changes nothing else: what a mod asks to do is always listed, and nothing runs until you press Turn on. If you don't press Turn on, nothing changes.",
+  },
+  "mod-first-open-about": {
+    title: "The Mods notice, folded",
+    body: "You chose not to see the whole Mods notice again, so it is one line here. Press it to read the whole notice. What this mod asks to do, and the Turn on button, are never folded.",
+  },
   "mods-disclaimer": {
     title: "Before you use mods",
     body: "A short notice you read once on this computer in this vault. Mods are made by people, PM checks what it can (the signature, the safety list, the sealed box) and can't check whether a mod is any good. 'I understand' saves that you've read it; a new computer, or a vault you join, asks again.",

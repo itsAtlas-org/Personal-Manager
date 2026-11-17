@@ -36,6 +36,7 @@ import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
 import { SettingsView } from "./components/SettingsView";
+import type { SettingsTab } from "./components/settings/registry";
 import { SettingsPendingProvider } from "./lib/settingsPending";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { VaultCurtain } from "./components/VaultCurtain";
@@ -183,6 +184,13 @@ export default function App() {
   // until the next relaunch surprises the user (issue #343). Fixed from Settings → Vault.
   const [vaultFaultNotice, setVaultFaultNotice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // The Settings page the next open lands on. Every way in names one (`openSettings`), so a deep link
+  // (a mod paused for developer mode points at "developer") never leaves the NEXT plain open there.
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const openSettings = (tab: SettingsTab = "general") => {
+    setSettingsTab(tab);
+    setShowSettings(true);
+  };
   const [view, setView] = useState<View>("focus");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   /** A file to highlight when the project opens (set by the command palette). */
@@ -1210,7 +1218,7 @@ export default function App() {
                     newConversation();
                   }}
                   onNewProjectChat={projectChat.newChat}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                   onOpenWhatsNew={() => setShowWhatsNew(true)}
                   onOpenPalette={() => setShowPalette(true)}
                   chatModel={settings?.chat_models[0] ?? null}
@@ -1279,7 +1287,7 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <ReviewView
                       onChanged={refreshReviewCount}
-                      onOpenSettings={() => setShowSettings(true)}
+                      onOpenSettings={() => openSettings()}
                     />
                   </main>
                 ) : view === "teach" ? (
@@ -1308,7 +1316,7 @@ export default function App() {
                     <ModsRoute
                       view={view}
                       onOpenMods={() => setView("mods")}
-                      onOpenSettings={() => setShowSettings(true)}
+                      onOpenSettings={(tab) => openSettings(tab)}
                     />
                   </main>
                 ) : (
@@ -1400,6 +1408,7 @@ export default function App() {
                 <SettingsPendingProvider>
                   <SettingsView
                     onboarding={false}
+                    initialTab={settingsTab}
                     onClose={() => {
                       setShowSettings(false);
                       refreshSettings();
@@ -1436,7 +1445,7 @@ export default function App() {
                     setView("calendar");
                   }}
                   onNavigate={setView}
-                  onOpenSettings={() => setShowSettings(true)}
+                  onOpenSettings={() => openSettings()}
                 />
               )}
             </div>

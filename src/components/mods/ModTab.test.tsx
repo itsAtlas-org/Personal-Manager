@@ -116,6 +116,12 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
   };
 }
 
+const pausedForDevMode = () =>
+  standing("paused-dev-mode", {
+    reason: "dev-mode",
+    text: "Paused because developer mode is off. Turn developer mode on to use it again.",
+  });
+
 const onOpenMods = vi.fn();
 const onOpenSettings = vi.fn();
 const refresh = vi.fn(() => Promise.resolve());
@@ -547,6 +553,48 @@ describe("a mod that can't run", () => {
     expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("opens Settings on its Developer page, not on whatever page it was last on", () => {
+    render(<Tab rows={[mod({ tier: "third", state: pausedForDevMode() })]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledExactlyOnceWith("developer");
+  });
+
+  it("puts a 'Developer mode off' mark at the top, next to the mod's name", () => {
+    render(<Tab rows={[mod({ tier: "third", state: pausedForDevMode() })]} />);
+    const heading = screen.getByRole("heading", { level: 1, name: "Acme Tool" });
+    const mark = screen.getByText("Developer mode off");
+    // In the header row with the name, not in the body below it and not inside the name itself.
+    expect(mark.parentElement).toBe(heading.parentElement);
+    expect(mark.getAttribute("data-help")).toBe("mod-dev-mode-off");
+    expect(heading.contains(mark)).toBe(false);
+    expect(HELP["mod-dev-mode-off"]?.title).toBeTruthy();
+  });
+
+  it.each([
+    ["paused-by-you", "resume"],
+    ["paused-other", "none"],
+    ["paused-frozen", "resume"],
+    ["paused-by-safety-list", "none"],
+    ["removed-by-safety-list", "uninstall"],
+    ["files-missing", "repair"],
+    ["parked", "none"],
+    ["installing", "none"],
+  ] as const)("has no such mark, and no Open Settings, for a mod that is %s", (kind, fix) => {
+    render(<Tab rows={[mod({ state: standing(kind, { text: "Some sentence.", fix }) })]} />);
+    expect(screen.getByText("Some sentence.")).toBeTruthy();
+    expect(screen.queryByText("Developer mode off")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Settings" })).toBeNull();
+  });
+
+  it("has no such mark on a mod that is waiting to be turned on, or one that is running", async () => {
+    render(<Tab rows={[mod({ consented: false, state: standing("waiting-for-you") })]} />);
+    expect(screen.queryByText("Developer mode off")).toBeNull();
+    cleanup();
+    render(<Tab rows={[mod()]} />);
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    expect(screen.queryByText("Developer mode off")).toBeNull();
   });
 
   it("offers Repair for a mod whose files are missing, and reads the rows after", async () => {

@@ -148,6 +148,11 @@ tauri-plugin-single-instance = "2"
 # (MIT; MIT OR Apache-2.0), so no new package.
 minisign-verify = "0.3"
 semver = "1"
+# Mods (spec §1.13): the plain-text rule (src/mods/package.rs) refuses a run of combining marks, and
+# Rust's standard library has no Unicode general category to ask, so `\p{M}` is asked of regex. It
+# also runs the content-rule test (spec §1.4, src/mods/engine.rs). Already in the shipped build through
+# rrule and tauri-utils, and in Cargo.lock (MIT OR Apache-2.0), so no new package or licence.
+regex = "1"
 
 # OS keychain for all secrets (API key, DB key). Per-platform native backends;
 # Linux uses the freedesktop Secret Service over the session D-Bus (KWallet on KDE,
@@ -246,7 +251,3 @@ webkit2gtk = { version = "2", features = ["v2_40"] }
 # already in Cargo.lock (ring through rustls, blake2 through argon2), so no new package.
 ring = "0.17"
 blake2 = "0.11"
-# Mods (spec §1.4): runs macOS's content rule list against URLs the way WebKit does, so a filter
-# that exempts more than Vite's host fails a test. Already in Cargo.lock (through rrule, tauri-utils
-# and zxcvbn; MIT OR Apache-2.0), so no new package.
-regex = "1"

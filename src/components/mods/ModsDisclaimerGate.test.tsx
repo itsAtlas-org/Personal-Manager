@@ -7,16 +7,21 @@
 // "Turn on" elsewhere writes the same record, and the next `mods://changed` lifts the gate.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetModActions } from "../../lib/modActions";
+import { readShown } from "../../lib/modsDisclaimerShown";
 import type { ModsChanged, ModsDisclaimerState } from "../../lib/modsTypes";
 
 const modsDisclaimerState = vi.fn();
 const acceptModsDisclaimer = vi.fn();
 let changed: ((e: ModsChanged) => void) | null = null;
 
+const vaultStatus = vi.fn();
+
 vi.mock("../../lib/ipc", () => ({
+  vaultStatus: () => vaultStatus(),
   modsDisclaimerState: () => modsDisclaimerState(),
   acceptModsDisclaimer: () => acceptModsDisclaimer(),
   onModsChanged: (h: (e: ModsChanged) => void) => {
@@ -49,6 +54,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetModActions();
   changed = null;
+  localStorage.clear();
+  vaultStatus.mockResolvedValue({ vault_id: "vault-a" });
 });
 afterEach(cleanup);
 
@@ -150,6 +157,86 @@ describe("ModsDisclaimerGate", () => {
     await act(async () => changed?.({ cause: "consented" }));
     expect(await screen.findByText("the sections")).toBeTruthy();
     expect(acceptModsDisclaimer).not.toHaveBeenCalled();
+  });
+
+  describe("counting its showings (for a mod's Don't show this again)", () => {
+    const A = "pm.mods.disclaimerShown.vault-a";
+    const count = () => readShown(A);
+
+    it("counts the screen once, however often it is read again or redrawn", async () => {
+      modsDisclaimerState.mockResolvedValue(state(false));
+      gate();
+      await screen.findByRole("button", { name: "I understand" });
+      await waitFor(() => expect(count().shown).toBe(1));
+      await waitFor(() => expect(changed).not.toBeNull());
+      await act(async () => changed?.({ cause: "consented" }));
+      await act(async () => changed?.({ cause: "recovered" }));
+      await act(async () => {});
+      expect(modsDisclaimerState.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(count().shown).toBe(1);
+    });
+
+    it("counts once under StrictMode", async () => {
+      modsDisclaimerState.mockResolvedValue(state(false));
+      render(
+        <StrictMode>
+          <ModsDisclaimerGate>
+            <p>the sections</p>
+          </ModsDisclaimerGate>
+        </StrictMode>,
+      );
+      await screen.findByRole("button", { name: "I understand" });
+      await waitFor(() => expect(count().shown).toBe(1));
+      await act(async () => {});
+      expect(count().shown).toBe(1);
+    });
+
+    it("counts nothing while loading, once accepted, or while the read fails", async () => {
+      modsDisclaimerState.mockRejectedValueOnce({ code: "no-store", message: "Closed." });
+      modsDisclaimerState.mockResolvedValue(state(true));
+      gate();
+      await screen.findByText("Closed.");
+      await act(async () => {});
+      expect(count().shown).toBe(0);
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await screen.findByText("the sections");
+      await act(async () => {});
+      expect(count().shown).toBe(0);
+    });
+
+    it("counts it again when the disclaimer comes back (a vault that hasn't accepted)", async () => {
+      modsDisclaimerState.mockResolvedValueOnce(state(false)).mockResolvedValue(state(true));
+      gate();
+      await screen.findByRole("button", { name: "I understand" });
+      await waitFor(() => expect(count().shown).toBe(1));
+      await waitFor(() => expect(changed).not.toBeNull());
+      await act(async () => changed?.({ cause: "consented" }));
+      await screen.findByText("the sections");
+      modsDisclaimerState.mockResolvedValue(state(false));
+      await act(async () => changed?.({ cause: "loaded" }));
+      await screen.findByRole("button", { name: "I understand" });
+      await waitFor(() => expect(count().shown).toBe(2));
+    });
+
+    it("always shows the whole text and never offers the box, whatever was chosen", async () => {
+      localStorage.setItem(A, JSON.stringify({ v: 1, shown: 6, hide: true }));
+      modsDisclaimerState.mockResolvedValue(state(false));
+      gate();
+      await screen.findByRole("button", { name: "I understand" });
+      await waitFor(() => expect(count().shown).toBe(7));
+      expect(screen.getByText("What PM checks.")).toBeTruthy();
+      expect(screen.queryByRole("checkbox")).toBeNull();
+      expect(count().hide).toBe(true);
+    });
+
+    it("counts nothing, and says nothing different, when the vault can't be named", async () => {
+      vaultStatus.mockResolvedValue({ vault_id: null });
+      modsDisclaimerState.mockResolvedValue(state(false));
+      gate();
+      await screen.findByRole("button", { name: "I understand" });
+      await act(async () => {});
+      expect(localStorage.length).toBe(0);
+    });
   });
 
   it("keeps the sections when a later read fails after one that said accepted", async () => {

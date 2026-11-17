@@ -1324,7 +1324,28 @@ pub(super) fn plain_text_fault(
     if bad {
         return Err("has a hidden or control character".into());
     }
+    if has_too_many_marks(s) {
+        return Err("has too many accent marks stacked on one letter".into());
+    }
     Ok(())
+}
+
+/// The most combining marks (Unicode category M: accents, vowel signs, pointing) one letter may
+/// carry. Real scripts stack three or four (Thai, Hebrew pointing with a cantillation mark, a
+/// Vietnamese letter with a dot below); a name of one letter and thirty-nine accents paints tens of
+/// ems above and below the line, over whatever PM draws beside it. The page cuts runs to three
+/// itself; this is the same rule one step looser at the door, so nothing signed or installed
+/// carries one.
+const MAX_STACKED_MARKS: usize = 4;
+
+/// Whether `s` has more than [`MAX_STACKED_MARKS`] combining marks in a row (pure).
+fn has_too_many_marks(s: &str) -> bool {
+    // Rust's standard library can't ask a character its general category; `\p{M}` is regex's.
+    static RUN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(&format!(r"\p{{M}}{{{}}}", MAX_STACKED_MARKS + 1))
+            .expect("a fixed pattern")
+    });
+    RUN.is_match(s)
 }
 
 /// Format and direction characters, zero-width ones, fillers, variation selectors and tags.
@@ -2592,6 +2613,80 @@ pub(crate) mod tests {
                 .verify()
                 .is_ok()
         );
+    }
+
+    /// Letters with marks stacked on them: `n` combining marks after `base`.
+    pub(crate) fn stacked(base: char, marks: &[char]) -> String {
+        std::iter::once(base).chain(marks.iter().copied()).collect()
+    }
+
+    #[test]
+    fn a_run_of_more_than_four_combining_marks_is_refused() {
+        // Real scripts that stack three or four marks on one letter still pass, in every field the
+        // rule covers: Vietnamese with a dot below, a circumflex and an acute (3), Hebrew with a
+        // dagesh, a vowel and two cantillation marks (4), Thai with a vowel, a tone mark and a
+        // killer (3).
+        let vietnamese = stacked('a', &['\u{0323}', '\u{0302}', '\u{0301}']);
+        let hebrew = stacked(
+            '\u{05D1}',
+            &['\u{05BC}', '\u{05B8}', '\u{05A5}', '\u{05AE}'],
+        );
+        let thai = stacked('\u{0E01}', &['\u{0E38}', '\u{0E49}', '\u{0E4C}']);
+        for name in [&vietnamese, &hebrew, &thai] {
+            assert!(
+                with_manifest(|m| m["name"] = json!(name)).verify().is_ok(),
+                "{name:?}"
+            );
+        }
+        // Several such letters in a row are fine: the run is of marks, not of marked letters.
+        let many = format!("{hebrew}{hebrew}{vietnamese}{thai} {hebrew}");
+        assert!(with_manifest(|m| m["name"] = json!(many)).verify().is_ok());
+        assert!(with_manifest(|m| {
+            m["description"] = json!(format!("{hebrew}\n{hebrew}"));
+            m["publisher"]["author"] = json!(hebrew.clone());
+        })
+        .verify()
+        .is_ok());
+
+        // Five in a row are refused, whatever the kind of mark (Mn, Me, Mc) and wherever they sit.
+        let five = ['\u{0301}', '\u{0302}', '\u{0303}', '\u{0304}', '\u{0305}'];
+        let mixed_kinds = ['\u{0301}', '\u{20DD}', '\u{0903}', '\u{0E49}', '\u{05BC}'];
+        let thirty_nine = ['\u{0301}'; 39];
+        for (what, text) in [
+            ("five accents", stacked('a', &five)),
+            ("mixed kinds", stacked('a', &mixed_kinds)),
+            ("thirty-nine", stacked('M', &thirty_nine)),
+            (
+                "after a good letter",
+                format!("{hebrew}{}", stacked('e', &five)),
+            ),
+            ("at the end", format!("Map {}", stacked('e', &five))),
+            ("on a mark-first name", five.iter().collect::<String>()),
+        ] {
+            refused_manifest(what, Refusal::Manifest, |m| m["name"] = json!(text));
+            refused_manifest(what, Refusal::Manifest, |m| {
+                m["description"] = json!(format!("Line one.\n{text}"))
+            });
+            refused_manifest(what, Refusal::Manifest, |m| {
+                m["publisher"]["author"] = json!(text)
+            });
+        }
+        // A reason, a tab label and a help body are held to it too (the same function).
+        refused_manifest("a permission's why", Refusal::Manifest, |m| {
+            m["permissions"][0]["why"] = json!(stacked('a', &five))
+        });
+        refused_manifest("a tab's label", Refusal::Manifest, |m| {
+            m["contributions"]["nav.tab"]["label"] = json!(stacked('a', &five))
+        });
+        refused_manifest("a help body", Refusal::Manifest, |m| {
+            m["contributions"]["help"][0]["body"] = json!(format!("Hi.\n{}", stacked('a', &five)))
+        });
+        // The fault says what is wrong, in plain words.
+        let fault = plain_text_fault(&stacked('a', &five), 40, false, false).unwrap_err();
+        assert_eq!(fault, "has too many accent marks stacked on one letter");
+        // Marks split by a letter are two runs of four, not one of eight.
+        let split = format!("{}{}", stacked('a', &five[..4]), stacked('b', &five[..4]));
+        assert!(plain_text_fault(&split, 40, false, false).is_ok());
     }
 
     #[test]

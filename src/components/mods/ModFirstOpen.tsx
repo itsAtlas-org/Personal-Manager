@@ -15,13 +15,21 @@
 // others (first-use ones wait for their own prompt, automatic ones need none), so those are the
 // checkboxes. They start on, which is what a person who pressed "Turn on" wants; each can be turned
 // off, and a "no" is recorded as one.
+//
+// "Don't show this again" (Bobby, 2026-11-17): the notice is shown in full every time until it has
+// been shown twice; from the second showing on an unticked box under it lets the person fold it to
+// one line on later first-open screens. The box is a layout choice kept on this device for this vault
+// (lib/modsDisclaimerShown); it changes nothing the backend decides, and the permissions and "Turn
+// on" are never folded.
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { consentMod } from "../../lib/ipc";
 import { runModAction, useModActions } from "../../lib/modActions";
+import { offersHide, rememberHide } from "../../lib/modsDisclaimerShown";
 import { useModRows } from "../../lib/modRows";
 import type { ModInfo } from "../../lib/modsTypes";
-import { Button, Callout, Card } from "../ui";
+import { useDisclaimerShowing } from "../../lib/useDisclaimerShowing";
+import { Button, Callout, Card, Collapsible } from "../ui";
 import { ModName } from "./ModName";
 import { modText } from "./modText";
 import { ModsDisclaimer } from "./ModsDisclaimer";
@@ -54,9 +62,22 @@ export function ModFirstOpen({
   // the old row, so it says so and offers the read, instead of a button that looks stuck.
   const [saved, setSaved] = useState(false);
 
+  // The full disclaimer's showings on this device in this vault (lib/modsDisclaimerShown). Counted
+  // once when this screen opens; null until known, and the full text shows meanwhile. From the second
+  // showing on there is an unticked "Don't show this again" (never on the first), and once it was
+  // chosen the text is folded to one line. The choice is made at Turn on, not by the tick itself.
+  const showing = useDisclaimerShowing(true, true);
+  const folded = showing?.hide === true;
+  const canHide = showing !== null && offersHide(showing);
+  const [hideNext, setHideNext] = useState(false);
+  const hideId = useId();
+
   function turnOn() {
     void runModAction(mod.id, "Turning on", "PM couldn't turn this mod on.", async () => {
       await consentMod(mod.id, answers);
+      // After the backend said yes, so a refused Turn on keeps the notice as it was. Nothing of the
+      // permissions or of Turn on itself is skipped by it, only how much of the notice is drawn.
+      if (canHide && hideNext && showing) rememberHide(showing);
       setSaved(true);
       // Part of the action, so the button stays off until the row says "running" (this screen goes
       // away with it): a second press in the gap would turn on what is already on.
@@ -96,10 +117,46 @@ export function ModFirstOpen({
           </Callout>
         )}
 
-        <Card className="p-4">
-          <h2 className="mb-2 font-head text-sm font-semibold text-ink">About mods</h2>
-          <ModsDisclaimer />
-        </Card>
+        {folded ? (
+          // The person chose not to see the whole notice again: one line, and the whole text a click
+          // away. Not remembered open: the next first-open screen starts folded again.
+          <Card className="p-4" data-help="mod-first-open-about">
+            <Collapsible title="About mods" defaultOpen={false}>
+              <div className="pt-2">
+                <ModsDisclaimer />
+              </div>
+            </Collapsible>
+          </Card>
+        ) : (
+          <Card className="space-y-3 p-4" data-help="mod-first-open-notice">
+            <div>
+              <h2 className="mb-2 font-head text-sm font-semibold text-ink">About mods</h2>
+              <ModsDisclaimer />
+            </div>
+            {canHide && (
+              <div
+                className="space-y-0.5 border-t border-border pt-3"
+                data-help="mod-first-open-hide"
+              >
+                <label className="flex items-center gap-2 text-sm text-ink2">
+                  <input
+                    type="checkbox"
+                    className="accent-[var(--accent)]"
+                    checked={hideNext}
+                    disabled={busy}
+                    aria-describedby={hideId}
+                    onChange={(e) => setHideNext(e.target.checked)}
+                  />
+                  Don&apos;t show this again
+                </label>
+                <p id={hideId} className="pl-6 text-xs text-ink3">
+                  Takes effect when you press Turn on. Later, this notice folds to one line you can
+                  open. What a mod asks to do is always shown.
+                </p>
+              </div>
+            )}
+          </Card>
+        )}
 
         <section aria-labelledby="mod-first-open-asks" className="space-y-2">
           <h2 id="mod-first-open-asks" className="font-head text-sm font-semibold text-ink">
