@@ -351,3 +351,43 @@ describe("form-control edges use --ink4, not --border2", () => {
   });
 });
 // ===== END form-control edges (#1105) =======================================================
+
+// ===== BEGIN chip-row fields (#1115) ========================================================
+// The small field at the end of a row of chips (add a tag, add another name, link a project) had
+// no edge at all, so only its placeholder said it was a field. Each one now takes `CHIP_INPUT`
+// (src/components/ui/chipInput.ts): Input's `--ink4` edge (3:1, WCAG 1.4.11), at chip height.
+describe("chip-row fields take CHIP_INPUT's --ink4 edge", () => {
+  const CHIP_ROW_FIELDS = [
+    "src/components/TagEditor.tsx",
+    "src/components/TeachTags.tsx",
+    "src/components/TeachView.tsx",
+    "src/components/ProjectPicker.tsx",
+  ] as const;
+
+  it("CHIP_INPUT edges in --ink4, focuses in --accent-text and recedes only when disabled", () => {
+    const text = SOURCES.find(([p]) => p === "src/components/ui/chipInput.ts")?.[1] ?? "";
+    expect(text).toContain("border border-ink4");
+    expect(text).toContain("focus:border-accent-text");
+    expect(text).toContain("disabled:border-border2");
+    const recipe = text.slice(text.indexOf('"'));
+    expect(recipe).not.toMatch(/(?<![\w-])(?<!disabled:)border-border2\b/);
+  });
+
+  it("every chip-row field uses it", () => {
+    for (const path of CHIP_ROW_FIELDS) {
+      const text = SOURCES.find(([p]) => p === path)?.[1];
+      expect(text, `${path} should exist`).toBeDefined();
+      // On the field itself: exactly one use, in a className.
+      const uses = (text ?? "").split("\n").filter((l) => l.includes("CHIP_INPUT)"));
+      expect(uses, path).toHaveLength(1);
+      expect(uses[0], path).toContain("className=");
+    }
+  });
+
+  it("the old borderless recipe is gone from the tree", () => {
+    expect(filesContaining("bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none")).toEqual(
+      [],
+    );
+  });
+});
+// ===== END chip-row fields (#1115) ==========================================================

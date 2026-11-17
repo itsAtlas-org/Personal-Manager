@@ -24,7 +24,8 @@ import { useDepth } from "../theme";
 import { TeachPreferences } from "./TeachPreferences";
 import { TeachTags } from "./TeachTags";
 import { DevRaw } from "./dev/DevRaw";
-import { Button, Callout, Card, Dialog, Input, Select, Skeleton, useFieldA11y } from "./ui";
+import { Button, Callout, Card, Dialog, Input, Select, Skeleton, cn, useFieldA11y } from "./ui";
+import { CHIP_INPUT } from "./ui/chipInput";
 
 /** The always-present fallback bucket; we don't nudge merges for it. */
 const UNSORTED = "Unsorted";
@@ -478,7 +479,7 @@ function EntityCard({
                 onBlur={onAliasCommit}
                 placeholder="another name…"
                 aria-label={`Add a name for ${entity.canonical_name}`}
-                className="w-32 rounded-[var(--radius-sm)] bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none placeholder:text-ink4"
+                className={cn("w-32", CHIP_INPUT)}
               />
             )}
           </div>

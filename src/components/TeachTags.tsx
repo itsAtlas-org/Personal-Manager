@@ -34,7 +34,8 @@ import {
 } from "../lib/ipc";
 import { findSimilarTags } from "../lib/tagSimilarity";
 import type { RetagJobState, RetagScope, TagProposalRow, TagSummary } from "../lib/types";
-import { Button, Card, Dialog, Input } from "./ui";
+import { Button, Card, Dialog, Input, cn } from "./ui";
+import { CHIP_INPUT } from "./ui/chipInput";
 import { IngestProgress } from "./IngestProgress";
 
 export function TeachTags() {
@@ -393,7 +394,7 @@ export function TeachTags() {
                 disabled={working}
                 aria-label="Add a tag to the vocabulary"
                 placeholder="add a tag…"
-                className="w-32 bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none placeholder:text-ink4"
+                className={cn("w-32", CHIP_INPUT)}
               />
             </div>
             <div className="mt-3">

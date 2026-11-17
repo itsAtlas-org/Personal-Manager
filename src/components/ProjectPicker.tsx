@@ -28,6 +28,8 @@
 // thing you must be able to correct where you notice it.
 
 import { useId, useState } from "react";
+import { cn } from "./ui";
+import { CHIP_INPUT } from "./ui/chipInput";
 
 export function ProjectPicker({
   value,
@@ -37,6 +39,7 @@ export function ProjectPicker({
   listId,
   inputClassName,
   hidePrimary,
+  label = "Add a project",
 }: {
   /** The document's projects, primary first. Never empty. */
   value: string[];
@@ -56,6 +59,9 @@ export function ProjectPicker({
    * remove control, so hiding either would take away information or a control rather than noise.
    */
   hidePrimary?: string;
+  /** The add field's accessible name. A list of documents names each one's, so a screen reader
+   *  can tell the rows apart. */
+  label?: string;
 }) {
   const [draft, setDraft] = useState("");
   const fallbackId = useId();
@@ -164,12 +170,9 @@ export function ProjectPicker({
         onBlur={add}
         disabled={disabled}
         list={ownListId}
-        aria-label="Add a project"
+        aria-label={label}
         placeholder={value.length ? "link another project…" : "project…"}
-        className={
-          inputClassName ??
-          "w-36 bg-transparent px-1 py-0.5 text-xs text-ink2 outline-none placeholder:text-ink4"
-        }
+        className={inputClassName ?? cn("w-36", CHIP_INPUT)}
       />
       {!listId && (
         <datalist id={ownListId}>
