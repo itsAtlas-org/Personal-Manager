@@ -46,10 +46,6 @@
 //! <= cap` in f64, so rounding can only refuse a call that exactly fits, never admit one that does
 //! not; any non-finite number refuses.
 
-// No caller until `ai.complete` (X5) takes the dispatch row; X5 deletes this line, so a function it
-// leaves unused is a warning again.
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -277,6 +273,8 @@ pub struct Reservation {
     usd: f64,
 }
 
+// Read by the tests of the ledger: the call itself settles a booking and never inspects it.
+#[cfg_attr(not(test), allow(dead_code))]
 impl Reservation {
     pub fn usd(&self) -> f64 {
         self.usd

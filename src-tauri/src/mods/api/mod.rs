@@ -40,6 +40,9 @@
 //! the payload from the store (never PM's own event), and sends only into the outbox of a session
 //! that may hear it (`mods::outbox`), bounded by the frame's acknowledgements.
 
+mod ai;
+#[cfg(test)]
+mod ai_tests;
 mod doc_storage;
 mod documents;
 mod embeddings;
@@ -107,6 +110,11 @@ pub trait Host: Clone + Send + Sync + 'static {
     #[allow(dead_code)]
     fn hops(&self) -> &Self::Hops;
 
+    /// The model side `ai.complete` goes through: the real one routes, prices and calls PM's AI; a
+    /// test scripts it, so the call's money rules run with no model.
+    type Model: ai::ModelEdge + 'static;
+    fn model(&self) -> &Self::Model;
+
     /// A test's hook into a call in flight, so it can change the world at an exact point (an
     /// uninstall between the checks and the commit). Nothing in a build.
     #[cfg(test)]
@@ -132,6 +140,9 @@ pub enum Point {
     /// An event is about to choose its recipients: the moment between a flush's own checks and the
     /// emission.
     BeforeEmit,
+    /// An `ai.complete` booking is made and the call is about to be checked once more. The DB guard
+    /// is held: a hook here must not take it.
+    Booked,
 }
 
 impl Host for AppHandle {
@@ -166,6 +177,13 @@ impl Host for AppHandle {
     fn hops(&self) -> &SystemHops {
         static HOPS: SystemHops = SystemHops::new();
         &HOPS
+    }
+
+    type Model = AppHandle;
+
+    /// The app handle is the model edge itself (`ai::ModelEdge for AppHandle`).
+    fn model(&self) -> &AppHandle {
+        self
     }
 }
 

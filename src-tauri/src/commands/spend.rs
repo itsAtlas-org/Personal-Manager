@@ -205,7 +205,11 @@ pub(super) fn log_background_usage(
 /// AI & Models must not contact openrouter.ai for someone who never set it up, a local-AI-only user
 /// above all. Such a user reaches it only by pressing "Refresh prices" or opening the model
 /// picker. A keychain that can't be read counts as no key, so the check fails closed.
-async fn ensure_pricing_fresh(app: &AppHandle) -> Result<()> {
+///
+/// A mod's `ai.complete` asks it too, before it prices a cloud route (a fresh machine has no prices
+/// until the first refresh, and a call with no price is refused): the same key gate holds, so a
+/// local-only user's mod call contacts nothing.
+pub(crate) async fn ensure_pricing_fresh(app: &AppHandle) -> Result<()> {
     if !uses_openrouter(&crate::secrets::get_background_or_primary_key()) {
         return Ok(());
     }

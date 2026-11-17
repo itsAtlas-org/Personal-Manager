@@ -13,8 +13,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    doc_storage, documents, embeddings, limits, storage, Authorised, Host, ModError, PageAction,
-    Reply,
+    ai, doc_storage, documents, embeddings, limits, storage, Authorised, Host, ModError,
+    PageAction, Reply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,10 +30,11 @@ pub enum Method {
     EmbeddingsDocumentVectors,
     EmbeddingsSignature,
     UiOpenDocument,
+    AiComplete,
 }
 
 impl Method {
-    pub const ALL: [Method; 11] = [
+    pub const ALL: [Method; 12] = [
         Self::ThemeGet,
         Self::StorageGet,
         Self::StorageSet,
@@ -45,6 +46,7 @@ impl Method {
         Self::EmbeddingsDocumentVectors,
         Self::EmbeddingsSignature,
         Self::UiOpenDocument,
+        Self::AiComplete,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +62,7 @@ impl Method {
             Self::EmbeddingsDocumentVectors => "embeddings.documentVectors",
             Self::EmbeddingsSignature => "embeddings.signature",
             Self::UiOpenDocument => "ui.openDocument",
+            Self::AiComplete => "ai.complete",
         }
     }
 
@@ -93,6 +96,7 @@ pub(super) async fn run<H: Host>(
         Method::EmbeddingsDocumentVectors => embeddings::document_vectors(host, auth, args).await,
         Method::EmbeddingsSignature => embeddings::signature(host, auth, args).await,
         Method::UiOpenDocument => documents::open_document(host, auth, args).await,
+        Method::AiComplete => ai::complete(host, auth, args).await,
     }
 }
 
@@ -127,7 +131,8 @@ pub(super) fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, ModError> {
 /// cancellable async work stops this way: a `spawn_blocking` step that began is not cancelled, so
 /// the handler asks [`super::still_current`] after the await and commits nothing for a call
 /// that ended.
-// Used by the handlers of the experimental calls (X5, X6).
+// Used by the handlers of the experimental calls (X6): `ai.complete` runs its own deadline through
+// `within`, so a test can shorten it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) async fn within_call_timeout<T>(
     work: impl Future<Output = Result<T, ModError>>,
@@ -136,8 +141,7 @@ pub(super) async fn within_call_timeout<T>(
 }
 
 /// [`within_call_timeout`] with the limit given (a test's short one).
-#[cfg_attr(not(test), allow(dead_code))]
-async fn within<T>(
+pub(super) async fn within<T>(
     limit: Duration,
     work: impl Future<Output = Result<T, ModError>>,
 ) -> Result<T, ModError> {

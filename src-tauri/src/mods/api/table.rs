@@ -62,8 +62,6 @@ const fn call(name: &'static str, permission: &'static str, class: Class) -> Row
 /// experimental. It needs a `family` because each of them waits on something outside PM (or, for
 /// `secrets.set` and `notify`, on the person), and a handler slice must say which limits it lives
 /// under rather than inherit "none" by default.
-// Used by the rows each handler slice adds (X5, X6); the table has none until then.
-#[cfg_attr(not(test), allow(dead_code))]
 const fn experimental_call(
     name: &'static str,
     permission: &'static str,
@@ -116,6 +114,9 @@ pub const ROWS: &[Row] = &[
         Class::Read,
     ),
     call("embeddings.signature", "documents.vectors", Class::Read),
+    // PR B's experimental calls (D13: outside the API freeze), each under its limits' family.
+    // Asks a model PM routes, books its worst-case price against the mod's monthly cap first.
+    experimental_call("ai.complete", "ai", Class::Money, Family::Ai),
     // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
     // A document that landed, as `documents.list`'s DTO with every field.
     event("documents.added", Some("documents.meta"), Class::Read),

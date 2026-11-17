@@ -67,11 +67,11 @@ for: only PM's own sentence.
 | `MOD-1002` | The call was removed from PM's mod API; the mod needs an update. |
 | `MOD-1003` | The call's arguments aren't what it takes (a missing or unknown field, a malformed key). |
 | `MOD-2001` | The mod doesn't have the permission the call needs: it never asked for it, you turned it off, it wasn't granted at install, or a safety rule refuses it (unsigned mods may read your data or reach the internet, never both; and they can't read your data while PM's web engine isn't sealed). |
-| `MOD-2002` | The call needs a permission PM asks you for the first time it's used, and you haven't been asked yet. |
+| `MOD-2002` | The call needs a permission PM asks you for the first time it's used, and you haven't been asked yet. An AI request that would cost money asks again when the mod has no monthly AI limit yet (a mod moved from a free model to a paid one is asked at that moment). |
 | `MOD-3001` | The mod is calling PM too fast, or has too many calls running at once (for an AI request or a web request, the limits are tighter than for other calls). |
 | `MOD-3002` | The call's arguments, or its answer, are larger than PM allows. |
 | `MOD-3003` | The mod's private storage is full. |
-| `MOD-3004` | The mod has used up its monthly AI limit (the amount you let it spend on AI models, set in the Mods tab), or it has no limit set yet for a model that costs money. |
+| `MOD-3004` | The mod has used up its monthly AI limit (the amount you let it spend on AI models, set in the Mods tab), counting what the requests it has running could still cost. |
 | `MOD-3005` | The call took longer than PM allows and was stopped. Whatever it was waiting for (an AI model, a website) didn't answer in time. |
 | `MOD-4001` | The mod tried to save over a value that changed since it read it (another of its windows saved first); it should read it again. |
 | `MOD-4002` | Nothing was found, or nothing the mod is allowed to see (PM never tells the two apart). |

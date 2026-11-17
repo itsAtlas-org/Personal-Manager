@@ -347,6 +347,16 @@ pub(crate) async fn endpoint_refused_now(base_url: &str) -> bool {
     posture_for(&scheme, class) == PostureVerdict::RefusePublicCleartext
 }
 
+/// The class of the address a stored local endpoint resolves to NOW (the most public of its
+/// addresses), or `None` when it cannot be told: no scheme, no host, a name that does not resolve.
+/// A mod's `ai.complete` prices a local arm by it ([`crate::mods::ai::RouteCost`]): only loopback
+/// and private are free. Unlike [`endpoint_refused_now`] this fails CLOSED, because the answer
+/// gates money: "don't know" is treated as public by the caller, never as free.
+pub(crate) async fn endpoint_class(base_url: &str) -> Option<EndpointClass> {
+    let (_scheme, host, port) = split_scheme_host_port(base_url).ok()?;
+    resolve_endpoint_class(&host, port).await.ok()
+}
+
 /// The configured endpoint as the call-time gate sees it.
 enum Endpoint {
     /// No base URL is configured.
@@ -4262,6 +4272,32 @@ mod tests {
                 resolve_endpoint_class("8.8.8.8", 443).await.unwrap(),
                 EndpointClass::PublicRemote
             );
+        });
+    }
+
+    /// The class a mod's call prices a local endpoint by: loopback and private are told apart from
+    /// public (https or not), and what cannot be classified is `None` (the caller counts it public:
+    /// this answer gates money, so it fails closed where `endpoint_refused_now` fails open).
+    #[test]
+    fn endpoint_class_tells_the_address_and_fails_to_none() {
+        use crate::local_slot::EndpointClass::{Loopback, PrivateRemote, PublicRemote};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for (url, want) in [
+                ("http://127.0.0.1:11434", Loopback),
+                ("http://[::1]:11434", Loopback),
+                ("http://192.168.1.50:8080", PrivateRemote),
+                ("http://8.8.8.8:11434", PublicRemote),
+                // https makes it no cheaper: a public host is a hosted service whatever the scheme.
+                ("https://8.8.8.8", PublicRemote),
+            ] {
+                assert_eq!(endpoint_class(url).await, Some(want), "{url}");
+            }
+            for unknown in ["localhost:11434", "http://not a host:11434", "http://"] {
+                assert_eq!(endpoint_class(unknown).await, None, "{unknown}");
+            }
         });
     }
 
