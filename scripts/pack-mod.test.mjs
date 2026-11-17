@@ -1440,6 +1440,14 @@ describe("attach", () => {
     expect(pack.attach(pack.buildArchive(files), signature()).equals(direct)).toBe(true);
   });
 
+  it("refuses an archive packed without --commit, even with a signature that names the same placeholder", () => {
+    const placeholder = "0".repeat(40);
+    const bare = packed(makeMod());
+    expect(pack.verifyArchive(bare).kind).toBe("pre-sign"); // a valid pre-sign file, which is the trap
+    refused(() => pack.attach(bare, signature({ commit: placeholder })), "all-zero placeholder");
+    refused(() => pack.attach(bare, signature()), "all-zero placeholder");
+  });
+
   it("refuses an archive that is already signed, and a third-party file", () => {
     const signed = pack.attach(archive(), signature());
     refused(() => pack.attach(signed, signature()), "already signed");
@@ -1781,6 +1789,126 @@ describe("built-output rules", () => {
     refused(() => html(text), why);
   });
 
+  // The frame's CSP is the control that holds; these are slip-catchers. They still must not be
+  // fooled by markup a browser reads differently from a `<[^>]*>` pattern.
+  it.each([
+    ["a script from another host", page('<script src="https://evil.example/x.js"></script>')],
+    ["a script from a protocol-relative URL", page('<script src="//evil.example/x.js"></script>')],
+    ["a script from a backslash URL", page('<script src="\\\\evil.example/x.js"></script>')],
+    ["a script from a data: URL", page('<script src="data:text/javascript,alert(1)"></script>')],
+    ["a script from a blob: URL", page('<script src="blob:null/x"></script>')],
+    ["a scheme in capitals", page('<script src="HTTPS://evil.example/x.js"></script>')],
+    ["a scheme with a tab in it", page('<script src="ht\ttps://evil.example/x.js"></script>')],
+    [
+      "a scheme spelled with character references",
+      page('<script src="https&#58;//evil.example"></script>'),
+    ],
+    ["a scheme with a named colon", page('<script src="https&colon;//evil.example"></script>')],
+    ["a scheme in hex references", page('<script src="&#x68;ttps://evil.example"></script>')],
+    [
+      "a second src that is remote",
+      page('<script src="a.js" src="https://evil.example/x.js"></script>'),
+    ],
+    ["an unquoted remote src", page("<script src=https://evil.example/x.js></script>")],
+    [
+      "a stylesheet from another host",
+      page("", '<link rel="stylesheet" href="https://evil.example/a.css">'),
+    ],
+    ["an icon from a data: URL", page("", '<link rel="icon" href="data:image/png;base64,AA">')],
+  ])("refuses %s", (_what, text) => {
+    refused(() => html(text), "isn't one of the mod's own files");
+  });
+
+  it.each([
+    [
+      "an event handler after a > inside a quoted value",
+      '<div title=">" onclick="x()">x</div>',
+      "event handler",
+    ],
+    [
+      "an event handler right after a closing quote",
+      '<div class="a"onclick="x()">x</div>',
+      "event handler",
+    ],
+    ["an event handler after a slash", '<div/onclick="x()">x</div>', "event handler"],
+    ["an unquoted event handler", "<svg onload=x()></svg>", "event handler"],
+    ["an event handler in capitals", '<div ONCLICK="x()">x</div>', "event handler"],
+    [
+      "an inline style after a > inside a quoted value",
+      "<p title='>' style='color:red'>x</p>",
+      "inline style attribute",
+    ],
+    ["crossorigin after a quoted >", '<link title=">" crossorigin>', "crossorigin"],
+    [
+      "a javascript: URL spelled with a character reference",
+      '<a href="java&#115;cript:x()">x</a>',
+      "javascript: URL",
+    ],
+    [
+      "a javascript: URL with a newline in it",
+      '<a href="java\nscript:x()">x</a>',
+      "javascript: URL",
+    ],
+    [
+      "a javascript: URL after leading spaces",
+      '<a href="  javascript:x()">x</a>',
+      "javascript: URL",
+    ],
+    [
+      "a modulepreload among other rel words",
+      '<link rel="preload modulepreload" href="a.js">',
+      "preloads a module",
+    ],
+    ["an inline script after a quoted >", '<script data-x=">">alert(1)</script>', "inline script"],
+    ["an inline script after a slash", "<script/data-x=1>alert(1)</script>", "inline script"],
+  ])("refuses %s", (_what, inner, why) => {
+    refused(() => html(page(inner)), why);
+  });
+
+  it("refuses markup that a comment-looking prefix would hide from a plain `-->` search", () => {
+    // To a browser `<!-->` and `<!--->` are whole comments and `--!>` ends one, so what follows runs.
+    for (const open of ["<!-->", "<!--->", "<!-- x --!>"]) {
+      refused(() => html(`${open}<script>alert(1)</script><!-- end -->`), "inline script");
+    }
+    // A real comment still hides what it holds.
+    expect(() => html(page("<!-- <script>x</script> --><p>ok</p>"))).not.toThrow();
+  });
+
+  it("refuses a tag the text ends inside", () => {
+    refused(() => html("<p>ok</p><div onclick="), "never ends");
+    refused(() => html("<img src='a.png"), "never ends");
+  });
+
+  it("still accepts local references, navigation links and a > inside a quoted value", () => {
+    for (const src of ["./a.js", "a.js", "/a.js", "../a.js", "assets/a.js?x=1&y=2", "a.js#top"]) {
+      expect(() => html(page("", `<script src="${src}"></script>`)), src).not.toThrow();
+    }
+    expect(() => html(page("", '<link rel="stylesheet" href="./a.css">'))).not.toThrow();
+    // an anchor is navigation, not something the page loads
+    expect(() => html(page('<a href="https://example.com/docs">docs</a>'))).not.toThrow();
+    expect(() => html(page('<p title=">" class="x">a &lt; b and a < b</p>'))).not.toThrow();
+    expect(() => html(page('<img alt="a>b" src="./a.png">'))).not.toThrow();
+  });
+
+  it("turns text that isn't UTF-8 into a refusal, not a TypeError", () => {
+    const bad = Buffer.from([0xff, 0xfe, 0x41]);
+    for (const path of ["app/index.html", "app/a.css", "app/a.js", "app/b.htm"]) {
+      refused(() => pack.checkBuiltFile(path, bad), "isn't UTF-8 text");
+    }
+    // and through the verifier, which is where a packed file meets it
+    const mod = makeMod();
+    const files = pack.assemble({ modDir: mod.modDir, root: mod.root });
+    files.set("app/other.html", bad);
+    refused(() => pack.buildArchive(files), "isn't UTF-8 text");
+  });
+
+  it("refuses a LICENCE.txt that isn't UTF-8 as the Licence refusal, like package.rs", () => {
+    const mod = makeMod();
+    const files = pack.assemble({ modDir: mod.modDir, root: mod.root });
+    files.set("LICENCE.txt", Buffer.from([0xff, 0xfe, 0x41]));
+    refused(() => pack.buildArchive(files), "isn't the GNU AGPL, version 3");
+  });
+
   it("refuses a stylesheet with a data: URL", () => {
     refused(
       () =>
@@ -1856,12 +1984,31 @@ describe("run (the command line)", () => {
     }
   });
 
-  it("warns, but still packs, when the commit is the placeholder", () => {
+  // The signature vouches for the commit in the trusted comment, so a package for signing that still
+  // holds the all-zero placeholder would be signed as built from a commit that does not exist.
+  it("refuses to pack for signing while the commit is the placeholder, and writes nothing", () => {
     const mod = makeMod();
     const out = logs();
     try {
-      pack.run([mod.modDir], mod.root);
-      expect(out.err.mock.calls.flat().join("\n")).toContain("all-zero placeholder");
+      refused(() => pack.run([mod.modDir], mod.root), "all-zero placeholder");
+      const file = join(mod.modDir, "dist", "atlas.toy-1.2.3.pmmod");
+      expect(existsSync(file)).toBe(false);
+      pack.run([mod.modDir, "--commit", COMMIT], mod.root);
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      out.restore();
+    }
+  });
+
+  it("lets a developer's --unsigned file and a --stage keep the placeholder", () => {
+    const third = makeMod({ manifest: thirdParty() });
+    const out = logs();
+    try {
+      pack.run([third.modDir, "--unsigned"], third.root);
+      expect(existsSync(join(third.modDir, "dist", "acme.toy-1.2.3.pmmod"))).toBe(true);
+      const first = makeMod();
+      pack.run([first.modDir, "--stage"], first.root);
+      expect(existsSync(join(first.modDir, "dist", "manifest.json"))).toBe(true);
     } finally {
       out.restore();
     }

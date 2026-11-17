@@ -22,11 +22,16 @@
 //       project in mods/tsconfig.json and has a `tsc -p` line in the justfile, so a Worker cannot
 //       drop out of every type-check without a sound (three places edited by hand until now);
 //     * nothing under mods/ is a symbolic link (the D12 rule trusts "inside mods/" to mean "not PM").
+//     * under mods/, the publisher is pinned to what Q3 of the PR B plan recommends: author "Atlas"
+//       and sourceRepo "itsAtlas-org/Personal-Manager". A later package whose tier, author or
+//       sourceRepo differs is refused as an update by PM (policy.rs), which can only be fixed by
+//       every user uninstalling and reinstalling, so the edit is refused here first.
 //   Across the repo:
-//     * no `bundle.resources` source of any tauri config, merged the way Tauri merges them
+//     * no source that a tauri config copies into the installer, merged the way Tauri merges them
 //       (RFC 7386 JSON Merge Patch), is under mods/, is a glob that matches it, or is a folder that
-//       contains it: a mod inside the installer would skip the verifier, the ledger and the
-//       blacklist, and ship to everyone;
+//       contains it: `bundle.resources`, `bundle.linux.{deb,rpm,appimage}.files`,
+//       `bundle.macOS.files` and `bundle.externalBin` (`bundleSources`). A mod inside the installer
+//       would skip the verifier, the ledger and the blacklist, and ship to everyone;
 //     * nothing under src/ (and not the root index.html) imports from the top-level mods/ folder.
 //       Each specifier is RESOLVED against the importing file: a substring test would refuse src/components/mods/, which is
 //       PM's own.
@@ -35,7 +40,15 @@
 //       included) needs a manifest version greater than the one at <ref>, and the matching top
 //       CHANGELOG entry. A folder new at <ref> is exempt. check-version-lockstep.mjs runs this same
 //       check whenever it is given --base, and uses `changedPaths` / `isModsOnly` to decide whether
-//       PM's own version must move (D12: only when something outside mods/ changed).
+//       PM's own version must move (D12: only when something outside the mod folders changed; a
+//       shared file directly under mods/ such as vite.config.ts counts as outside, because it
+//       decides the bytes of every mod and no single mod folder would owe a bump for it).
+//
+// NOT repeated here, because the Rust tests already hold them and a second copy could only drift:
+//     * "the two mod key ids differ" and "neither is the updater's": keys.rs
+//       `the_embedded_keys_decode_to_their_recorded_ids` and `the_mod_keys_are_not_the_updater_key`;
+//     * "every dispatch-table method and event has a permission row": api/table.rs
+//       `every_handler_and_event_has_a_row_and_every_row_its_handler`.
 //
 // Prints what it inspected; a count of zero is a failure, never a pass. Pure Node built-ins plus the
 // repo's own scripts, no dependencies.
@@ -65,6 +78,9 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const MODS_DIR = "mods";
 export const FIXTURES_DIR = "tests/mod-fixtures";
 export const PLACEHOLDER_COMMIT = "0".repeat(40);
+// The publisher pin for first-party mods (PR B plan Q3, recommended answer).
+export const FIRST_PARTY_AUTHOR = "Atlas";
+export const FIRST_PARTY_REPO = "itsAtlas-org/Personal-Manager";
 
 const PACKAGE_RS = "src-tauri/src/mods/package.rs";
 const POLICY_RS = "src-tauri/src/mods/policy.rs";
@@ -228,6 +244,18 @@ function checkModFolder(root, dir, kind, rust) {
     if (!isReservedId(m.id) || m.tier !== "first") {
       bad('a mod under mods/ is an Atlas mod: its id starts "atlas." and its tier is "first"');
     }
+    for (const [what, got, want] of [
+      ["author", m.author, FIRST_PARTY_AUTHOR],
+      ["sourceRepo", m.sourceRepo, FIRST_PARTY_REPO],
+    ]) {
+      if (got !== want) {
+        bad(
+          `publisher.${what} is ${JSON.stringify(got)} but a first-party mod's is ${JSON.stringify(want)}: ` +
+            `PM refuses an update whose publisher differs, and an installed copy can then only be ` +
+            `removed and installed again`,
+        );
+      }
+    }
   } else {
     if (isReservedId(m.id))
       bad('a test fixture may not take an "atlas." id (it must not look first party)');
@@ -351,6 +379,40 @@ function resourceSources(resources) {
   return [];
 }
 
+/**
+ * Every repo path a bundle config copies into the installer, with the key that named it. Not only
+ * `resources`: tauri-utils' config also lets `linux.{deb,rpm,appimage}.files` and `macOS.files` (a
+ * map from destination to SOURCE path) and `externalBin` pull in arbitrary files, so a gate that read
+ * `resources` alone would stay green while a mod shipped through one of the others. Windows has no
+ * such key (its NSIS/WiX settings name templates and hooks, not payload folders).
+ */
+export function bundleSources(bundle) {
+  if (!isObject(bundle)) return [];
+  const out = resourceSources(bundle.resources).map((source) => ({
+    key: "bundle.resources",
+    source,
+  }));
+  const fileMap = (key, files) => {
+    if (!isObject(files)) return;
+    for (const source of Object.values(files)) {
+      if (typeof source === "string") out.push({ key, source });
+    }
+  };
+  for (const kind of ["deb", "rpm", "appimage"]) {
+    fileMap(`bundle.linux.${kind}.files`, bundle.linux?.[kind]?.files);
+  }
+  // Tauri's serde accepts the key as `macOS` and as the alias `macos`; read both so a lowercase
+  // spelling cannot slip past.
+  fileMap("bundle.macOS.files", bundle.macOS?.files);
+  fileMap("bundle.macos.files", bundle.macos?.files);
+  if (Array.isArray(bundle.externalBin)) {
+    for (const source of bundle.externalBin) {
+      if (typeof source === "string") out.push({ key: "bundle.externalBin", source });
+    }
+  }
+  return out;
+}
+
 /** A glob as the `glob` crate Tauri uses reads it, as an anchored case-insensitive pattern. */
 function globRegex(glob) {
   let re = "";
@@ -437,11 +499,11 @@ function checkTauriConfigs(root, modNames) {
     merged.push([n, mergePatch(base, read(n))]);
   }
   for (const [name, config] of merged) {
-    for (const source of resourceSources(config.bundle?.resources)) {
+    for (const { key, source } of bundleSources(config.bundle)) {
       const why = resourceReaches(source, root, modNames);
       if (why) {
         problems.push(
-          `${TAURI_DIR}/${name}: bundle.resources source ${JSON.stringify(source)} ${why} ` +
+          `${TAURI_DIR}/${name}: ${key} source ${JSON.stringify(source)} ${why} ` +
             `(I-25: no mod ships in the installer)`,
         );
       }
@@ -625,9 +687,16 @@ export function changedPaths(baseRef, root = repoRoot) {
   }
 }
 
-/** D12: true only when something changed and every changed path is under mods/. Never judgement. */
+/**
+ * D12: true only when something changed and every changed path is inside a mod's own folder
+ * (`mods/<id>/...`). Never judgement. A file directly under mods/ (vite.config.ts, tsconfig.json,
+ * vite-env.d.ts) is the build tooling SHARED by every mod: editing it can change the bytes of every
+ * packed mod, yet no mod folder changed so none owes a bump (checkModBumps keys on `mods/<id>/`).
+ * So such a change is PM's, and PM's version moves. This is stricter than the spec's wording ("touches
+ * only mods/"); the review that found the gap left the final call to Bobby.
+ */
 export function isModsOnly(paths) {
-  return paths.length > 0 && paths.every((p) => p.startsWith(`${MODS_DIR}/`));
+  return paths.length > 0 && paths.every((p) => /^mods\/[^/]+\/./.test(p));
 }
 
 /**
@@ -641,6 +710,7 @@ export function checkModBumps(baseRef, diff, root = repoRoot) {
       problems: [`could not list the changed files against ${baseRef}: ${diff.why}`],
       changed: 0,
       bumped: 0,
+      fresh: 0,
     };
   }
   const changed = new Set();
@@ -650,6 +720,7 @@ export function checkModBumps(baseRef, diff, root = repoRoot) {
   }
   const problems = [];
   let bumped = 0;
+  let fresh = 0;
   for (const name of [...changed].sort()) {
     const dir = `${MODS_DIR}/${name}`;
     const manifestPath = join(root, dir, "manifest.json");
@@ -676,7 +747,7 @@ export function checkModBumps(baseRef, diff, root = repoRoot) {
       continue;
     }
     if (before === null) {
-      bumped++; // new at the base: the first version has nothing to exceed
+      fresh++; // new at the base: the first version has nothing to exceed, so nothing was compared
     } else {
       let then;
       try {
@@ -696,7 +767,12 @@ export function checkModBumps(baseRef, diff, root = repoRoot) {
     }
     problems.push(...changelogProblems(root, dir, now));
   }
-  return { problems, changed: changed.size, bumped };
+  return { problems, changed: changed.size, bumped, fresh };
+}
+
+/** "2 changed mod folder(s) (1 new, 1 with a greater version)": what `checkModBumps` really verified. */
+export function bumpSummary({ changed, bumped, fresh }) {
+  return `${changed} changed mod folder(s) (${fresh} new, ${bumped} with a greater version)`;
 }
 
 // ---- Run ------------------------------------------------------------------------------------------
@@ -715,7 +791,7 @@ function main(argv) {
   if (base) {
     const bumps = checkModBumps(base, changedPaths(base, repoRoot), repoRoot);
     for (const p of bumps.problems) problems.add(p);
-    bumpNote = `; ${bumps.changed} changed mod folder(s) against ${base}, each with a greater version`;
+    bumpNote = `; ${bumpSummary(bumps)} against ${base}`;
   }
   if (problems.size > 0) {
     console.error("✗ check-mods:\n");

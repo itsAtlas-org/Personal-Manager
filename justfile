@@ -105,6 +105,15 @@ build-mods:
     fi
     echo "✓ build-mods: built, packed and verified $built mod(s)"
 
+# Pack the acme.hello test fixture as a developer's own file (`--unsigned`, tier third), which
+# `build-mods` skips because it only loops over mods/. This is the file the L7 live test installs
+# from a debug PM's developer-mode "install from file". Writes
+# tests/mod-fixtures/acme.hello/dist/acme.hello-<version>.pmmod (git-ignored).
+build-fixture:
+    PM_MOD_DIR=tests/mod-fixtures/acme.hello npx vite build --config mods/vite.config.ts
+    node scripts/pack-mod.mjs tests/mod-fixtures/acme.hello --unsigned
+    node scripts/pack-mod.mjs --verify tests/mod-fixtures/acme.hello/dist/*.pmmod
+
 # --- backend (Rust) -------------------------------------------------------
 
 # Fetch the bundled standalone interpreter before anything that compiles the

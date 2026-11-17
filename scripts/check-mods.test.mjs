@@ -32,6 +32,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   PLACEHOLDER_COMMIT,
+  bumpSummary,
+  bundleSources,
   changedPaths,
   changelogTop,
   checkModBumps,
@@ -226,6 +228,33 @@ describe("the manifest", () => {
     });
     const problems = checkMods(root).problems;
     expect(problems.some((p) => p.includes('its id starts "atlas."'))).toBe(true);
+  });
+
+  // PR B plan Q3 (recommended answer): a later package with another author or sourceRepo is refused
+  // as an update by PM, which only uninstall-and-reinstall fixes, so the edit stops here.
+  it("pins a first-party mod's author and sourceRepo", () => {
+    expect(problemsOf(goodTree())).toEqual([]);
+    expectRefused(
+      withMap((m) => (m.publisher.author = "Someone")),
+      'publisher.author is "Someone" but a first-party mod\'s is "Atlas"',
+    );
+    expectRefused(
+      withMap((m) => (m.publisher.author = "atlas")),
+      "publisher.author",
+    );
+    expectRefused(
+      withMap((m) => (m.publisher.sourceRepo = "itsAtlas-org/PM-Mods")),
+      'publisher.sourceRepo is "itsAtlas-org/PM-Mods"',
+    );
+    expectRefused(
+      withMap((m) => (m.publisher.sourceRepo = "itsatlas-org/Personal-Manager")),
+      "publisher.sourceRepo",
+    );
+  });
+
+  it("does not hold a test fixture to the first-party publisher", () => {
+    expect(HELLO_MANIFEST.publisher.author).not.toBe("Atlas");
+    expect(problemsOf(goodTree())).toEqual([]);
   });
 
   it("refuses a first-tier mod whose id is not an atlas one", () => {
@@ -699,6 +728,84 @@ describe("bundle.resources", () => {
     expectRefused(conf({ "C:\\build\\mods\\atlas.map": "m" }), "absolute path through mods/");
   });
 
+  // Tauri copies repo files into an installer through more keys than `resources`; each is read.
+  describe("the other keys that copy files into the installer", () => {
+    const withBundle = (bundle) =>
+      goodTree({ "src-tauri/tauri.conf.json": json({ bundle: { resources: {}, ...bundle } }) });
+
+    it.each([
+      [
+        "bundle.linux.deb.files",
+        { linux: { deb: { files: { "/usr/share/pm/mods": "../mods" } } } },
+      ],
+      [
+        "bundle.linux.rpm.files",
+        { linux: { rpm: { files: { "/usr/share/pm/m": "../mods/atlas.map" } } } },
+      ],
+      [
+        "bundle.linux.appimage.files",
+        { linux: { appimage: { files: { "usr/share/m": "../mods/atlas.map/dist" } } } },
+      ],
+      ["bundle.macOS.files", { macOS: { files: { "Resources/mods": "../mods" } } }],
+      ["bundle.macos.files", { macos: { files: { "Resources/mods": "../mods/atlas.map" } } }],
+      ["bundle.externalBin", { externalBin: ["../mods/atlas.map/bin/tool"] }],
+    ])("refuses a mod source under %s", (key, bundle) => {
+      expectRefused(withBundle(bundle), `${key} source`);
+      expectRefused(withBundle(bundle), "I-25");
+    });
+
+    it("refuses a glob, a whole-repository folder and an absolute path there too", () => {
+      expectRefused(
+        withBundle({ linux: { deb: { files: { "/usr/share/m": "../mods/**" } } } }),
+        "glob",
+      );
+      expectRefused(
+        withBundle({ macOS: { files: { "Resources/all": ".." } } }),
+        "whole repository",
+      );
+      expectRefused(
+        withBundle({ linux: { rpm: { files: { "/m": "/srv/build/mods/atlas.map" } } } }),
+        "absolute path through mods/",
+      );
+    });
+
+    it("sees one that only a platform file adds, in that platform's merged config", () => {
+      const problems = problemsOf(
+        goodTree({
+          "src-tauri/tauri.linux.conf.json": json({
+            bundle: {
+              resources: { python: "python" },
+              linux: { deb: { files: { "/m": "../mods" } } },
+            },
+          }),
+        }),
+      );
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain("tauri.linux.conf.json: bundle.linux.deb.files source");
+    });
+
+    it("lets unrelated sources through, and ignores a value that is not a path", () => {
+      expect(
+        problemsOf(
+          withBundle({
+            linux: {
+              deb: { files: { "/usr/share/pm/licence": "../LICENCE.txt", "/x": "../modsfoo/x" } },
+              rpm: { files: null },
+              appimage: {},
+            },
+            macOS: { files: { "Resources/n": "../NOTICE.txt" }, minimumSystemVersion: "14.0" },
+            externalBin: ["binaries/tool"],
+          }),
+        ),
+      ).toEqual([]);
+      expect(bundleSources({ linux: { deb: { files: { "/x": 3, "/y": ["../mods"] } } } })).toEqual(
+        [],
+      );
+      expect(bundleSources(undefined)).toEqual([]);
+      expect(bundleSources({ externalBin: "../mods" })).toEqual([]);
+    });
+  });
+
   it("lets an unrelated source through, including look-alikes", () => {
     expect(
       problemsOf(
@@ -989,7 +1096,9 @@ describe("the command", () => {
     for (const s of SCRIPTS) copyFileSync(join(here, s), join(r.root, "scripts", s));
     const clean = run(r.root, "--base", r.base);
     expect(clean.status).toBe(0);
-    expect(clean.out).toContain("0 changed mod folder(s) against");
+    expect(clean.out).toContain(
+      "0 changed mod folder(s) (0 new, 0 with a greater version) against",
+    );
     put(r.root, "mods/atlas.map/src/main.ts", "export const changed = 1;\n");
     const stuck = run(r.root, "--base", r.base);
     expect(stuck.status).toBe(1);
@@ -997,8 +1106,19 @@ describe("the command", () => {
     put(r.root, "mods/atlas.map/manifest.json", manifestAt("1.0.1"));
     put(r.root, "mods/atlas.map/CHANGELOG.md", changelogAt("1.0.1", "1.0.0"));
     const moved = run(r.root, "--base", r.base);
-    expect(moved.out).toContain("1 changed mod folder(s) against");
+    expect(moved.out).toContain(
+      "1 changed mod folder(s) (0 new, 1 with a greater version) against",
+    );
     expect(moved.status).toBe(0);
+    // a folder new at the base is reported as new, never as "with a greater version"
+    put(r.root, "mods/atlas.pinboard/manifest.json", manifestAt("1.0.0", "atlas.pinboard"));
+    put(r.root, "mods/atlas.pinboard/CHANGELOG.md", changelogAt("1.0.0"));
+    put(r.root, "mods/atlas.pinboard/src/index.html", "x");
+    const fresh = run(r.root, "--base", r.base);
+    expect(fresh.out).toContain(
+      "2 changed mod folder(s) (1 new, 1 with a greater version) against",
+    );
+    rmSync(join(r.root, "mods/atlas.pinboard"), { recursive: true });
     // the static rules still run beside it
     put(r.root, "src/main.ts", 'import "../mods/atlas.map/src/id";\n');
     expect(run(r.root, "--base", r.base).status).toBe(1);
@@ -1140,8 +1260,15 @@ describe("changedPaths and isModsOnly", () => {
     expect(changedPaths(r.base, r.root).paths).toEqual([]);
   });
 
-  it("calls a change mods-only only when it is non-empty and every path is under mods/", () => {
-    expect(isModsOnly(["mods/a/x", "mods/b/y", "mods/tsconfig.json"])).toBe(true);
+  it("calls a change mods-only only when it is non-empty and every path is inside a mod folder", () => {
+    expect(isModsOnly(["mods/a/x", "mods/b/y", "mods/b/sub/z.ts"])).toBe(true);
+    // The build tooling directly under mods/ is shared by every mod and decides each one's bytes, so
+    // changing it is PM's change (no mod folder moved, so none would owe a bump).
+    for (const shared of ["mods/vite.config.ts", "mods/tsconfig.json", "mods/vite-env.d.ts"]) {
+      expect(isModsOnly([shared]), shared).toBe(false);
+      expect(isModsOnly(["mods/a/x", shared]), shared).toBe(false);
+    }
+    expect(isModsOnly(["mods/a/"])).toBe(false);
     expect(isModsOnly([])).toBe(false);
     expect(isModsOnly(["mods/a/x", "src/y"])).toBe(false);
     expect(isModsOnly(["Mods/a/x"])).toBe(false);
@@ -1172,7 +1299,8 @@ describe("checkModBumps", () => {
     const r = gitRepo(files());
     touch(r);
     bump(r, "1.0.1", "1.0.0");
-    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 1 });
+    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 1, fresh: 0 });
+    expect(bumpSummary(check(r))).toBe("1 changed mod folder(s) (0 new, 1 with a greater version)");
   });
 
   it("refuses a changed mod whose version did not move, or went backwards", () => {
@@ -1218,7 +1346,9 @@ describe("checkModBumps", () => {
     put(r.root, "mods/atlas.pinboard/manifest.json", manifestAt("1.0.0", "atlas.pinboard"));
     put(r.root, "mods/atlas.pinboard/src/main.ts", "export {};\n");
     put(r.root, "mods/atlas.pinboard/CHANGELOG.md", changelogAt("1.0.0"));
-    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 1 });
+    // counted as new, not as a verified bump: nothing was compared
+    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 0, fresh: 1 });
+    expect(bumpSummary(check(r))).toBe("1 changed mod folder(s) (1 new, 0 with a greater version)");
     rmSync(join(r.root, "mods/atlas.pinboard/CHANGELOG.md"));
     expect(check(r).problems.join()).toContain("no CHANGELOG.md");
   });
@@ -1226,7 +1356,7 @@ describe("checkModBumps", () => {
   it("needs no bump for a deleted folder, and ignores files directly in mods/", () => {
     const r = gitRepo(files());
     rmSync(join(r.root, "mods/atlas.map"), { recursive: true });
-    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 0 });
+    expect(check(r)).toMatchObject({ problems: [], changed: 1, bumped: 0, fresh: 0 });
     const only = gitRepo(files());
     put(only.root, "mods/tsconfig.json", '{"a":1}\n');
     expect(check(only)).toMatchObject({ problems: [], changed: 0 });
@@ -1378,18 +1508,35 @@ describe("D12 in check-version-lockstep", () => {
         expect(x.out).toContain("CHANGELOG");
       });
 
-      it("passes a mods-only change that adds a new mod folder, and one that only edits mods/tsconfig.json", () => {
+      it("passes a mods-only change that adds a new mod folder, and says it is new", () => {
         const r = repo();
         writeAll(r, {
           "mods/atlas.pinboard/manifest.json": manifestAt("1.0.0", "atlas.pinboard"),
           "mods/atlas.pinboard/CHANGELOG.md": changelogAt("1.0.0"),
           "mods/atlas.pinboard/src/main.ts": "export {};\n",
         });
-        expect(go(r, "--base", r.base).ok).toBe(true);
-        const t = repo();
-        put(t.root, "mods/tsconfig.json", '{"a":1}\n');
-        expect(go(t, "--base", t.base).ok).toBe(true);
+        const x = go(r, "--base", r.base);
+        expect(x.ok).toBe(true);
+        expect(x.out).toContain("(1 new, 0 with a greater version)");
       });
+
+      // The build tooling directly under mods/ decides every mod's bytes, but no mod folder changed,
+      // so no mod owes a bump: it must be PM's change, with PM's version moving.
+      it.each(["mods/vite.config.ts", "mods/tsconfig.json", "mods/vite-env.d.ts"])(
+        "treats %s as PM's change: refused without PM's bump, passed with it",
+        (shared) => {
+          const t = repo();
+          put(t.root, shared, `// ${Math.random()}\n`);
+          const x = go(t, "--base", t.base);
+          expect(x.ok).toBe(false);
+          expect(x.out).toContain("version was not bumped");
+          expect(x.out).toContain("a shared file directly under mods/");
+          writeAll(t, pmFiles("3.0.1-alpha"));
+          const y = go(t, "--base", t.base);
+          expect(y.ok).toBe(true);
+          expect(y.out).toContain("✓ bumped");
+        },
+      );
 
       it("passes a mods-only change that deletes a mod folder", () => {
         const r = repo();

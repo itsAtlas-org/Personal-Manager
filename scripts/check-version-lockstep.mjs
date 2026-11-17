@@ -11,8 +11,9 @@
 //   1. LOCKSTEP   — all six version-bearing files carry one identical value.
 //   2. BUMPED      (--base <ref>) — that value is strictly greater, by semver,
 //                  than the base branch's, so every PR moves the number. The one exception
-//                  is D12 (Mods spec): a change whose every touched path is under mods/
-//                  does not ship in PM (I-25), so PM's version need not move. It bumps the
+//                  is D12 (Mods spec): a change whose every touched path is inside a mod's
+//                  own folder (mods/<id>/) does not ship in PM (I-25), so PM's version need
+//                  not move (a shared file directly under mods/ is PM's). It bumps the
 //                  mod's own version instead, and that is enforced here too, through
 //                  check-mods.mjs, for EVERY changed mod folder in any PR, mixed or not.
 //                  Keyed on the files touched (a changed path outside mods/, or no changed
@@ -44,7 +45,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { changedPaths, checkModBumps, isModsOnly } from "./check-mods.mjs";
+import { bumpSummary, changedPaths, checkModBumps, isModsOnly } from "./check-mods.mjs";
 import { semverCmp } from "./semver.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -217,15 +218,16 @@ if (baseRef) {
   }
   if (isModsOnly(diff.paths)) {
     console.log(
-      `✓ mods-only change (D12): all ${diff.paths.length} changed path(s) are under mods/, so PM's ` +
-        `own version need not move (${mods.bumped} mod folder(s) moved their own)`,
+      `✓ mods-only change (D12): all ${diff.paths.length} changed path(s) are inside mod folders ` +
+        `(mods/<id>/), so PM's own version need not move (${bumpSummary(mods)})`,
     );
   } else {
     if (semverCmp(current, baseVersion) <= 0) {
       fail(
         `version was not bumped — base ${baseRef} is ${baseVersion}, this branch is ${current}. ` +
           `Every PR must bump the version (feature → minor, fix/chore → patch) and add a What's New entry. ` +
-          `The one exception is a change that touches only mods/, which bumps the mod's own version (D12).`,
+          `The one exception is a change that touches only mod folders (mods/<id>/), which bumps the mod's own version (D12); ` +
+          `a shared file directly under mods/ (vite.config.ts, tsconfig.json) is not one.`,
       );
     }
     console.log(`✓ bumped: ${current} > ${baseVersion} (${baseRef})`);

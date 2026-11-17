@@ -11,6 +11,8 @@
 //       <mod>/.build/modules.json, and the repo's LICENCE.txt. Prints `sha256  file`.
 //       --commit stamps `publisher.commit` (the source tree cannot hold its own commit, so it carries
 //       an all-zero placeholder; the verifier and the trusted comment need the real 40 hex digits).
+//       A package for signing is REFUSED while it still holds the placeholder, because the
+//       signature would vouch for a commit that does not exist; so is `attach` to one.
 //       --unsigned makes the file a developer's own: the manifest must say tier "third" and the id
 //       must not be an atlas. one (a file PM installs unsigned is never first party).
 //   node scripts/pack-mod.mjs <mod folder> --stage [--commit <sha>]
@@ -21,8 +23,10 @@
 //       signed file is byte-for-byte what packing it with a signature would have been.
 //   node scripts/pack-mod.mjs --verify <file>
 //       checks a `.pmmod` against the rules src-tauri/src/mods/package.rs applies, plus the rules for
-//       built output (no inline script or style, no module script, no `crossorigin`). It cannot check
-//       the signature itself: the trusted keys are embedded in PM, and only PM verifies against them.
+//       built output (no inline script or style, no module script, no `crossorigin`, no script or
+//       link that loads from off-folder). Those are slip-catchers: the frame's CSP is the control
+//       that holds at run time. It cannot check the signature itself: the trusted keys are embedded
+//       in PM, and only PM verifies against them.
 //
 // TWO IMPLEMENTATIONS OF ONE FORMAT. package.rs is the verifier that counts; the checks here are a
 // mirror so a bad file fails in the build, not at install. They can drift, so the constants are
@@ -843,7 +847,13 @@ export function checksumsFor(files) {
 
 /** `LICENCE.txt` holds the AGPL's text (its title and version). */
 function checkLicenceText(files) {
-  const text = files.has(LICENCE_FILE) ? utf8(files.get(LICENCE_FILE)) : "";
+  let text = "";
+  try {
+    // package.rs reads it as text and reports a failure as the same Licence refusal.
+    if (files.has(LICENCE_FILE)) text = utf8(files.get(LICENCE_FILE));
+  } catch {
+    // left empty: refused below with the Rust wording
+  }
   if (!(text.includes("GNU AFFERO GENERAL PUBLIC LICENSE") && text.includes("Version 3"))) {
     refuse(`its ${LICENCE_FILE} isn't the GNU AGPL, version 3`);
   }
@@ -901,45 +911,144 @@ export function checkSignatureFile(bytes, manifest) {
 }
 
 /**
+ * The start tags of HTML text, tokenized the way a browser does it, which a `<[^>]*>` pattern is
+ * not: a quoted attribute value may hold ">", an attribute may follow a closing quote or a "/"
+ * with no space, and every name counts. `closed` is false for a tag the text ends inside.
+ */
+function startTags(html) {
+  const tags = [];
+  const n = html.length;
+  const open = /<([a-zA-Z][^\s/>]*)/g;
+  for (let m = open.exec(html); m !== null; m = open.exec(html)) {
+    const attrs = [];
+    let i = open.lastIndex;
+    let closed = false;
+    while (i < n) {
+      while (i < n && /[\s/]/.test(html[i])) i++;
+      if (i >= n) break;
+      if (html[i] === ">") {
+        closed = true;
+        i++;
+        break;
+      }
+      const nameAt = i++; // a leading "=" belongs to the name, as in HTML
+      while (i < n && !/[\s/>=]/.test(html[i])) i++;
+      const name = html.slice(nameAt, i).toLowerCase();
+      let value = "";
+      let j = i;
+      while (j < n && /\s/.test(html[j])) j++;
+      if (html[j] === "=") {
+        j++;
+        while (j < n && /\s/.test(html[j])) j++;
+        if (html[j] === '"' || html[j] === "'") {
+          const end = html.indexOf(html[j], j + 1);
+          value = html.slice(j + 1, end < 0 ? n : end);
+          i = end < 0 ? n : end + 1;
+        } else {
+          const from = j;
+          while (j < n && !/[\s>]/.test(html[j])) j++;
+          value = html.slice(from, j);
+          i = j;
+        }
+      }
+      attrs.push({ name, value });
+    }
+    tags.push({ name: m[1].toLowerCase(), attrs, end: i, closed });
+    open.lastIndex = i;
+  }
+  return tags;
+}
+
+/** An attribute value as a browser reads it for a URL: character references decoded, tabs and newlines gone. */
+function urlText(value) {
+  const named = { colon: ":", tab: "\t", newline: "\n", sol: "/", bsol: "\\" };
+  const decoded = value
+    .replace(
+      /&#x([0-9a-f]{1,6});?|&#([0-9]{1,7});?|&(colon|tab|newline|sol|bsol);/gi,
+      (_, h, d, w) => {
+        if (w) return named[w.toLowerCase()];
+        const code = h ? parseInt(h, 16) : Number(d);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      },
+    )
+    .replace(/[\t\n\r]/g, "");
+  // A URL's leading C0 controls and spaces are stripped (a char-code loop: a control-character
+  // regex is a lint error).
+  let start = 0;
+  while (start < decoded.length && decoded.charCodeAt(start) <= 0x20) start++;
+  return decoded.slice(start);
+}
+
+/** The rules for one HTML file (`checkBuiltFile` calls it). */
+function checkBuiltHtml(text, where) {
+  // `<!-->` and `<!--->` are complete comments to a browser, and `--!>` closes one: a plain `-->`
+  // search would swallow the markup after them and never look at it.
+  const html = text.replace(/<!--(?:-?>|[\s\S]*?--!?>)/g, "");
+  for (const tag of startTags(html)) {
+    if (!tag.closed) where("has a tag that never ends");
+    const all = (name) => tag.attrs.filter((a) => a.name === name).map((a) => a.value);
+    const names = tag.attrs.map((a) => a.name);
+    if (tag.name === "script") {
+      const close = /<\/script[\s/>]/i.exec(html.slice(tag.end));
+      if (!close) where("has an unclosed script tag");
+      const body = html.slice(tag.end, tag.end + close.index);
+      if (!names.includes("src") || body.trim() !== "") where("has an inline script");
+      // The first `type` is the one a browser reads; an allow-list, so anything odd is refused.
+      const type = (all("type")[0] ?? "").toLowerCase();
+      if (!["", "text/javascript", "application/javascript"].includes(type)) {
+        where(`has a script of type ${quote(type)} (only classic scripts load in the frame)`);
+      }
+    }
+    if (tag.name === "style") where("has an inline style element");
+    if (names.includes("style")) where("has an inline style attribute");
+    if (names.includes("crossorigin")) where("has a crossorigin attribute");
+    if (names.some((a) => a.startsWith("on"))) where("has an inline event handler");
+    if (all("rel").some((v) => v.toLowerCase().split(/\s+/).includes("modulepreload"))) {
+      where("preloads a module");
+    }
+    for (const name of ["href", "src", "action", "formaction", "xlink:href"]) {
+      if (all(name).some((v) => /^javascript:/i.test(urlText(v)))) where("has a javascript: URL");
+    }
+    // What a page pulls in must be the mod's own file. The frame's CSP is what holds at run time;
+    // this catches a build that emitted a CDN link before it ships and then fails silently.
+    const loads = tag.name === "script" ? "src" : tag.name === "link" ? "href" : null;
+    for (const value of loads ? all(loads) : []) {
+      const url = urlText(value);
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) || /^[\\/]{2}/.test(url)) {
+        where(
+          `has a ${tag.name} that loads ${quote(value)}, which isn't one of the mod's own files`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Rules for built output, which package.rs does not have (a package is data to it) but the frame
- * does. Text rules, not a parser: they catch a build that went wrong or an author's slip, and the
- * frame's CSP is what holds against a hostile page. Comments are dropped first.
+ * does. They catch a build that went wrong or an author's slip, and the frame's CSP is what holds
+ * against a hostile page: this is a slip-catcher, not the security control. HTML is tokenized (see
+ * `startTags`) after its comments are dropped; CSS and JS are text rules.
  */
 export function checkBuiltFile(path, bytes) {
   const where = (why) => refuse(`${quote(path)} ${why}`);
-  if (extensionIs(path, "html") || extensionIs(path, "htm")) {
-    const html = utf8(bytes).replace(/<!--[\s\S]*?-->/g, "");
-    for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
-      const attrs = m[1];
-      if (!/\bsrc\s*=/i.test(attrs) || m[2].trim() !== "") where("has an inline script");
-      const type = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-      const value = (type?.[1] ?? type?.[2] ?? type?.[3] ?? "").toLowerCase();
-      if (!["", "text/javascript", "application/javascript"].includes(value)) {
-        where(`has a script of type ${quote(value)} (only classic scripts load in the frame)`);
-      }
-    }
-    if (/<script\b(?![^>]*>[\s\S]*?<\/script)/i.test(html)) where("has an unclosed script tag");
-    if (/<style\b/i.test(html)) where("has an inline style element");
-    for (const tag of html.matchAll(/<[a-zA-Z][^>]*>/g)) {
-      const attrNames = [...tag[0].matchAll(/\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?=[\s=/>])/g)].map(
-        (a) => a[1].toLowerCase(),
-      );
-      if (attrNames.includes("style")) where("has an inline style attribute");
-      if (attrNames.includes("crossorigin")) where("has a crossorigin attribute");
-      if (attrNames.some((a) => a.startsWith("on"))) where("has an inline event handler");
-      if (/\brel\s*=\s*["']?modulepreload/i.test(tag[0])) where("preloads a module");
-      if (/\b(?:href|src|action|formaction|xlink:href)\s*=\s*["']?\s*javascript:/i.test(tag[0])) {
-        where("has a javascript: URL");
-      }
-    }
-  } else if (extensionIs(path, "css")) {
-    if (/url\(\s*["']?\s*data:/i.test(utf8(bytes))) {
+  const isHtml = extensionIs(path, "html") || extensionIs(path, "htm");
+  const isCss = extensionIs(path, "css");
+  if (!isHtml && !isCss && !extensionIs(path, "js")) return;
+  let text;
+  try {
+    text = utf8(bytes);
+  } catch {
+    where("isn't UTF-8 text");
+  }
+  if (isHtml) checkBuiltHtml(text, where);
+  else if (isCss) {
+    if (/url\(\s*["']?\s*data:/i.test(text)) {
       where("has a data: URL (the frame's CSP allows only the mod's own files)");
     }
-  } else if (extensionIs(path, "js")) {
+  } else {
     try {
       // Compiled as a classic script and never run: `import` or `export` at the top is a syntax error.
-      new vm.Script(utf8(bytes), { filename: path });
+      new vm.Script(text, { filename: path });
     } catch (e) {
       where(`isn't a classic script (${String(e.message).split("\n").pop()})`);
     }
@@ -1208,11 +1317,24 @@ export function buildArchive(files, { unsigned = false, signature } = {}) {
   return bytes;
 }
 
+/** Refuse the all-zero placeholder `publisher.commit` of a source manifest; `how` says how to fix it. */
+function refusePlaceholderCommit(manifest, how) {
+  if (/^0{40}$/.test(manifest.commit)) {
+    refuse(
+      `publisher.commit is the all-zero placeholder, not the commit this was built from (${how}): ` +
+        `a signature would vouch for a commit that does not exist`,
+    );
+  }
+}
+
 /** Add a signature to an archive and write it again with the one writer. */
 export function attach(archive, signature) {
   const before = verifyArchive(archive);
   if (before.kind === "signed") refuse("that archive is already signed");
   if (before.kind === "unsigned") refuse("a third-party file can't be signed by an Atlas key");
+  // The signature's trusted comment must equal the manifest's commit, so checking the manifest
+  // covers both: a signed claim to the all-zero commit would be a claim to a commit that doesn't exist.
+  refusePlaceholderCommit(before.manifest, "it was packed without --commit");
   const entries = new Map(before.entries);
   entries.set(SIGNATURE, Buffer.from(signature));
   const bytes = writeZip(entries);
@@ -1287,11 +1409,9 @@ export function run(argv, root = repoRoot) {
   const files = assemble({ modDir, root, commit: flags.get("--commit") });
   const bytes = buildArchive(files, { unsigned: flags.has("--unsigned") });
   const { manifest } = verifyArchive(bytes);
-  if (/^0{40}$/.test(manifest.commit) && !flags.has("--unsigned")) {
-    console.error(
-      "pack-mod: warning: publisher.commit is the all-zero placeholder (pass --commit)",
-    );
-  }
+  // A package for signing must name the commit it was built from: the signature vouches for it.
+  // Only a developer's own --unsigned file (and --stage, above) may keep the placeholder.
+  if (!flags.has("--unsigned")) refusePlaceholderCommit(manifest, "pass --commit <sha>");
   write(
     flags.get("--out") ?? join(modDir, "dist", `${manifest.id}-${manifest.version}.pmmod`),
     bytes,
