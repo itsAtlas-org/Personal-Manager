@@ -522,7 +522,7 @@ function InlineAction({ label, onClick }: { label: string; onClick: () => void }
     <button
       type="button"
       onClick={onClick}
-      className="rounded-[var(--radius-sm)] border border-border px-2.5 py-1 text-xs text-ink2 hover:bg-surface"
+      className="rounded-[var(--radius-sm)] border border-ink4 px-2.5 py-1 text-xs text-ink2 hover:bg-surface"
     >
       {label}
     </button>
@@ -600,7 +600,7 @@ function OpenSourceButton({
                 .then(() => setCopied("done"))
                 .catch(() => setCopied("failed"));
             }}
-            className="rounded-[var(--radius-sm)] border border-border px-2 py-1 text-xs text-ink2 hover:bg-surface"
+            className="rounded-[var(--radius-sm)] border border-ink4 px-2 py-1 text-xs text-ink2 hover:bg-surface"
           >
             Copy
           </button>

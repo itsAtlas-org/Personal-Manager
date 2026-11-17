@@ -69,7 +69,7 @@ const FULL = "Google allows up to 5 notifications.";
 
 /** The number box, as small as the lists beside it (Select's compact size). */
 const COUNT =
-  "w-14 rounded-[var(--radius-sm)] border border-border2 bg-surface px-2 py-1 text-xs text-ink2 outline-none transition focus:border-accent aria-invalid:border-st-due disabled:cursor-not-allowed disabled:bg-transparent disabled:text-ink3";
+  "w-14 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-2 py-1 text-xs text-ink2 outline-none transition focus:border-accent-text aria-invalid:border-st-due disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3";
 
 /** A row as its fields hold it. `at` is an all-day row's time of day. */
 interface Form {

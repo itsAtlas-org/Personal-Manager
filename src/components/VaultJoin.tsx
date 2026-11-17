@@ -122,7 +122,7 @@ export function VaultJoin({
             {vaults.map((v, i) => (
               <label
                 key={v.vault_id}
-                className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] border border-border2 px-3 py-2 text-sm text-ink2"
+                className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] border border-ink4 px-3 py-2 text-sm text-ink2"
               >
                 <input
                   type="radio"

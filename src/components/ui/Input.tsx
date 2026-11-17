@@ -13,7 +13,12 @@ export function Input({ className, ...rest }: ComponentPropsWithRef<"input">) {
   return (
     <input
       className={cn(
-        "w-full rounded-[var(--radius-sm)] border border-border2 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent disabled:cursor-not-allowed disabled:bg-transparent disabled:text-ink3",
+        // The edge is `--ink4`, not `--border2`: a field's border is what marks it out, so it owes
+        // 3:1 (WCAG 1.4.11), and `--border2` measures 1.33-1.84:1 at the default Contrast. Focus
+        // moves to `--accent-text` (never `--accent`, which falls to 1.4:1 on a pale accent in a
+        // light theme and would make the focused edge weaker than the resting one). contrast.test.ts
+        // pins both. Disabled drops back to `--border2`: a disabled field is exempt and should recede.
+        "w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3",
         system === "terminal" && "font-mono caret-[var(--accent-text)]",
         className,
       )}

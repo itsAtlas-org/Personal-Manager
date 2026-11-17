@@ -393,8 +393,10 @@ export function RemovePmData({ biometricAvailable }: Props) {
               return (
                 <label
                   key={item.key}
-                  className={`flex items-start gap-3 rounded-[var(--radius)] border border-border bg-surface px-3 py-2.5 transition ${
-                    locked ? "cursor-default opacity-90" : "cursor-pointer hover:border-border2"
+                  className={`flex items-start gap-3 rounded-[var(--radius)] border bg-surface px-3 py-2.5 transition ${
+                    locked
+                      ? "cursor-default border-border2 opacity-90"
+                      : "cursor-pointer border-ink4 hover:border-ink2"
                   }`}
                 >
                   <input

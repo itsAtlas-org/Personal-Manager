@@ -797,7 +797,7 @@ function NavControls({
   onReset: () => void;
 }) {
   const btn =
-    "flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-border bg-surface/85 text-ink2 backdrop-blur transition hover:text-ink hover:border-border2";
+    "flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] border border-ink4 bg-surface/85 text-ink2 backdrop-blur transition hover:text-ink hover:border-ink2";
   return (
     <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-1.5" data-help="map-navigate">
       <button type="button" className={btn} onClick={onZoomIn} aria-label="Zoom in" title="Zoom in">

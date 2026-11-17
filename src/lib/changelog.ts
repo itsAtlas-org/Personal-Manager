@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.182.1-alpha",
+    date: "2026-11-16",
+    highlights: [
+      "Text fields, dropdowns, secondary buttons and other controls now have a clearly visible edge in every theme. At the default contrast they were too faint to make out against the background, and some looked like they had no edge at all. Their colours when you point at them or click into them are a touch stronger too.",
+    ],
+  },
+  {
     version: "3.182.0-alpha",
     date: "2026-11-16",
     highlights: [

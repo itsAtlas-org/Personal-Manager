@@ -365,7 +365,7 @@ export function Sidebar({
           onClick={onOpenPalette}
           data-help="sidebar-search"
           title="Search and jump to any project, file, conversation, or calendar event"
-          className="flex w-full items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface px-3 py-1.5 text-left text-sm text-ink4 hover:text-ink2"
+          className="flex w-full items-center justify-between rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-1.5 text-left text-sm text-ink4 hover:text-ink2"
         >
           <span>Search…</span>
           <span className="ml-2 shrink-0 font-mono text-xs text-ink4">{SHORTCUT_HINT}</span>
