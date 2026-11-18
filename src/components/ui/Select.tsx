@@ -11,15 +11,23 @@ interface Props extends ComponentPropsWithRef<"select"> {
    *  engine. (WebKitGTK on Linux anchors native-<select> text lower than Blink, so a fixed height
    *  with zeroed padding clipped the descenders there; padding-driven sizing renders identically.) */
   compact?: boolean;
+  /** The height of a SegmentedControl, for a select that sits in a row with one (the Calendar
+   *  header's Days). Same sizing as Button's `bar`; wins over `compact`. */
+  bar?: boolean;
 }
 
 // Token-driven wrapper over the native <select>. color-scheme (set by applyTheme) makes the
 // native dropdown follow light/dark automatically.
-export function Select({ className, children, compact = false, ...rest }: Props) {
+export function Select({ className, children, compact = false, bar = false, ...rest }: Props) {
   const { system } = useTheme();
   // Swap the size classes, never layer them: cn() is a plain joiner, so emitting both py-1.5 and py-1
   // would leave the winner to stylesheet order — the ambiguity that let the clip through.
-  const sizing = compact ? "px-2 py-1 text-xs" : "px-2 py-1.5 text-sm";
+  // `bar` also carries its own height floor, since a select has none of Button's.
+  const sizing = bar
+    ? "min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2 py-1.5 text-xs"
+    : compact
+      ? "px-2 py-1 text-xs"
+      : "px-2 py-1.5 text-sm";
   return (
     <select
       className={cn(

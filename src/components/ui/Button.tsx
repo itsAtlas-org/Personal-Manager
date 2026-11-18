@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Token-driven button (DESIGN_TOKENS.md §7). Four variants × four sizes; the terminal System wraps
+// Token-driven button (DESIGN_TOKENS.md §7). Four variants × five sizes; the terminal System wraps
 // the label in brackets and forces mono. Never style a button instance directly — use this.
 
 import type { ComponentPropsWithRef, ReactNode } from "react";
@@ -9,7 +9,7 @@ import { useTheme } from "../../theme";
 import { cn } from "./cn";
 
 export type ButtonVariant = "primary" | "secondary" | "tertiary" | "danger";
-export type ButtonSize = "xs" | "sm" | "md" | "lg";
+export type ButtonSize = "xs" | "sm" | "md" | "lg" | "bar";
 
 // Hover/active are gated to :enabled so a disabled button never reacts to the pointer, which
 // together with `disabled:cursor-not-allowed` and the colour swap below reads as unmistakably
@@ -51,16 +51,28 @@ const VARIANT: Record<ButtonVariant, string> = {
 // `text-*` taking effect (font sizes are emitted alphabetically, so `text-xs` beats `text-sm`).
 // Every compact button in PM was therefore a full-size box with shrunken type. Same hazard, same
 // fix as `Select`'s `compact`.
+//
+// The height floor (`min-h`) is part of each size for the same reason: a size with a different floor
+// (`bar`) could not otherwise swap it, and two `min-h` classes would leave the winner to stylesheet
+// order. Every entry therefore carries exactly one. The width floor is the same for all, so it stays
+// in the base.
 const SIZE: Record<ButtonSize, string> = {
   // Dense steppers and micro toolbar chips. --tap-min still floors the box to 24px, so xs and sm
   // render the same HEIGHT at Standard density and differ only in horizontal padding.
-  xs: "px-1.5 py-0.5 text-xs",
+  xs: "min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs",
   // Byte-identical to Select's `compact`, so a Button lines up beside one. Button.test.tsx pins it.
-  sm: "px-2 py-1 text-xs",
+  sm: "min-h-[var(--tap-min,24px)] px-2 py-1 text-xs",
   // Today's base, verbatim — every unannotated call site is untouched by the seam landing.
-  md: "px-3 py-1.5 text-sm",
+  md: "min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm",
   // Matches Input's own px-4 py-2, for a control paired with a full-size field.
-  lg: "px-4 py-2 text-sm",
+  lg: "min-h-[var(--tap-min,24px)] px-4 py-2 text-sm",
+  // The height of a SegmentedControl, for a control that sits in a row with one (the Calendar
+  // header's). A segmented control is its 1px border x2 + p-0.5 + an item of max(--tap-min, py-1 +
+  // 1rem), so it stands 2px + 0.25rem + max(tap, 1.5rem) tall. The floor below is exactly that, so
+  // the height does not depend on what is inside: a text label (py-1.5 + a 1rem line + a secondary's
+  // 2px border) lands on it, and an icon-only button (a 0.875rem glyph, shorter than a line) and a
+  // borderless one are lifted to it. Button.test.tsx pins it to SegmentedControl's own classes.
+  bar: "min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs",
 };
 
 export interface ButtonProps extends ComponentPropsWithRef<"button"> {
@@ -86,7 +98,7 @@ export function Button({
       // one-primary-per-screen rule — without parsing class strings.
       data-variant={variant}
       className={cn(
-        "inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed",
+        "inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed",
         SIZE[size],
         terminal && "font-mono",
         VARIANT[variant],

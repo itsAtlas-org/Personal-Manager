@@ -1756,7 +1756,7 @@ describe("CalendarView: tasks", () => {
     expect(localStorage.getItem("pm.calendar.agendaMode")).toBe("runway");
   });
 
-  it("the Runway's count, next up, Hide events, + Window and + Task are in the header, not the board, and gone in the List", async () => {
+  it("Hide events, + Window and + Task are in the header, not the board, and gone in the List", async () => {
     localStorage.removeItem("pm.calendar.agendaMode");
     tasks = [
       task({ id: 1, status: "done" }),
@@ -1769,36 +1769,25 @@ describe("CalendarView: tasks", () => {
     const board = await screen.findByRole("region", { name: "Today" });
     const header = document.querySelector<HTMLElement>('[data-help="calendar-header"]')!;
     const inHeader = within(header);
-    expect(await inHeader.findByText("1/2 done")).toBeTruthy();
-    expect(inHeader.getByText(/Next up/)).toBeTruthy();
-    expect(inHeader.getByRole("button", { name: "Hide events" })).toBeTruthy();
+    expect(await inHeader.findByRole("button", { name: "Hide events" })).toBeTruthy();
+    // The count and next up that once sat beside them are gone, from the header and the board.
+    expect(inHeader.queryByText(/\d+\/\d+ done/)).toBeNull();
+    expect(inHeader.queryByText(/Next up/)).toBeNull();
+    expect(inHeader.queryByRole("progressbar")).toBeNull();
     expect(inHeader.getByRole("button", { name: "+ Window" })).toBeTruthy();
     expect(inHeader.getByRole("button", { name: "+ Task" })).toBeTruthy();
     // Each is in one place: none of them is left in the board.
     const root = board.closest<HTMLElement>('[data-help="calendar-runway"]')!;
-    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByText(/Next up/)).toBeNull();
     expect(within(root).queryByRole("button", { name: "Hide events" })).toBeNull();
     expect(within(root).queryByRole("button", { name: "+ Window" })).toBeNull();
     expect(within(root).queryByRole("button", { name: "+ Task" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     await screen.findByRole("button", { name: /Standup/ });
-    expect(screen.queryByText("1/2 done")).toBeNull();
     expect(screen.queryByRole("button", { name: "Hide events" })).toBeNull();
     expect(screen.queryByRole("button", { name: "+ Window" })).toBeNull();
     expect(screen.queryByRole("button", { name: "+ Task" })).toBeNull();
-  });
-
-  it("says Nothing planned in the header when nothing is planned from today", async () => {
-    localStorage.removeItem("pm.calendar.agendaMode");
-    tasks = [];
-    // The suite's milestone counts as planned work from today.
-    ipc.listAllMilestones.mockResolvedValue([]);
-    const View = (await import("./CalendarView")).CalendarView;
-    render(<View />);
-    await screen.findByRole("region", { name: "Today" });
-    expect(screen.getByText("Nothing planned")).toBeTruthy();
-    expect(screen.queryByText("0/0 done")).toBeNull();
   });
 
   it("+ Task in the header opens New task starting today", async () => {
@@ -2494,7 +2483,7 @@ describe("CalendarView: the filters", () => {
       ipc.listAllMilestones.mockResolvedValue([]);
     });
 
-    it("hides a task done before the Agenda opened, keeps one ticked since, and keeps counting both", async () => {
+    it("hides a task done before the Agenda opened, and keeps one ticked since", async () => {
       const doneBefore = task({
         id: 2,
         title: "Done before",
@@ -2513,8 +2502,6 @@ describe("CalendarView: the filters", () => {
       expect(within(todayCol).getByText("Open one")).toBeTruthy();
       expect(hideButton()?.textContent).toBe("Show done (1)");
       expect(status()).toContain("1 done item hidden");
-      // "1/2 done" still counts what is hidden.
-      expect(screen.getByText("1/2 done")).toBeTruthy();
       // Ticked now, after Hide done went on (the editor's status select or the other window reach
       // it the same way, as a fresh `completed_at`): it stays, struck through, until the toggle flips.
       tasks = [
@@ -2524,7 +2511,6 @@ describe("CalendarView: the filters", () => {
       await act(async () => tasksChanged());
       expect(within(todayCol).getByText("Open one")).toBeTruthy();
       expect(within(todayCol).queryByText("Done before")).toBeNull();
-      expect(screen.getByText("2/2 done")).toBeTruthy();
       // A moment on, Show done, then Hide done again: the cutoff is fresh, so now both were done
       // before it.
       await act(() => new Promise((r) => setTimeout(r, 5)));

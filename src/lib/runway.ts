@@ -40,7 +40,7 @@ import {
   weekdayShort,
 } from "./calendar-layout";
 import { formatDateLocal, pad2 } from "./format";
-import { compareTasks, deadlineInfo, deadlineKindOf, isOpen, type DeadlineTone } from "./tasks";
+import { compareTasks, isOpen } from "./tasks";
 import type { CalendarEvent, Milestone, Task, TaskLane, TaskStack } from "./types";
 
 // --- columns ---------------------------------------------------------------------------------------
@@ -302,14 +302,6 @@ export function cardCount(lanes: RunwayLanes): number {
   return n;
 }
 
-/** The Runway readout's count: "3/7 done", plus " · 1 in progress" while any is started, or
- *  "Nothing planned" when no task or milestone sits from today on (not "0/0 done", which reads as
- *  a failure when it means an empty week). */
-export function runwayProgressWords(p: RunwayProgress): string {
-  if (p.total === 0) return "Nothing planned";
-  return `${p.done}/${p.total} done${p.doing > 0 ? ` · ${p.doing} in progress` : ""}`;
-}
-
 // --- cards -----------------------------------------------------------------------------------------
 
 export interface RunwayTaskCard {
@@ -362,27 +354,11 @@ export interface RunwayLanes {
   background: RunwayCard[];
 }
 
-export interface RunwayProgress {
-  done: number;
-  total: number;
-  doing: number;
-}
-
-export interface RunwayNextUp {
-  title: string;
-  deadlineText: string;
-  tone: DeadlineTone;
-}
-
 export interface RunwayModel {
   /** Each column's two lanes, by column id. Every column has an entry. */
   lanes: Record<string, RunwayLanes>;
   /** Parked open tasks, in order. */
   parked: RunwayTaskCard[];
-  /** Over the tasks and milestones from today on (not parked, not "Before today"). */
-  progress: RunwayProgress;
-  /** The open task or milestone with the earliest deadline. */
-  nextUp: RunwayNextUp | null;
   /** The column each placed task sits in, by task id (parked and left-off tasks aren't here):
    *  where a drag or a move comes from. */
   columnOf: ReadonlyMap<number, string>;
@@ -403,8 +379,7 @@ export interface PlaceInput {
    *  no `completed_at` or finished before this instant, and so is every met milestone. A task
    *  finished at or after it stays, struck through, so one ticked while hiding doesn't vanish under
    *  the pointer. Only Today and later are cut: "Before today" is the folded place to look back.
-   *  A left-out item still counts in `progress`, still joins its stack's chain and still has a
-   *  `columnOf` entry. */
+   *  A left-out item still joins its stack's chain and still has a `columnOf` entry. */
   hideDoneBefore?: Date | null;
 }
 
@@ -478,14 +453,6 @@ export function placeCards(input: PlaceInput): RunwayModel {
   };
 
   const parked: RunwayTaskCard[] = [];
-  const progress: RunwayProgress = { done: 0, total: 0, doing: 0 };
-  let next: { day: string; rank: number; title: string; kind: "hard" | "soft" } | null = null;
-  const consider = (day: string | null, rank: number, title: string, kind: "hard" | "soft") => {
-    if (!day) return;
-    if (!next || day < next.day || (day === next.day && rank < next.rank)) {
-      next = { day, rank, title, kind };
-    }
-  };
 
   // Matched on the window's own dates: a running window's column starts at today, not on them.
   const windowMatch = (t: Task): RunwayColumn | undefined =>
@@ -506,7 +473,7 @@ export function placeCards(input: PlaceInput): RunwayModel {
     else stackMembers.set(sid, [m]);
   };
   const sortedTasks = [...tasks].sort(compareTasks);
-  sortedTasks.forEach((t, rank) => {
+  sortedTasks.forEach((t) => {
     if (archivedTask(t, archived)) return;
     const open = isOpen(t);
     const day = planDay(t);
@@ -584,16 +551,9 @@ export function placeCards(input: PlaceInput): RunwayModel {
       columnOf.set(t.id, col.id);
       joinStack({ card: placed.card as RunwayTaskCard, columnId: col.id });
     }
-    if (col && col.kind !== "past") {
-      progress.total += 1;
-      if (!open) progress.done += 1;
-      else if (t.status === "doing") progress.doing += 1;
-      if (open) consider(dayOf(t.effective_deadline), rank, t.title, deadlineKindOf(t));
-    }
   });
 
-  const mRank = sortedTasks.length;
-  milestones.forEach((m, i) => {
+  milestones.forEach((m) => {
     if (archived.has(m.project_name)) return;
     const due = dayOf(m.due_date);
     if (!due) return;
@@ -617,11 +577,6 @@ export function placeCards(input: PlaceInput): RunwayModel {
     } else {
       put(col, { card: { kind: "milestone", milestone: m, late }, lane: "foreground" });
     }
-    if (col && col.kind !== "past") {
-      progress.total += 1;
-      if (done) progress.done += 1;
-      else consider(due, mRank + i, m.label, "hard");
-    }
   });
 
   const lanes: Record<string, RunwayLanes> = {};
@@ -643,16 +598,7 @@ export function placeCards(input: PlaceInput): RunwayModel {
     };
   }
 
-  const n = next as { day: string; kind: "hard" | "soft"; title: string } | null;
-  const info = n ? deadlineInfo(n.day, n.kind, t0) : null;
-  return {
-    lanes,
-    parked,
-    progress,
-    nextUp: n && info ? { title: n.title, deadlineText: info.text, tone: info.tone } : null,
-    columnOf,
-    hiddenDone,
-  };
+  return { lanes, parked, columnOf, hiddenDone };
 }
 
 /** When a task finished, as a time; NaN when it has no `completed_at` (or it doesn't parse), which

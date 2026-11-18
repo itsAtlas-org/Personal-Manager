@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.185.1-alpha",
+    date: "2026-11-18",
+    highlights: [
+      "The Agenda's header is calmer. The “3/7 done” count with its progress bar and the “Next up” line beside “From today” are gone, which frees up room at the top. Hide events and + Window stay where they were.",
+      "The buttons in the calendar's header are now all the same height as the switches beside them, so the row lines up: + New event is no longer shorter than + Task, in every view, in the pop-out window and at every text size.",
+    ],
+  },
+  {
     version: "3.185.0-alpha",
     date: "2026-11-18",
     highlights: [
