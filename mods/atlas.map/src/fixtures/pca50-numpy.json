@@ -1,0 +1,60 @@
+{
+  "howMade": "python -I -B make-pca50-fixture.py tsne-opentsne.json out.json, with numpy; the script is the `script` field.",
+  "versions": {
+    "python": "3.12.13",
+    "numpy": "2.5.2"
+  },
+  "script": [
+    "# Makes mods/atlas.map/src/fixtures/pca50-numpy.json: for each case of tsne-opentsne.json whose vectors are",
+    "# wider than 50 dimensions, how much variance numpy's SVD puts in the top 50 axes (what the sidecar's",
+    "# `_pca(x, 50)` keeps before t-SNE). The Document Map's JavaScript top-50 axes (pca.ts principalScores) must",
+    "# capture at least 99 per cent of it. Vectors are read from tsne-opentsne.json, not repeated here.",
+    "import base64, json, sys",
+    "import numpy as np",
+    "",
+    "SRC, OUT = sys.argv[1], sys.argv[2]",
+    "src = json.load(open(SRC))",
+    "",
+    "def decode(b64):",
+    "    return np.frombuffer(base64.b64decode(b64), dtype=\"<f4\")",
+    "",
+    "cases = []",
+    "for c in src[\"cases\"]:",
+    "    n, d = c[\"n\"], c[\"dimension\"]",
+    "    if d <= 50:",
+    "        continue",
+    "    x = decode(c[\"vectors\"]).reshape(n, d).astype(np.float64)",
+    "    x = x - x.mean(axis=0, keepdims=True)",
+    "    s = np.linalg.svd(x, full_matrices=False, compute_uv=False)",
+    "    cases.append({",
+    "        \"name\": c[\"name\"], \"n\": n, \"dimension\": d,",
+    "        \"totalVariance\": float((s ** 2).sum()),",
+    "        \"top50Variance\": float((s[:50] ** 2).sum()),",
+    "        \"top2Variance\": float((s[:2] ** 2).sum()),",
+    "    })",
+    "json.dump({",
+    "    \"howMade\": \"python -I -B make-pca50-fixture.py tsne-opentsne.json out.json, with numpy; the script is the `script` field.\",",
+    "    \"versions\": {\"python\": sys.version.split()[0], \"numpy\": np.__version__},",
+    "    \"script\": open(__file__).read().splitlines(),",
+    "    \"cases\": cases,",
+    "}, open(OUT, \"w\"), indent=1)"
+  ],
+  "cases": [
+    {
+      "name": "separated-300x64",
+      "n": 300,
+      "dimension": 64,
+      "totalVariance": 249.88776522196358,
+      "top50Variance": 248.25441448144554,
+      "top2Variance": 110.08664906260819
+    },
+    {
+      "name": "wide-150x96",
+      "n": 150,
+      "dimension": 96,
+      "totalVariance": 126.6117222030762,
+      "top50Variance": 118.53837489253364,
+      "top2Variance": 57.13342980613817
+    }
+  ]
+}

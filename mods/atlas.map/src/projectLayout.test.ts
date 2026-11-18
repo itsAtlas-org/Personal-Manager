@@ -284,7 +284,9 @@ describe("loadProjectLayout", () => {
       // A grid stands in for the simulation: 45,000 nodes would take the real one a long while.
       const grid: Compute = {
         mode: "inline",
-        reduce: () => Promise.reject(new Error("unused")),
+        semantic: () => {
+          throw new Error("unused");
+        },
         force: async (req) => ({
           positions: req.nodes.map((n, i) => ({
             id: n.id,
@@ -306,7 +308,9 @@ describe("loadProjectLayout", () => {
       const pm = host();
       const grid: Compute = {
         mode: "inline",
-        reduce: () => Promise.reject(new Error("unused")),
+        semantic: () => {
+          throw new Error("unused");
+        },
         force: async (req) => ({
           positions: req.nodes.map((n, i) => ({
             id: n.id,

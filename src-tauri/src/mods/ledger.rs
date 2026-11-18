@@ -1760,6 +1760,8 @@ mod tests {
     mod slice5;
     // The pilots' auto-install (PR B, B8).
     mod pilots;
+    // An update that only adds cache keys: unattended, stored as cache, left out of a backup.
+    mod enhanced_keys;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).

@@ -73,7 +73,7 @@
 // and only a save after that choice may replace it. A description is compared by what it shows, so
 // one only opened is never sent.
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type {
   Calendar,
@@ -408,8 +408,13 @@ export function EventEditor({
   const saveRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   // Save can be held by then (`mustReopen`, a repeat being checked), and takes no focus: Cancel does.
-  const refocusSave = () =>
-    setTimeout(() => (saveRef.current?.disabled ? cancelRef : saveRef).current?.focus(), 0);
+  // Decided in the commit that follows, not on a timer: a timer could run before the render that
+  // re-enables Save, and then send focus to Cancel (or nowhere) though Save was about to be free.
+  const [saveFocusAsk, setSaveFocusAsk] = useState(0);
+  const refocusSave = () => setSaveFocusAsk((n) => n + 1);
+  useLayoutEffect(() => {
+    if (saveFocusAsk > 0) (saveRef.current?.disabled ? cancelRef : saveRef).current?.focus();
+  }, [saveFocusAsk]);
 
   const setDraft = (next: EditorFields) => {
     draftRef.current = next;

@@ -3,6 +3,15 @@
 The Document Map's own history. Its version is the one in `manifest.json`, separate from PM's (spec D12): a
 change that touches only this folder bumps this version and adds an entry here.
 
+## 1.1.0
+
+- The enhanced (t-SNE) layout is built into the Document Map. Nothing to download, on by default;
+  switch it off in Map settings. It is worked out in the page, shows the quick layout first with a
+  progress bar and a Cancel button, and is saved, so the next opening is quick. The first opening
+  after your documents change can take 10 to 30 seconds on a large library. It is a fresh
+  implementation, so the picture may look a little different from the one the downloadable layout
+  drew.
+
 ## 1.0.0
 
 - The Document Map, PM's Map as a mod (named so it isn't mistaken for a geographical map; the id stays

@@ -16,6 +16,15 @@
 // two arrangements, or changing cohesion (a render-time blend), costs no recompute; a refresh or a new
 // cap drops what it makes stale.
 //
+// THE ENHANCED LAYOUT (t-SNE) IS A SLOWER SECOND LAYOUT BEHIND THE QUICK ONE. A run shows the quick layout
+// as soon as it exists and sharpens it under a progress strip with a Cancel button; semantic.ts has the
+// table of what each run reads, posts and writes. `heldBack` is the one flag of this open: Cancel, the
+// deadline, a failed worker or a refused save of the quick layout set it, and while it is set every later
+// run (a new cap, Refresh) is the quick layout only and says so, with a Sharpen button that clears it.
+// Cancel never writes the setting. The subtitle says "enhanced" from the coordinates on screen (their
+// `method`), never from the setting, so a held-back map is never labelled enhanced. A tab switch rebuilds
+// the frame, so a half-finished run is simply lost (nothing of t-SNE is saved until it is whole).
+//
 // WHAT FAILS IS ALWAYS SAID IN THE MAP'S OWN WORDS (copy.ts), never PM's: a failed list or layout is one
 // strip with Try again, a failed save or a failed open is one with Dismiss, and the map the person had
 // stays where it can.
@@ -31,13 +40,19 @@ import {
   phaseText,
   SETTINGS_READ_FAILED,
   SETTINGS_SAVE_FAILED,
+  stoppedNote,
   subtitle,
 } from "./copy";
 import { listDocuments, type MapHost } from "./hostApi";
 import { buildSemanticLayout, projectOf, type BaseLayout } from "./layoutModel";
 import { graphColor } from "./palette";
 import { loadProjectLayout } from "./projectLayout";
-import { loadSemanticCoords, type SemanticResult } from "./semantic";
+import {
+  loadSemanticCoords,
+  SemanticControl,
+  type SemanticResult,
+  type StoppedReason,
+} from "./semantic";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
@@ -97,6 +112,17 @@ export function mountMap(options: MapAppOptions): MapApp {
   let base: BaseLayout | null = null;
   let arranging = false;
   let phase: string | null = null;
+  let phaseKind: string | null = null;
+  // The quick layout shown while the enhanced one is still being worked out.
+  let interim: SemanticResult | null = null;
+  // The enhanced layout is running (or about to), so the strip offers Cancel.
+  let cancellable = false;
+  let control: SemanticControl | null = null;
+  // This open is held to the quick layout, and the note that says why (a note can also stand without
+  // the hold: no worker, an enhanced layout that could not be saved).
+  let heldBack = false;
+  let heldNote: StoppedReason | null = null;
+  let focusCancel = false;
   let notice: ChangeNotice | null = null;
   let problem: Problem | null = null;
   let hovered: MapDoc | null = null;
@@ -146,13 +172,37 @@ export function mountMap(options: MapAppOptions): MapApp {
     return settings.layoutMode === "semantic" && semantic !== null ? "nothing-to-place" : "failed";
   };
 
+  /** Write a live region's words, only when they differ (so it speaks once per change, not per render). */
+  const say = (region: HTMLElement, words: string) => {
+    if (region.textContent !== words) region.textContent = words;
+  };
+
   const renderStrips = () => {
     shell.computing.hidden = phase === null;
-    shell.computingText.textContent = phase ?? "";
+    // The strip's text, and the live region that says it (always in the page, so it is announced even when
+    // the strip was hidden a moment ago). Both are written only when they differ.
+    say(shell.computingText, phase ?? "");
+    say(shell.announcePhase, phase ?? "");
+    shell.progress.hidden = phaseKind !== "sharpening";
+    shell.cancel.hidden =
+      !cancellable ||
+      (phaseKind !== "reading" && phaseKind !== "reducing" && phaseKind !== "sharpening");
+    if (focusCancel && !shell.cancel.hidden && !shell.computing.hidden) {
+      focusCancel = false;
+      shell.cancel.focus();
+    }
+    shell.held.hidden = heldNote === null;
+    const heldWords = heldNote ? stoppedNote(heldNote) : "";
+    say(shell.heldText, heldWords);
+    say(shell.announceHeld, heldWords);
+    shell.sharpen.hidden = !heldBack;
     shell.notice.hidden = notice === null;
-    shell.noticeText.textContent = notice ? noticeText(notice) : "";
+    const noticeWords = notice ? noticeText(notice) : "";
+    say(shell.noticeText, noticeWords);
+    say(shell.announceNotice, noticeWords);
     shell.error.hidden = problem === null;
-    shell.errorText.textContent = problem?.text ?? "";
+    say(shell.errorText, problem?.text ?? "");
+    say(shell.announceError, problem?.text ?? "");
     shell.retry.textContent = problem?.retry ? "Try again" : "Dismiss";
   };
 
@@ -167,13 +217,21 @@ export function mountMap(options: MapAppOptions): MapApp {
     shell.names.setAttribute("aria-pressed", String(settings.labels));
     shell.names.classList.toggle("active", settings.labels);
     shell.names.title = settings.labels ? "Hide file names" : "Show file names";
+    shell.enhanced.checked = settings.enhanced;
     // Not while it is being typed in: the box would jump under the cursor.
     if (doc.activeElement !== shell.nodeCap) shell.nodeCap.value = String(settings.nodeCap);
   };
 
   const renderSubtitle = () => {
+    const shown = semantic ?? interim;
     const text = docsReady
-      ? subtitle(settings.layoutMode, docs.length, projectCount, semantic?.placed ?? 0)
+      ? subtitle(
+          settings.layoutMode,
+          docs.length,
+          projectCount,
+          shown?.placed ?? 0,
+          shown?.method ?? "pca",
+        )
       : "";
     shell.subtitle.textContent = text;
     shell.canvas.setAttribute("aria-label", text ? `Map: ${text}` : "Map");
@@ -191,9 +249,19 @@ export function mountMap(options: MapAppOptions): MapApp {
     renderStrips();
   };
 
-  const setPhase = (next: string | null) => {
+  const setPhase = (next: string | null, kind: string | null = null) => {
     phase = next;
+    phaseKind = next === null ? null : kind;
     renderStrips();
+  };
+
+  let shownPercent = 0;
+  const setProgress = (fraction: number) => {
+    const percent = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
+    if (percent === shownPercent) return;
+    shownPercent = percent;
+    shell.progressFill.setAttribute("width", String(percent));
+    shell.progress.setAttribute("aria-valuenow", String(percent));
   };
 
   /** Show a new layout (or none): the stage fits to it and the legend follows its projects. */
@@ -207,8 +275,14 @@ export function mountMap(options: MapAppOptions): MapApp {
 
   // ---- the work --------------------------------------------------------------------------------------
 
-  const arrange = async (): Promise<void> => {
+  /** Work out (or fetch) the layout for the chosen arrangement. `keepPicture`: the map on screen stays
+   *  while a new run replaces it (Sharpen, turning Enhanced on or off), not a blank "Preparing". */
+  const arrange = async (keepPicture = false): Promise<void> => {
     const run = ++arrangeRun;
+    // Whatever semantic run is still going is superseded: its worker ends now, nothing more is written.
+    control?.abandon();
+    control = null;
+    cancellable = false;
     const mode = settings.layoutMode;
     const stale = () => dead || run !== arrangeRun;
     if (problem?.source === "data") problem = null;
@@ -236,24 +310,62 @@ export function mountMap(options: MapAppOptions): MapApp {
       } else {
         if (!semantic) {
           arranging = true;
-          setBase(null);
+          interim = null;
+          if (!(keepPicture && base)) setBase(null);
+          setPhase(null);
+          setProgress(0);
           render();
+          const mine = new SemanticControl();
+          control = mine;
+          // The quick layout only, while this open is held back.
+          const enhanced = settings.enhanced && !heldBack;
+          cancellable = enhanced;
           const result = await loadSemanticCoords(host, compute, {
             nodeCap: settings.nodeCap,
+            enhanced,
+            control: mine,
             onPhase: (p) => {
-              if (!stale()) setPhase(phaseText(p));
+              // After Cancel the strip is gone at once; the run's own phases must not bring it back.
+              if (!stale() && !mine.cancelRequested) setPhase(phaseText(p), p);
+            },
+            onProgress: (fraction) => {
+              if (!stale()) setProgress(fraction);
             },
             // The saved picture no longer fits the documents: show it (new documents faded at their
             // project's centre) under the strip until the new one lands, as the core Map did, not a
-            // blank "Preparing" for the whole recompute.
+            // blank "Preparing" for the whole recompute. A picture already on screen from this open
+            // (Sharpen) is newer than a saved one, so it stays.
             onStale: (old) => {
-              if (stale()) return;
+              if (stale() || (keepPicture && base)) return;
               setBase(buildSemanticLayout(docs, old, settings.cohesion));
+              render();
+            },
+            // The quick layout, ready while the enhanced one is being worked out.
+            onProvisional: (quick) => {
+              if (stale()) return;
+              interim = quick;
+              setBase(buildSemanticLayout(docs, quick.coords, settings.cohesion));
               render();
             },
           });
           if (stale()) return;
           semantic = result;
+          interim = null;
+          cancellable = false;
+          focusCancel = false;
+          setProgress(0);
+          if (result.stopped) {
+            heldNote = result.stopped;
+            heldBack = result.stopped !== "no-worker";
+          } else if (result.method === "tsne") {
+            // Made after all (a Cancel that came too late): nothing is held back any more.
+            heldBack = false;
+            heldNote = result.saved ? null : "unsaved";
+          } else if (heldBack) {
+            heldNote = result.saved ? (heldNote === "unsaved" ? "cancelled" : heldNote) : "unsaved";
+          } else {
+            heldNote = null;
+          }
         }
         setBase(
           semantic.coords.length > 0
@@ -264,6 +376,8 @@ export function mountMap(options: MapAppOptions): MapApp {
     } catch {
       if (stale()) return;
       arranging = false;
+      cancellable = false;
+      focusCancel = false;
       setBase(null);
       setPhase(null);
       // Nothing was kept for the arrangement that failed (a layout is remembered only once it is
@@ -283,7 +397,11 @@ export function mountMap(options: MapAppOptions): MapApp {
     docsReady = false;
     loadFailed = false;
     arranging = false;
+    control?.abandon();
+    control = null;
+    cancellable = false;
     semantic = null;
+    interim = null;
     project = null;
     projectDone = false;
     setBase(null);
@@ -338,8 +456,9 @@ export function mountMap(options: MapAppOptions): MapApp {
     settings = { ...settings, cohesion: next };
     persist({ cohesion: next });
     // A blend at drawing time over the saved coordinates: no recompute, no storage of the layout.
-    if (docsReady && semantic && settings.layoutMode === "semantic" && semantic.coords.length > 0) {
-      setBase(buildSemanticLayout(docs, semantic.coords, next));
+    const shown = semantic ?? interim;
+    if (docsReady && shown && settings.layoutMode === "semantic" && shown.coords.length > 0) {
+      setBase(buildSemanticLayout(docs, shown.coords, next));
       render();
     } else {
       renderControls();
@@ -368,6 +487,45 @@ export function mountMap(options: MapAppOptions): MapApp {
     if (docsReady && settings.layoutMode === "semantic") void arrange();
   };
 
+  const setEnhanced = (value: boolean) => {
+    if (settings.enhanced === value) return;
+    settings = { ...settings, enhanced: value };
+    persist({ enhanced: value });
+    // Turning it off or on lifts any hold. The other layout's saved coordinates are used as they are:
+    // no recompute unless they are out of date. A run in flight ends (off: PCA shows, with no note).
+    heldBack = false;
+    heldNote = null;
+    semantic = null;
+    interim = null;
+    renderControls();
+    if (docsReady && settings.layoutMode === "semantic") void arrange(true);
+    else renderStrips();
+  };
+
+  /** The person pressed Cancel: keep the quick layout for the rest of this open. The strip turns into the
+   *  note at once; the run ends with the quick layout a moment later and says the same. */
+  const cancelRun = () => {
+    if (!control) return;
+    control.cancel();
+    cancellable = false;
+    heldBack = true;
+    heldNote = "cancelled";
+    setPhase(null);
+    shell.sharpen.focus();
+  };
+
+  const sharpenRun = () => {
+    if (!heldBack) return;
+    heldBack = false;
+    heldNote = null;
+    semantic = null;
+    interim = null;
+    // The Cancel button is not on screen until the run's strip is; the focus goes to it then.
+    focusCancel = true;
+    renderStrips();
+    if (docsReady && settings.layoutMode === "semantic") void arrange(true);
+  };
+
   const setTheme = (next: MapTheme) => {
     theme = next;
     applied = applyTheme(options.themeRoot, next, applied);
@@ -392,6 +550,9 @@ export function mountMap(options: MapAppOptions): MapApp {
   on(shell.zoomOut, "click", () => stage.zoom(1 / 1.3));
   on(shell.fit, "click", () => stage.fit());
   on(shell.refresh, "click", () => void load());
+  on(shell.cancel, "click", cancelRun);
+  on(shell.sharpen, "click", sharpenRun);
+  on(shell.enhanced, "change", () => setEnhanced(shell.enhanced.checked));
   on(shell.dismiss, "click", () => {
     notice = null;
     renderStrips();
@@ -477,6 +638,7 @@ export function mountMap(options: MapAppOptions): MapApp {
     destroy() {
       if (dead) return;
       dead = true;
+      control?.abandon();
       stage.destroy();
       watcher.stop();
       offEvents();

@@ -34,5 +34,6 @@ docs
 .github
 
 # Written by numpy (its `script` field is the program that made it): the generator owns the format, and
-# a reflow would turn 85 KB of vectors into thousands of lines.
+# a reflow would turn 85 KB of vectors into thousands of lines. Same for the openTSNE oracle.
 mods/atlas.map/src/fixtures/pca-numpy.json
+mods/atlas.map/src/fixtures/tsne-opentsne.json

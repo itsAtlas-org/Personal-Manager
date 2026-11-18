@@ -90,6 +90,25 @@ describe("a cold open", () => {
     result.coords.forEach((c, i) => expect([c.x, c.y]).toEqual([direct[2 * i], direct[2 * i + 1]]));
   });
 
+  it("reads the vectors from PM once and gives the compute one job, whatever the run does with them", async () => {
+    const { pm } = world(40);
+    const real = inlineCompute();
+    const jobs: { pca: boolean; tsne: boolean; vectors: Float32Array }[] = [];
+    const counting: Compute = {
+      ...real,
+      semantic: (vectors, count, dimension, options) => {
+        jobs.push({ pca: options.pca, tsne: options.tsne, vectors });
+        return real.semantic(vectors, count, dimension, options);
+      },
+    };
+    await loadSemanticCoords(pm.host, counting, { nodeCap: 1000, sleep: noSleep });
+    expect(pm.of("embeddings.documentVectors")).toHaveLength(1);
+    expect(jobs).toHaveLength(1);
+    // Without `enhanced` the run is the quick layout alone: one job, PCA only (semanticEnhanced.test.ts
+    // has the runs that ask for t-SNE).
+    expect(jobs[0]).toMatchObject({ pca: true, tsne: false });
+  });
+
   it("stores each document's coordinate as {x, y} under the cache key", async () => {
     const { pm } = world(10);
     const result = await load(pm.host);
@@ -125,13 +144,15 @@ describe("a warm open", () => {
     await load(pm.host);
     const never: Compute = {
       mode: "inline",
-      reduce: vi.fn(() => Promise.reject(new Error("must not run"))),
+      semantic: vi.fn(() => {
+        throw new Error("must not run");
+      }),
       force: vi.fn(() => Promise.reject(new Error("must not run"))),
       close: () => undefined,
     };
     const warm = await loadSemanticCoords(pm.host, never, { nodeCap: 1000, sleep: noSleep });
     expect(warm.source).toBe("cache");
-    expect(never.reduce).not.toHaveBeenCalled();
+    expect(never.semantic).not.toHaveBeenCalled();
   });
 });
 
@@ -515,7 +536,14 @@ describe("edges", () => {
     const docs = documents(5, 2);
     const pm = memoryHost({ docs, dimension: DIM });
     const result = await load(pm.host);
-    expect(result).toEqual({ coords: [], source: "computed", total: 0, placed: 0, saved: true });
+    expect(result).toEqual({
+      method: "pca",
+      coords: [],
+      source: "computed",
+      total: 0,
+      placed: 0,
+      saved: true,
+    });
     expect(methods(pm)).toEqual(["embeddings.signature"]);
   });
 
@@ -532,7 +560,10 @@ describe("edges", () => {
     const { pm } = world(30);
     const failing: Compute = {
       mode: "worker",
-      reduce: () => Promise.reject(new Error("The layout worker failed.")),
+      semantic: () => ({
+        result: Promise.reject(new Error("The layout worker failed.")),
+        cancel: () => undefined,
+      }),
       force: () => Promise.reject(new Error("unused")),
       close: () => undefined,
     };

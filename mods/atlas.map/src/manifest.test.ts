@@ -16,7 +16,13 @@ import { listDocuments } from "./hostApi";
 import { watchDocumentChanges } from "./changes";
 import { memoryHost } from "./memoryHost";
 import { loadProjectLayout, KEY_PROJECT_LAYOUT } from "./projectLayout";
-import { KEY_SEMANTIC_COORDS, KEY_SEMANTIC_META, loadSemanticCoords } from "./semantic";
+import {
+  KEY_SEMANTIC_COORDS,
+  KEY_SEMANTIC_COORDS_TSNE,
+  KEY_SEMANTIC_META,
+  KEY_SEMANTIC_META_TSNE,
+  loadSemanticCoords,
+} from "./semantic";
 import { KEY_SETTINGS, loadSettings, saveSettings } from "./settings";
 import { documents, vectorsFor } from "./testing";
 
@@ -40,6 +46,8 @@ describe("the committed manifest", () => {
       [KEY_SETTINGS]: "content",
       [KEY_SEMANTIC_META]: "cache",
       [KEY_SEMANTIC_COORDS]: "cache",
+      [KEY_SEMANTIC_META_TSNE]: "cache",
+      [KEY_SEMANTIC_COORDS_TSNE]: "cache",
       [KEY_PROJECT_LAYOUT]: "cache",
     });
   });
@@ -50,6 +58,55 @@ describe("the committed manifest", () => {
 
   it("a per-document key is cache class, because PM refuses a content key in storage.doc.set", () => {
     expect(declared.get(KEY_SEMANTIC_COORDS)).toBe("cache");
+    expect(declared.get(KEY_SEMANTIC_COORDS_TSNE)).toBe("cache");
+  });
+});
+
+// The published 1.0.0 (the manifest at 5682c3d3, the B1 tip) is what every later update is compared
+// with. PM's `policy::widening` (src-tauri/src/mods/policy.rs:423) lists what an update asks for that the
+// installed version did not: a permission, an internet host, a secret, a nav.tab or calendar.overlay
+// contribution, or a help id. An unattended update that widens is refused and waits for the person's
+// approval (ledger.rs:696). It does NOT look at `data.keys`, so adding the two enhanced-layout cache keys
+// is free. These tests pin the rest to 1.0.0, so the enhanced layout (which this version already has)
+// can never be the thing that makes a later update ask. The lists below were read from that commit.
+describe("the manifest asks for nothing more than 1.0.0 did", () => {
+  it("has exactly the help ids 1.0.0 had (a new help id is a widening)", () => {
+    expect(manifest.contributions.help.map((h) => h.id)).toEqual([
+      "map-overview",
+      "map-canvas",
+      "map-arrangement",
+      "map-cohesion",
+      "map-navigate",
+      "map-names",
+      "map-settings",
+      "map-updates",
+    ]);
+  });
+
+  it("asks for the same four permissions, no internet host and no secret", () => {
+    expect(manifest.permissions.map((p) => p.id)).toEqual([
+      "storage",
+      "ui.tab",
+      "documents.meta",
+      "documents.vectors",
+    ]);
+    expect("internetHosts" in manifest).toBe(false);
+    expect("secrets" in manifest).toBe(false);
+  });
+
+  it("contributes only a tab and help", () => {
+    expect(Object.keys(manifest.contributions).sort()).toEqual(["help", "nav.tab"]);
+  });
+
+  it("keeps every key 1.0.0 declared, with the class it had (a key's class is read from the manifest at every write)", () => {
+    for (const [key, cls] of [
+      [KEY_SETTINGS, "content"],
+      [KEY_SEMANTIC_META, "cache"],
+      [KEY_SEMANTIC_COORDS, "cache"],
+      [KEY_PROJECT_LAYOUT, "cache"],
+    ]) {
+      expect(declared.get(key), key).toBe(cls);
+    }
   });
 });
 
@@ -172,9 +229,19 @@ describe("the help entries", () => {
     }
   });
 
-  it("say nothing that is no longer so: no t-SNE, no Settings tab for the Map, nothing kept on this device", () => {
+  it("name the enhanced (t-SNE) layout where the person looks for it: the arrangement, the settings and the refreshing", () => {
+    const named = help.filter((h) => /t-?sne|enhanced/i.test(h.body)).map((h) => h.id);
+    expect(named).toEqual(["map-arrangement", "map-settings", "map-updates"]);
+    const body = (id: string) => help.find((h) => h.id === id)?.body ?? "";
+    expect(body("map-settings")).toContain("Enhanced layout (t-SNE)");
+    expect(body("map-updates")).toContain("Cancel");
+    expect(body("map-updates")).toContain("Sharpen");
+  });
+
+  it("say nothing that is no longer so: no Settings tab for the Map, nothing kept on this device", () => {
     const all = help.map((h) => `${h.title}\n${h.body}`).join("\n");
-    expect(all).not.toMatch(/t-?sne/i);
+    // Nothing is downloaded any more (the layout is built in), and the page runs it in a Worker.
+    expect(all).not.toMatch(/download|install/i);
     expect(all).not.toMatch(/Memory map/i);
     expect(all).not.toMatch(/remembered on this device/i);
     expect(all).not.toMatch(/background/i);

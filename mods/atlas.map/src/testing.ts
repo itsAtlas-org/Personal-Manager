@@ -6,6 +6,8 @@
 // written the same way in src/lib/mapLayout.test.ts, which took its literals from the core Map's code;
 // the tests here hold those literals, so the port and the old code are held to one oracle.
 
+import { inlineCompute, SemanticStopped, type Compute, type SemanticJobOptions } from "./compute";
+import { reduceToUnit } from "./pca";
 import type { MapDoc } from "./types";
 
 /** mulberry32: a small seeded generator, so every run on every machine sees the same documents. */
@@ -92,3 +94,130 @@ export function vectorsFor(docs: MapDoc[], dimension: number, seed = 7): Map<num
 
 /** The last element (`Array.prototype.at` is newer than the mods' type-check library). */
 export const last = <T>(items: readonly T[]): T | undefined => items[items.length - 1];
+
+// ---- a Compute a test steers ---------------------------------------------------------------------
+
+/** One `semantic` job the page posted, and the hands a test has on it. */
+export interface ScriptedJob {
+  pca: boolean;
+  tsne: boolean;
+  count: number;
+  dimension: number;
+  /** The vectors as posted (the real compute moves them to the worker). */
+  vectors: Float32Array;
+  cancelled: boolean;
+  ended: boolean;
+  /** The quick layout, as a worker posts it before t-SNE (only a job that asked for both). */
+  provisional(): void;
+  progress(fraction: number): void;
+  /** End the job with the enhanced layout (a mirror image of PCA's, so a test can tell them apart). */
+  finish(): void;
+  /** End the job with the quick layout alone (what a PCA-only job, or a missing Worker, answers). */
+  finishQuick(): void;
+  fail(message?: string): void;
+  /** The deadline passing. */
+  deadline(): void;
+}
+
+export interface ScriptedCompute extends Compute {
+  jobs: ScriptedJob[];
+  /** Pretend no Worker could be made. */
+  mode: "worker" | "inline";
+}
+
+/** The enhanced layout a scripted job answers: PCA mirrored left to right, so it is another picture. */
+export function mirrored(coords: Float64Array): Float64Array {
+  const out = new Float64Array(coords.length);
+  for (let i = 0; i < coords.length; i += 2) {
+    out[i] = 1 - coords[i];
+    out[i + 1] = coords[i + 1];
+  }
+  return out;
+}
+
+/**
+ * A Compute whose `semantic` jobs wait for the test: `provisional()`, `progress()`, `finish()`. With
+ * `auto`, a job runs to its end by itself (a provisional first when both layouts were asked for).
+ * `force` is the real inline simulation. Its PCA is the real one, so a test can compare coordinates.
+ */
+export function scriptedCompute(auto = false): ScriptedCompute {
+  const real = inlineCompute();
+  const jobs: ScriptedJob[] = [];
+  const compute: ScriptedCompute = {
+    jobs,
+    mode: "worker",
+    semantic(vectors, count, dimension, options: SemanticJobOptions) {
+      const quick = reduceToUnit(vectors.slice(), count, dimension).coords;
+      let settle!: {
+        resolve: (r: { coords: Float64Array; method: "pca" | "tsne" }) => void;
+        reject: (e: Error) => void;
+      };
+      const result = new Promise<{ coords: Float64Array; method: "pca" | "tsne" }>(
+        (resolve, reject) => {
+          settle = { resolve, reject };
+        },
+      );
+      const job: ScriptedJob = {
+        pca: options.pca,
+        tsne: options.tsne,
+        count,
+        dimension,
+        vectors,
+        cancelled: false,
+        ended: false,
+        provisional() {
+          if (job.ended || !options.pca || !options.tsne) return;
+          options.onProvisional?.({ coords: quick.slice(), method: "pca" });
+        },
+        progress(fraction) {
+          if (!job.ended) options.onProgress?.(fraction);
+        },
+        finish() {
+          if (job.ended) return;
+          job.ended = true;
+          settle.resolve(
+            options.tsne
+              ? { coords: mirrored(quick), method: "tsne" }
+              : { coords: quick.slice(), method: "pca" },
+          );
+        },
+        finishQuick() {
+          if (job.ended) return;
+          job.ended = true;
+          settle.resolve({ coords: quick.slice(), method: "pca" });
+        },
+        fail(message = "The layout worker failed.") {
+          if (job.ended) return;
+          job.ended = true;
+          settle.reject(new Error(message));
+        },
+        deadline() {
+          if (job.ended) return;
+          job.ended = true;
+          settle.reject(new SemanticStopped("deadline"));
+        },
+      };
+      jobs.push(job);
+      if (auto) {
+        queueMicrotask(() => {
+          job.provisional();
+          job.progress(0.5);
+          if (compute.mode === "inline") job.finishQuick();
+          else job.finish();
+        });
+      }
+      return {
+        result,
+        cancel() {
+          if (job.ended) return;
+          job.ended = true;
+          job.cancelled = true;
+          settle.reject(new SemanticStopped("cancelled"));
+        },
+      };
+    },
+    force: (request) => real.force(request),
+    close: () => real.close(),
+  };
+  return compute;
+}

@@ -14,8 +14,11 @@ import {
   phaseText,
   SETTINGS_READ_FAILED,
   SETTINGS_SAVE_FAILED,
+  SHARPENING_LABEL,
+  stoppedNote,
   subtitle,
 } from "./copy";
+import type { StoppedReason } from "./semantic";
 
 describe("subtitle", () => {
   it("says how many documents across how many projects by project, singular and plural", () => {
@@ -49,6 +52,53 @@ describe("subtitle", () => {
     expect(subtitle("semantic", 20, 2, 0)).toBe(
       "20 documents by meaning · scroll to zoom, drag to pan",
     );
+  });
+});
+
+describe("subtitle for the enhanced layout", () => {
+  it("says enhanced only for coordinates that are the enhanced layout", () => {
+    expect(subtitle("semantic", 40, 5, 40, "tsne")).toBe(
+      "40 documents by meaning, enhanced · scroll to zoom, drag to pan",
+    );
+    expect(subtitle("semantic", 1500, 5, 1000, "tsne")).toBe(
+      "showing the top 1000 of 1500 documents by meaning, enhanced · scroll to zoom, drag to pan",
+    );
+    expect(subtitle("semantic", 40, 5, 40, "pca")).toBe(
+      "40 documents by meaning · scroll to zoom, drag to pan",
+    );
+  });
+
+  it("never says it by project, whatever the method", () => {
+    expect(subtitle("project", 12, 3, 0, "tsne")).not.toContain("enhanced");
+  });
+});
+
+describe("the notes for an enhanced layout that was not made", () => {
+  const reasons: StoppedReason[] = ["cancelled", "deadline", "failed", "unsaved", "no-worker"];
+
+  it("says each plainly, with the words the plan drafted for a refused save and for no worker", () => {
+    expect(stoppedNote("unsaved")).toBe(
+      "The layout couldn't be saved, so it will be worked out again next time.",
+    );
+    expect(stoppedNote("no-worker")).toBe(
+      "The enhanced layout needs a background worker, which this page could not start.",
+    );
+    expect(stoppedNote("cancelled")).toBe(
+      "Showing the quick layout. Sharpen to work out the enhanced one.",
+    );
+    expect(stoppedNote("deadline")).toContain("taking too long");
+    expect(stoppedNote("failed")).toContain("couldn't be worked out");
+  });
+
+  it("are short sentences with no em dash, one end mark each", () => {
+    for (const reason of reasons) {
+      const text = stoppedNote(reason);
+      expect(text, reason).not.toMatch(/\u2014|\u2013/);
+      expect(text.endsWith("."), reason).toBe(true);
+      expect(text.length, reason).toBeLessThan(100);
+    }
+    expect(phaseText("sharpening")).toBe("Sharpening clusters…");
+    expect(SHARPENING_LABEL).toBe("Sharpening clusters");
   });
 });
 
