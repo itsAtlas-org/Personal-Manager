@@ -231,7 +231,7 @@ export function modTabLabel(navTab: string | null, name: string): string {
  *  that names no tab contributes none. Every installed mod with a tab has one, whatever its
  *  standing: a paused or waiting mod's tab says so and offers the way back (ModTab). */
 export function modNavEntries(
-  rows: readonly Pick<ModInfo, "id" | "name" | "navTab">[],
+  rows: readonly (Pick<ModInfo, "id" | "name" | "navTab"> & Partial<Pick<ModInfo, "pending">>)[],
 ): NavEntryDef[] {
   const seen = new Set<string>();
   const out: NavEntryDef[] = [];
@@ -246,7 +246,11 @@ export function modNavEntries(
       source: "mod",
       helpId: MOD_TAB_HELP_ID,
       hideable: true,
-      defaultShown: always,
+      // A placeholder (PM is still installing the mod) shows by the old tab's rule, so a Minimal-Depth
+      // user doesn't see the tab flicker in and then hide once the mod lands: the installed-hidden rule
+      // (`placementAfterPilotLanded`) runs only after landing. A landed mod's tab is "always".
+      defaultShown:
+        row.pending === true ? (PILOT_CORE_TAB.get(row.id)?.shown ?? notMinimal) : always,
     });
   }
   return out.sort(
@@ -526,8 +530,16 @@ export function parsePlacement(
 
 /** The mods that took over a core tab: which tab, and whether it showed at a Depth when the user had
  *  said nothing. What "installed hidden" (below) preserves. */
-const PILOT_CORE_TAB: ReadonlyMap<string, { tab: string; shown: (depth: Depth) => boolean }> =
-  new Map([["atlas.map", { tab: "graph", shown: notMinimal }]]);
+const PILOT_CORE_TAB: ReadonlyMap<
+  string,
+  { tab: string; shown: (depth: Depth) => boolean; feature: string }
+> = new Map([["atlas.map", { tab: "graph", shown: notMinimal, feature: "Map" }]]);
+
+/** What the person used that made PM install `modId` for them ("Map"), or null when it isn't one of
+ *  the mods PM installs on its own. Worded on the mod's first-open screen. */
+export function pilotFeature(modId: string): string | null {
+  return PILOT_CORE_TAB.get(modId)?.feature ?? null;
+}
 
 /** Whether the installed-hidden rule applies to `modId` at all: only once the core tab it replaced
  *  is gone from PM's own entries (`core`). Until then the core tab is still the user's Map and the
@@ -563,16 +575,23 @@ export function placementAfterPilotLanded(
 export function adoptLegacy(teach: string | null, map: string | null, depth: Depth): NavPlacement {
   const hidden: string[] = [];
   const pinned: string[] = [];
-  const adopt = (pref: string | null, ids: NavId[]) => {
+  const adopt = (pref: string | null, ids: NavId[], shown: (id: NavId) => boolean) => {
     if (pref === "hide") hidden.push(...ids);
     if (pref === "show") {
       for (const id of ids) {
-        if (!CORE_NAV.find((e) => e.id === id)?.defaultShown(depth)) pinned.push(id);
+        if (!shown(id)) pinned.push(id);
       }
     }
   };
-  adopt(teach, ["review", "teach"]);
-  adopt(map, ["graph"]);
+  adopt(
+    teach,
+    ["review", "teach"],
+    (id) => CORE_NAV.find((e) => e.id === id)?.defaultShown(depth) ?? false,
+  );
+  // The Map is a mod now: its old switch lands on the mod's tab, by the old tab's Depth rule (kept in
+  // PILOT_CORE_TAB), not by a `graph` entry that is no longer in CORE_NAV.
+  const mapMod = PILOT_CORE_TAB.get("atlas.map");
+  adopt(map, ["mod:atlas.map"], () => mapMod?.shown(depth) ?? false);
   return { hidden, pinned };
 }
 

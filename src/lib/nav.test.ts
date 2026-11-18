@@ -496,7 +496,7 @@ describe("adopting the old Settings switches", () => {
 
   it("turns a hide into hidden, whatever the Depth", () => {
     expect(adoptLegacy("hide", "hide", "standard")).toEqual({
-      hidden: ["review", "teach", "graph"],
+      hidden: ["review", "teach", "mod:atlas.map"],
       pinned: [],
     });
     expect(adoptLegacy("hide", null, "min").hidden).toEqual(["review", "teach"]);
@@ -506,7 +506,7 @@ describe("adopting the old Settings switches", () => {
     expect(adoptLegacy("show", "show", "standard")).toEqual(NONE);
     expect(adoptLegacy("show", "show", "min")).toEqual({
       hidden: [],
-      pinned: ["review", "teach", "graph"],
+      pinned: ["review", "teach", "mod:atlas.map"],
     });
   });
 
@@ -518,12 +518,15 @@ describe("adopting the old Settings switches", () => {
   it("adopts them once, then forgets them, so a reset can't bring them back", () => {
     localStorage.setItem(LEGACY_TEACH_KEY, "hide");
     localStorage.setItem(LEGACY_MAP_KEY, "show");
-    expect(readNavPlacement("min")).toEqual({ hidden: ["review", "teach"], pinned: ["graph"] });
+    expect(readNavPlacement("min")).toEqual({
+      hidden: ["review", "teach"],
+      pinned: ["mod:atlas.map"],
+    });
     expect(localStorage.getItem(LEGACY_TEACH_KEY)).toBeNull();
     expect(localStorage.getItem(LEGACY_MAP_KEY)).toBeNull();
     expect(parsePlacement(localStorage.getItem(NAV_PLACEMENT_KEY))).toEqual({
       hidden: ["review", "teach"],
-      pinned: ["graph"],
+      pinned: ["mod:atlas.map"],
     });
     resetNavPlacement();
     expect(navPlacementIsDefault(readNavPlacement("min"))).toBe(true);

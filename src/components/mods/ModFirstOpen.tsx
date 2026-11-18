@@ -27,6 +27,7 @@ import { consentMod } from "../../lib/ipc";
 import { runModAction, useModActions } from "../../lib/modActions";
 import { offersHide, rememberHide } from "../../lib/modsDisclaimerShown";
 import { useModRows } from "../../lib/modRows";
+import { pilotFeature } from "../../lib/nav";
 import type { ModInfo } from "../../lib/modsTypes";
 import { useDisclaimerShowing } from "../../lib/useDisclaimerShowing";
 import { Button, Callout, Card, Collapsible } from "../ui";
@@ -71,6 +72,9 @@ export function ModFirstOpen({
   const canHide = showing !== null && offersHide(showing);
   const [hideNext, setHideNext] = useState(false);
   const hideId = useId();
+  // A mod PM downloaded on its own (the Map, for a person who had documents) says so, in PM's words:
+  // the person didn't ask for this install, and nothing runs until they turn it on.
+  const usedFeature = pilotFeature(mod.id);
 
   function turnOn() {
     void runModAction(mod.id, "Turning on", "PM couldn't turn this mod on.", async () => {
@@ -107,6 +111,12 @@ export function ModFirstOpen({
           </p>
           {mod.description && (
             <p className="break-words pt-1 text-sm text-ink2">{modText(mod.description)}</p>
+          )}
+          {usedFeature !== null && (
+            <p className="pt-1 text-sm text-ink2" data-testid="mod-first-open-auto">
+              PM downloaded this for you because you used the {usedFeature}. It does nothing until
+              you turn it on.
+            </p>
           )}
         </header>
 

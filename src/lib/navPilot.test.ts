@@ -9,13 +9,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  adoptLegacy,
   CORE_NAV,
   isNavIdShape,
   modNavEntries,
   parsePlacement,
+  pilotFeature,
   pilotHiddenRuleApplies,
   placementAfterPilotLanded,
   renamedNavId,
+  resolveNav,
+  type NavContext,
   type NavPlacement,
 } from "./nav";
 
@@ -24,6 +28,8 @@ const CORE = new Set(CORE_NAV.map((e) => e.id as string));
 const WITHOUT_GRAPH = new Set([...CORE].filter((id) => id !== "graph"));
 const MAP = "mod:atlas.map";
 const NONE: NavPlacement = { hidden: [], pinned: [] };
+const STANDARD: NavContext = { depth: "standard", devMode: false };
+const MINIMAL: NavContext = { depth: "min", devMode: false };
 
 describe("a stored `graph` placement", () => {
   it("is the core Map tab for as long as it exists: nothing is renamed", () => {
@@ -110,5 +116,46 @@ describe("a mod PM is still installing", () => {
   it("has its tab from the synthesized entry, so the user can see the Installing screen and it survives tab switches", () => {
     const entries = modNavEntries([{ id: "atlas.map", name: "Map", navTab: "Map" }]);
     expect(entries.map((e) => [e.id, e.label])).toEqual([[MAP, "Map"]]);
+  });
+
+  it("shows by the old Map tab's rule (not at Minimal) so a Minimal user never sees it flicker in", () => {
+    const [pending] = modNavEntries([
+      { id: "atlas.map", name: "Map", navTab: "Map", pending: true },
+    ]);
+    expect(pending.defaultShown("min")).toBe(false);
+    expect(pending.defaultShown("standard")).toBe(true);
+    expect(pending.defaultShown("power")).toBe(true);
+    expect(resolveNav([pending], NONE, STANDARD).shown.map((e) => e.id)).toEqual([MAP]);
+    expect(resolveNav([pending], NONE, MINIMAL).shown).toEqual([]);
+  });
+
+  it("is shown at every Depth once landed, as any installed mod's tab is", () => {
+    const [landed] = modNavEntries([
+      { id: "atlas.map", name: "Map", navTab: "Map", pending: false },
+    ]);
+    expect(landed.defaultShown("min")).toBe(true);
+    const [bare] = modNavEntries([{ id: "atlas.map", name: "Map", navTab: "Map" }]);
+    expect(bare.defaultShown("min")).toBe(true);
+  });
+});
+
+describe("adopting the old Map switch", () => {
+  it("hides the mod's tab for a legacy hide, at every Depth", () => {
+    for (const depth of ["min", "standard", "power"] as const) {
+      expect(adoptLegacy(null, "hide", depth)).toEqual({ hidden: [MAP], pinned: [] });
+    }
+  });
+
+  it("pins the mod's tab for a legacy show only where the Depth would leave it out", () => {
+    expect(adoptLegacy(null, "show", "min")).toEqual({ hidden: [], pinned: [MAP] });
+    expect(adoptLegacy(null, "show", "standard")).toEqual(NONE);
+    expect(adoptLegacy(null, "show", "power")).toEqual(NONE);
+  });
+});
+
+describe("what PM installs by itself", () => {
+  it("names the feature the person used, and knows no other mod", () => {
+    expect(pilotFeature("atlas.map")).toBe("Map");
+    expect(pilotFeature("acme.tool")).toBeNull();
   });
 });

@@ -341,6 +341,32 @@ describe("when what is stored can't be trusted", () => {
   });
 });
 
+describe("a mod PM installed on its own", () => {
+  const SENTENCE =
+    "PM downloaded this for you because you used the Map. It does nothing until you turn it on.";
+  const MOD_WORDS = "Does a thing.";
+
+  it("says plainly that PM downloaded it, and that it does nothing until turned on", async () => {
+    render(
+      <ModFirstOpen
+        mod={{ ...waiting, id: "atlas.map", name: "Document Map" }}
+        onTurnedOn={onTurnedOn}
+      />,
+    );
+    expect(await screen.findByText(SENTENCE)).toBeTruthy();
+    // After the mod's own description, never in place of it or of what it asks.
+    expect(screen.getByText(MOD_WORDS)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Turn on" })).toBeTruthy();
+    expect(screen.getByText("What this mod asks to do")).toBeTruthy();
+  });
+
+  it("says nothing of the kind for a mod the person chose", async () => {
+    open();
+    await screen.findByRole("button", { name: "Turn on" });
+    expect(screen.queryByText(/PM downloaded this for you/)).toBeNull();
+  });
+});
+
 describe("help", () => {
   it("has an entry for each new surface", () => {
     for (const id of ["mod-first-open-notice", "mod-first-open-hide", "mod-first-open-about"]) {
