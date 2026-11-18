@@ -587,6 +587,10 @@ describe("a semantic job: PCA, then t-SNE, in a worker of its own", () => {
   });
 
   describe("the deadline", () => {
+    it("is two minutes (the plan's 5,000 x 1,024 timings on a slow machine; every test below advances by the constant)", () => {
+      expect(SEMANTIC_DEADLINE_MS).toBe(120_000);
+    });
+
     it("ends a t-SNE that runs past it, reporting the deadline, with its worker ended", async () => {
       vi.useFakeTimers();
       const w = fakeWorker();
@@ -718,12 +722,18 @@ describe("a semantic job with no worker to run it", () => {
     expect(v.byteLength).toBe(48 * 6 * 4);
   });
 
-  it("does the same for a t-SNE-only request", async () => {
-    const result = await workerCompute(noWorker).semantic(groups(), 48, 6, {
-      pca: false,
-      tsne: true,
-    }).result;
-    expect(result.method).toBe("pca");
+  it("stops a t-SNE-only request at once (the quick layout is in hand: no PCA is worked out to be thrown away)", async () => {
+    const compute = workerCompute(noWorker);
+    const job = compute.semantic(groups(), 48, 6, { pca: false, tsne: true });
+    await expect(job.result).rejects.toMatchObject({
+      name: "SemanticStopped",
+      reason: "no-worker",
+    });
+    expect(compute.mode).toBe("inline");
+    // The inline compute says the same, and a later request finds it already inline.
+    await expect(
+      compute.semantic(groups(), 48, 6, { pca: false, tsne: true }).result,
+    ).rejects.toMatchObject({ reason: "no-worker" });
   });
 
   it("the inline compute itself never runs t-SNE", async () => {

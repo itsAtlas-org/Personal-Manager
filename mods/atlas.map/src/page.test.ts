@@ -248,17 +248,22 @@ describe("the page's markup and stylesheet", () => {
     const edges = (selector: string) =>
       declarations(selector).filter((d) => /^border(-color)?:/.test(d) && !/^border: 0$/.test(d));
 
-    it.each(["select", 'input[type="number"]', ".chip", ".seg", ".nav-button", ".check"])(
-      "draws the edge of %s in --ink4, never --border or --border2",
-      (selector) => {
-        const drawn = edges(selector);
-        expect(drawn.length, `${selector} has no edge`).toBeGreaterThan(0);
-        for (const edge of drawn) {
-          expect(edge, selector).toMatch(/var\(--ink4\b/);
-          expect(edge, selector).not.toMatch(/--border2?\b/);
-        }
-      },
-    );
+    it.each([
+      "select",
+      'input[type="number"]',
+      ".chip",
+      ".seg",
+      ".nav-button",
+      ".check",
+      ".progress",
+    ])("draws the edge of %s in --ink4, never --border or --border2", (selector) => {
+      const drawn = edges(selector);
+      expect(drawn.length, `${selector} has no edge`).toBeGreaterThan(0);
+      for (const edge of drawn) {
+        expect(edge, selector).toMatch(/var\(--ink4\b/);
+        expect(edge, selector).not.toMatch(/--border2?\b/);
+      }
+    });
 
     it("gives the active segment an inset --ink4 rim", () => {
       const shadow = declarations(".seg-button.active").filter((d) => d.startsWith("box-shadow:"));

@@ -12,6 +12,8 @@
 //  - `inlineCompute()`: the same jobs on the page's own thread, except that t-SNE is never run there:
 //    on some engines the frame shares the main thread, and a ten-second run would trip PM's
 //    frozen-page watchdog (the mod would be paused and PM reloaded). A `semantic` job answers with PCA.
+//    A job that asks for t-SNE alone (the quick layout is already in hand) is refused at once with
+//    `SemanticStopped("no-worker")`: there is nothing for this thread to do.
 //    The core Map fell back to the page's thread when a Worker could not be made, and so does
 //    `workerCompute` (only when `spawn` throws, never after a worker has started and failed): a plain
 //    map is better than no map. The mode is visible, so a test (and a developer) can tell.
@@ -93,8 +95,14 @@ export const SEMANTIC_DEADLINE_MS = 120_000;
 
 /** A `semantic` job that was ended by the page, not by a failure. */
 export class SemanticStopped extends Error {
-  constructor(readonly reason: "cancelled" | "deadline") {
-    super(reason === "deadline" ? "The enhanced layout took too long." : WORKER_CLOSED);
+  constructor(readonly reason: "cancelled" | "deadline" | "no-worker") {
+    super(
+      reason === "deadline"
+        ? "The enhanced layout took too long."
+        : reason === "no-worker"
+          ? "There is no worker to work out the enhanced layout in."
+          : WORKER_CLOSED,
+    );
     this.name = "SemanticStopped";
   }
 }
@@ -137,7 +145,15 @@ export function inlineCompute(): Compute {
   };
   return {
     mode: "inline",
-    semantic(vectors, count, dimension) {
+    semantic(vectors, count, dimension, options) {
+      // Only t-SNE was asked for (the quick layout is already in hand): there is nothing this thread may
+      // do. Working out PCA just to throw it away would repeat on every open.
+      if (!options.pca) {
+        return {
+          result: Promise.reject(new SemanticStopped("no-worker")),
+          cancel: () => undefined,
+        };
+      }
       let stopped = false;
       const done = live(() =>
         semanticFrom(

@@ -319,6 +319,10 @@ describe("starting", () => {
       "Your map settings couldn't be read, so the standard ones are showing.",
     );
     expect(o.el(".strip-error .link").textContent).toBe("Dismiss");
+    // The same words go to a live region that was in the page before there was anything to say.
+    expect(o.text("[role=alert] .announce-error")).toBe(
+      "Your map settings couldn't be read, so the standard ones are showing.",
+    );
     expect(draw().length).toBeGreaterThan(0);
   });
 
@@ -1151,6 +1155,9 @@ describe("documents changing while the map is open", () => {
     o.pm.emit({ name: "grants.changed", seq: 5, payload: {}, missed: 3 });
     vi.advanceTimersByTime(QUIET_MS);
     expect(noticeStrip(o).textContent).toContain("Your documents changed while the map was open.");
+    expect(o.text("[role=status] .announce-notice")).toBe(
+      "Your documents changed while the map was open.",
+    );
   });
 
   it("is not raised for a theme event", async () => {
@@ -1185,7 +1192,9 @@ describe("documents changing while the map is open", () => {
 /** The strip that carries the "documents changed" notice: the status strip with a Refresh button. */
 function noticeStrip(o: Opened): HTMLElement {
   const strips = Array.from(
-    o.mount.querySelectorAll<HTMLElement>(".strip[role=status]:not(.strip-held)"),
+    o.mount.querySelectorAll<HTMLElement>(
+      ".strip:not(.strip-held):not(.strip-error):not(.strip-computing)",
+    ),
   );
   const found = strips.find((s) => s.querySelector("button.link") !== null);
   if (!found) throw new Error("no notice strip");
@@ -1397,8 +1406,8 @@ describe("the enhanced layout", () => {
       job.progress(0.42);
       expect(bar.getAttribute("aria-valuenow")).toBe("42");
       expect(o.el(".progress rect").getAttribute("width")).toBe("42");
-      // The live region is the phase text alone.
-      const live = o.el("[role=status].strip-text");
+      // The live region says the phase alone.
+      const live = o.el("[role=status] .announce-phase");
       expect(live.textContent).toBe("Sharpening clusters…");
       expect(live.contains(bar)).toBe(false);
     });
@@ -1406,7 +1415,7 @@ describe("the enhanced layout", () => {
     it("the live region's text changes once for the phase while thirty progress ticks arrive", async () => {
       const { o, job } = await semanticOpen();
       await land(job);
-      const live = o.el("[role=status].strip-text");
+      const live = o.el("[role=status]");
       let changes = 0;
       const watcher = new MutationObserver((records) => {
         changes += records.length;
@@ -1436,6 +1445,39 @@ describe("the enhanced layout", () => {
       const all = Array.from(o.mount.querySelectorAll("button, select, input"));
       expect(all.indexOf(cancelButton(o))).toBeGreaterThan(-1);
       expect(all.indexOf(cancelButton(o))).toBeLessThan(all.indexOf(sharpenButton(o)));
+    });
+  });
+
+  describe("what a screen reader is told", () => {
+    it("hears the phase, then the note after Cancel, from live regions that were in the page before there was anything to say", async () => {
+      const { o, job } = await semanticOpen();
+      const status = o.el("[role=status]");
+      const alerter = o.el("[role=alert]");
+      const text = (selector: string) => o.el(selector).textContent;
+      expect(status.hidden).toBe(false);
+      expect(text(".announce-phase")).toBe("Placing documents by meaning…");
+      expect(text(".announce-held")).toBe("");
+      await land(job);
+      expect(text(".announce-phase")).toBe("Sharpening clusters…");
+      click(cancelButton(o));
+      // The phase is cleared (so the same phase is heard again next time) and the note is spoken.
+      expect(text(".announce-phase")).toBe("");
+      expect(text(".announce-held")).toBe(
+        "Showing the quick layout. Sharpen to work out the enhanced one.",
+      );
+      // The very same elements, never inside a strip, with no hidden ancestor, at every step.
+      expect(o.el("[role=status]")).toBe(status);
+      expect(o.el("[role=alert]")).toBe(alerter);
+      for (const region of [status, alerter]) {
+        expect(region.closest(".strip")).toBeNull();
+        for (let up: HTMLElement | null = region; up; up = up.parentElement) {
+          expect(up.hidden).toBe(false);
+        }
+      }
+      // The strips themselves are not live regions.
+      expect(
+        o.mount.querySelectorAll(".strip[role], .strip [role=status], .strip [role=alert]"),
+      ).toHaveLength(0);
     });
   });
 

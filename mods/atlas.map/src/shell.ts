@@ -40,8 +40,14 @@ export interface Shell {
   /** The Enhanced layout (t-SNE) switch. */
   enhanced: HTMLInputElement;
   computing: HTMLElement;
-  /** The phase: the one live region of the strip, so it changes only when the phase does. */
+  /** The phase as the strip shows it. What a screen reader is told is `announcePhase`. */
   computingText: HTMLElement;
+  /** The live regions: always in the page, never inside a strip that starts hidden (a region that appears
+   *  together with its text is often not announced). A strip writes its words here as well as in itself. */
+  announcePhase: HTMLElement;
+  announceHeld: HTMLElement;
+  announceNotice: HTMLElement;
+  announceError: HTMLElement;
   /** The share of the enhanced layout done: a progressbar outside the live region. */
   progress: HTMLElement;
   progressFill: SVGRectElement;
@@ -178,12 +184,11 @@ export function buildShell(doc: Document): Shell {
     ),
   ]);
 
-  // Strips under the header. Each is hidden until it has something to say; a status strip is announced.
-  // The phase is the live region; the progress bar and Cancel sit beside it, outside it, so a screen
-  // reader hears the phase once and not thirty percentages. The bar's fill is an SVG rect (the frame's
+  // Strips under the header. Each is hidden until it has something to say; what it says is also written
+  // into a live region that is always in the page (below). The progress bar and Cancel are outside every
+  // live region, so a screen reader hears the phase once and not thirty percentages. The bar's fill is an SVG rect (the frame's
   // CSP forbids the style attribute, which a CSS width would need).
   const computingText = span("strip-text");
-  computingText.setAttribute("role", "status");
   const pulse = span("pulse");
   pulse.setAttribute("aria-hidden", "true");
   const progressFill = doc.createElementNS(SVG_NS, "rect");
@@ -211,21 +216,32 @@ export function buildShell(doc: Document): Shell {
   const heldText = span("strip-text");
   const sharpen = button("link", SHARPEN);
   const held = div("strip strip-held", heldText, sharpen);
-  held.setAttribute("role", "status");
   held.hidden = true;
 
   const noticeText = span("strip-text");
   const refresh = button("link", "Refresh");
   const dismiss = button("link quiet", "Dismiss");
   const notice = div("strip", noticeText, refresh, dismiss);
-  notice.setAttribute("role", "status");
   notice.hidden = true;
 
   const errorText = span("strip-text");
   const retry = button("link", "Try again");
   const error = div("strip strip-error", errorText, retry);
-  error.setAttribute("role", "alert");
   error.hidden = true;
+
+  // The live regions, visually hidden and never `hidden`: the strips above show the words, these say them.
+  // Three spans share one polite region and none is atomic, so a change in one is read alone. The error
+  // has a region of its own, assertive.
+  const announcePhase = span("announce-phase");
+  const announceHeld = span("announce-held");
+  const announceNotice = span("announce-notice");
+  const announcer = div("announcer", announcePhase, announceHeld, announceNotice);
+  announcer.setAttribute("role", "status");
+  announcer.setAttribute("aria-live", "polite");
+  announcer.setAttribute("aria-atomic", "false");
+  const announceError = span("announce-error");
+  const alerter = div("announcer", announceError);
+  alerter.setAttribute("role", "alert");
 
   // The stage: a message (or the shimmer while documents load) or the canvas with its controls.
   const messageText = span("");
@@ -256,7 +272,7 @@ export function buildShell(doc: Document): Shell {
 
   const stage = div("stage", message, canvas, nav, card);
 
-  const root = div("map", header, computing, held, notice, error, stage);
+  const root = div("map", header, announcer, alerter, computing, held, notice, error, stage);
   return {
     root,
     subtitle,
@@ -272,6 +288,10 @@ export function buildShell(doc: Document): Shell {
     enhanced,
     computing,
     computingText,
+    announcePhase,
+    announceHeld,
+    announceNotice,
+    announceError,
     progress,
     progressFill,
     cancel,

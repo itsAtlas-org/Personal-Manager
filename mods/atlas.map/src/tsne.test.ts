@@ -111,7 +111,7 @@ describe("the layout against openTSNE's quality, case by case", () => {
     expect(compared).toBeGreaterThanOrEqual(5);
   }, 120_000);
 
-  it("the n = 1,200 case (past openTSNE's switch to approximate neighbours) meets the same margin", () => {
+  it("the n = 1,200 case (past openTSNE's switch to approximate neighbours) meets the same margins on all three scores", () => {
     const c = byName("large-1200x32");
     expect(c.n).toBeGreaterThanOrEqual(1000);
     const result = tsne(c.vectors, c.n, c.dimension);
@@ -123,9 +123,12 @@ describe("the layout against openTSNE's quality, case by case", () => {
       c.dimension,
       c.scoreNeighbours,
     );
-    expect(got.trustworthiness).toBeGreaterThanOrEqual(
-      c.scores.tsne.trustworthiness - MARGINS.large.trustworthiness,
+    const want = c.scores.tsne;
+    expect(got.trustworthiness, "trustworthiness").toBeGreaterThanOrEqual(
+      want.trustworthiness - MARGINS.large.trustworthiness,
     );
+    expect(got.recall, "recall").toBeGreaterThanOrEqual(want.recall - MARGINS.large.recall);
+    expect(got.purity, "purity").toBeGreaterThanOrEqual(want.purity - MARGINS.large.purity);
   }, 120_000);
 });
 
@@ -610,4 +613,77 @@ describe("a whole run", () => {
       TsneCancelled,
     );
   });
+});
+
+// The quality margins above cannot tell a whole run that skipped early exaggeration, reset its gains
+// between the phases, halved the neighbours or the perplexity, or lost the 50-axis pre-step from one that
+// did it right: on these clustered fixtures every variant still draws a sane picture. So the recipe is
+// written out here a second time, from the exported pieces and nothing else, and tsne() must give the
+// very same bits. A refactor of the run that changes any argument it hands a piece fails here.
+
+/** min-max each axis into [0,1], rounded to 5 decimals (the last step of the recipe). */
+function intoTheBox(y: Float64Array, n: number): Float64Array {
+  const out = new Float64Array(2 * n);
+  for (let axis = 0; axis < 2; axis++) {
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (let i = 0; i < n; i++) {
+      mn = Math.min(mn, y[2 * i + axis]);
+      mx = Math.max(mx, y[2 * i + axis]);
+    }
+    for (let i = 0; i < n; i++) {
+      out[2 * i + axis] =
+        mx - mn > 1e-9 ? Math.round(((y[2 * i + axis] - mn) / (mx - mn)) * 1e5) / 1e5 : 0;
+    }
+  }
+  return out;
+}
+
+/** The documented recipe, with the numbers spelled out where tsne() takes them from constants. */
+function recipe(vectors: Float32Array, n: number, dimension: number): Float64Array {
+  let x: Float64Array;
+  let d: number;
+  if (dimension > 50) {
+    const reduced = principalScores(vectors, n, dimension, 50);
+    x = reduced.scores;
+    d = reduced.axes;
+  } else {
+    d = dimension;
+    x = new Float64Array(n * d);
+    for (let j = 0; j < d; j++) {
+      let mean = 0;
+      for (let i = 0; i < n; i++) mean += vectors[i * d + j];
+      mean /= n;
+      for (let i = 0; i < n; i++) x[i * d + j] = vectors[i * d + j] - mean;
+    }
+  }
+  const { perplexity, neighbours } = plan(n);
+  const p = jointProbabilities(nearestNeighbours(x, n, d, neighbours), n, perplexity);
+  const y = initialPicture(x, n, d);
+  const tree = new QuadTree();
+  const grad = new Float64Array(2 * n);
+  const update = new Float64Array(2 * n);
+  const gains = new Float64Array(2 * n).fill(1);
+  for (let iter = 0; iter < 750; iter++) {
+    const early = iter < 250;
+    // Exaggeration 12 and learning rate n / 12 for the first 250 steps, then 1 and n; one set of gains
+    // and one running update for the whole run.
+    gradient(y, n, p, early ? 12 : 1, 0.5, tree, grad);
+    step(y, n, grad, update, gains, early ? n / 12 : n);
+  }
+  return intoTheBox(y, n);
+}
+
+describe("a whole run is the documented recipe, step for step", () => {
+  it("with more than 50 dimensions (the 50-axis pre-step) gives the recipe's picture bit for bit", () => {
+    const c = byName("wide-150x96");
+    expect(c.dimension).toBeGreaterThan(50);
+    expect(tsne(c.vectors, c.n, c.dimension).coords).toEqual(recipe(c.vectors, c.n, c.dimension));
+  }, 120_000);
+
+  it("with 50 dimensions or fewer (mean-centred only) gives the recipe's picture bit for bit", () => {
+    const n = 70;
+    const v = Float32Array.from(cloud(n, 9, 17));
+    expect(tsne(v, n, 9).coords).toEqual(recipe(v, n, 9));
+  }, 120_000);
 });

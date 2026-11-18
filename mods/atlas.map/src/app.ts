@@ -172,11 +172,17 @@ export function mountMap(options: MapAppOptions): MapApp {
     return settings.layoutMode === "semantic" && semantic !== null ? "nothing-to-place" : "failed";
   };
 
+  /** Write a live region's words, only when they differ (so it speaks once per change, not per render). */
+  const say = (region: HTMLElement, words: string) => {
+    if (region.textContent !== words) region.textContent = words;
+  };
+
   const renderStrips = () => {
     shell.computing.hidden = phase === null;
-    // The text is the live region: it is written only when it differs, so it changes once per phase.
-    if (shell.computingText.textContent !== (phase ?? ""))
-      shell.computingText.textContent = phase ?? "";
+    // The strip's text, and the live region that says it (always in the page, so it is announced even when
+    // the strip was hidden a moment ago). Both are written only when they differ.
+    say(shell.computingText, phase ?? "");
+    say(shell.announcePhase, phase ?? "");
     shell.progress.hidden = phaseKind !== "sharpening";
     shell.cancel.hidden =
       !cancellable ||
@@ -186,12 +192,17 @@ export function mountMap(options: MapAppOptions): MapApp {
       shell.cancel.focus();
     }
     shell.held.hidden = heldNote === null;
-    shell.heldText.textContent = heldNote ? stoppedNote(heldNote) : "";
+    const heldWords = heldNote ? stoppedNote(heldNote) : "";
+    say(shell.heldText, heldWords);
+    say(shell.announceHeld, heldWords);
     shell.sharpen.hidden = !heldBack;
     shell.notice.hidden = notice === null;
-    shell.noticeText.textContent = notice ? noticeText(notice) : "";
+    const noticeWords = notice ? noticeText(notice) : "";
+    say(shell.noticeText, noticeWords);
+    say(shell.announceNotice, noticeWords);
     shell.error.hidden = problem === null;
-    shell.errorText.textContent = problem?.text ?? "";
+    say(shell.errorText, problem?.text ?? "");
+    say(shell.announceError, problem?.text ?? "");
     shell.retry.textContent = problem?.retry ? "Try again" : "Dismiss";
   };
 

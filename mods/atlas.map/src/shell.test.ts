@@ -82,18 +82,37 @@ describe("buildShell", () => {
     expect(buildShell(document).legend.tabIndex).toBe(0);
   });
 
-  it("points the settings button at its popover and announces the strips", () => {
+  it("points the settings button at its popover, and announces the strips through live regions that are always in the page", () => {
     const shell = buildShell(document);
     expect(shell.settingsButton.getAttribute("aria-controls")).toBe(shell.settingsPanel.id);
     expect(shell.settingsButton.getAttribute("aria-expanded")).toBe("false");
-    // The phase text is the live region; the bar and Cancel sit beside it, outside it.
-    expect(shell.computing.getAttribute("role")).toBeNull();
-    expect(shell.computingText.getAttribute("role")).toBe("status");
-    expect(shell.notice.getAttribute("role")).toBe("status");
-    expect(shell.error.getAttribute("role")).toBe("alert");
+    // No strip is a live region itself: each starts `hidden`, and a region that becomes visible together
+    // with its words is often not announced. The regions are outside every strip and never hidden.
+    for (const strip of [shell.computing, shell.held, shell.notice, shell.error]) {
+      expect(strip.getAttribute("role")).toBeNull();
+      expect(strip.querySelector("[role]:not([role=progressbar])")).toBeNull();
+    }
+    const status = shell.announcePhase.parentElement as HTMLElement;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    for (const part of [shell.announcePhase, shell.announceHeld, shell.announceNotice]) {
+      expect(part.parentElement).toBe(status);
+    }
+    const alerter = shell.announceError.parentElement as HTMLElement;
+    expect(alerter.getAttribute("role")).toBe("alert");
+    for (const region of [status, alerter]) {
+      expect(shell.root.contains(region)).toBe(true);
+      expect(region.hidden).toBe(false);
+      for (let up: HTMLElement | null = region; up; up = up.parentElement) {
+        expect(up.hidden, "no hidden ancestor").toBe(false);
+      }
+      for (const strip of [shell.computing, shell.held, shell.notice, shell.error]) {
+        expect(strip.contains(region)).toBe(false);
+      }
+    }
   });
 
-  it("holds the enhanced layout's strip: a phase that is the live region, a progressbar and Cancel outside it, and a note with Sharpen", () => {
+  it("holds the enhanced layout's strip: a phase, a progressbar and Cancel outside every live region, and a note with Sharpen", () => {
     const shell = buildShell(document);
     expect(shell.progress.getAttribute("role")).toBe("progressbar");
     expect(shell.progress.getAttribute("aria-label")).toBe("Sharpening clusters");
@@ -102,6 +121,8 @@ describe("buildShell", () => {
     expect(shell.progress.getAttribute("aria-valuenow")).toBe("0");
     expect(shell.computingText.contains(shell.progress)).toBe(false);
     expect(shell.computingText.contains(shell.cancel)).toBe(false);
+    expect(shell.announcePhase.contains(shell.progress)).toBe(false);
+    expect(shell.announcePhase.contains(shell.cancel)).toBe(false);
     expect(shell.computing.contains(shell.progress)).toBe(true);
     expect(shell.computing.contains(shell.cancel)).toBe(true);
     // The fill is an SVG rect (a style attribute is not allowed in the frame).
@@ -113,7 +134,6 @@ describe("buildShell", () => {
     expect(shell.cancel.textContent).toBe("Cancel");
     expect(shell.sharpen.textContent).toBe("Sharpen");
     for (const el of [shell.progress, shell.cancel, shell.held]) expect(el.hidden).toBe(true);
-    expect(shell.held.getAttribute("role")).toBe("status");
     expect(shell.held.contains(shell.sharpen)).toBe(true);
   });
 

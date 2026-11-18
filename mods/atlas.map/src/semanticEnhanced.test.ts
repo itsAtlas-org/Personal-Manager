@@ -706,6 +706,25 @@ describe("the deadline, a failing worker, and no worker", () => {
     const result = await loadSemanticCoords(pm.host, compute, watch({ enhanced: true }).options);
     expect(result).toMatchObject({ method: "pca", source: "cache", stopped: "no-worker" });
     expect(writesOf(pm)).toEqual([]);
+    // t-SNE cannot run here and the quick layout is in hand: the vectors are not even read.
+    expect(pm.of("embeddings.documentVectors")).toHaveLength(0);
+  });
+
+  it("a Worker that cannot be made, found out on the job: the saved quick layout is shown, nothing is written, no PCA is worked out", async () => {
+    const { pm } = world();
+    await loadSemanticCoords(pm.host, scriptedCompute(true), { nodeCap: 1000, sleep: noSleep });
+    pm.calls.length = 0;
+    const compute = workerCompute(() => {
+      throw new Error("worker-src blocked");
+    });
+    const result = await loadSemanticCoords(pm.host, compute, watch({ enhanced: true }).options);
+    expect(result).toMatchObject({ method: "pca", source: "cache", stopped: "no-worker" });
+    expect(writesOf(pm)).toEqual([]);
+    expect(compute.mode).toBe("inline");
+    // The next open does not even read the vectors.
+    pm.calls.length = 0;
+    await loadSemanticCoords(pm.host, compute, watch({ enhanced: true }).options);
+    expect(pm.of("embeddings.documentVectors")).toHaveLength(0);
   });
 });
 

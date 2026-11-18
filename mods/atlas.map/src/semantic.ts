@@ -436,6 +436,12 @@ export async function loadSemanticCoords(
     return { ...cached("pca", pcaRows as SemanticCoord[]), stopped: "cancelled" };
   }
 
+  // Row 3 with no Worker: the quick layout is in hand and t-SNE cannot run here, so the vectors are not
+  // even read.
+  if (rowThree && compute.mode === "inline") {
+    return { ...cached("pca", pcaRows as SemanticCoord[]), stopped: "no-worker" };
+  }
+
   onPhase?.("reading");
   const vectors = await host.documentVectors({ cap: nodeCap });
   gone();
