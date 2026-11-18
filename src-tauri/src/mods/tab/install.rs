@@ -106,7 +106,11 @@ pub struct ConsentScreen {
     pub name: String,
     pub description: String,
     pub version: String,
+    /// The publisher: the name the maker's pin and signature speak of.
     pub author: String,
+    /// The people the manifest credits (`authors`), in its order; empty when it names none. Shown
+    /// after the publisher, under a label that marks them as the mod's own claim.
+    pub authors: Vec<String>,
     /// The source repo, `owner/repo`, and the commit the maker's signed build came from.
     pub repo: String,
     pub commit: String,
@@ -224,6 +228,7 @@ pub fn screen(
         description: m.description.clone(),
         version: m.version.to_string(),
         author: m.publisher.author.clone(),
+        authors: m.authors.clone(),
         repo: m.publisher.source_repo.clone(),
         commit: m.publisher.commit.clone(),
         tier: m.publisher.tier.as_str().to_owned(),
@@ -502,6 +507,7 @@ mod tests {
                 source_repo: "acme/notes".into(),
                 commit: "d".repeat(40),
             },
+            authors: vec!["Ann Lee".into(), "Bo Chen".into()],
             permissions: ["documents.meta", "documents.text", "storage", "ai"]
                 .iter()
                 .map(|p| Permission {
@@ -557,6 +563,7 @@ mod tests {
             ("acme.notes", "Notes", "second", "fresh", "file")
         );
         assert_eq!((s.author.as_str(), s.repo.as_str()), ("Acme", "acme/notes"));
+        assert_eq!(s.authors, ["Ann Lee", "Bo Chen"]);
         assert_eq!(
             s.commit,
             "d".repeat(40),

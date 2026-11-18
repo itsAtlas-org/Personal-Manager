@@ -38,6 +38,7 @@ const GATES = [
   "check-ipc-commands",
   "check-license-subset",
   "check-model-licences",
+  "check-mods",
   "check-node-version",
   "check-requirements-lock",
   "check-script-deps",

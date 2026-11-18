@@ -640,11 +640,16 @@ pub fn models_from_list(value: &serde_json::Value) -> Vec<String> {
 ///
 /// `thinking_off` adds [`THINKING_OFF`] as `reasoning_effort`, and the caller sets it only for an
 /// endpoint [`Thinking::Switchable`] says takes it.
+///
+/// `max_tokens` is `None` for every caller PM has had, and the body is then what it always was (a
+/// test holds it byte for byte). Only a mod's `ai.complete` bounds the answer, so the worst-case
+/// price PM books for it is a real bound.
 pub fn chat_body(
     model: &str,
     messages: &[ChatMessage],
     stream: bool,
     thinking_off: bool,
+    max_tokens: Option<u32>,
 ) -> serde_json::Value {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -661,6 +666,9 @@ pub fn chat_body(
     }
     if thinking_off {
         body["reasoning_effort"] = serde_json::json!(THINKING_OFF);
+    }
+    if let Some(limit) = max_tokens {
+        body["max_tokens"] = serde_json::json!(limit);
     }
     body
 }
@@ -830,6 +838,8 @@ fn may_refuse_the_switch(status: u16) -> bool {
 /// is reported as it always was, with nothing remembered.
 ///
 /// `want_thinking` is the chat Thinking button, and only [`stream_chat`] can pass `true`.
+/// `max_tokens` bounds the answer; only a mod's call passes `Some`.
+#[allow(clippy::too_many_arguments)]
 async fn post_chat(
     base_url: &str,
     model: &str,
@@ -838,6 +848,7 @@ async fn post_chat(
     stream: bool,
     deadline: Option<Duration>,
     want_thinking: bool,
+    max_tokens: Option<u32>,
 ) -> LocalResult<reqwest::Response> {
     // Thinking asked for: send the body PM sent before #852 — no field, no probe. Short-circuited so
     // the on path never touches THINKING (it can't resend, so it can't record a refusal either).
@@ -846,7 +857,7 @@ async fn post_chat(
     let mut resent = false;
     let url = format!("{base_url}/v1/chat/completions");
     loop {
-        let body = chat_body(model, messages, stream, thinking_off);
+        let body = chat_body(model, messages, stream, thinking_off, max_tokens);
         let mut req = client_for(base_url).post(&url);
         if stream {
             req = req.header(reqwest::header::ACCEPT, "text/event-stream");
@@ -1416,7 +1427,17 @@ pub async fn stream_chat<F>(
 where
     F: FnMut(StreamDelta<'_>),
 {
-    let response = post_chat(base_url, model, token, messages, true, None, show_thinking).await?;
+    let response = post_chat(
+        base_url,
+        model,
+        token,
+        messages,
+        true,
+        None,
+        show_thinking,
+        None,
+    )
+    .await?;
 
     let mut full = String::new();
     let mut served: Option<String> = None;
@@ -1569,18 +1590,23 @@ async fn unfinished_thought(
 }
 
 /// A single non-streaming chat completion — background work wants the whole answer at once.
+///
+/// `max_tokens` bounds the answer's length when `Some`; every caller but a mod's `ai.complete`
+/// passes `None` (through `llm_gateway::complete`), which sends the body this call always sent.
 pub async fn complete(
     base_url: &str,
     model: &str,
     token: Option<&str>,
     messages: &[ChatMessage],
+    max_tokens: Option<u32>,
 ) -> LocalResult<Completion> {
-    complete_within(
+    complete_within_capped(
         base_url,
         model,
         token,
         messages,
         tunables::BACKGROUND_TOTAL_TIMEOUT,
+        max_tokens,
     )
     .await
 }
@@ -1601,6 +1627,18 @@ pub async fn complete_within(
     messages: &[ChatMessage],
     deadline: std::time::Duration,
 ) -> LocalResult<Completion> {
+    complete_within_capped(base_url, model, token, messages, deadline, None).await
+}
+
+/// [`complete_within`] with the answer's length bounded when `max_tokens` is `Some`.
+async fn complete_within_capped(
+    base_url: &str,
+    model: &str,
+    token: Option<&str>,
+    messages: &[ChatMessage],
+    deadline: std::time::Duration,
+    max_tokens: Option<u32>,
+) -> LocalResult<Completion> {
     let response = post_chat(
         base_url,
         model,
@@ -1609,6 +1647,7 @@ pub async fn complete_within(
         false,
         Some(deadline),
         false,
+        max_tokens,
     )
     .await?;
     let value: serde_json::Value = response
@@ -2534,7 +2573,7 @@ mod tests {
 
     #[test]
     fn request_body_carries_no_cloud_only_fields() {
-        let body = chat_body("llama3.2", &[msg("user", "hi")], true, false);
+        let body = chat_body("llama3.2", &[msg("user", "hi")], true, false, None);
         // The model is a plain string (never a `models` fallback array), messages are plain strings,
         // and NONE of OpenRouter's body fields appear.
         assert_eq!(body["model"], "llama3.2");
@@ -2550,18 +2589,78 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
 
         // The non-streaming body omits stream_options too.
-        let buffered = chat_body("m", &[msg("user", "x")], false, false);
+        let buffered = chat_body("m", &[msg("user", "x")], false, false, None);
         assert_eq!(buffered["stream"], false);
         assert!(buffered.get("stream_options").is_none());
         assert!(body.get("reasoning_effort").is_none());
         assert!(buffered.get("reasoning_effort").is_none());
     }
 
+    /// Every caller PM had before a mod could ask for a bounded answer sends this body, byte for
+    /// byte (keys are sorted, so the text is stable). The strings were taken from the code before
+    /// `max_tokens` existed.
+    #[test]
+    fn every_local_body_that_asks_for_no_bound_is_what_it_always_was() {
+        let msgs = [msg("system", "s"), msg("user", "u")];
+        let text = |stream: bool, off: bool| {
+            serde_json::to_string(&chat_body("m", &msgs, stream, off, None)).unwrap()
+        };
+        assert_eq!(
+            text(false, false),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"m","stream":false}"#
+        );
+        assert_eq!(
+            text(true, false),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"m","stream":true,"stream_options":{"include_usage":true}}"#
+        );
+        assert_eq!(
+            text(false, true),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"m","reasoning_effort":"none","stream":false}"#
+        );
+        assert_eq!(
+            text(true, true),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"m","reasoning_effort":"none","stream":true,"stream_options":{"include_usage":true}}"#
+        );
+    }
+
+    /// A bound adds `max_tokens` and nothing else, and the local body stays free of cloud fields.
+    #[test]
+    fn a_bound_adds_one_field_to_the_local_body() {
+        for (stream, off) in [(false, false), (false, true), (true, false)] {
+            let plain = chat_body("m", &[msg("user", "u")], stream, off, None);
+            let bounded = chat_body("m", &[msg("user", "u")], stream, off, Some(300));
+            assert_eq!(bounded["max_tokens"], serde_json::json!(300));
+            let mut without = bounded.as_object().unwrap().clone();
+            without.remove("max_tokens");
+            assert_eq!(serde_json::Value::Object(without), plain);
+            assert!(plain.get("max_tokens").is_none());
+            assert!(bounded.get("provider").is_none());
+        }
+    }
+
+    /// The test-the-endpoint call the Local AI settings make, which has no use for a bound, asks
+    /// for none: it passes `None` and no other value.
+    #[test]
+    fn the_endpoint_test_asks_for_no_bound() {
+        let src = include_str!("openai_compat.rs");
+        let within = src
+            .split("pub async fn complete_within(")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn complete_within_capped(").next())
+            .expect("complete_within is followed by complete_within_capped");
+        assert!(
+            within.contains(
+                "complete_within_capped(base_url, model, token, messages, deadline, None)"
+            ),
+            "{within}"
+        );
+    }
+
     #[test]
     fn the_thinking_switch_is_one_field_and_only_ever_none() {
         for stream in [true, false] {
-            let off = chat_body("gemma4", &[msg("user", "hi")], stream, true);
-            let plain = chat_body("gemma4", &[msg("user", "hi")], stream, false);
+            let off = chat_body("gemma4", &[msg("user", "hi")], stream, true, None);
+            let plain = chat_body("gemma4", &[msg("user", "hi")], stream, false, None);
             assert_eq!(off["reasoning_effort"], "none");
             // Exactly one field more than the body PM always sent, and nothing else changed.
             let mut off = off.as_object().unwrap().clone();
@@ -2772,8 +2871,13 @@ mod tests {
                     let model = json["model"].as_str().unwrap_or("").to_string();
                     let switch = json.get("reasoning_effort").is_some();
                     let streaming = json["stream"].as_bool() == Some(true);
+                    // A bound on the answer shows only when the request carried one.
+                    let bound = json
+                        .get("max_tokens")
+                        .map(|n| format!(" max_tokens={n}"))
+                        .unwrap_or_default();
                     seen.lock().unwrap().push(format!(
-                        "{path} {model} {}",
+                        "{path} {model} {}{bound}",
                         if switch { "switch" } else { "plain" }
                     ));
                     if refuses_everything || (switch && refuses_switch(&model)) {
@@ -2817,6 +2921,31 @@ mod tests {
             Duration::from_secs(5),
         )
         .await
+    }
+
+    /// A mod's bound on the answer reaches the wire of a local endpoint, and a call that asks for
+    /// none sends a request with no `max_tokens` at all (what every other caller sends).
+    #[tokio::test]
+    async fn a_bound_reaches_a_local_endpoint_and_no_bound_sends_none() {
+        let server = mock_server(200, "0.12.4", |_| false, false);
+        let messages = [msg("user", "hi")];
+        for bound in [Some(77), None] {
+            complete(&server.base_url, "m", None, &messages, bound)
+                .await
+                .unwrap();
+        }
+        let chats: Vec<String> = server
+            .take()
+            .into_iter()
+            .filter(|l| l.starts_with("/v1/chat/completions"))
+            .collect();
+        assert_eq!(
+            chats,
+            [
+                "/v1/chat/completions m plain max_tokens=77",
+                "/v1/chat/completions m plain"
+            ]
+        );
     }
 
     #[tokio::test]

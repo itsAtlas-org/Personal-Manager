@@ -130,6 +130,17 @@ describe("first open", () => {
 });
 
 describe("the installed section", () => {
+  it("leaves out a mod PM is still installing: it is no row, so it has nothing to pause or remove", async () => {
+    draw([mod(), mod({ id: "atlas.map", name: "Map", pending: true })]);
+    expect(await screen.findByRole("heading", { name: "Acme Tool" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Map" })).toBeNull();
+    expect(screen.getByText("1 mod installed")).toBeTruthy();
+    cleanup();
+    draw([mod({ id: "atlas.map", name: "Map", pending: true })]);
+    expect(await screen.findByText("No mods are installed.")).toBeTruthy();
+    expect(screen.getByText("No mods installed")).toBeTruthy();
+  });
+
   it("has one row per mod, and says when there are none", async () => {
     draw([mod(), mod({ id: "acme.other", name: "Other" })]);
     expect(await screen.findByRole("heading", { name: "Acme Tool" })).toBeTruthy();
@@ -164,6 +175,9 @@ describe("refreshing on mods://changed", () => {
     "decided",
     "dev-mode",
     "test-mod",
+    "auto-installed",
+    "secret",
+    "ai-cap",
   ];
 
   it.each(CAUSES)("reads the rows and the strips again after %s", async (cause) => {

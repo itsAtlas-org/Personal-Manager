@@ -100,8 +100,8 @@ not an exhaustive list; the in-app **What's New** is the complete, current recor
 
 ### Cross-cutting
 
-- **Private by design.** The local store is always encrypted, secrets live in the OS
-  keychain, and ingested content is treated as untrusted data — never as instructions.
+- **Private by design.** The local store is always encrypted, PM's secrets live in the OS
+  keychain (a key you type for a mod is the one exception, kept in the encrypted store), and ingested content is treated as untrusted data — never as instructions.
 - **Encrypted, restore-anywhere backups.** Pack your whole vault into a single
   passphrase-protected file — on demand or on a schedule — straight to your own Proton Drive
   or Google Drive, and restore it on any machine.
@@ -281,8 +281,10 @@ API keys live in the OS keychain, never in the data directory.
 
 ## Privacy & security
 
-Local-first by design. The database is always encrypted at rest (SQLCipher) and secrets
-live in the OS keychain. The Markdown vault's at-rest protection depends on how you set
+Local-first by design. The database is always encrypted at rest (SQLCipher) and PM's own
+secrets live in the OS keychain. The one exception is a key you type for a mod: it is kept in
+the encrypted database, anyone who can open the vault (a shared vault included) can use it, and
+backups and exports leave it out. The Markdown vault's at-rest protection depends on how you set
 it up:
 
 - A **device vault** (the default) stores Markdown as plaintext on disk and relies on
@@ -298,7 +300,7 @@ refuses to send a token and chats in the clear to a public address); a check for
 (and the download if you accept one); a fetch of PM's signed mod safety list — two small files from
 the project's public `PM-Mods` GitHub release, at launch and every six hours, which send nothing but
 a generic `PM-mods/1` user agent and which PM accepts only if they carry the project's signature
-(and, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); a one-time first-run download of PM's on-device models
+(and, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); the websites each installed mod declares it will fetch from and you allow (only those exact hostnames, over HTTPS to the public internet, never to an address on this machine or your network, with no proxy), and, if a mod uses AI, its requests through your own Background AI route with the monthly limit you set; a one-time first-run download of PM's on-device models
 and Python dependencies (your local model runner, if you use one, fetches model weights itself —
 PM does not); and — only if you turn them on — a calendar fetch (plus the event changes you make,
 if you turn on editing for a Google account), a read-only sync of the cloud accounts you connect

@@ -15,7 +15,14 @@
 // its end if the person leaves the Mods tab, so coming back shows "Pausing…" or the refusal rather
 // than an idle row that invites a second press.
 
-import { approveUpdate, modPermissionDecide, pauseMod, repairMod, resumeMod } from "../../lib/ipc";
+import {
+  approveUpdate,
+  modAiCapSet,
+  modPermissionDecide,
+  pauseMod,
+  repairMod,
+  resumeMod,
+} from "../../lib/ipc";
 import { useRememberedFold } from "../../lib/foldPrefs";
 import { clearModError, runModAction, setModScreen, useModActions } from "../../lib/modActions";
 import { modFoldKey } from "../../lib/modFolds";
@@ -29,8 +36,10 @@ import {
 import { Button, Callout, Card, Collapsible, VisuallyHidden } from "../ui";
 import { toneSurface } from "../ui/tone";
 import { DevModeOffMark } from "./DevModeOffMark";
+import { ModAiLimit } from "./ModAiLimit";
 import { ModIconView } from "./ModIconView";
-import { modText } from "./modText";
+import { ModSecretFields } from "./ModSecretFields";
+import { madeByLine, modText } from "./modText";
 import { classWords, permissionWords, standingLine } from "./permissionWords";
 import { TierBadge } from "./TierBadge";
 
@@ -63,7 +72,11 @@ const SOURCE: Record<string, string> = {
 
 function permissionStanding(p: ModPermission): string {
   if (p.decision === "denied") return p.offBecause ?? "Off: you said no.";
-  if (p.access === "allowed") return "Allowed.";
+  if (p.access === "allowed") {
+    // First party's `ai` is allowed with no answer on record, and says what still comes: the money
+    // question, at the first request that would cost something.
+    return p.id === "ai" && p.when === "auto" && p.decision == null ? standingLine(p) : "Allowed.";
+  }
   if (p.access === "asks") return "PM asks you the first time the mod uses it.";
   return p.offBecause ?? standingLine(p);
 }
@@ -260,7 +273,7 @@ export function ModRow({
           <div className="space-y-3 pt-2 text-sm text-ink2">
             {mod.description && <p className="break-words">{modText(mod.description)}</p>}
             <p className="break-words text-xs text-ink3">
-              {mod.author ? `Made by ${modText(mod.author)}` : "Maker not named"}
+              {madeByLine(mod.authors, mod.author)}
               {mod.repo ? ` · ${modText(mod.repo)}` : ""}
               {mod.tier === "second" && mod.commit
                 ? ` · reviewed by Atlas at commit ${modText(mod.commit).slice(0, 12)}`
@@ -355,6 +368,29 @@ export function ModRow({
                 )}
               </Collapsible>
             </div>
+
+            {canDecide && mod.permissions.some((p) => p.id === "ai") && (
+              // Keyed by the stored limit, so the field starts again from it after every save.
+              <ModAiLimit
+                key={mod.aiCapUsd ?? "none"}
+                mod={mod}
+                disabled={working !== null}
+                onSave={(cap) =>
+                  act("Saving", "PM couldn't save that limit.", () => modAiCapSet(mod.id, cap))
+                }
+              />
+            )}
+
+            {canDecide && mod.secrets.length > 0 && (
+              // The keys the manifest declares. The same field the Test keys section and a mod's
+              // `secrets.set` dialog use; the rows are read again after a save or a remove.
+              <ModSecretFields
+                modId={mod.id}
+                slots={mod.secrets}
+                disabled={working !== null}
+                onChanged={() => void refresh()}
+              />
+            )}
 
             {fix !== "uninstall" && (
               <div>

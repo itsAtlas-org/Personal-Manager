@@ -6,9 +6,10 @@
 // the strip App draws for a mod that was paused or removed can't be seen or used while it is open:
 // SettingsView draws its own copy (the rule the sign-in strip follows).
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { addNotice, forgetModSurface } from "../lib/modSurface";
 import { safety } from "./mods/modFixtures";
 
 const modsSafetyStatus = vi.fn();
@@ -81,5 +82,23 @@ describe("the safety list's notices in Settings", () => {
     render(<SettingsView onClose={() => {}} onboarding={false} />);
     await screen.findByText("General tab");
     expect(screen.queryByText(/safety list/)).toBeNull();
+  });
+});
+
+describe("a mod's notice in Settings", () => {
+  it("is drawn inside the Settings dialog too, where its scrim hides App's copy", async () => {
+    modsSafetyStatus.mockResolvedValue(safety());
+    render(<SettingsView onClose={() => {}} onboarding={false} />);
+    await screen.findByText("General tab");
+    act(() =>
+      addNotice(
+        { modId: "a.b", name: "Acme", tier: "third" },
+        { text: "Rain at four.", tone: "info" },
+      ),
+    );
+    const strip = screen.getByText("Rain at four.");
+    expect(screen.getByRole("dialog").contains(strip)).toBe(true);
+    expect(screen.getByRole("dialog").textContent).toContain("“Acme”");
+    forgetModSurface();
   });
 });

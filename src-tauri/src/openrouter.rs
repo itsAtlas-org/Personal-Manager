@@ -445,11 +445,16 @@ fn request_error(status: reqwest::StatusCode, detail: &str) -> Error {
 /// one model we send `"model"`; with several we send `"models"` (an ordered
 /// fallback list — OpenRouter advances to the next on a rate-limit/quota/provider
 /// error, which is how auto-switch works). Callers guarantee a non-empty list.
+///
+/// `max_tokens` is `None` for every caller PM has had: the body is then exactly what it always was
+/// (a test holds it byte for byte). A mod's `ai.complete` is the one caller that sets it, because
+/// the worst-case price PM books before the call is only a bound if the answer is bounded.
 fn chat_body(
     models: &[String],
     messages: &[ChatMessage],
     stream: bool,
     cache_through: Option<usize>,
+    max_tokens: Option<u32>,
 ) -> serde_json::Value {
     // Build the messages array by hand so we can optionally mark a stable system prefix with an
     // ephemeral prompt-cache breakpoint. `cache_through` is the index of the LAST message of the
@@ -495,6 +500,9 @@ fn chat_body(
     } else {
         body["models"] = serde_json::json!(models);
     }
+    if let Some(limit) = max_tokens {
+        body["max_tokens"] = serde_json::json!(limit);
+    }
     // PRIVACY (spec §6) — enforce Zero-Data-Retention on EVERY request, whichever model the
     // user picked. `zdr: true` keeps the request on endpoints that don't retain prompts;
     // `data_collection: "deny"` blocks providers that train on / store data. Two distinct
@@ -533,7 +541,7 @@ where
     // block, card 7C) so providers cache it and bill it cheaply turn after turn; the per-turn grounding
     // and growing history sit after it and stay uncached. `None` (no stable block) preserves the old
     // fully-uncached behaviour.
-    let body = chat_body(models, messages, true, cache_through);
+    let body = chat_body(models, messages, true, cache_through, None);
 
     // A long, healthy streamed reply can legitimately run for many minutes (a slow or reasoning model,
     // a large grounded answer). Bounding the WHOLE request with a total `.timeout` therefore severs a
@@ -670,23 +678,35 @@ pub(crate) fn drain_lines(buffer: &mut Vec<u8>) -> Vec<String> {
 /// auto-switch fallback). Returns the assistant message content. Set `cache_prefix`
 /// when the first message is a stable prefix reused across many back-to-back calls
 /// (the review loop) so providers cache + cheaply reuse it.
+///
+/// `max_tokens` bounds the answer's length when `Some`; every caller but a mod's `ai.complete`
+/// passes `None` (through `llm_gateway::complete`), which sends the body this call always sent.
 pub async fn complete(
     api_key: &str,
     models: &[String],
     messages: &[ChatMessage],
     cache_prefix: bool,
+    max_tokens: Option<u32>,
 ) -> Result<Completion> {
     // Background callers cache from message 0 (their stable system instruction); `false` ⇒ no breakpoint.
-    let body = chat_body(models, messages, false, cache_prefix.then_some(0));
+    let body = chat_body(
+        models,
+        messages,
+        false,
+        cache_prefix.then_some(0),
+        max_tokens,
+    );
 
-    let response = HTTP
-        .post(ENDPOINT)
-        // A total deadline fits here (unlike `stream_chat`): the whole answer arrives at once.
-        .timeout(std::time::Duration::from_secs(120))
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await?;
+    // Through `wire_mark::send` so a mod's `ai.complete` can tell a request that never connected
+    // (its booking is given back) from one that may have left; a plain send for everyone else.
+    let response = crate::wire_mark::send(
+        HTTP.post(ENDPOINT)
+            // A total deadline fits here (unlike `stream_chat`): the whole answer arrives at once.
+            .timeout(std::time::Duration::from_secs(120))
+            .bearer_auth(api_key)
+            .json(&body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -886,11 +906,72 @@ mod tests {
         assert!(n.prompt_tokens.is_none() && n.completion_tokens.is_none());
     }
 
+    /// Every caller PM had before a mod could ask for a bounded answer sends this body, byte for
+    /// byte (keys are sorted, so the text is stable): a bound on the answer is a new field only a
+    /// mod's call may add. The strings were taken from the code before `max_tokens` existed.
+    #[test]
+    fn every_request_body_that_asks_for_no_bound_is_what_it_always_was() {
+        let msgs = [
+            ChatMessage {
+                role: "system".into(),
+                content: "s".into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "u".into(),
+            },
+        ];
+        let one = ["a/b".to_string()];
+        let two = ["a/b".to_string(), "c/d".to_string()];
+        let text = |models: &[String], stream: bool, cache: Option<usize>| {
+            serde_json::to_string(&chat_body(models, &msgs, stream, cache, None)).unwrap()
+        };
+        assert_eq!(
+            text(&one, false, None),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"a/b","provider":{"data_collection":"deny","zdr":true},"stream":false,"usage":{"include":true}}"#
+        );
+        assert_eq!(
+            text(&one, true, None),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"model":"a/b","provider":{"data_collection":"deny","zdr":true},"stream":true,"stream_options":{"include_usage":true},"usage":{"include":true}}"#
+        );
+        assert_eq!(
+            text(&one, false, Some(0)),
+            r#"{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"s","type":"text"}],"role":"system"},{"content":"u","role":"user"}],"model":"a/b","provider":{"data_collection":"deny","zdr":true},"stream":false,"usage":{"include":true}}"#
+        );
+        assert_eq!(
+            text(&two, false, None),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":"u","role":"user"}],"models":["a/b","c/d"],"provider":{"data_collection":"deny","zdr":true},"stream":false,"usage":{"include":true}}"#
+        );
+        assert_eq!(
+            text(&two, true, Some(1)),
+            r#"{"messages":[{"content":"s","role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"u","type":"text"}],"role":"user"}],"models":["a/b","c/d"],"provider":{"data_collection":"deny","zdr":true},"stream":true,"stream_options":{"include_usage":true},"usage":{"include":true}}"#
+        );
+    }
+
+    /// A bound adds `max_tokens` and nothing else: the ZDR pin, the usage request and the model
+    /// routing are untouched.
+    #[test]
+    fn a_bound_adds_one_field_and_the_zdr_pin_stays() {
+        let msgs = [ChatMessage {
+            role: "user".into(),
+            content: "u".into(),
+        }];
+        let models = ["a/b".to_string(), "c/d".to_string()];
+        let plain = chat_body(&models, &msgs, false, None, None);
+        let bounded = chat_body(&models, &msgs, false, None, Some(300));
+        assert_eq!(bounded["max_tokens"], serde_json::json!(300));
+        assert_eq!(bounded["provider"]["zdr"], serde_json::json!(true));
+        let mut without = bounded.as_object().unwrap().clone();
+        without.remove("max_tokens");
+        assert_eq!(serde_json::Value::Object(without), plain);
+        assert!(plain.get("max_tokens").is_none());
+    }
+
     #[test]
     fn chat_body_enforces_zdr_and_keeps_model_routing() {
         // Single model: the "model" field, the ZDR provider object, usage accounting, and the
         // streaming usage opt-in. chat_body is PM's only ZDR enforcement point, so this guards it.
-        let one = chat_body(&["a/b".to_string()], &[], true, None);
+        let one = chat_body(&["a/b".to_string()], &[], true, None, None);
         assert_eq!(one["provider"]["zdr"], serde_json::json!(true));
         assert_eq!(
             one["provider"]["data_collection"],
@@ -905,7 +986,13 @@ mod tests {
         );
         // Several models: the ordered "models" fallback list, still ZDR-enforced + usage-accounted,
         // no "model" and (non-streaming) no stream_options.
-        let many = chat_body(&["a/b".to_string(), "c/d".to_string()], &[], false, None);
+        let many = chat_body(
+            &["a/b".to_string(), "c/d".to_string()],
+            &[],
+            false,
+            None,
+            None,
+        );
         assert_eq!(many["models"], serde_json::json!(["a/b", "c/d"]));
         assert!(many.get("model").is_none());
         assert_eq!(many["provider"]["zdr"], serde_json::json!(true));
@@ -984,7 +1071,7 @@ mod tests {
             },
         ];
         // None → every message is a plain string, no cache_control anywhere (the old chat behaviour).
-        let plain = chat_body(&["a/b".to_string()], &msgs, false, None);
+        let plain = chat_body(&["a/b".to_string()], &msgs, false, None, None);
         for i in 0..msgs.len() {
             assert!(
                 plain["messages"][i]["content"].is_string(),
@@ -994,7 +1081,7 @@ mod tests {
         // Some(1) → the breakpoint sits on message 1 (the last stable system message), so the provider
         // caches the prefix through it; the earlier stable message and the dynamic turn after it stay
         // plain. (Anthropic caches everything up to AND INCLUDING the marked block.)
-        let cached = chat_body(&["a/b".to_string()], &msgs, false, Some(1));
+        let cached = chat_body(&["a/b".to_string()], &msgs, false, Some(1), None);
         assert!(
             cached["messages"][0]["content"].is_string(),
             "messages before the breakpoint are not themselves marked"

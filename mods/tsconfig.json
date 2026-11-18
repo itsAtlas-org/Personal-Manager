@@ -1,0 +1,40 @@
+{
+  // The type-check for everything under mods/ (the third pass of `just tsc`). Its own project rather
+  // than a widening of the root one: a mod is a sealed frame (a page with no Node and no PM modules),
+  // so `include` names `mods` and never `src`. A mod reaches PM's own code only through src/kit/**
+  // (the lint fence says so); when that folder exists it joins the program through the import itself,
+  // so it needs no `include` entry here.
+  //
+  // The lib is DOM because a mod's page is a browser page. A mod's Worker is NOT in this project: a
+  // Worker has a different global scope (lib WebWorker, no `window`), and the two libs cannot share
+  // one config, so each worker folder carries its own tsconfig.json (mods/atlas.map/src/worker/) and
+  // the `tsc` recipe runs it as another pass. Tests in a worker folder belong to that pass.
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  // `../tests/mod-fixtures` is the third-party mod the toolchain tests build (a developer's mod, so it
+  // lives under tests/, not in mods/): it is type-checked like any mod page.
+  "include": [".", "../tests/mod-fixtures"],
+  // dist is built output (never checked), the Vite config is Node-side (tsconfig.node.json owns it),
+  // and every worker folder is its own project (above). Worker folders are listed by path, not by a
+  // `**/worker` glob: a new one then fails the DOM check until its tsconfig is added here on purpose,
+  // instead of dropping out of every type-check without a sound.
+  "exclude": ["**/dist", "**/node_modules", "vite.config.ts", "atlas.map/src/worker"]
+}

@@ -12,15 +12,19 @@ import type {
   DevKitInfo,
   DevModeState,
   DevSwitch,
+  AiPromptInfo,
   InstallResult,
   ModIcon,
   ModInfo,
+  ModSecretSlot,
   ModNotice,
   ModStandingAfter,
   ModUninstalled,
   ModsChanged,
   ModsDisclaimerState,
+  ModsHandoverState,
   ModsResetResult,
+  ModsRetryResult,
   ModsSafetyStatus,
   Reloaded,
   Repaired,
@@ -2317,7 +2321,8 @@ export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch
 /** The Developer kit's readouts, all from Rust so the page keeps no copy that could drift: the API
  *  version and its deprecation window, every row of the dispatch table, the build-time limits, the
  *  web engine's seal, and each mounted frame's event counters. Read-only. Rejects `dev-mode-off`
- *  while developer mode is off for this device. (The Test keys fields ship with `secrets.set`.) */
+ *  while developer mode is off for this device. (The Test keys section is drawn from the shared mod
+ *  rows and `modSecretSave`, not from this.) */
 export const devKitInfo = () => invoke<DevKitInfo>("dev_kit_info");
 
 /** Read the developer's unpacked folder at `path` (an absolute path) and return the stark screen,
@@ -2384,9 +2389,43 @@ export const consentMod = (modId: string, decisions: Record<string, boolean>) =>
   invoke<ModStandingAfter>("consent_mod", { modId, decisions });
 
 /** One permission toggled on a mod's row (or a first-use prompt's answer). Rejects with
- *  `grant-refused` where unsigned mods may not hold both reads and the internet. */
-export const modPermissionDecide = (modId: string, permission: string, granted: boolean) =>
-  invoke<void>("mod_permission_decide", { modId, permission, granted });
+ *  `grant-refused` where unsigned mods may not hold both reads and the internet.
+ *
+ *  `capUsd` is the monthly AI limit the money prompt's field held: only with a yes to `ai`, and
+ *  written in the same transaction as the grant (a refused grant leaves no limit, a refused limit
+ *  no grant). Anything else sends none. */
+export const modPermissionDecide = (
+  modId: string,
+  permission: string,
+  granted: boolean,
+  capUsd?: number,
+) => invoke<void>("mod_permission_decide", { modId, permission, granted, capUsd });
+
+/** What the money prompt says about the route a mod's AI call would take now (the person's own
+ *  settings). Reads only; rejects for a mod that is not installed or never asked for the AI. */
+export const modAiPromptInfo = (modId: string) =>
+  invoke<AiPromptInfo>("mod_ai_prompt_info", { modId });
+
+/** Set a mod's monthly AI limit from its row, or take it away with null (the next paid call then
+ *  asks for one). Raising it is felt at once; lowering it below what is used refuses further paid
+ *  calls. Rejects with fixed words for a number PM cannot use. */
+export const modAiCapSet = (modId: string, capUsd: number | null) =>
+  invoke<void>("mod_ai_cap_set", { modId, capUsd });
+
+/** Save the key the user typed for one of a mod's declared slots, in PM's encrypted store, bound to
+ *  the slot's host and header. An empty value deletes it. Answers the mod's slots (a bool each,
+ *  never the key) and rejects with fixed words that never quote what was typed. The component that
+ *  calls this clears its field the moment it settles. */
+export const modSecretSave = (modId: string, name: string, value: string) =>
+  invoke<ModSecretSlot[]>("mod_secret_save", { modId, name, value });
+
+/** Delete the key of one slot. */
+export const modSecretClear = (modId: string, name: string) =>
+  invoke<void>("mod_secret_clear", { modId, name });
+
+/** The mod's slots and whether each has a key now. */
+export const modSecretStatus = (modId: string) =>
+  invoke<ModSecretSlot[]>("mod_secret_status", { modId });
 
 /** Whether this device has accepted the Mods disclaimer in this vault (per device AND per vault). */
 export const modsDisclaimerState = () => invoke<ModsDisclaimerState>("mods_disclaimer_state");
@@ -2405,6 +2444,21 @@ export const dismissModResumed = (modId: string) => invoke<void>("dismiss_mod_re
  *  seen revoked until a list names them again, so ask first. Rejects `not-allowed` unless the record
  *  really is unusable. Then fetches. */
 export const resetSafetyRecord = () => invoke<ModsResetResult>("reset_safety_record");
+
+/** "Try now" under an Installing tab: fetch the safety list now and let PM install the mod it still
+ *  owes this vault (the Map, once a migration says so). Offline it says so; it never rejects for
+ *  that. */
+export const retryAutoInstall = () => invoke<ModsRetryResult>("retry_auto_install");
+
+/** Which auto-installed mods landed in this vault, and whether the Map's device-local view prefs
+ *  still wait to be handed over (both empty for a vault with no auto-install). */
+export const modsHandoverState = () => invoke<ModsHandoverState>("mods_handover_state");
+
+/** Hand this device's Map view prefs to the Map mod's storage (it fills only what the mod lacks).
+ *  Resolves true when it did or there was nothing left to hand over. The device's own keys stay:
+ *  every vault on the device is owed them once. */
+export const adoptMapPrefs = (layoutMode: string, cohesion: number, labels: boolean) =>
+  invoke<boolean>("adopt_map_prefs", { layoutMode, cohesion, labels });
 
 /** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
  *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows

@@ -28,7 +28,7 @@
 // unmounts it here until the store is read again.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { onModsChanged, onVaultFault, repairMod, resumeMod } from "../../lib/ipc";
+import { onModsChanged, onVaultFault, repairMod, resumeMod, retryAutoInstall } from "../../lib/ipc";
 import { runModAction, useModActions } from "../../lib/modActions";
 import { useModRows } from "../../lib/modRows";
 import { pausedForDevMode, type ModInfo } from "../../lib/modsTypes";
@@ -39,7 +39,7 @@ import { DevModeOffMark } from "./DevModeOffMark";
 import { ModFirstOpen } from "./ModFirstOpen";
 import { ModFrame } from "./ModFrame";
 import { ModName } from "./ModName";
-import { modText } from "./modText";
+import { makerCredit, modText } from "./modText";
 
 interface ModTabProps {
   /** The mod's id (the part of the view after `mod:`). */
@@ -193,6 +193,11 @@ function RunningMod({
       name={modText(mod.name) || mod.id}
       tier={mod.tier}
       onClosed={onClosed}
+      about={{
+        description: mod.description,
+        help: mod.help,
+        credit: makerCredit(mod.authors, mod.author),
+      }}
     />
   );
 }
@@ -232,6 +237,18 @@ function StatusPanel({
   }
 
   const installing = kind === "installing";
+  // "Try now" is the one thing a pending mod (no row yet) can do: fetch the safety list and let PM
+  // install what it owes this vault. Offline it says so here, in the backend's words.
+  const [tried, setTried] = useState<string | null>(null);
+  function tryNow() {
+    setTried(null);
+    void runModAction(mod.id, "Trying", "PM couldn't try just now.", () => retryAutoInstall()).then(
+      (res) => {
+        if (res.ok) setTried(res.value.problem);
+        return refresh();
+      },
+    );
+  }
   return (
     <Panel
       title={
@@ -260,7 +277,13 @@ function StatusPanel({
         </p>
       )}
       {error && <Callout size="md">{error}</Callout>}
+      {tried && <Callout size="md">{tried}</Callout>}
       <Actions>
+        {mod.pending && (
+          <Button variant="primary" disabled={busy} onClick={tryNow}>
+            Try now
+          </Button>
+        )}
         {fix === "resume" && (
           <Button
             variant="primary"

@@ -478,31 +478,83 @@ const MOD_ID = /^[a-z][a-z0-9-]{0,30}(\.[a-z][a-z0-9-]{0,30}){1,4}$/;
 const CORE_IDS: ReadonlySet<string> = new Set(CORE_NAV.map((e) => e.id));
 
 /** Whether a stored string could name a tab: one of PM's, or a well-formed `mod:<id>`. */
-export function isNavIdShape(id: string): boolean {
-  return CORE_IDS.has(id) || (id.startsWith("mod:") && MOD_ID.test(id.slice(4)));
+export function isNavIdShape(id: string, core: ReadonlySet<string> = CORE_IDS): boolean {
+  return core.has(id) || (id.startsWith("mod:") && MOD_ID.test(id.slice(4)));
 }
 
-function cleanIds(value: unknown): string[] {
+/** Core tabs that became a mod's tab, by the id a placement stored for them (the Map: `graph`
+ *  became `mod:atlas.map`). A pin or a hide the user made on the old tab belongs to the new one. */
+const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([["graph", "mod:atlas.map"]]);
+
+/** The id a stored placement entry means now. The translation takes effect only once the old id is
+ *  no longer one of PM's own entries (`core`): while `graph` is still a core tab a stored `graph` IS
+ *  that tab, and the day the core entry is removed this switches on by itself, so the pins and hides
+ *  stored for it are carried over and not silently dropped as an id nobody knows. */
+export function renamedNavId(id: string, core: ReadonlySet<string> = CORE_IDS): string {
+  const to = RENAMED_NAV_IDS.get(id);
+  return to !== undefined && !core.has(id) ? to : id;
+}
+
+function cleanIds(value: unknown, core: ReadonlySet<string>): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
-  for (const id of value) {
+  for (const stored of value) {
     if (out.length >= MAX_IDS) break;
-    if (typeof id === "string" && isNavIdShape(id) && !out.includes(id)) out.push(id);
+    if (typeof stored !== "string") continue;
+    const id = renamedNavId(stored, core);
+    if (isNavIdShape(id, core) && !out.includes(id)) out.push(id);
   }
   return out;
 }
 
-/** A stored value, read defensively: anything malformed degrades to "nothing chosen". */
-export function parsePlacement(raw: string | null): NavPlacement {
+/** A stored value, read defensively: anything malformed degrades to "nothing chosen". `core` is the
+ *  set of PM's own tab ids (the tests pass one without `graph` to read the state after its removal). */
+export function parsePlacement(
+  raw: string | null,
+  core: ReadonlySet<string> = CORE_IDS,
+): NavPlacement {
   if (raw === null) return EMPTY;
   try {
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value)) return EMPTY;
     const v = value as Record<string, unknown>;
-    return { hidden: cleanIds(v.hidden), pinned: cleanIds(v.pinned) };
+    return { hidden: cleanIds(v.hidden, core), pinned: cleanIds(v.pinned, core) };
   } catch {
     return EMPTY;
   }
+}
+
+/** The mods that took over a core tab: which tab, and whether it showed at a Depth when the user had
+ *  said nothing. What "installed hidden" (below) preserves. */
+const PILOT_CORE_TAB: ReadonlyMap<string, { tab: string; shown: (depth: Depth) => boolean }> =
+  new Map([["atlas.map", { tab: "graph", shown: notMinimal }]]);
+
+/** Whether the installed-hidden rule applies to `modId` at all: only once the core tab it replaced
+ *  is gone from PM's own entries (`core`). Until then the core tab is still the user's Map and the
+ *  mod's arrival changes nothing they see. */
+export function pilotHiddenRuleApplies(
+  modId: string,
+  core: ReadonlySet<string> = CORE_IDS,
+): boolean {
+  const pilot = PILOT_CORE_TAB.get(modId);
+  return pilot !== undefined && !core.has(pilot.tab);
+}
+
+/** The placement after a pilot mod landed in this vault, on a device where its core tab wasn't
+ *  showing (Minimal, and not pinned): the new tab is added to the hidden set, so installing the mod
+ *  doesn't make a tab appear that the user's sidebar had left out. A tab the user had pinned stays
+ *  pinned, one already hidden is left as it is, and nothing changes while the core tab still exists
+ *  ([`pilotHiddenRuleApplies`]). Pure. */
+export function placementAfterPilotLanded(
+  placement: NavPlacement,
+  modId: string,
+  depth: Depth,
+  core: ReadonlySet<string> = CORE_IDS,
+): NavPlacement {
+  const id = `mod:${modId}`;
+  if (!pilotHiddenRuleApplies(modId, core) || placement.pinned.includes(id)) return placement;
+  if (PILOT_CORE_TAB.get(modId)?.shown(depth) || placement.hidden.includes(id)) return placement;
+  return { hidden: [...placement.hidden, id], pinned: placement.pinned };
 }
 
 /** The old Settings switches as a placement. "hide" hides. "show" meant shown whatever the Depth, so

@@ -1,0 +1,28 @@
+{
+  // The Map's Worker: lib WebWorker and no DOM, so a stray `window` or `document` in worker code is a
+  // type error here rather than a runtime ReferenceError in the frame. Run by `just tsc` as its own
+  // pass (`tsc -p mods/atlas.map/src/worker`); mods/tsconfig.json excludes this folder. The folder is
+  // named `worker` on purpose: typescript-eslint's project service finds the nearest tsconfig.json
+  // above a file, and that is this one, so a worker file is linted with the right globals too.
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "WebWorker"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["."]
+}

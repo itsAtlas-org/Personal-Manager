@@ -10,7 +10,7 @@
 //! load, whoever runs it.
 
 use super::*;
-use crate::mods::devmode;
+use crate::mods::devmode::{self, test_here};
 use crate::mods::index::Index;
 use crate::mods::outbox::testing::Recorder;
 use crate::mods::outbox::{MOD_PAUSED, SESSION_CLOSED};
@@ -35,7 +35,7 @@ const OTHER_DEVICE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn dev(w: &World, device: &str, on: bool) {
     let mut c = w.store.conn.lock().unwrap();
-    devmode::write(&mut c, device, on).unwrap();
+    devmode::write(&mut c, test_here(device), on).unwrap();
 }
 
 /// Developer mode on for this device, in the store and in the registry's copy.
@@ -58,7 +58,7 @@ fn sha(bytes: &[u8]) -> String {
 
 fn uopts(index: Option<&Index>) -> UnsignedOptions<'_> {
     UnsignedOptions {
-        device: DEVICE,
+        device: test_here(DEVICE),
         index,
     }
 }
@@ -558,7 +558,7 @@ fn senv(sealed: bool) -> UnsignedEnv<'static> {
         now: list_now(),
         index: None,
         engine_sealed: sealed,
-        device: DEVICE,
+        device: test_here(DEVICE),
     }
 }
 
@@ -982,13 +982,72 @@ fn state_of(w: &World, who: &str) -> String {
 }
 
 #[test]
+fn a_device_named_in_another_vault_neither_installs_nor_switches_in_this_one() {
+    // The device was named before a vault switch: its answer is the old vault's, so the ledger of
+    // the new one refuses it whatever the new store says.
+    let w = world();
+    dev_on(&w);
+    let strayed = devmode::Here::new(
+        DEVICE,
+        "99999999-8888-7777-6666-555555555555",
+        test_here(DEVICE).dir(),
+    );
+    let bytes = plain();
+    let pkg = package::verify_unsigned(&bytes).unwrap();
+    let opts = UnsignedOptions {
+        device: &strayed,
+        index: None,
+    };
+    assert!(matches!(
+        w.ledger()
+            .install_unsigned(&pkg, &sha(&bytes), &opts, now()),
+        Err(LedgerError::VaultChanged)
+    ));
+    assert!(matches!(
+        w.ledger()
+            .set_dev_mode_for_device(&strayed, false, &serve_all(), now()),
+        Err(LedgerError::VaultChanged)
+    ));
+    nothing_written(&w);
+    assert!(devmode::is_on(&w.store.conn.lock().unwrap(), test_here(DEVICE)).unwrap());
+}
+
+#[test]
+fn a_device_named_for_one_folder_does_not_answer_for_a_lookalike_vault_in_another() {
+    // The open vault changed to one with the SAME vault id and store id in another folder (a
+    // copied vault): the device's entry still names its own folder, and the copied store lists its
+    // credential, so only the folder tells them apart. Every read and write of the answer refuses.
+    let w = world();
+    dev_on(&w);
+    *w.store.place.lock().unwrap() = "another-folder".into();
+    let bytes = plain();
+    assert!(matches!(
+        install_file(&w, &bytes, None),
+        Err(LedgerError::VaultChanged)
+    ));
+    let pkg = package::verify_unsigned(&bytes).unwrap();
+    assert!(matches!(
+        w.ledger()
+            .preview_unsigned(&pkg, &sha(&bytes), &uopts(None)),
+        Err(LedgerError::VaultChanged)
+    ));
+    assert!(matches!(
+        w.ledger()
+            .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now()),
+        Err(LedgerError::VaultChanged)
+    ));
+    nothing_written(&w);
+    assert!(devmode::is_on(&w.store.conn.lock().unwrap(), test_here(DEVICE)).unwrap());
+}
+
+#[test]
 fn switching_off_pauses_every_unsigned_mod_and_only_those_and_ends_their_sessions() {
     let w = world();
     dev_on(&w);
     let (atlas, tool) = install_both_kinds(&w);
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     assert_eq!(
         done,
@@ -1009,7 +1068,7 @@ fn switching_off_pauses_every_unsigned_mod_and_only_those_and_ends_their_session
     );
     assert!(!w.runtime.unsigned_allowed());
     let c = w.store.conn.lock().unwrap();
-    assert!(!devmode::is_on(&c, DEVICE).unwrap());
+    assert!(!devmode::is_on(&c, test_here(DEVICE)).unwrap());
 }
 
 #[test]
@@ -1021,7 +1080,7 @@ fn switching_back_on_resumes_exactly_what_it_paused() {
     install_file(&w, &file(|m, _| m["id"] = json!("acme.mine")), None).unwrap();
     w.ledger().pause_by_user(&id("acme.mine"), now()).unwrap();
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     assert_eq!(
         state_of(&w, "acme.mine"),
@@ -1030,7 +1089,7 @@ fn switching_back_on_resumes_exactly_what_it_paused() {
     );
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, true, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), true, &serve_all(), now())
         .unwrap();
     assert_eq!(done.resumed, ["acme.tool"]);
     assert!(done.paused.is_empty());
@@ -1046,7 +1105,7 @@ fn a_resume_asks_the_safety_list_and_hands_a_listed_mod_to_it() {
     dev_on(&w);
     install_file(&w, &plain(), None).unwrap();
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     let listed = index_with(|v| {
         v["blacklist"] = json!([{"id": "acme.tool", "versions": "=1.0.0", "action": "paused",
@@ -1054,7 +1113,12 @@ fn a_resume_asks_the_safety_list_and_hands_a_listed_mod_to_it() {
     });
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, true, &SafetyCheck::serve(Some(&listed)), now())
+        .set_dev_mode_for_device(
+            test_here(DEVICE),
+            true,
+            &SafetyCheck::serve(Some(&listed)),
+            now(),
+        )
         .unwrap();
     assert!(done.resumed.is_empty(), "not resumed past a standing entry");
     assert_eq!(state_of(&w, "acme.tool"), "paused:blacklist");
@@ -1069,7 +1133,7 @@ fn a_switch_that_cannot_write_changes_nothing() {
     w.store.closed.store(true, Ordering::SeqCst);
     let e = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap_err();
     assert!(matches!(e, LedgerError::Store(_)));
     w.store.closed.store(false, Ordering::SeqCst);
@@ -1087,11 +1151,11 @@ fn switching_for_this_device_leaves_another_devices_switch_alone() {
     dev(&w, OTHER_DEVICE, true);
     dev_on(&w);
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     let c = w.store.conn.lock().unwrap();
-    assert!(devmode::is_on(&c, OTHER_DEVICE).unwrap());
-    assert!(!devmode::is_on(&c, DEVICE).unwrap());
+    assert!(devmode::is_on(&c, test_here(OTHER_DEVICE)).unwrap());
+    assert!(!devmode::is_on(&c, test_here(DEVICE)).unwrap());
 }
 
 // ---- every load follows developer mode ------------------------------------------------------------------
@@ -1124,7 +1188,7 @@ fn a_park_that_lifts_while_developer_mode_is_off_ends_paused_not_active() {
     dev_on(&w);
     install_file(&w, &plain(), None).unwrap();
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     // Parked for missing files while it was off (the row is in the ledger's own park).
     w.exec("UPDATE mods SET state = 'parked', state_reason = 'files-missing'");
@@ -1146,7 +1210,7 @@ fn a_user_resume_of_an_unsigned_mod_does_not_serve_it_while_developer_mode_is_of
     install_file(&w, &plain(), None).unwrap();
     w.ledger().pause_by_user(&acme(), now()).unwrap();
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     let stood = w
         .ledger()
@@ -1171,9 +1235,14 @@ fn a_restore_of_a_store_whose_record_names_this_device_leaves_it_off_and_pauses_
     assert_eq!(state_of(&w, "acme.tool"), "active:");
     {
         let c = w.store.conn.lock().unwrap();
-        crate::backup::adopt_mods::reset_for_adopt(&c).unwrap();
-        assert!(!devmode::is_on(&c, DEVICE).unwrap());
-        assert!(!devmode::is_on(&c, OTHER_DEVICE).unwrap());
+        crate::backup::adopt_mods::reset_for_adopt(
+            &c,
+            test_here(DEVICE).dir(),
+            devmode::TEST_VAULT,
+        )
+        .unwrap();
+        assert!(!devmode::is_on(&c, test_here(DEVICE)).unwrap());
+        assert!(!devmode::is_on(&c, test_here(OTHER_DEVICE)).unwrap());
     }
     // The reset pauses nothing itself: the row is still active until the open's load runs.
     assert_eq!(state_of(&w, "acme.tool"), "active:");
@@ -1186,7 +1255,7 @@ fn a_restore_of_a_store_whose_record_names_this_device_leaves_it_off_and_pauses_
         w.runtime.clear();
         let on = {
             let c = w.store.conn.lock().unwrap();
-            devmode::is_on(&c, DEVICE).unwrap()
+            devmode::is_on(&c, test_here(DEVICE)).unwrap()
         };
         assert!(!on, "still off after the store re-opened (open {round})");
         w.runtime.set_unsigned_allowed(on);
@@ -1231,7 +1300,7 @@ fn a_mod_developer_mode_paused_stays_paused_while_its_files_are_missing() {
     dev_on(&w);
     install_file(&w, &plain(), None).unwrap();
     w.ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all(), now())
         .unwrap();
     let aside = w.dir.path().join("aside");
     fs::rename(tool_dir(&w, "1.0.0"), &aside).unwrap();
@@ -1239,7 +1308,7 @@ fn a_mod_developer_mode_paused_stays_paused_while_its_files_are_missing() {
     // not served; it says what stopped it until it can run.
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, true, &serve_all(), now())
+        .set_dev_mode_for_device(test_here(DEVICE), true, &serve_all(), now())
         .unwrap();
     assert!(done.resumed.is_empty());
     assert_eq!(state_of(&w, "acme.tool"), "paused:dev-mode");

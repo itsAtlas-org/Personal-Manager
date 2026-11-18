@@ -39,7 +39,10 @@ import { UninstallDialog } from "./UninstallDialog";
 const TURN_ON_TITLE = "mods-turn-on-title";
 
 export function ModsView() {
-  const { rows, loaded, problem, refresh } = useModRows();
+  const { rows: read, loaded, problem, refresh } = useModRows();
+  // A mod PM is still installing has a tab (and says "Installing" there) but is no row: nothing in
+  // this list could be paused, repaired or uninstalled for it.
+  const rows = read.filter((r) => !r.pending);
   const { catalogue, problem: catalogueProblem, refresh: refreshCatalogue } = useCatalogue();
   const { notes, screens, busy } = useModActions();
   const [uninstallId, setUninstallId] = useState<string | null>(null);

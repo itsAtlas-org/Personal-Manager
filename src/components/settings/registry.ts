@@ -156,6 +156,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDef[] = [
           { id: "sec-dev-limits", label: "Limits" },
           { id: "sec-dev-running", label: "Running now" },
           { id: "sec-dev-testmods", label: "Load a test mod" },
+          { id: "sec-dev-testkeys", label: "Test keys" },
         ],
       },
     ],

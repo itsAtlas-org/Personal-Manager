@@ -121,7 +121,10 @@ fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
 /// Screen a lookup's answers. Every one must be public: a resolver that mixes a public answer with
 /// a private one is refused whole, or the client could dial the private one. And there must be at
 /// least one.
-fn screen_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, Refusal> {
+///
+/// `pub(crate)` so the mods' hop-fetcher test double screens its scripted answers with this very
+/// function, not a copy of it.
+pub(crate) fn screen_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, Refusal> {
     if addrs.is_empty() {
         return Err(Refusal::Unresolved);
     }

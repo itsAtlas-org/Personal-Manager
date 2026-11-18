@@ -10,19 +10,23 @@
 //! access as the dispatcher would answer it now (`grants::decide`, D3 and the sealed engine
 //! included), so the tab shows what is true and not what the policy table alone would say.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::Utc;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::words::{self, RowFacts, Standing};
+use crate::mods::ai::{self as money, MonthUse};
 use crate::mods::api::grants::{self, Decision, Facts, Outcome, Refused};
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
+use crate::mods::autoinstall::{self, Pilot};
 use crate::mods::index::Index;
 use crate::mods::ledger::{self, Resumed, Waiting, WaitingKind};
 use crate::mods::package::ApiRange;
 use crate::mods::policy;
+use crate::mods::secrets::{self, SlotStatus};
 use crate::mods::store;
 
 /// The largest icon PM will show (also `icon::ICON_CAP`): a small raster, not a photo.
@@ -33,16 +37,23 @@ pub const ICON_CAP: u64 = 256 << 10;
 /// has no use for the risk.
 pub const ICON_EXTENSIONS: [&str; 2] = ["png", "webp"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModDto {
     pub id: String,
+    /// True for the one entry that is no row: a pilot PM is still installing for this store (a
+    /// marker, no `mods` row; `autoinstall`). It has a tab and the "Installing" words and nothing
+    /// else: no permissions, no files, nothing to uninstall.
+    pub pending: bool,
     pub name: String,
     pub description: String,
     /// `first`, `second` or `third`: what the row says. Which tier PM *treats* it as is
     /// [`Self::signed`] first: an unsigned row is third party whatever its manifest claimed.
     pub tier: String,
+    /// The publisher the pin speaks of.
     pub author: String,
+    /// The people the manifest credits, in its order; empty when it names none. Display only.
+    pub authors: Vec<String>,
     /// The source repo, `owner/repo`.
     pub repo: String,
     pub commit: String,
@@ -53,9 +64,24 @@ pub struct ModDto {
     pub state: Standing,
     pub permissions: Vec<PermissionDto>,
     pub internet_hosts: Vec<String>,
+    /// The key slots the manifest declares, each with its host, its header and whether a key is
+    /// stored for it. Never the key.
+    pub secrets: Vec<SlotStatus>,
+    /// The monthly AI limit in dollars, or none until the person sets one (a paid call asks first).
+    pub ai_cap_usd: Option<f64>,
+    /// What counts against the limit now: this month's settled spend plus the bookings still held
+    /// (a call in flight, or one a crash left, which counts to month end). The cap's own ledger,
+    /// not the Usage and cost table's best-effort log.
+    pub ai_spent_usd: f64,
+    /// The month that number is for (`YYYY-MM`, the person's own time zone).
+    pub ai_month: String,
     /// The sidebar tab's label, when the mod has one.
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
+    /// The mod's own help (`contributions.help`), for PM's "About this mod" panel. Author-written
+    /// text: the page draws the title as a plain line and the body only through its sanitizing
+    /// Markdown component, never as HTML.
+    pub help: Vec<HelpDto>,
     /// Whether the manifest names a PNG or WebP icon the file list holds, within the size cap;
     /// `mod_icon` answers the bytes.
     pub has_icon: bool,
@@ -65,6 +91,16 @@ pub struct ModDto {
     pub resumed: Option<ResumedDto>,
     pub installed_at: String,
     pub updated_at: String,
+}
+
+/// One help entry of a mod, as its manifest wrote it (already held to PM's plain-text rules at install).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelpDto {
+    pub id: String,
+    pub title: String,
+    /// Markdown source; the page renders it through `markdown.tsx` only.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -197,7 +233,12 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     } else {
         Vec::new()
     };
-    Ok(rows
+    // Which slots have a key: names, hosts and headers only, never the value column.
+    let bound = secrets::bound_pairs(conn)?;
+    // The limits and the month's use, by the cap's own rule for the month (`mods::ai::month_use`).
+    let month = money::current_month(conn, Utc::now());
+    let ledgers = money::read_ledgers(conn, &month)?;
+    let mut out: Vec<ModDto> = rows
         .iter()
         .map(|row| {
             let own = decisions.get(&row.id);
@@ -206,11 +247,72 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                 own,
                 waiting.get(&row.id),
                 resumed.iter().rev().find(|r| r.id == row.id),
-                &held,
+                &Shared {
+                    held: &held,
+                    bound: &bound,
+                    ledgers: &ledgers,
+                    month: &month,
+                },
                 ctx,
             )
         })
-        .collect())
+        .collect();
+    // A pilot whose marker is set and whose row isn't there yet. Never a row: a fake one in a
+    // truth-class table would carry an invented hash and version into backups and shared vaults.
+    for pilot in autoinstall::pending(conn)? {
+        if !rows.iter().any(|r| r.id == pilot.id) {
+            out.push(pending_dto(pilot));
+        }
+    }
+    Ok(out)
+}
+
+/// The entry for a pilot that is still installing: its tab and the "Installing" words.
+fn pending_dto(pilot: &Pilot) -> ModDto {
+    let state = words::standing(
+        &RowFacts {
+            id: pilot.id,
+            name: pilot.name,
+            version: "",
+            package_sha256: None,
+            state: store::STATE_INSTALLING,
+            reason: None,
+            consented: false,
+            installed_from: store::FROM_CATALOGUE,
+            api: None,
+        },
+        None,
+    );
+    ModDto {
+        id: pilot.id.to_owned(),
+        pending: true,
+        name: pilot.name.to_owned(),
+        description: String::new(),
+        tier: "first".to_owned(),
+        author: String::new(),
+        authors: Vec::new(),
+        repo: String::new(),
+        commit: String::new(),
+        version: String::new(),
+        installed_from: store::FROM_CATALOGUE.to_owned(),
+        signed: true,
+        consented: false,
+        state,
+        permissions: Vec::new(),
+        internet_hosts: Vec::new(),
+        secrets: Vec::new(),
+        ai_cap_usd: None,
+        ai_spent_usd: 0.0,
+        ai_month: String::new(),
+        nav_tab: Some(pilot.tab_label.to_owned()),
+        calendar_overlay: None,
+        help: Vec::new(),
+        has_icon: false,
+        update: None,
+        resumed: None,
+        installed_at: String::new(),
+        updated_at: String::new(),
+    }
 }
 
 fn read_decisions(
@@ -240,13 +342,25 @@ fn read_decisions(
 #[derive(Debug, Default)]
 pub struct ManifestView {
     pub description: String,
+    pub authors: Vec<String>,
     pub icon: Option<String>,
     pub permissions: Vec<(String, String)>,
     pub internet_hosts: Vec<String>,
     pub nav_tab: Option<String>,
     pub calendar_overlay: Option<String>,
+    pub help: Vec<HelpDto>,
     pub api: Option<ApiRange>,
 }
+
+/// The install check's own limits on help (`package.rs`: 64 entries, an 80-character title, a
+/// 2,000-character body). A stored row that was hand-edited past them reads as having less, so the
+/// listing can't be made to carry a megabyte of "help" to the page.
+const HELP_ENTRIES_MAX: usize = 64;
+const HELP_TITLE_MAX: usize = 80;
+const HELP_BODY_MAX: usize = 2000;
+/// The same for `authors` (`package.rs`: 8 names of 64 characters).
+const AUTHORS_MAX: usize = 8;
+const AUTHOR_MAX: usize = 64;
 
 /// Read a stored manifest (pure). Anything missing or oddly shaped reads as absent: the verifier
 /// checked the manifest at install, so this only meets a hand-edited or damaged row.
@@ -267,6 +381,12 @@ pub fn read_manifest(manifest: &str) -> ManifestView {
         .map(|(min, target)| ApiRange { min, target });
     ManifestView {
         description: text(&v["description"]).unwrap_or_default(),
+        authors: list(&v["authors"])
+            .iter()
+            .filter_map(text)
+            .filter(|a| a.chars().count() <= AUTHOR_MAX)
+            .take(AUTHORS_MAX)
+            .collect(),
         icon: text(&v["icon"]),
         permissions: list(&v["permissions"])
             .iter()
@@ -275,6 +395,16 @@ pub fn read_manifest(manifest: &str) -> ManifestView {
         internet_hosts: list(&v["internetHosts"]).iter().filter_map(text).collect(),
         nav_tab: text(&v["contributions"]["nav.tab"]["label"]),
         calendar_overlay: text(&v["contributions"]["calendar.overlay"]["label"]),
+        help: list(&v["contributions"]["help"])
+            .iter()
+            .filter_map(|h| {
+                let (id, title, body) = (text(&h["id"])?, text(&h["title"])?, text(&h["body"])?);
+                let fits = title.chars().count() <= HELP_TITLE_MAX
+                    && body.chars().count() <= HELP_BODY_MAX;
+                fits.then_some(HelpDto { id, title, body })
+            })
+            .take(HELP_ENTRIES_MAX)
+            .collect(),
         api,
     }
 }
@@ -369,14 +499,33 @@ pub fn permission(
     })
 }
 
+/// What every row's DTO is built against, read once for the whole list.
+struct Shared<'a> {
+    /// D3's holdings of the unsigned set.
+    held: &'a [(PolicyTier, Class)],
+    /// The key slots that have a key (names and bindings, never a value).
+    bound: &'a BTreeSet<(String, String, String, String)>,
+    /// Each mod's monthly AI limit and what counts against it now.
+    ledgers: &'a BTreeMap<String, (Option<f64>, MonthUse)>,
+    /// The month today falls in, for a mod with no ledger row.
+    month: &'a str,
+}
+
 fn dto(
     row: &RawRow,
     decisions: Option<&BTreeMap<String, Decision>>,
     waiting: Option<&Waiting>,
     resumed: Option<&Resumed>,
-    held: &[(PolicyTier, Class)],
+    shared: &Shared<'_>,
     ctx: &Ctx<'_>,
 ) -> ModDto {
+    let Shared {
+        held,
+        bound,
+        ledgers,
+        month,
+    } = shared;
+    let ledger = ledgers.get(&row.id);
     let m = read_manifest(&row.manifest);
     let tier = PolicyTier::of(row.signed, &row.tier);
     // Only the unsigned set is judged together; a signed tier has no exclusion to read.
@@ -415,10 +564,12 @@ fn dto(
     );
     ModDto {
         id: row.id.clone(),
+        pending: false,
         name: row.name.clone(),
         description: m.description.clone(),
         tier: row.tier.clone(),
         author: row.author.clone(),
+        authors: m.authors.clone(),
         repo: row.source_repo.clone(),
         commit: row.source_commit.clone(),
         version: row.version.clone(),
@@ -428,8 +579,13 @@ fn dto(
         state,
         permissions,
         internet_hosts: m.internet_hosts.clone(),
+        secrets: secrets::statuses(&row.id, &row.manifest, bound),
+        ai_cap_usd: ledger.and_then(|(cap, _)| *cap),
+        ai_spent_usd: ledger.map_or(0.0, |(_, used)| used.used_usd),
+        ai_month: ledger.map_or_else(|| (*month).to_owned(), |(_, used)| used.month.clone()),
         nav_tab: m.nav_tab.clone(),
         calendar_overlay: m.calendar_overlay.clone(),
+        help: m.help.clone(),
         has_icon: icon_path(m.icon.as_deref(), &row.files).is_some(),
         update: waiting.and_then(|w| update_dto(&row.version, w)),
         resumed: resumed.map(|r| ResumedDto {
@@ -616,8 +772,15 @@ mod tests {
             "allowed"
         );
         // A first-use permission asks.
-        let p = show("ai", PolicyTier::First, None, &[], true);
+        let p = show("ai", PolicyTier::Second, None, &[], true);
         assert_eq!((p.access, p.when, p.class), ("asks", "first-use", "money"));
+        // A first-party mod's `ai` is allowed from the start; what asks is the limit, at the first
+        // paid use (the handler's rule, not the table's).
+        let p = show("ai", PolicyTier::First, None, &[], true);
+        assert_eq!((p.access, p.when, p.class), ("allowed", "auto", "money"));
+        // A no on record still refuses a first-party mod.
+        let p = show("ai", PolicyTier::First, Some(Decision::Denied), &[], true);
+        assert_eq!(p.access, "off");
         // D3: an unsigned mod's internet is off while another unsigned mod holds a read.
         let p = show(
             "internet",
@@ -646,6 +809,127 @@ mod tests {
         index: None,
         engine_sealed: true,
     };
+
+    #[test]
+    fn a_mods_help_is_read_in_order_and_whatever_is_malformed_or_oversized_is_left_out() {
+        let m = read_manifest(
+            &json!({"contributions": {"help": [
+                {"id": "a", "title": "First", "body": "One.\nTwo."},
+                {"id": "b", "title": 7, "body": "no title"},
+                {"id": "c", "title": "No body"},
+                "not an object",
+                {"id": "d", "title": "x".repeat(HELP_TITLE_MAX + 1), "body": "long title"},
+                {"id": "e", "title": "Long body", "body": "x".repeat(HELP_BODY_MAX + 1)},
+                {"id": "f", "title": "Edge", "body": "x".repeat(HELP_BODY_MAX)},
+            ]}})
+            .to_string(),
+        );
+        let ids: Vec<&str> = m.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["a", "f"]);
+        assert_eq!(m.help[0].body, "One.\nTwo.");
+        // No help, or help that isn't a list, reads as none.
+        for junk in [
+            json!({}),
+            json!({"contributions": {}}),
+            json!({"contributions": {"help": "text"}}),
+        ] {
+            assert!(read_manifest(&junk.to_string()).help.is_empty(), "{junk}");
+        }
+        // The count is bounded like the install check's.
+        let many: Vec<Value> = (0..HELP_ENTRIES_MAX + 5)
+            .map(|i| json!({"id": format!("h{i}"), "title": "T", "body": "B"}))
+            .collect();
+        let m = read_manifest(&json!({"contributions": {"help": many}}).to_string());
+        assert_eq!(m.help.len(), HELP_ENTRIES_MAX);
+    }
+
+    #[test]
+    fn the_listing_carries_a_mods_help_to_the_page_in_camel_case() {
+        let (_dir, c) = test_store();
+        let mut manifest = manifest(&["storage"]);
+        manifest["contributions"]["help"] =
+            json!([{"id": "map-overview", "title": "Map", "body": "Hover a document."}]);
+        insert(
+            &c,
+            &Row {
+                manifest,
+                ..Row::default()
+            },
+        );
+        let listed = list(&c, &CTX).unwrap();
+        let wire = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(
+            wire["help"],
+            json!([{"id": "map-overview", "title": "Map", "body": "Hover a document."}])
+        );
+        // A mod with none lists an empty array, never a missing field the page would have to guess at.
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["help"], json!([]));
+    }
+
+    #[test]
+    fn the_listing_carries_the_credited_authors_beside_the_publisher() {
+        let (_dir, c) = test_store();
+        let mut manifest = manifest(&["storage"]);
+        manifest["authors"] = json!(["Bobby Yu", "Ann Lee"]);
+        insert(
+            &c,
+            &Row {
+                manifest,
+                ..Row::default()
+            },
+        );
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["authors"], json!(["Bobby Yu", "Ann Lee"]));
+        assert_eq!(wire["author"], "Atlas", "the publisher stays the pin's");
+        // None named lists an empty array, and a damaged or oversized value reads as less.
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["authors"], json!([]));
+        let long = "x".repeat(AUTHOR_MAX + 1);
+        let names: Vec<Value> = (0..AUTHORS_MAX + 3)
+            .map(|i| json!(format!("N{i}")))
+            .collect();
+        let m = read_manifest(&json!({"authors": names}).to_string());
+        assert_eq!(m.authors.len(), AUTHORS_MAX);
+        let m = read_manifest(&json!({"authors": ["Ok", long, 7, null]}).to_string());
+        assert_eq!(m.authors, ["Ok"]);
+        assert!(read_manifest(&json!({"authors": "Bobby"}).to_string())
+            .authors
+            .is_empty());
+    }
+
+    #[test]
+    fn the_committed_map_manifests_help_reaches_the_listing_whole() {
+        // B6's eight entries, through the same reader the listing uses: none is dropped by the
+        // length limits or by the shape check.
+        let text = include_str!("../../../../mods/atlas.map/manifest.json");
+        let m = read_manifest(text);
+        let ids: Vec<&str> = m.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "map-overview",
+                "map-canvas",
+                "map-arrangement",
+                "map-cohesion",
+                "map-navigate",
+                "map-names",
+                "map-settings",
+                "map-updates"
+            ]
+        );
+        assert!(m
+            .help
+            .iter()
+            .all(|h| !h.title.is_empty() && !h.body.is_empty()));
+        // The mod is the Document Map (not the geographical kind), and it credits its maker.
+        assert_eq!(m.help[0].title, "Document Map");
+        assert_eq!(m.authors, ["Bobby Yu"]);
+    }
 
     #[test]
     fn the_listing_reads_rows_decisions_and_notes_from_one_store() {
@@ -710,6 +994,70 @@ mod tests {
     }
 
     #[test]
+    fn a_pilot_still_installing_is_one_synthesized_entry_and_never_a_row() {
+        let (_dir, c) = test_store();
+        // No marker: no entry, and the wire carries `pending: false` for a real row.
+        assert!(list(&c, &CTX).unwrap().is_empty());
+        insert(&c, &Row::default());
+        let wire = serde_json::to_value(&list(&c, &CTX).unwrap()[0]).unwrap();
+        assert_eq!(wire["pending"], json!(false));
+        c.execute("DELETE FROM mods", []).unwrap();
+
+        c.execute(
+            "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1')",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed.len(), 1);
+        let map = &listed[0];
+        assert!(map.pending);
+        assert_eq!(
+            (map.id.as_str(), map.name.as_str(), map.nav_tab.as_deref()),
+            ("atlas.map", "Document Map", Some("Document Map"))
+        );
+        // The existing "Installing" words, nothing to turn on, nothing to run, no permissions.
+        assert_eq!(map.state.kind, words::Kind::Installing);
+        assert_eq!(map.state.fix, words::Fix::None);
+        assert!(!map.state.running && !map.consented);
+        assert!(
+            map.state.text.starts_with("Installing."),
+            "{}",
+            map.state.text
+        );
+        assert!(map.permissions.is_empty() && map.help.is_empty() && map.update.is_none());
+        // Listing writes nothing: no row, the marker stays.
+        let (rows, marker): (i64, i64) = c
+            .query_row(
+                "SELECT (SELECT count(*) FROM mods), \
+                        (SELECT count(*) FROM settings WHERE key = 'mods_autoinstall_map')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, marker), (0, 1));
+
+        // Once the mod has a row (any kind) the real row speaks for it, never both.
+        insert(&c, &Row::default());
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].pending);
+        // A marker for no pilot in the table lists nothing.
+        c.execute("DELETE FROM mods", []).unwrap();
+        c.execute(
+            "DELETE FROM settings WHERE key = 'mods_autoinstall_map'",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_nothing', '1')",
+            [],
+        )
+        .unwrap();
+        assert!(list(&c, &CTX).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_row_whose_manifest_no_longer_reads_is_still_listed_so_it_can_be_uninstalled() {
         let (_dir, c) = test_store();
         insert(
@@ -729,6 +1077,90 @@ mod tests {
         let map = &listed[0];
         assert!(map.permissions.is_empty() && !map.has_icon && map.nav_tab.is_none());
         assert_eq!(map.state.fix, words::Fix::Uninstall);
+    }
+
+    /// The row's key slots, each with whether a key is stored AND still bound to the slot: a
+    /// moved or planted row reads as not set, and nothing in the DTO can carry the value.
+    #[test]
+    fn a_listed_mod_shows_its_key_slots_set_or_not_and_never_a_value() {
+        let (_dir, c) = test_store();
+        let mut m = manifest(&["internet"]);
+        m["internetHosts"] = json!(["a.example.com"]);
+        m["secrets"] = json!([
+            {"name": "set", "host": "a.example.com", "header": "X-A"},
+            {"name": "unset", "host": "a.example.com", "header": "X-B"},
+            {"name": "moved", "host": "a.example.com", "header": "X-C"},
+        ]);
+        insert(
+            &c,
+            &Row {
+                manifest: m,
+                ..Row::default()
+            },
+        );
+        c.execute(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'set', 'a.example.com', 'X-A', 'sentinel-value-1'), \
+             ('atlas.map', 'moved', 'old.example.com', 'X-C', 'sentinel-value-2')",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        let got: Vec<(&str, bool)> = listed[0]
+            .secrets
+            .iter()
+            .map(|s| (s.name.as_str(), s.set))
+            .collect();
+        assert_eq!(got, [("set", true), ("unset", false), ("moved", false)]);
+        assert_eq!(listed[0].secrets[0].host, "a.example.com");
+        assert_eq!(listed[0].secrets[0].header, "X-A");
+        let wire = serde_json::to_string(&listed).unwrap();
+        assert!(!wire.contains("sentinel-value"), "{wire}");
+        // A mod that declares none lists none.
+        let (_d2, c2) = test_store();
+        insert(&c2, &Row::default());
+        assert!(list(&c2, &CTX).unwrap()[0].secrets.is_empty());
+    }
+
+    /// The row's monthly AI limit and what counts against it: this month's settled spend plus the
+    /// bookings held, per mod; an earlier month reads as nothing used (the next call rolls it).
+    #[test]
+    fn a_listed_mod_shows_its_ai_limit_and_what_it_has_used_this_month() {
+        let (_dir, c) = test_store();
+        insert(&c, &Row::default());
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(listed[0].ai_cap_usd, None, "no limit until one is set");
+        assert_eq!(listed[0].ai_spent_usd, 0.0);
+        let now = money::current_month(&c, Utc::now());
+        assert_eq!(listed[0].ai_month, now);
+        c.execute(
+            "UPDATE mods SET ai_cap_usd = 2.0, ai_spent_usd = 0.5, ai_month = ?1",
+            [&now],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO ai_reservations(mod_id, reserved_usd) VALUES ('atlas.map', 0.25)",
+            [],
+        )
+        .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.75)
+        );
+        let wire = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(wire["aiCapUsd"], json!(2.0));
+        assert_eq!(wire["aiSpentUsd"], json!(0.75));
+        assert_eq!(wire["aiMonth"], json!(now));
+        // Last month's spend has rolled.
+        c.execute("UPDATE mods SET ai_month = '2000-01'", [])
+            .unwrap();
+        let listed = list(&c, &CTX).unwrap();
+        assert_eq!(
+            (listed[0].ai_cap_usd, listed[0].ai_spent_usd),
+            (Some(2.0), 0.0)
+        );
+        assert_eq!(listed[0].ai_month, now);
     }
 
     #[test]

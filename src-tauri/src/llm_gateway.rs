@@ -888,6 +888,14 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
     Ok(Some(CloudArm { key, models }))
 }
 
+/// The Background role's whole model list in the person's order, with auto-switch ignored (the
+/// money prompt of a mod's `ai` names all of it; see `mods::api::ai::ModelEdge::listed_models`).
+pub(crate) fn background_model_list(app: &AppHandle) -> Result<Vec<String>> {
+    let state = app.state::<AppState>();
+    let conn = state.conn()?;
+    crate::settings::models_for(&conn, BACKGROUND_MODELS_KEY)
+}
+
 /// Hydrate the local arm for a role: the shared base URL + the role's model + the optional bearer
 /// token, or `None` when the endpoint isn't fully configured (no URL, or no model for the role).
 fn local_arm(app: &AppHandle, role: Role) -> Result<Option<LocalArm>> {
@@ -945,22 +953,45 @@ pub async fn complete(
     messages: &[ChatMessage],
     cache_prefix: bool,
 ) -> Result<LlmOutcome> {
+    complete_capped(app, plan, messages, cache_prefix, None).await
+}
+
+/// [`complete`] with the answer's length bounded (`max_tokens`) on every leg the route can take,
+/// the local arm and each cloud fallback alike, when `Some`. `None` is `complete` exactly (no
+/// request body changes: the other callers' bodies are held byte for byte by tests in
+/// `openrouter.rs` and `openai_compat.rs`); only a mod's `ai.complete` bounds an answer, because
+/// the worst-case price PM books for it is a bound only if the answer is.
+pub async fn complete_capped(
+    app: &AppHandle,
+    plan: &RoutePlan,
+    messages: &[ChatMessage],
+    cache_prefix: bool,
+    max_tokens: Option<u32>,
+) -> Result<LlmOutcome> {
     if plan.needs_local_ai() {
         local_ai_gate(&app.state::<AppState>().local_ai)?;
     }
     match plan {
         RoutePlan::Cloud(arm) => {
             let start = Instant::now();
-            let completion =
-                openrouter::complete(arm.key.expose(), &arm.models, messages, cache_prefix).await?;
+            let completion = openrouter::complete(
+                arm.key.expose(),
+                &arm.models,
+                messages,
+                cache_prefix,
+                max_tokens,
+            )
+            .await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud(start.elapsed()),
             })
         }
-        RoutePlan::LocalOnly(local) => run_local_complete(app, local, messages, None).await,
+        RoutePlan::LocalOnly(local) => {
+            run_local_complete(app, local, messages, None, max_tokens).await
+        }
         RoutePlan::LocalThenCloud { local, cloud } => {
-            run_local_complete(app, local, messages, Some(cloud)).await
+            run_local_complete(app, local, messages, Some(cloud), max_tokens).await
         }
         // Straight to OpenRouter with the caller's own `cache_prefix`, NOT through `cloud_complete`,
         // which hard-codes `false`: the review and retag batches ask for the cached prefix and a
@@ -970,9 +1001,14 @@ pub async fn complete(
             displaced_local_model,
         } => {
             let start = Instant::now();
-            let completion =
-                openrouter::complete(cloud.key.expose(), &cloud.models, messages, cache_prefix)
-                    .await?;
+            let completion = openrouter::complete(
+                cloud.key.expose(),
+                &cloud.models,
+                messages,
+                cache_prefix,
+                max_tokens,
+            )
+            .await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud_fallback(
@@ -1005,6 +1041,7 @@ async fn run_local_complete(
     local: &LocalArm,
     messages: &[ChatMessage],
     cloud: Option<&CloudArm>,
+    max_tokens: Option<u32>,
 ) -> Result<LlmOutcome> {
     let state = app.state::<AppState>();
     let rt = &state.local_ai;
@@ -1019,6 +1056,7 @@ async fn run_local_complete(
                     messages,
                     FallbackReason::Cooldown,
                     local.model.clone(),
+                    max_tokens,
                 )
                 .await
             }
@@ -1039,6 +1077,7 @@ async fn run_local_complete(
                     messages,
                     FallbackReason::EndpointRefused,
                     local.model.clone(),
+                    max_tokens,
                 )
                 .await
             }
@@ -1066,6 +1105,7 @@ async fn run_local_complete(
                     messages,
                     FallbackReason::HardFailure(failure.kind),
                     local.model.clone(),
+                    max_tokens,
                 )
                 .await
             }
@@ -1086,7 +1126,8 @@ async fn run_local_complete(
         // model resident, and a marker written only on success would leave PM unable to free the
         // memory its own failed call reserved.
         rt.mark_pm_loaded(&local.base_url, &local.model);
-        let attempt = openai_compat::complete(&local.base_url, &local.model, token, messages);
+        let attempt =
+            openai_compat::complete(&local.base_url, &local.model, token, messages, max_tokens);
         // The switch going off mid-call drops the slot future, which aborts the request exactly as
         // a chat preemption does; the load it may have caused stays marked, like a preempted one,
         // for the switch's release pass to hand back.
@@ -1161,6 +1202,7 @@ async fn run_local_complete(
                             messages,
                             FallbackReason::HardFailure(failure.kind),
                             local.model.clone(),
+                            max_tokens,
                         )
                         .await
                     }
@@ -1182,11 +1224,18 @@ async fn cloud_complete(
     messages: &[ChatMessage],
     reason: FallbackReason,
     displaced: String,
+    max_tokens: Option<u32>,
 ) -> Result<LlmOutcome> {
     local_ai_gate(rt)?;
     let start = Instant::now();
-    let completion =
-        openrouter::complete(cloud.key.expose(), &cloud.models, messages, false).await?;
+    let completion = openrouter::complete(
+        cloud.key.expose(),
+        &cloud.models,
+        messages,
+        false,
+        max_tokens,
+    )
+    .await?;
     Ok(LlmOutcome {
         completion,
         meta: CallMeta::cloud_fallback(start.elapsed(), reason, displaced),
@@ -1749,6 +1798,69 @@ mod tests {
     use super::*;
     use crate::local_slot::LocalRuntime;
     use crate::openai_compat::{WindowInfo, WindowSource};
+
+    /// The ~19 callers PM has go through `complete` and `stream_chat`, and neither bounds an
+    /// answer: `complete` is `complete_capped` with `None` and no other value, and the streaming
+    /// path never names a bound. Only a mod's `ai.complete` calls `complete_capped` with `Some`
+    /// (their request bodies are held byte for byte in `openrouter.rs` and `openai_compat.rs`).
+    #[test]
+    fn the_existing_callers_ask_for_no_bound() {
+        let src = include_str!("llm_gateway.rs");
+        let live = src.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let plain = live
+            .split("pub async fn complete(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn complete_capped(").next())
+            .expect("complete is followed by complete_capped");
+        assert!(
+            plain.contains("complete_capped(app, plan, messages, cache_prefix, None)"),
+            "{plain}"
+        );
+        let streaming = live
+            .split("pub async fn stream_chat<F>(")
+            .nth(1)
+            .expect("stream_chat exists");
+        assert!(
+            !streaming.contains("max_tokens"),
+            "the chat stream is unbounded"
+        );
+    }
+
+    /// A bounded call is bounded on EVERY leg the route can take: each request `complete_capped`
+    /// can make (the cloud arm, the power route, the local arm, and each of the four cloud
+    /// fallbacks) is handed the bound, never a literal. A leg left out would be one a mod's call
+    /// could spend on past the worst case PM booked.
+    #[test]
+    fn every_leg_of_a_bounded_call_is_handed_the_bound() {
+        let src = include_str!("llm_gateway.rs");
+        let live = src.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let region = live
+            .split("pub async fn complete_capped(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn stream_chat<F>(").next())
+            .expect("complete_capped comes before stream_chat");
+        // The call sites: the text from each to its `.await`.
+        let sites = |needle: &str| -> Vec<&str> {
+            region
+                .match_indices(needle)
+                // A definition is not a call.
+                .filter(|(at, _)| !region[..*at].ends_with("fn "))
+                .map(|(at, _)| region[at..].split(".await").next().unwrap())
+                .collect()
+        };
+        for (needle, count) in [
+            ("openrouter::complete(", 3),
+            ("openai_compat::complete(", 1),
+            ("cloud_complete(\n", 4),
+            ("run_local_complete(app", 2),
+        ] {
+            let found = sites(needle);
+            assert_eq!(found.len(), count, "{needle}");
+            for site in found {
+                assert!(site.contains("max_tokens"), "{needle}: {site}");
+            }
+        }
+    }
 
     fn arm() -> LocalArm {
         LocalArm {

@@ -676,6 +676,7 @@ mod tests {
             version: v("1.1.0"),
             api: range((1, 0), (1, 0)),
             publisher: publisher(Tier::First, "Atlas", "itsAtlas-org/pm-mods"),
+            authors: Vec::new(),
             permissions: vec![
                 Permission {
                     id: "storage".into(),

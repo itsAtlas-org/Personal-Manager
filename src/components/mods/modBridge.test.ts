@@ -26,6 +26,7 @@ import {
   fitsBytes,
   isArrayBuffer,
   isConnectRequest,
+  isMethodName,
   readEvent,
   readPortMessage,
   readReply,
@@ -144,6 +145,17 @@ describe("a call", () => {
     });
   });
 
+  it("is told apart by isMethodName exactly as the page reads it (the frame SDK asks it first)", () => {
+    for (const method of ["storage.get", "a", "A_b-c.9", "x".repeat(128)]) {
+      expect(isMethodName(method), method).toBe(true);
+      expect(readPortMessage({ id: 1, method }).kind).toBe("call");
+    }
+    for (const method of [undefined, "", "1abc", "a b", "x".repeat(129), 7, null]) {
+      expect(isMethodName(method), String(method)).toBe(false);
+      expect(readPortMessage({ id: 1, method }).kind).toBe("refuse");
+    }
+  });
+
   it("refuses arguments that aren't plain JSON", () => {
     const cycle: Record<string, unknown> = {};
     cycle.self = cycle;
@@ -209,6 +221,14 @@ describe("the backend's answer", () => {
     ).toEqual({
       kind: "error",
       error: { code: "MOD-4001", message: "stale", revision: 3, permission: "storage" },
+    });
+  });
+
+  it.each(["secrets.set", "notify"])("reads %s as a page action the page performs", (action) => {
+    expect(readReply({ kind: "page", action, args: { a: 1 } })).toEqual({
+      kind: "page",
+      action,
+      args: { a: 1 },
     });
   });
 

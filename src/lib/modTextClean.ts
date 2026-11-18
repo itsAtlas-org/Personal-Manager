@@ -26,6 +26,53 @@ export function plainLine(text: string): string {
   return cleanModChars(text).replace(/ {2,}/g, " ").trim();
 }
 
+/** The most names a manifest may credit (`package.rs` `MAX_AUTHORS`); a longer list is cut to it. */
+const MAX_CREDITED = 8;
+
+/** Who made a mod, in the one short form every screen uses: the publisher the signature and the
+ *  pin are about first, then, marked as the mod's own claim, the people it credits, after a label ("Atlas
+ *  · author: Bobby Yu", "Atlas · authors: Bobby Yu, Ann Lee"). The credited names are free text a
+ *  mod's maker types, so they never sit where the publisher does and always follow that label: a
+ *  name like "Atlas" or "Bobby Yu · Atlas" can't pass for the publisher or for a reviewer. With no
+ *  people it is the publisher alone, and with neither it is empty. All of it is cleaned like the
+ *  mod's name. */
+export function makerCredit(authors: readonly string[] | undefined, publisher: string): string {
+  const people = (authors ?? [])
+    .slice(0, MAX_CREDITED)
+    .map(plainLine)
+    .filter((a) => a !== "");
+  const who = plainLine(publisher);
+  if (people.length === 0) return who;
+  return `${who || "an unnamed publisher"} · ${people.length === 1 ? "author" : "authors"}: ${people.join(", ")}`;
+}
+
+/** The line every screen draws for it: "Made by Atlas · author: Bobby Yu", or "Maker
+ *  not named". */
+export function madeByLine(authors: readonly string[] | undefined, publisher: string): string {
+  const credit = makerCredit(authors, publisher);
+  return credit ? `Made by ${credit}` : "Maker not named";
+}
+
+const INVISIBLE_BUT_NEWLINE = /(?!\n)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/** A mod's help text, which may have several lines: the same cleaning as {@link plainLine} but the
+ *  line breaks stay (a carriage return counts as one), spaces are left as written, and a run of
+ *  blank lines is cut to one so a body can't push the rest of the panel off the screen. */
+export function modBody(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(INVISIBLE_BUT_NEWLINE, " ")
+    .replace(MARK_RUN, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Whether a mod has anything to put in its About panel: a description, or a help entry with a body,
+ *  once cleaned. False means ModFrame offers no button that would open an empty panel. */
+export function hasAbout(description: string, help: readonly { body: string }[]): boolean {
+  return plainLine(description) !== "" || help.some((h) => modBody(h.body) !== "");
+}
+
 /** A mod's name as it sits inside one of PM's own sentences, titles and menu items: in quotes, which
  *  the name can't close (a double quote inside it becomes a single one), so a name like
  *  `Calendar. Nothing was changed.` reads as the mod's name rather than as more of PM's sentence.

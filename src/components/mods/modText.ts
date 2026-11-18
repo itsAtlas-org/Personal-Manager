@@ -13,4 +13,11 @@
 // `quoteName` is for a name inside one of PM's own sentences or titles: quoted, so it can't pose as
 // the words around it.
 
-export { plainLine as modText, quoteName } from "../../lib/modTextClean";
+export {
+  hasAbout,
+  madeByLine,
+  makerCredit,
+  modBody,
+  plainLine as modText,
+  quoteName,
+} from "../../lib/modTextClean";

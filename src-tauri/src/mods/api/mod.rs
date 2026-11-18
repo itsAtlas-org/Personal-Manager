@@ -19,7 +19,9 @@
 //! 4. the mod runs: its row is active and turned on (paused, parked, installing, blacklisted and an
 //!    unaccepted auto-install all refuse), and the method exists in this API (the table);
 //! 5. the grant ([`grants`], D3's exclusions and the sealed-engine rule included);
-//! 6. the rate bucket and the concurrency cap ([`limits`]);
+//! 6. the rate bucket and the concurrency cap ([`limits`]), then the call's family's own (the
+//!    experimental AI and network calls: tighter, because they hold their admission while they wait
+//!    on something outside PM);
 //! 7. the handler, with the arguments' size cap first.
 //!
 //! **Never past an await on stale facts.** Steps 2-5 run in one blocking task, each DB read a short
@@ -38,19 +40,33 @@
 //! the payload from the store (never PM's own event), and sends only into the outbox of a session
 //! that may hear it (`mods::outbox`), bounded by the frame's acknowledgements.
 
+mod ai;
+#[cfg(test)]
+mod ai_prompt_tests;
+#[cfg(test)]
+mod ai_tests;
 mod doc_storage;
 mod documents;
 mod embeddings;
 pub mod error;
 pub mod events;
+#[cfg(test)]
+mod fixture_tests;
 pub mod grants;
 mod handlers;
 pub mod limits;
+pub(crate) mod net;
+mod net_fetch;
+#[cfg(test)]
+mod net_fetch_tests;
 pub mod permissions;
 mod storage;
+mod surface;
+#[cfg(test)]
+mod surface_tests;
 pub mod table;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -66,8 +82,14 @@ use tauri::{AppHandle, Manager};
 pub use error::{Code, ModError};
 pub use limits::Calls;
 
+#[cfg(test)]
+pub(crate) use ai::PromptRoute;
+/// The money prompt's facts about the route (`mod_ai_prompt_info`).
+pub(crate) use ai::{prompt_info, PromptInfo};
+
 use self::grants::ModFacts;
 use self::table::{Lookup, Row};
+use super::netfetch::{HopFetcher, SystemHops};
 use super::policy::MOD_API_VERSION;
 use super::runtime::{CallTicket, ModRuntime};
 use super::{EngineState, MAIN_LABEL};
@@ -96,6 +118,16 @@ pub trait Host: Clone + Send + Sync + 'static {
     /// Whether PM is locked now. An error means the store is closed, which refuses the same way.
     fn app_locked(&self) -> crate::error::Result<bool>;
 
+    /// The network edge `net.fetch` goes through: the real one resolves, screens and pins; a test
+    /// scripts it (`netfetch::fake`), so the fetch's rules run with no network.
+    type Hops: HopFetcher + 'static;
+    fn hops(&self) -> &Self::Hops;
+
+    /// The model side `ai.complete` goes through: the real one routes, prices and calls PM's AI; a
+    /// test scripts it, so the call's money rules run with no model.
+    type Model: ai::ModelEdge + 'static;
+    fn model(&self) -> &Self::Model;
+
     /// A test's hook into a call in flight, so it can change the world at an exact point (an
     /// uninstall between the checks and the commit). Nothing in a build.
     #[cfg(test)]
@@ -121,6 +153,12 @@ pub enum Point {
     /// An event is about to choose its recipients: the moment between a flush's own checks and the
     /// emission.
     BeforeEmit,
+    /// An `ai.complete` booking is priced and written, and is about to go into the call's slot.
+    /// The DB guard is held: a hook here must not take it.
+    Booking,
+    /// An `ai.complete` booking is made and the call is about to be checked once more. The DB guard
+    /// is held: a hook here must not take it.
+    Booked,
 }
 
 impl Host for AppHandle {
@@ -149,6 +187,20 @@ impl Host for AppHandle {
     fn app_locked(&self) -> crate::error::Result<bool> {
         crate::settings::app_locked_for_mods(self.store())
     }
+
+    type Hops = SystemHops;
+
+    fn hops(&self) -> &SystemHops {
+        static HOPS: SystemHops = SystemHops::new();
+        &HOPS
+    }
+
+    type Model = AppHandle;
+
+    /// The app handle is the model edge itself (`ai::ModelEdge for AppHandle`).
+    fn model(&self) -> &AppHandle {
+        self
+    }
 }
 
 /// A page action: an authorised call PM's page answers, from what only it holds.
@@ -161,17 +213,31 @@ pub enum PageAction {
     /// (`ModFrame.tsx`, through the app's `ReaderProvider`).
     #[serde(rename = "ui.openDocument")]
     UiOpenDocument,
+    /// PM's own key field for one of the mod's declared secret slots (`secrets.set`): the person
+    /// types the key there, and the page sends it to Rust, never to the frame.
+    #[serde(rename = "secrets.set")]
+    SecretsSet,
+    /// A notice strip with the mod's name, in PM's own band (`notify`).
+    #[serde(rename = "notify")]
+    Notify,
 }
 
 impl PageAction {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [PageAction; 2] = [Self::ThemeGet, Self::UiOpenDocument];
+    pub const ALL: [PageAction; 4] = [
+        Self::ThemeGet,
+        Self::UiOpenDocument,
+        Self::SecretsSet,
+        Self::Notify,
+    ];
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn name(self) -> &'static str {
         match self {
             Self::ThemeGet => "theme.get",
             Self::UiOpenDocument => "ui.openDocument",
+            Self::SecretsSet => "secrets.set",
+            Self::Notify => "notify",
         }
     }
 }
@@ -310,6 +376,11 @@ async fn call<H: Host>(
     // 6. The rate bucket and the concurrency cap. The admission counts the call as in flight until
     // it returns.
     let _admission = host.calls().admit(&auth.ticket.mod_id, Instant::now())?;
+    // ...and, for a call that waits on a model or a website, its family's own (the row says which),
+    // held for as long as the call runs. A general call gets an admission that counts nothing.
+    let _family =
+        host.calls()
+            .admit_family(&auth.ticket.mod_id, auth.row.family, Instant::now())?;
     // 7. The handler.
     if args.len() > limits::MAX_ARGS_BYTES {
         return Err(ModError::new(

@@ -20,13 +20,20 @@
 //!   travel as binary, up to **20 MiB**, not here.
 //! - **5,000 documents a call** (the Map's largest node cap): a page of the list, the ids a call
 //!   names, the entries of one batched write.
+//! - **The experimental calls (PR B)** have limits of their own, below: one outer deadline
+//!   ([`CALL_TIMEOUT`]) for any call that waits on something outside PM, a bucket and a concurrency
+//!   cap per [`Family`] (a call of the AI or network family holds its admission for as long as the
+//!   model or the website takes, so the generic 16 at once would let one mod hold PM's shared local
+//!   model slot or its sockets), and the payload caps of `ai.complete`, `net.fetch`, `notify` and
+//!   `secrets.set`. They were chosen before any mod uses a call, so each is a first guess to tune
+//!   after the live tests; every one errs toward refusing.
 //! - **50 MiB of private storage per mod** (`mod_kv` and `mod_doc_data` together), counted as each
 //!   row's value and key bytes plus a fixed per-row cost, so a million empty rows fill it too. The
 //!   Map's coordinates for 5,000 documents are well under 1 MiB.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::error::{Code, ModError};
 use crate::mods::ids::ModId;
@@ -63,6 +70,113 @@ pub const STORAGE_GROWTH_PER_SECOND: u64 = 4;
 /// Growing writes a mod may make at once after a quiet spell. The Map's first layout of a large
 /// library is a few dozen batches.
 pub const STORAGE_GROWTH_BURST: u64 = 40;
+
+// The experimental calls (plan decisions D-15, D-20, D-22). Each is shown in the Developer tab.
+
+/// The outer deadline of a call that waits on something outside PM (a model, a website). The AI
+/// route's own worst case is 20 s waiting for the shared local slot plus a 120 s cold load of the
+/// model, then the answer itself; past this the call is stopped and the mod is told
+/// `MOD-3005`. Only cancellable async work can be stopped by it: a `spawn_blocking` step
+/// that has begun runs to its end, which is why a handler commits nothing after a timeout (it
+/// checks [`super::still_current`] first) and keeps its blocking steps short.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// `ai.complete` calls of one mod running at once. A call holds PM's one local-model slot while it
+/// runs (`local_slot.rs`), so a mod may not queue many ahead of PM's own background jobs.
+pub const AI_MAX_IN_FLIGHT: usize = 2;
+/// `ai.complete` calls a mod may make per minute, sustained. Every call spends the mod's money cap
+/// as well; this bounds how fast a mod can reach it, and how fast it can fill the usage log.
+pub const AI_CALLS_PER_MINUTE: u64 = 20;
+/// `ai.complete` calls a mod may make at once after a quiet spell.
+pub const AI_CALL_BURST: u64 = 5;
+/// The messages of one `ai.complete`, as UTF-8 bytes of content. The reservation is priced from this
+/// (a token covers at least one byte of text, so the bytes are a provable upper bound on the tokens
+/// without a tokenizer in Rust), so a larger prompt is a larger worst-case price.
+pub const MAX_AI_PROMPT_BYTES: usize = 64 << 10;
+/// Messages in one `ai.complete`.
+pub const MAX_AI_MESSAGES: usize = 32;
+/// The most a mod may ask a model to write, in tokens (`maxTokens` is capped to it, never refused
+/// for being over it: a smaller answer is the safe side).
+pub const MAX_AI_OUTPUT_TOKENS: u32 = 4096;
+
+/// `net.fetch` calls of one mod running at once: the call holds its admission for the whole fetch,
+/// and `getaddrinfo` cannot be cancelled once begun.
+pub const NET_MAX_IN_FLIGHT: usize = 4;
+/// `net.fetch` calls a mod may make per second, sustained.
+pub const NET_FETCHES_PER_SECOND: u64 = 5;
+/// `net.fetch` calls a mod may make at once after a quiet spell.
+pub const NET_FETCH_BURST: u64 = 20;
+/// A fetch's request body, in bytes.
+pub const MAX_FETCH_REQUEST_BYTES: usize = 256 << 10;
+/// A fetch's response body, in bytes, read to this and no further. Sent to the frame as text or
+/// base64. As base64 it is under [`MAX_RESULT_BYTES`]; as text it is sent only when its JSON form
+/// is within [`MAX_FETCH_TEXT_JSON_BYTES`] (escaping can grow text up to six times), else as base64,
+/// so a body within this cap always fits (a test holds both).
+pub const MAX_FETCH_RESPONSE_BYTES: usize = 4 << 20;
+/// The most a fetch's text body may weigh as a JSON string (quotes, backslashes and control
+/// characters escaped) before it is sent as base64 instead: above the base64 form of the largest
+/// body, below the answer cap with the headers' room.
+pub const MAX_FETCH_TEXT_JSON_BYTES: usize = 6 << 20;
+/// How long a fetch may take to connect, per hop.
+pub const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a whole fetch may take, redirects and body included.
+pub const FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Redirects a fetch follows, each one re-checked as a new request.
+pub const MAX_FETCH_REDIRECTS: usize = 5;
+
+/// A `notify` text, in characters (after PM cleans it like any mod text).
+pub const NOTIFY_MAX_CHARS: usize = 140;
+/// Notices a mod may show per day, by the user's local date.
+pub const NOTIFY_PER_DAY: u32 = 5;
+/// Times a mod may ask for a key in one session (`secrets.set`).
+pub const SECRET_ASKS_PER_SESSION: u32 = 3;
+
+/// The calls that are counted against a bucket and a cap of their own, as well as the generic
+/// ones (every call is admitted by [`Calls::admit`] first). A row names its family in the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// Everything else: only the generic limits.
+    General,
+    /// `ai.complete`.
+    Ai,
+    /// `net.fetch`.
+    Net,
+}
+
+/// One family's concurrency cap and bucket, `rate` calls every `per_seconds` seconds.
+struct FamilyLimit {
+    max_in_flight: usize,
+    rate: u64,
+    per_seconds: u64,
+    burst: u64,
+    /// What a refusal says, for too many at once and for too fast.
+    busy: &'static str,
+    fast: &'static str,
+}
+
+impl Family {
+    fn limit(self) -> Option<FamilyLimit> {
+        match self {
+            Self::General => None,
+            Self::Ai => Some(FamilyLimit {
+                max_in_flight: AI_MAX_IN_FLIGHT,
+                rate: AI_CALLS_PER_MINUTE,
+                per_seconds: 60,
+                burst: AI_CALL_BURST,
+                busy: "Too many of this mod's AI requests are running at once.",
+                fast: "This mod is asking the AI model too often.",
+            }),
+            Self::Net => Some(FamilyLimit {
+                max_in_flight: NET_MAX_IN_FLIGHT,
+                rate: NET_FETCHES_PER_SECOND,
+                per_seconds: 1,
+                burst: NET_FETCH_BURST,
+                busy: "Too many of this mod's web requests are running at once.",
+                fast: "This mod is fetching from the web too fast.",
+            }),
+        }
+    }
+}
 
 // Events (spec §1.5 "Events"). A frame is told things as they happen, and a frame can be slow, so the
 // pipe from Rust to a frame holds a bounded number of events nobody has acknowledged, whatever the
@@ -108,25 +222,37 @@ pub fn quota_allows(others: u64, old: u64, new: u64, quota: u64) -> bool {
     new <= old || others.saturating_add(new) <= quota
 }
 
-/// A token bucket in millionths of a call, so refilling is exact integer arithmetic: `rate` calls
-/// a second, at most `burst` saved up. Pure: the caller says what time it is.
+/// A token bucket whose unit is a millionth of a call per second of the refill period, so
+/// refilling is exact integer arithmetic (no remainder is ever dropped): `rate` calls every
+/// `per_seconds` seconds (one second, unless made with [`TokenBucket::per`]), at most `burst` saved
+/// up. One call costs `MICRO * per_seconds` units, and a microsecond earns `rate` of them. Pure: the
+/// caller says what time it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenBucket {
-    micros: u64,
+    units: u64,
     last: Instant,
     rate: u64,
+    /// What one call costs, in units.
+    cost: u64,
     burst: u64,
 }
 
 const MICRO: u64 = 1_000_000;
 
 impl TokenBucket {
-    /// A full bucket.
+    /// A full bucket refilling at `rate` calls a second.
     pub fn new(rate: u64, burst: u64, now: Instant) -> Self {
+        Self::per(rate, 1, burst, now)
+    }
+
+    /// A full bucket refilling at `rate` calls every `per_seconds` seconds (at least one).
+    pub fn per(rate: u64, per_seconds: u64, burst: u64, now: Instant) -> Self {
+        let cost = MICRO.saturating_mul(per_seconds.max(1));
         Self {
-            micros: burst.saturating_mul(MICRO),
+            units: burst.saturating_mul(cost),
             last: now,
             rate,
+            cost,
             burst,
         }
     }
@@ -136,16 +262,15 @@ impl TokenBucket {
     pub fn take(&mut self, now: Instant) -> bool {
         let elapsed = now.saturating_duration_since(self.last);
         self.last = self.last.max(now);
-        // rate calls per second = rate micro-calls per microsecond.
         let earned = u64::try_from(elapsed.as_micros())
             .unwrap_or(u64::MAX)
             .saturating_mul(self.rate);
-        self.micros = self
-            .micros
+        self.units = self
+            .units
             .saturating_add(earned)
-            .min(self.burst.saturating_mul(MICRO));
-        if self.micros >= MICRO {
-            self.micros -= MICRO;
+            .min(self.burst.saturating_mul(self.cost));
+        if self.units >= self.cost {
+            self.units -= self.cost;
             true
         } else {
             false
@@ -159,6 +284,30 @@ struct PerMod {
     in_flight: usize,
     /// Growing storage writes, which pay for a scan of everything the mod stores.
     growth: TokenBucket,
+    ai: FamilyState,
+    net: FamilyState,
+}
+
+/// One family's bucket and in-flight count for one mod.
+#[derive(Debug)]
+struct FamilyState {
+    bucket: TokenBucket,
+    in_flight: usize,
+}
+
+impl FamilyState {
+    fn new(family: Family, now: Instant) -> Self {
+        // A family without limits is never asked; its bucket is the generic one, unused.
+        let (rate, per, burst) = family
+            .limit()
+            .map_or((CALLS_PER_SECOND, 1, CALL_BURST), |l| {
+                (l.rate, l.per_seconds, l.burst)
+            });
+        Self {
+            bucket: TokenBucket::per(rate, per, burst, now),
+            in_flight: 0,
+        }
+    }
 }
 
 impl PerMod {
@@ -167,6 +316,17 @@ impl PerMod {
             bucket: TokenBucket::new(rate, burst, now),
             in_flight: 0,
             growth: TokenBucket::new(STORAGE_GROWTH_PER_SECOND, STORAGE_GROWTH_BURST, now),
+            ai: FamilyState::new(Family::Ai, now),
+            net: FamilyState::new(Family::Net, now),
+        }
+    }
+
+    /// The state of a family that has limits of its own.
+    fn family_mut(&mut self, family: Family) -> Option<&mut FamilyState> {
+        match family {
+            Family::General => None,
+            Family::Ai => Some(&mut self.ai),
+            Family::Net => Some(&mut self.net),
         }
     }
 }
@@ -190,6 +350,26 @@ impl Drop for Admission {
     fn drop(&mut self) {
         if let Some(m) = lock(&self.per_mod).get_mut(&self.id) {
             m.in_flight = m.in_flight.saturating_sub(1);
+        }
+    }
+}
+
+/// One admitted call of a family with limits of its own: it counts as in flight in that family until
+/// dropped. A [`Family::General`] call gets one that counts nothing.
+#[derive(Debug)]
+pub struct FamilyAdmission {
+    per_mod: Arc<Mutex<HashMap<ModId, PerMod>>>,
+    id: ModId,
+    family: Family,
+}
+
+impl Drop for FamilyAdmission {
+    fn drop(&mut self) {
+        if let Some(s) = lock(&self.per_mod)
+            .get_mut(&self.id)
+            .and_then(|m| m.family_mut(self.family))
+        {
+            s.in_flight = s.in_flight.saturating_sub(1);
         }
     }
 }
@@ -238,6 +418,45 @@ impl Calls {
         })
     }
 
+    /// Admit one call of `family` for `id` at `now`, on top of [`Calls::admit`]: the family's own
+    /// concurrency cap and bucket. A call refused for concurrency spends no token. [`Family::General`]
+    /// is always admitted (it has no limits beyond the generic ones).
+    pub fn admit_family(
+        &self,
+        id: &ModId,
+        family: Family,
+        now: Instant,
+    ) -> Result<FamilyAdmission, ModError> {
+        // Built only once a slot is taken (a `FamilyAdmission` gives one back when dropped, and its
+        // drop takes the lock this method holds). A general call counts nothing, and `family_mut`
+        // is `None` for it, so its drop counts nothing either.
+        let admission = || FamilyAdmission {
+            per_mod: Arc::clone(&self.per_mod),
+            id: id.clone(),
+            family,
+        };
+        let Some(limit) = family.limit() else {
+            return Ok(admission());
+        };
+        {
+            let mut all = lock(&self.per_mod);
+            let m = all
+                .entry(id.clone())
+                .or_insert_with(|| PerMod::new(now, CALLS_PER_SECOND, CALL_BURST));
+            let state = m
+                .family_mut(family)
+                .expect("a family with limits has a state");
+            if state.in_flight >= limit.max_in_flight {
+                return Err(ModError::new(Code::RateLimited, limit.busy));
+            }
+            if !state.bucket.take(now) {
+                return Err(ModError::new(Code::RateLimited, limit.fast));
+            }
+            state.in_flight += 1;
+        }
+        Ok(admission())
+    }
+
     /// Whether `id` may make one more storage write that grows what it stores, which costs a scan of
     /// everything it stores ([`STORAGE_GROWTH_PER_SECOND`]). Called under the DB guard, and takes
     /// only this limiter's own short lock (nothing takes the guard while holding it).
@@ -259,6 +478,14 @@ impl Calls {
     #[cfg(test)]
     pub fn in_flight(&self, id: &ModId) -> usize {
         lock(&self.per_mod).get(id).map_or(0, |m| m.in_flight)
+    }
+
+    #[cfg(test)]
+    pub fn family_in_flight(&self, id: &ModId, family: Family) -> usize {
+        lock(&self.per_mod)
+            .get_mut(id)
+            .and_then(|m| m.family_mut(family))
+            .map_or(0, |s| s.in_flight)
     }
 }
 
@@ -406,6 +633,162 @@ mod tests {
             assert!(STORAGE_GROWTH_PER_SECOND < CALLS_PER_SECOND);
             assert!(STORAGE_GROWTH_BURST <= CALL_BURST);
         }
+    }
+
+    #[test]
+    fn a_bucket_can_refill_per_minute_exactly_with_no_remainder_lost() {
+        // 20 a minute, bursts of 5: a token every 3 s.
+        let t0 = Instant::now();
+        let mut b = TokenBucket::per(AI_CALLS_PER_MINUTE, 60, AI_CALL_BURST, t0);
+        for i in 0..AI_CALL_BURST {
+            assert!(b.take(t0), "burst {i}");
+        }
+        assert!(!b.take(t0));
+        assert!(!b.take(t0 + Duration::from_millis(2999)));
+        assert!(b.take(t0 + Duration::from_secs(3)));
+        assert!(!b.take(t0 + Duration::from_secs(3)));
+        // Asking again and again in the gap loses nothing: the same instant is reached by one
+        // take or by a thousand microsecond-spaced refusals (a truncating rate would starve here).
+        let mut c = TokenBucket::per(20, 60, 1, t0);
+        assert!(c.take(t0));
+        let mut spent = 0;
+        for i in 1..=3_000_000u64 {
+            // 3 s in 1 microsecond steps.
+            if c.take(t0 + Duration::from_micros(i)) {
+                spent += 1;
+            }
+        }
+        assert_eq!(spent, 1, "exactly the token earned in 3 s");
+        // A long rest refills to the burst and no further; a zero period is read as one second.
+        let mut d = TokenBucket::per(20, 60, 5, t0);
+        for _ in 0..5 {
+            assert!(d.take(t0));
+        }
+        let later = t0 + Duration::from_secs(86_400);
+        for i in 0..5 {
+            assert!(d.take(later), "after a day, token {i}");
+        }
+        assert!(!d.take(later));
+        let mut z = TokenBucket::per(1, 0, 1, t0);
+        assert!(z.take(t0));
+        assert!(!z.take(t0 + Duration::from_millis(999)));
+        assert!(z.take(t0 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_general_call_is_never_held_by_a_family_and_counts_nothing() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let a = id("acme.a");
+        let held: Vec<_> = (0..500)
+            .map(|_| calls.admit_family(&a, Family::General, t0).unwrap())
+            .collect();
+        assert_eq!(calls.family_in_flight(&a, Family::Ai), 0);
+        assert_eq!(calls.family_in_flight(&a, Family::Net), 0);
+        drop(held);
+        assert_eq!(calls.in_flight(&a), 0);
+    }
+
+    #[test]
+    fn the_ai_family_holds_two_at_once_and_a_burst_then_a_slow_refill() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let (a, b) = (id("acme.a"), id("acme.b"));
+        let one = calls.admit_family(&a, Family::Ai, t0).unwrap();
+        let two = calls.admit_family(&a, Family::Ai, t0).unwrap();
+        assert_eq!(calls.family_in_flight(&a, Family::Ai), AI_MAX_IN_FLIGHT);
+        let busy = calls.admit_family(&a, Family::Ai, t0).unwrap_err();
+        assert_eq!(busy.code, Code::RateLimited);
+        assert!(busy.message.contains("at once"), "{busy}");
+        // The net family, the generic count and another mod are unaffected.
+        assert!(calls.admit_family(&a, Family::Net, t0).is_ok());
+        assert!(calls.admit_family(&b, Family::Ai, t0).is_ok());
+        assert_eq!(calls.in_flight(&a), 0, "the generic count is `admit`'s");
+        // A finished call frees its place, and the refused one spent no token: three of the bucket's
+        // five are taken (`one`, `two`, `three`), so exactly two remain.
+        drop(one);
+        assert_eq!(calls.family_in_flight(&a, Family::Ai), 1);
+        let three = calls.admit_family(&a, Family::Ai, t0).unwrap();
+        drop((two, three));
+        let last_two: Vec<_> = (0..2)
+            .map(|_| calls.admit_family(&a, Family::Ai, t0).unwrap())
+            .collect();
+        drop(last_two);
+        let empty = calls.admit_family(&a, Family::Ai, t0).unwrap_err();
+        assert_eq!(empty.code, Code::RateLimited);
+        assert!(empty.message.contains("too often"), "{empty}");
+        // One token every 3 s.
+        assert!(calls
+            .admit_family(&a, Family::Ai, t0 + Duration::from_millis(2999))
+            .is_err());
+        assert!(calls
+            .admit_family(&a, Family::Ai, t0 + Duration::from_secs(3))
+            .is_ok());
+        assert_eq!(calls.family_in_flight(&a, Family::Ai), 0);
+    }
+
+    #[test]
+    fn the_net_family_holds_four_at_once_and_refills_by_the_second() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let a = id("acme.a");
+        let mut held = Vec::new();
+        for _ in 0..NET_MAX_IN_FLIGHT {
+            held.push(calls.admit_family(&a, Family::Net, t0).unwrap());
+        }
+        let busy = calls.admit_family(&a, Family::Net, t0).unwrap_err();
+        assert!(busy.message.contains("at once"), "{busy}");
+        assert_eq!(calls.family_in_flight(&a, Family::Net), NET_MAX_IN_FLIGHT);
+        drop(held);
+        assert_eq!(calls.family_in_flight(&a, Family::Net), 0);
+        // Burst of 20: four taken; sixteen more one at a time, then it is empty.
+        for i in 0..(NET_FETCH_BURST - NET_MAX_IN_FLIGHT as u64) {
+            drop(
+                calls
+                    .admit_family(&a, Family::Net, t0)
+                    .unwrap_or_else(|e| panic!("{i}: {e}")),
+            );
+        }
+        let fast = calls.admit_family(&a, Family::Net, t0).unwrap_err();
+        assert!(fast.message.contains("too fast"), "{fast}");
+        assert!(calls
+            .admit_family(&a, Family::Net, t0 + Duration::from_millis(199))
+            .is_err());
+        assert!(calls
+            .admit_family(&a, Family::Net, t0 + Duration::from_millis(200))
+            .is_ok());
+    }
+
+    #[test]
+    fn the_experimental_limits_are_tighter_than_the_generic_ones_and_fit_together() {
+        const {
+            // A family only ever narrows what the generic limits allow.
+            assert!(AI_MAX_IN_FLIGHT < MAX_IN_FLIGHT);
+            assert!(NET_MAX_IN_FLIGHT < MAX_IN_FLIGHT);
+            assert!(AI_MAX_IN_FLIGHT >= 1 && NET_MAX_IN_FLIGHT >= 1);
+            assert!(AI_CALLS_PER_MINUTE < 60 * CALLS_PER_SECOND);
+            assert!(NET_FETCHES_PER_SECOND < CALLS_PER_SECOND);
+            assert!(AI_CALL_BURST <= CALL_BURST && NET_FETCH_BURST <= CALL_BURST);
+            // A burst is something a bucket can hold: at least one, and the rates refill it.
+            assert!(AI_CALL_BURST >= 1 && NET_FETCH_BURST >= 1);
+            assert!(AI_CALLS_PER_MINUTE >= 1 && NET_FETCHES_PER_SECOND >= 1);
+            // A fetch's body, base64 encoded (4 bytes per 3) with its headers' room, is an answer
+            // PM will send (MAX_RESULT_BYTES); the request is an argument PM will take.
+            assert!(MAX_FETCH_RESPONSE_BYTES / 3 * 4 + (64 << 10) < MAX_RESULT_BYTES);
+            // The text form's budget holds the base64 form of the largest body (so a body is never
+            // sent as base64 only to be larger) and still leaves the headers' room.
+            assert!(MAX_FETCH_TEXT_JSON_BYTES >= MAX_FETCH_RESPONSE_BYTES.div_ceil(3) * 4);
+            assert!(MAX_FETCH_TEXT_JSON_BYTES + (64 << 10) < MAX_RESULT_BYTES);
+            assert!(MAX_FETCH_REQUEST_BYTES < MAX_ARGS_BYTES);
+            // The prompt and its messages fit in one call's arguments.
+            assert!(MAX_AI_PROMPT_BYTES * 2 < MAX_ARGS_BYTES);
+            assert!(MAX_AI_MESSAGES >= 1 && MAX_AI_OUTPUT_TOKENS >= 1);
+            assert!(MAX_FETCH_REDIRECTS >= 1);
+            assert!(NOTIFY_MAX_CHARS >= 1 && NOTIFY_PER_DAY >= 1 && SECRET_ASKS_PER_SESSION >= 1);
+        }
+        // Deadlines nest: connecting fits in a fetch, a fetch in a call.
+        assert!(FETCH_CONNECT_TIMEOUT <= FETCH_TOTAL_TIMEOUT);
+        assert!(FETCH_TOTAL_TIMEOUT < CALL_TIMEOUT);
     }
 
     #[test]

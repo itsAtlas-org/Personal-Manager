@@ -84,7 +84,8 @@ pub const PERMISSIONS: &[&str] = &[
 ];
 
 /// Headers a secret may never go in: hop-by-hop ones and those the request itself owns (spec §1.5).
-const FORBIDDEN_SECRET_HEADERS: &[&str] = &[
+/// `api/net.rs` refuses a mod the same names (and more), and a test holds the two together.
+pub(crate) const FORBIDDEN_SECRET_HEADERS: &[&str] = &[
     "connection",
     "content-length",
     "cookie",
@@ -231,6 +232,10 @@ pub struct Manifest {
     pub version: semver::Version,
     pub api: ApiRange,
     pub publisher: Publisher,
+    /// The people who made it, for credit (`authors`, 1 to 8 names; empty when absent). Display
+    /// only: never part of the publisher pin, an update check, the index match or the trusted
+    /// comment, which all speak of the `publisher`. Like the name, they are the mod's own claim.
+    pub authors: Vec<String>,
     pub permissions: Vec<Permission>,
     pub internet_hosts: Vec<String>,
     pub secrets: Vec<SecretSlot>,
@@ -370,6 +375,8 @@ struct RawManifest {
     version: String,
     api_version: RawApi,
     publisher: RawPublisher,
+    #[serde(default, deserialize_with = "present")]
+    authors: Option<Vec<String>>,
     licence: String,
     #[serde(default)]
     permissions: Vec<Permission>,
@@ -1147,6 +1154,7 @@ fn parse_manifest(
     let version = parse_version(&raw.version)?;
     let api = parse_api(&raw.api_version)?;
     let publisher = parse_publisher(&raw.publisher)?;
+    let authors = parse_authors(raw.authors.as_deref())?;
     if raw.licence != LICENCE {
         return Err(refuse(
             Refusal::Licence,
@@ -1270,6 +1278,7 @@ fn parse_manifest(
         version,
         api,
         publisher,
+        authors,
         permissions: raw.permissions,
         internet_hosts: raw.internet_hosts,
         secrets: raw.secrets,
@@ -1462,6 +1471,26 @@ fn parse_publisher(raw: &RawPublisher) -> Result<Publisher, PackageError> {
         source_repo: raw.source_repo.clone(),
         commit: raw.commit.clone(),
     })
+}
+
+/// How many people a manifest may credit.
+pub(super) const MAX_AUTHORS: usize = 8;
+
+/// `authors`: absent reads as none; present it holds 1 to [`MAX_AUTHORS`] names, each held to the
+/// rule `publisher.author` is (plain text, 64 characters). Credit only: nothing pins on it.
+fn parse_authors(raw: Option<&[String]>) -> Result<Vec<String>, PackageError> {
+    let Some(names) = raw else {
+        return Ok(Vec::new());
+    };
+    if names.is_empty() || names.len() > MAX_AUTHORS {
+        return Err(manifest_error(format!(
+            "authors must name 1 to {MAX_AUTHORS} people"
+        )));
+    }
+    for name in names {
+        plain_text("an author's name", name, 64, false, false)?;
+    }
+    Ok(names.to_vec())
 }
 
 /// A git commit as PM writes one: 40 lowercase hex digits (a SHA-1 object id).
@@ -2749,6 +2778,72 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn authors_are_optional_display_only_names_held_to_the_publishers_text_rule() {
+        // Absent is fine: it reads as nobody named.
+        assert!(Fixture::new().verify().unwrap().manifest.authors.is_empty());
+        // One to eight names read back in order.
+        for names in [
+            vec!["Bobby Yu"],
+            vec!["Bobby Yu", "Ramit", "Mats", "A", "B", "C", "D", "E"],
+        ] {
+            let f = with_manifest(|m| m["authors"] = json!(names));
+            assert_eq!(f.verify().unwrap().manifest.authors, names);
+        }
+        // Names are as long as a publisher's author may be, and no longer.
+        let longest = "a".repeat(64);
+        let f = with_manifest(|m| m["authors"] = json!([longest]));
+        assert!(f.verify().is_ok());
+        refused_manifest("65 characters", Refusal::Manifest, |m| {
+            m["authors"] = json!(["a".repeat(65)])
+        });
+        // None, nine, a non-list, a null, a non-text name.
+        refused_manifest("empty list", Refusal::Manifest, |m| {
+            m["authors"] = json!([])
+        });
+        refused_manifest("nine names", Refusal::Manifest, |m| {
+            m["authors"] = json!(["a", "b", "c", "d", "e", "f", "g", "h", "i"])
+        });
+        refused_manifest("a bare string", Refusal::Manifest, |m| {
+            m["authors"] = json!("Bobby Yu")
+        });
+        refused_manifest("null", Refusal::Manifest, |m| m["authors"] = json!(null));
+        refused_manifest("a number", Refusal::Manifest, |m| m["authors"] = json!([7]));
+        // Each name is refused (not cleaned) for what refuses a publisher's author.
+        for bad in [
+            "",
+            " Bobby",
+            "Bobby ",
+            "Bob\u{0}by",
+            "Bob\nby",
+            "A\u{202e}B",
+            "Bo\u{200b}b",
+            "Bob\tby",
+        ] {
+            refused_manifest(&format!("{bad:?}"), Refusal::Manifest, |m| {
+                m["authors"] = json!(["Fine", bad])
+            });
+        }
+        let five = ['\u{0301}', '\u{0302}', '\u{0303}', '\u{0304}', '\u{0305}'];
+        refused_manifest("stacked marks", Refusal::Manifest, |m| {
+            m["authors"] = json!([stacked('a', &five)])
+        });
+    }
+
+    /// The signed pin speaks of the publisher alone: credit names are in no part of the trusted
+    /// comment, so a package that names or changes them still verifies against the same signature
+    /// form, and its publisher is untouched.
+    #[test]
+    fn authors_are_no_part_of_the_signed_comment_or_the_publisher() {
+        let plain = Fixture::new().verify().unwrap().manifest;
+        let f = with_manifest(|m| m["authors"] = json!(["Bobby Yu", "Ramit"]));
+        let credited = f.verify().unwrap().manifest;
+        assert_eq!(credited.authors, ["Bobby Yu", "Ramit"]);
+        assert_eq!(credited.publisher, plain.publisher);
+        // The comment is built from the publisher alone (see `comment_for`).
+        assert!(!comment_for(&f.manifest).contains("Bobby"));
+    }
+
+    #[test]
     fn permissions_are_known_unique_and_explained() {
         refused_manifest("unknown", Refusal::Manifest, |m| {
             m["permissions"][0]["id"] = json!("everything")
@@ -3059,6 +3154,157 @@ pub(crate) mod tests {
         let bytes = unsigned_package(|m, _| m["version"] = json!("2.0.0"));
         let pkg = verify_unsigned(&bytes).unwrap();
         assert_eq!(pkg.manifest.version, semver::Version::new(2, 0, 0));
+    }
+
+    /// The Map's source manifest (`mods/atlas.map`, PR B) is read by two programs: PM's Rust here and
+    /// the node gate `scripts/check-mods.mjs`. The rust job has no node build, so this is the one place
+    /// a drift in what the committed file says shows up there. The file's commit is the all-zero
+    /// placeholder (a manifest cannot hold the hash of its own commit), which has the right shape.
+    #[test]
+    fn the_committed_atlas_map_manifest_parses() {
+        let text = include_str!("../../../mods/atlas.map/manifest.json");
+        let mut files = BTreeMap::new();
+        files.insert(
+            "app/index.html".to_string(),
+            VerifiedFile {
+                sha256: [0; 32],
+                bytes: Vec::new(),
+            },
+        );
+        let m = parse_manifest(text.as_bytes(), &files).expect("the committed manifest parses");
+        assert_eq!(m.id.as_str(), "atlas.map");
+        assert_eq!(m.publisher.tier, Tier::First);
+        assert_eq!(m.publisher.commit, "0".repeat(40));
+        assert_eq!(m.name, "Document Map");
+        assert_eq!(m.contributions.nav_tab.as_deref(), Some("Document Map"));
+        // The publisher is the organisation (what pins updates); the person is credit only.
+        assert_eq!(m.publisher.author, "Atlas");
+        assert_eq!(m.authors, ["Bobby Yu"]);
+        // The Map's help entries (B6) go through PM's own text rules here: the ids, the lengths, no
+        // control or invisible character. The node side holds the same rules in manifest.test.ts.
+        let help: Vec<&str> = m.contributions.help.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(
+            help,
+            [
+                "map-overview",
+                "map-canvas",
+                "map-arrangement",
+                "map-cohesion",
+                "map-navigate",
+                "map-names",
+                "map-settings",
+                "map-updates"
+            ]
+        );
+    }
+
+    /// A folder of one `app/index.html` and the repo's own LICENCE.txt around a committed manifest:
+    /// what `pack-mod --stage` leaves in a mod's `dist/` for the developer folder loader.
+    fn staged_folder(manifest: &str) -> BTreeMap<String, VerifiedFile> {
+        let file = |bytes: &[u8]| VerifiedFile {
+            sha256: Sha256::digest(bytes).into(),
+            bytes: bytes.to_vec(),
+        };
+        BTreeMap::from([
+            (MANIFEST.to_string(), file(manifest.as_bytes())),
+            (
+                LICENCE_FILE.to_string(),
+                file(include_str!("../../../LICENCE.txt").as_bytes()),
+            ),
+            ("app/index.html".to_string(), file(b"<!doctype html>")),
+        ])
+    }
+
+    /// Both committed source manifests, as the developer-mode folder loader reads a staged `dist/`:
+    /// the Map as a first-party folder (a development build only) and the toolchain's third-party
+    /// fixture (`tests/mod-fixtures/acme.hello`, packed `--unsigned` in the live test) as anyone's.
+    #[test]
+    fn the_committed_manifests_load_as_the_folders_pack_mod_stages() {
+        let map = include_str!("../../../mods/atlas.map/manifest.json");
+        let pkg = verify_folder(staged_folder(map), true).expect("atlas.map loads in a dev build");
+        assert_eq!(pkg.manifest.id.as_str(), "atlas.map");
+        // Not in a release build: an atlas. folder is Atlas's.
+        assert_eq!(
+            refusal(verify_folder(staged_folder(map), false)),
+            Refusal::Id
+        );
+
+        let hello = include_str!("../../../tests/mod-fixtures/acme.hello/manifest.json");
+        for allow_atlas in [false, true] {
+            let pkg = verify_folder(staged_folder(hello), allow_atlas).expect("acme.hello loads");
+            assert_eq!(pkg.manifest.id.as_str(), "acme.hello");
+            assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+            assert_eq!(pkg.manifest.contributions.nav_tab.as_deref(), Some("Hello"));
+            assert_eq!(pkg.manifest.data.keys.len(), 1);
+        }
+    }
+
+    /// The other half of the format agreement. `scripts/pack-mod.mjs` wrote the archive in
+    /// `tests/mod-fixtures/golden/hello.pmmod.b64` (scripts/pack-mod.test.mjs regenerates it from fixed
+    /// inputs and fails if the bytes differ), and this is the real verifier reading it: the zip
+    /// structure, the sorted checksums, the AGPL text, the manifest and the `--commit` stamp. Two
+    /// implementations of one format agree on at least one real archive, in the rust job, which has
+    /// no node build.
+    #[test]
+    fn a_pack_mod_golden_archive_is_one_the_verifier_takes() {
+        let text = include_str!("../../../tests/mod-fixtures/golden/hello.pmmod.b64");
+        let b64: String = text.split_whitespace().collect();
+        let bytes = B64.decode(b64).expect("the golden file is base64");
+
+        let pkg = verify_unsigned(&bytes).expect("pack-mod's file verifies");
+        assert_eq!(pkg.manifest.id.as_str(), "acme.golden");
+        assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+        assert_eq!(
+            pkg.manifest.publisher.commit,
+            "1234567890abcdef1234567890abcdef12345678"
+        );
+        assert!(pkg.signer.is_none() && pkg.trusted_comment.is_none());
+        let paths: Vec<&str> = pkg.files.keys().map(String::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "LICENCE.txt",
+                "NOTICE.txt",
+                "app/assets/app.js",
+                "app/assets/style.css",
+                "app/index.html",
+                "manifest.json"
+            ]
+        );
+        let notice = std::str::from_utf8(&pkg.files[NOTICE_FILE].bytes).unwrap();
+        assert!(notice.contains("golden-dep 1.0.0"));
+
+        // It is an unsigned file, so the signed entry point refuses it for that and nothing else.
+        let key = TestKey::new();
+        assert_eq!(refusal(verify(&bytes, &[key.public()])), Refusal::Unsigned);
+        // And the zip itself is what the writer promises: stored entries, the 1980 time, in path order.
+        let mut zip = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut names = Vec::new();
+        for i in 0..zip.len() {
+            let entry = zip.by_index(i).unwrap();
+            assert_eq!(entry.compression(), CompressionMethod::Stored);
+            let t = entry.last_modified().expect("a time");
+            assert_eq!(
+                (
+                    t.year(),
+                    t.month(),
+                    t.day(),
+                    t.hour(),
+                    t.minute(),
+                    t.second()
+                ),
+                (1980, 1, 1, 0, 0, 0)
+            );
+            assert_eq!(entry.unix_mode().map(|m| m & 0o777), Some(0o644));
+            names.push(String::from_utf8_lossy(entry.name_raw()).into_owned());
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("pmmod/checksums.json")
+        );
     }
 
     #[test]

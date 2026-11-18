@@ -32,3 +32,7 @@ docs
 
 # Workflows are checked by zizmor/actionlint, not reflowed by Prettier
 .github
+
+# Written by numpy (its `script` field is the program that made it): the generator owns the format, and
+# a reflow would turn 85 KB of vectors into thousands of lines.
+mods/atlas.map/src/fixtures/pca-numpy.json

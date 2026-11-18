@@ -96,6 +96,48 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     "mod_permission_decide",
     { modId: "atlas.map", permission: "internet", granted: false },
   ],
+  [
+    "modPermissionDecide (with the money prompt's limit)",
+    () => ipc.modPermissionDecide("acme.tool", "ai", true, 2.5),
+    "mod_permission_decide",
+    { modId: "acme.tool", permission: "ai", granted: true, capUsd: 2.5 },
+  ],
+  [
+    "modAiPromptInfo",
+    () => ipc.modAiPromptInfo("acme.tool"),
+    "mod_ai_prompt_info",
+    { modId: "acme.tool" },
+  ],
+  [
+    "modAiCapSet",
+    () => ipc.modAiCapSet("acme.tool", 3),
+    "mod_ai_cap_set",
+    { modId: "acme.tool", capUsd: 3 },
+  ],
+  [
+    "modAiCapSet (taking the limit away)",
+    () => ipc.modAiCapSet("acme.tool", null),
+    "mod_ai_cap_set",
+    { modId: "acme.tool", capUsd: null },
+  ],
+  [
+    "modSecretSave",
+    () => ipc.modSecretSave("acme.tool", "token", "typed"),
+    "mod_secret_save",
+    { modId: "acme.tool", name: "token", value: "typed" },
+  ],
+  [
+    "modSecretClear",
+    () => ipc.modSecretClear("acme.tool", "token"),
+    "mod_secret_clear",
+    { modId: "acme.tool", name: "token" },
+  ],
+  [
+    "modSecretStatus",
+    () => ipc.modSecretStatus("acme.tool"),
+    "mod_secret_status",
+    { modId: "acme.tool" },
+  ],
   ["modsDisclaimerState", () => ipc.modsDisclaimerState(), "mods_disclaimer_state", undefined],
   ["acceptModsDisclaimer", () => ipc.acceptModsDisclaimer(), "accept_mods_disclaimer", undefined],
   ["modsSafetyStatus", () => ipc.modsSafetyStatus(), "mods_safety_status", undefined],
@@ -106,6 +148,14 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     { modId: "atlas.map" },
   ],
   ["resetSafetyRecord", () => ipc.resetSafetyRecord(), "reset_safety_record", undefined],
+  ["retryAutoInstall", () => ipc.retryAutoInstall(), "retry_auto_install", undefined],
+  ["modsHandoverState", () => ipc.modsHandoverState(), "mods_handover_state", undefined],
+  [
+    "adoptMapPrefs",
+    () => ipc.adoptMapPrefs("semantic", 0.25, true),
+    "adopt_map_prefs",
+    { layoutMode: "semantic", cohesion: 0.25, labels: true },
+  ],
 ];
 
 describe("the Mods tab's wrappers", () => {

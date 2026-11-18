@@ -17,6 +17,7 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import prettier from "eslint-config-prettier";
+import { dirname, relative, resolve, sep } from "node:path";
 
 // The backend boundary: see the frontend block below. The package root re-exports `core` too, so
 // `import { core } from "@tauri-apps/api"` (or from its `/index` subpath, the same file) is the same
@@ -190,6 +191,83 @@ const MOD_FRAME_SHAPE = [
   },
 ];
 
+// First-party mods (top-level mods/, Mods spec §7). A mod is a sealed frame: a page of its own that
+// reaches PM only through the bridge, so its source must not reach PM's code either. The wall that
+// holds against a hostile mod is the frame's sandbox and CSP; these lint rules guard against a
+// first-party author reaching across by mistake (importing a Tauri API that would not work in the
+// frame, or a src/ module that drags the page's code and its IPC into the bundle). They are not a
+// defence against a mod written to evade them.
+//
+// The only door into PM's own code is src/kit/** (spec D14, the shared pure components, which a later
+// PR adds). A string pattern cannot tell the top-level src/ from `mods/<id>/src/` (a mod's own
+// sources live in `src/` too) or from `src/components/mods/`, so the rule below resolves each
+// relative specifier against the importing file and compares real paths.
+const MODS_CORE =
+  "A mod reaches PM only through the bridge: import nothing from PM's src/ except src/kit/**.";
+const modsRepoRoot = import.meta.dirname;
+/**
+ * The repo-relative, `/`-separated path a specifier names from `fromFile`; null for a package.
+ * An absolute path (in a Vite page it is relative to a root this rule cannot see) and a bare
+ * `src/…` name no package, so they come back as a path under src/ and are judged like one.
+ */
+function modsLocalTarget(specifier, fromFile) {
+  if (specifier.startsWith("/") || /^[A-Za-z]:[\\/]/.test(specifier)) return "src/(absolute)";
+  const bareSrc = specifier === "src" || specifier.startsWith("src/");
+  if (!bareSrc && !specifier.startsWith(".")) return null;
+  // Resolved, so `src/kit/../lib/ipc` and `../../../src/kit/../lib/ipc` are what they really name.
+  const from = bareSrc ? modsRepoRoot : dirname(fromFile);
+  return relative(modsRepoRoot, resolve(from, specifier)).split(sep).join("/");
+}
+const modsNoCoreImports = {
+  meta: { type: "problem", schema: [], messages: { core: MODS_CORE } },
+  create(context) {
+    const check = (node) => {
+      const spec = node.source?.type === "Literal" ? node.source.value : null;
+      if (typeof spec !== "string") return;
+      const target = modsLocalTarget(spec, context.filename);
+      if (target === null) return;
+      const intoSrc = target === "src" || target.startsWith("src/");
+      const intoKit = target === "src/kit" || target.startsWith("src/kit/");
+      if (intoSrc && !intoKit) context.report({ node, messageId: "core" });
+    };
+    return {
+      ImportDeclaration: check,
+      ExportAllDeclaration: check,
+      ExportNamedDeclaration: check,
+      ImportExpression: check,
+    };
+  },
+};
+const MODS_TAURI = [
+  {
+    // Matches the bare `@tauri-apps/api` too (measured: the `**` form also covers its own folder).
+    group: ["@tauri-apps/**"],
+    message: "A mod frame has no Tauri API: it talks to PM through the bridge (src/kit).",
+  },
+];
+// One classic script (the frame loads an IIFE; spec §7), so no code splitting, and no way round the
+// import fence above by reading src/ files in bulk.
+const MODS_SYNTAX = [
+  ...HTML_SINKS,
+  ...FRAME_SINKS,
+  ...NO_IFRAME_ELEMENT,
+  ...NO_IFRAME_NAME,
+  {
+    selector: "ImportExpression",
+    message: "A mod is one classic script: no dynamic import() (it would split the bundle).",
+  },
+  {
+    selector: "CallExpression[callee.type='MemberExpression'][callee.property.name='glob']",
+    message: "A mod imports files by name: no import.meta.glob (it reads files in bulk).",
+  },
+];
+const MODS_RULES = {
+  "no-restricted-imports": ["error", { patterns: MODS_TAURI }],
+  "no-restricted-syntax": ["error", ...MODS_SYNTAX],
+  "mods/no-core-imports": "error",
+};
+const MODS_PLUGIN = { mods: { rules: { "no-core-imports": modsNoCoreImports } } };
+
 export default tseslint.config(
   // src-tauri/python is the fetched standalone interpreter (a build artifact, like
   // src-tauri/target) — present only on Windows checkouts and full of vendored JS.
@@ -202,6 +280,11 @@ export default tseslint.config(
       // The sealed-frame regression app's build output (its own crate, tests/sealed-frame).
       "tests/sealed-frame/src-tauri/target",
       "tests/sealed-frame/src-tauri/gen",
+      // A mod's built stage dir (mods/<id>/dist: Vite's bundle, not source). Rooted strings, so the
+      // bare "dist" above does not reach a nested one.
+      "mods/*/dist",
+      // The toolchain test's third-party fixture mod builds into its own dist the same way.
+      "tests/mod-fixtures/*/dist",
       "design-system-docs",
       // The spec + decision log + scratch notes (git-ignored, local-only — not first-party
       // source). Lint shouldn't reach into it (e.g. a stray docs/calendar-view/*.js prototype).
@@ -310,6 +393,31 @@ export default tseslint.config(
       ],
     },
   },
+  // The mod kit (src/kit/**, Mods spec D14): code that is bundled INTO a mod's page, so it runs in a
+  // sealed frame where there is no Tauri API and no ipc.ts, and a mod's own bans (the HTML and frame
+  // sinks, dynamic import, import.meta.glob: MODS_SYNTAX) hold for it too. A rule's options replace
+  // rather than merge, so the imports are restated. Its tests are exempt from the syntax bans by the
+  // test block below, like every test in src/.
+  {
+    files: ["src/kit/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: IPC_BOUNDARY,
+          patterns: [
+            ...MODS_TAURI,
+            {
+              regex: "(^|/)ipc(\\.[cm]?[jt]sx?)?$",
+              message:
+                "The kit runs in a mod's frame, which has no IPC: take its data from a context.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": ["error", ...MODS_SYNTAX],
+    },
+  },
   // A plain JavaScript file in src/ (none exists) would ship just the same, so the page's fences hold
   // there too rather than stopping at the TypeScript block's glob.
   {
@@ -337,6 +445,50 @@ export default tseslint.config(
       "no-restricted-syntax": "off",
     },
   },
+  // First-party mods (MODS_* above). Type-aware for the same promise floor as src/: a mod's calls to
+  // PM are async, and a dropped one swallows an error. The project service takes each file's nearest
+  // tsconfig.json (mods/tsconfig.json, or a worker folder's own). mods/vite.config.ts is Node-side
+  // and in no mod project, so it is left out here and linted with the other configs below.
+  {
+    files: ["mods/**/*.{ts,tsx}"],
+    ignores: ["mods/vite.config.ts"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: globals.browser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    plugins: { "react-hooks": reactHooks, ...MODS_PLUGIN },
+    rules: {
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": [
+        "error",
+        { checksVoidReturn: { attributes: false } },
+      ],
+      ...MODS_RULES,
+    },
+  },
+  // A plain JavaScript file in a mod would ship just the same.
+  {
+    files: ["mods/**/*.{js,jsx,mjs,cjs}"],
+    ignores: ["mods/*.{js,mjs,cjs}"],
+    languageOptions: { globals: globals.browser },
+    plugins: MODS_PLUGIN,
+    rules: MODS_RULES,
+  },
+  // A mod's tests may drive the sinks like src/'s do (a fixture's markup, a spy), and ship nowhere.
+  // Only the sink and frame bans go: the import fence and the Tauri ban still hold, since a test that
+  // imports PM's code is a coupling the mod itself would soon copy.
+  {
+    files: ["mods/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": "off",
+    },
+  },
   // The calendar editor's hook is the one importer of the calendar write wrappers. A rule's options
   // replace rather than merge, so the IPC boundary is restated here, not lost. Tests are exempt:
   // they mock and drive the wrappers, and ship nowhere.
@@ -356,7 +508,7 @@ export default tseslint.config(
   },
   // Node tooling (build/check scripts, config files).
   {
-    files: ["scripts/**/*.mjs", "*.{js,mjs,ts}"],
+    files: ["scripts/**/*.mjs", "*.{js,mjs,ts}", "mods/*.{js,mjs,ts}"],
     languageOptions: {
       globals: globals.node,
     },

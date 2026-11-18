@@ -26,10 +26,10 @@ default:
 # `just ci-membership` asserts BOTH directions of that claim: every member below has a
 # step in pr.yml AND a hook in .pre-commit-config.yaml. The claim used to be prose only,
 # and pre-commit had drifted to 9 of the 13 — missing, of all things, the drift guards.
-check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers license-subset ci-membership sync-set ipc-commands calendar-write-fence script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
+check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
 
 # Everything a PR is gated on (adds the compile/test/supply-chain/security checks).
-check: check-fast frontend-test build-frontend clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
+check: check-fast frontend-test build-frontend build-mods clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
 
 # Auto-apply every formatter (the writing counterpart to the --check recipes).
 fmt:
@@ -48,13 +48,18 @@ prettier:
 eslint:
     npx eslint .
 
-# Type-check both TS projects: the app (src) and the Node-side config (vite.config.ts,
+# Type-check every TS project: the app (src), the Node-side config (vite.config.ts,
 # via the tsconfig.node.json project reference) — plain `tsc` only checks the root
-# project, so vite.config.ts went unchecked (T1-9). Two `-p` passes, not `tsc -b`:
-# build mode requires composite refs to emit, which --noEmit forbids (TS6310).
+# project, so vite.config.ts went unchecked (T1-9) — and the mods. Separate `-p` passes, not
+# `tsc -b`: build mode requires composite refs to emit, which --noEmit forbids (TS6310).
+# The mods get two passes because a Worker has a different global scope (lib WebWorker, no DOM) and
+# the two libs cannot share a config: `mods` is the page, `mods/atlas.map/src/worker` the Map's Worker
+# (each further mod worker folder adds a line here and an `exclude` in mods/tsconfig.json).
 tsc:
     npx tsc --noEmit
     npx tsc -p tsconfig.node.json --noEmit
+    npx tsc -p mods --noEmit
+    npx tsc -p mods/atlas.map/src/worker --noEmit
 
 # Frontend unit tests (vitest). Started as T-07 over the pure src/lib/** modules the audit flagged as
 # guarded by nothing (date formatting, the markdown sanitize allowlist), and now also covers component
@@ -70,6 +75,45 @@ frontend-test:
 # to notice on every commit.
 build-frontend:
     npx vite build
+
+# Build, stage, pack and verify every mod under mods/ (Mods spec §7). For each folder with a
+# manifest: Vite builds it into dist/app (mods/vite.config.ts), `pack-mod --stage` puts manifest,
+# licence and notice beside it (dist/ is then a folder the developer-mode loader opens), `pack-mod`
+# writes dist/<id>-<version>.pmmod stamped with this checkout's commit, and `pack-mod --verify` reads
+# that file back with the independent check (an author's lint, the frame's CSP is the guard: no
+# inline script or style, no module script, no `crossorigin`, which the hygiene job cannot do: it
+# has no build). The file is NOT signed: Atlas's
+# only signer is the pm-mods pipeline. Fails when there is no mod to build, so a moved folder cannot
+# leave this a green step that built nothing.
+build-mods:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    commit="$(git rev-parse HEAD)"
+    built=0
+    for dir in mods/*/; do
+        dir="${dir%/}"
+        [ -f "$dir/manifest.json" ] || continue
+        PM_MOD_DIR="$dir" npx vite build --config mods/vite.config.ts
+        node scripts/pack-mod.mjs "$dir" --stage --commit "$commit"
+        rm -f "$dir"/dist/*.pmmod
+        node scripts/pack-mod.mjs "$dir" --commit "$commit"
+        node scripts/pack-mod.mjs --verify "$dir"/dist/*.pmmod
+        built=$((built + 1))
+    done
+    if [ "$built" -eq 0 ]; then
+        echo "✗ build-mods: no mod folder (a manifest.json) under mods/" >&2
+        exit 1
+    fi
+    echo "✓ build-mods: built, packed and verified $built mod(s)"
+
+# Pack the acme.hello test fixture as a developer's own file (`--unsigned`, tier third), which
+# `build-mods` skips because it only loops over mods/. This is the file the L7 live test installs
+# from a debug PM's developer-mode "install from file". Writes
+# tests/mod-fixtures/acme.hello/dist/acme.hello-<version>.pmmod (git-ignored).
+build-fixture:
+    PM_MOD_DIR=tests/mod-fixtures/acme.hello npx vite build --config mods/vite.config.ts
+    node scripts/pack-mod.mjs tests/mod-fixtures/acme.hello --unsigned
+    node scripts/pack-mod.mjs --verify tests/mod-fixtures/acme.hello/dist/*.pmmod
 
 # --- backend (Rust) -------------------------------------------------------
 
@@ -152,9 +196,12 @@ pip-audit:
     pip-audit --disable-pip -r sidecar/requirements.lock -r sidecar/requirements-ocr.lock -r sidecar/requirements-tsne.lock
 
 # JS dependency CVE audit against the npm lockfile. `moderate` (not `high`) so a moderate-rated
-# sanitizer / proto-pollution advisory in the render path can't pass green (L-7).
+# sanitizer / proto-pollution advisory in the render path can't pass green (L-7). The script runs
+# `npm audit` and lets through only an advisory listed in scripts/npm-audit-rules.mjs's ACCEPTED (dated,
+# with the decision),
+# and only while a second audit of the shipped tree alone (`--omit=dev`) doesn't report it.
 npm-audit:
-    npm audit --audit-level=moderate
+    node scripts/npm-audit.mjs
 
 # Secret scan of the WHOLE working tree — including git-ignored files, so it's the
 # sole net for a secret in an ignored path (config: .gitleaks.toml). CI runs this
@@ -175,6 +222,7 @@ zizmor:
 # --- bespoke gates (pure Node, no deps) -----------------------------------
 
 # Version lockstep + changelog; pass --base <ref> to require a bump, --tag <vX.Y.Z> to match a tag.
+# With --base, a change that touches only mod folders (mods/<id>/) is exempt from PM's bump and owes its mod's own (D12).
 version *args:
     node scripts/check-version-lockstep.mjs {{args}}
 
@@ -194,6 +242,14 @@ files:
 
 headers:
     node scripts/check-spdx-headers.mjs
+
+# The mods folder (Mods spec §7, I-25), from source alone: each manifest passes package.rs's rules,
+# id = folder, atlas.* and first party, a changelog that matches, nothing under mods/ in any tauri
+# bundle's resources, nothing in src/ importing mods/. It never reads built output: this runs in
+# pr.yml's hygiene job, which has no build (`pack-mod --verify`, inside build-mods, does that).
+# `--base <ref>` adds "a changed mod bumped its version"; `just version --base` runs that same check.
+mods *args:
+    node scripts/check-mods.mjs {{args}}
 
 # Licence allow-lists agree: everything deny.toml permits (PR gate) is attributable
 # in about.toml's accepted set (release NOTICE), so NOTICE generation can't hit an

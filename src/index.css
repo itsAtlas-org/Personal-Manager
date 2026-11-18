@@ -635,9 +635,11 @@ body {
    the model laid out by hand — `pre-line` keeps those breaks while still collapsing runs of spaces.
    Scoped here so the document reader keeps CommonMark's folding.
    `.pm-event-desc` is an event's description (the calendar pop-up): plain text someone typed line by
-   line, in Google or a feed, which GFM would fold the same way. */
+   line, in Google or a feed, which GFM would fold the same way. `.pm-mod-help` is a mod's help in the
+   About this mod panel: the Map's entries (and any mod's) put each paragraph on its own line. */
 .pm-inline-md .pm-markdown p,
-.pm-event-desc .pm-markdown p {
+.pm-event-desc .pm-markdown p,
+.pm-mod-help .pm-markdown p {
   white-space: pre-line;
 }
 /* A list item only when it holds nothing but text. A loose item (its text in a <p>) or one holding a
@@ -645,7 +647,8 @@ body {
    would paint as empty lines (and white-space inherits into the nested list). A rule of its own, so
    an engine without :has() drops only this one and falls back to GFM folding. */
 .pm-inline-md .pm-markdown li:not(:has(> p, > ul, > ol, > blockquote, > pre, > table)),
-.pm-event-desc .pm-markdown li:not(:has(> p, > ul, > ol, > blockquote, > pre, > table)) {
+.pm-event-desc .pm-markdown li:not(:has(> p, > ul, > ol, > blockquote, > pre, > table)),
+.pm-mod-help .pm-markdown li:not(:has(> p, > ul, > ol, > blockquote, > pre, > table)) {
   white-space: pre-line;
 }
 /* Citation links, styled as the pre-Markdown `[n]` buttons were: dotted, so they read as a jump to

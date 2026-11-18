@@ -25,7 +25,9 @@ name: macOS bundle dry-run
 #
 # Runs on PRs touching the packaging surface. As with the Linux lane, version
 # lockstep means the manifests move on every PR, so in practice this runs on every
-# PR — deliberate, and one line to narrow if the wall-clock stops being worth it.
+# PR — deliberate, and one line to narrow if the wall-clock stops being worth it. A PR that
+# touches only mod folders (mods/<id>/, Mods spec D12) moves no manifest, so it skips this lane; no mod ships in
+# the installer (I-25), and this lane is not a required check.
 
 on:
   workflow_dispatch:

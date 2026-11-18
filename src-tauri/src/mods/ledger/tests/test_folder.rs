@@ -11,7 +11,7 @@
 //! and says why when it can't; and no package ever installs over a folder.
 
 use super::*;
-use crate::mods::devmode;
+use crate::mods::devmode::{self, test_here};
 use crate::mods::folder::tests::{edit_manifest, tool_folder, write_files};
 use crate::mods::folder::{self, Scan};
 use crate::mods::index::Index;
@@ -36,7 +36,7 @@ const OTHER_DEVICE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn dev(w: &World, device: &str, on: bool) {
     let mut c = w.store.conn.lock().unwrap();
-    devmode::write(&mut c, device, on).unwrap();
+    devmode::write(&mut c, test_here(device), on).unwrap();
 }
 
 /// Developer mode on for this device, in the store and in the registry's copy.
@@ -47,7 +47,7 @@ fn dev_on(w: &World) {
 
 fn uopts(index: Option<&Index>) -> UnsignedOptions<'_> {
     UnsignedOptions {
-        device: DEVICE,
+        device: test_here(DEVICE),
         index,
     }
 }
@@ -63,6 +63,16 @@ fn sha(bytes: &[u8]) -> String {
 /// The fixture third-party mod as the developer's folder.
 fn tool_dir() -> tempfile::TempDir {
     tool_dir_with(|_, _| {})
+}
+
+/// The fixture with the one key slot [`give_it_things`] stores a key for (`token`).
+fn declare_the_token_slot(m: &mut Value, _files: &mut BTreeMap<String, Vec<u8>>) {
+    m["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "internet", "why": "Fetches things."}));
+    m["internetHosts"] = json!(["api.example.com"]);
+    m["secrets"] = json!([{"name": "token", "host": "api.example.com", "header": "Authorization"}]);
 }
 
 fn tool_dir_with(
@@ -206,6 +216,25 @@ fn a_folder_loads_only_while_developer_mode_is_on_for_this_device() {
         refusal(w.ledger().preview_folder(&scan(dir.path()), &uopts(None))),
         Refusal::DevModeOff
     );
+}
+
+#[test]
+fn a_folder_is_not_loaded_into_a_lookalike_vault_in_another_folder() {
+    // Same vault id and store id, another folder on this computer: the device's entry names its
+    // own folder, so the preview and the load both refuse before anything is written.
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir();
+    *w.store.place.lock().unwrap() = "another-folder".into();
+    assert!(matches!(
+        load(&w, dir.path(), None),
+        Err(LedgerError::VaultChanged)
+    ));
+    assert!(matches!(
+        w.ledger().preview_folder(&scan(dir.path()), &uopts(None)),
+        Err(LedgerError::VaultChanged)
+    ));
+    nothing_written(&w);
 }
 
 #[test]
@@ -586,7 +615,7 @@ fn switching_developer_mode_off_unloads_every_folder_and_on_does_not_bring_them_
 
     let done = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, false, &serve_all, now())
+        .set_dev_mode_for_device(test_here(DEVICE), false, &serve_all, now())
         .unwrap();
     assert_eq!(done.unloaded, vec!["acme.tool".to_owned()]);
     assert_eq!(done.paused, vec!["acme.other".to_owned()]);
@@ -608,7 +637,7 @@ fn switching_developer_mode_off_unloads_every_folder_and_on_does_not_bring_them_
     // On again: the file mod comes back, the folder does not.
     let back = w
         .ledger()
-        .set_dev_mode_for_device(DEVICE, true, &serve_all, now())
+        .set_dev_mode_for_device(test_here(DEVICE), true, &serve_all, now())
         .unwrap();
     assert_eq!(back.resumed, vec!["acme.other".to_owned()]);
     assert!(back.unloaded.is_empty());
@@ -699,7 +728,8 @@ fn reload(w: &World, dir: &Path) -> Result<Reloaded, LedgerError> {
 fn a_reload_picks_up_an_edit_keeps_grants_and_install_id_and_restarts_the_frame() {
     let w = world();
     dev_on(&w);
-    let dir = tool_dir();
+    // The key's slot is still declared, so the reload keeps the key.
+    let dir = tool_dir_with(declare_the_token_slot);
     load(&w, dir.path(), None).unwrap();
     give_it_things(&w);
     let id_before = install_id(&w);
@@ -724,6 +754,35 @@ fn a_reload_picks_up_an_edit_keeps_grants_and_install_id_and_restarts_the_frame(
         serde_json::from_str(&w.sql::<String>("SELECT files FROM mods")).unwrap();
     let main = files.iter().find(|f| f.path == "app/main.js").unwrap();
     assert_eq!(main.size, "console.log('edited');".len() as u64);
+}
+
+/// A key whose slot the developer dropped goes with the reload: it would otherwise sit in the store
+/// where the person can neither see nor clear it. A key whose slot is kept stays.
+#[test]
+fn a_reload_that_drops_a_key_slot_deletes_the_key_and_one_that_keeps_it_does_not() {
+    let w = world();
+    dev_on(&w);
+    let dir = tool_dir_with(declare_the_token_slot);
+    load(&w, dir.path(), None).unwrap();
+    give_it_things(&w);
+    let keys = |w: &World| w.sql::<i64>("SELECT count(*) FROM mod_secrets");
+    // An edit elsewhere: the slot is the same, so is the key.
+    fs::write(dir.path().join("app/main.js"), "console.log('edited');").unwrap();
+    assert!(reload(&w, dir.path()).unwrap().changed);
+    assert_eq!(keys(&w), 1);
+    // The slot is dropped: asking for less, so the reload is allowed.
+    edit_manifest(dir.path(), |m| {
+        m["secrets"] = json!([]);
+    });
+    assert!(reload(&w, dir.path()).unwrap().changed);
+    assert_eq!(
+        keys(&w),
+        0,
+        "the orphaned key went in the reload's transaction"
+    );
+    // Nothing else of the mod's was touched.
+    assert_eq!(grants_of(&w, "acme.tool").len(), 1);
+    assert_eq!(things_left(&w), 2);
 }
 
 #[test]
@@ -965,7 +1024,7 @@ fn env<'a>(index: Option<&'a Index>) -> UnsignedEnv<'a> {
         now: now(),
         index,
         engine_sealed: true,
-        device: DEVICE,
+        device: test_here(DEVICE),
     }
 }
 
@@ -1304,12 +1363,17 @@ fn a_restore_swapping_the_store_under_a_loaded_folder_ends_it_and_serves_none_of
     let frame = live_frame(&w, "acme.tool");
     {
         let c = w.store.conn.lock().unwrap();
-        crate::backup::adopt_mods::reset_for_adopt(&c).unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(
+            &c,
+            test_here(DEVICE).dir(),
+            devmode::TEST_VAULT,
+        )
+        .unwrap();
     }
     // The open that follows looks developer mode up (off for everyone after the reset) and loads.
     w.runtime.set_unsigned_allowed({
         let c = w.store.conn.lock().unwrap();
-        devmode::is_on(&c, DEVICE).unwrap()
+        devmode::is_on(&c, test_here(DEVICE)).unwrap()
     });
     let report = w.ledger().startup(now(), &serve_all);
     assert!(report.skipped.is_none());

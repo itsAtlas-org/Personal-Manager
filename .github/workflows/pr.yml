@@ -55,6 +55,11 @@ jobs:
         run: just frontend-test
       - name: Production bundle (vite build)
         run: just build-frontend
+      # The mods' own build: Vite (mods/vite.config.ts) into dist/app, then pack-mod writes the
+      # unsigned package and re-reads it with the independent built-output checks. The hygiene job
+      # has no build, so this is the only place those rules can run.
+      - name: Mods (build, pack, verify)
+        run: just build-mods
       # Exercises the npm half of `just notice` — the release-only NOTICE trap, half of which was
       # still open: `license-subset` proves the two allow-lists agree, and nothing proved the
       # attribution actually generates. It needs node_modules for the per-package copyright lines,
@@ -379,6 +384,8 @@ jobs:
         run: just files
       - name: SPDX headers + licence integrity
         run: just headers
+      - name: Mods folder (manifests, no mod in the installer, nothing in src/ imports mods/)
+        run: just mods
       - name: Licence allow-lists agree (deny ⊆ about)
         run: just license-subset
       - name: CI membership (justfile ⊆ pr.yml)

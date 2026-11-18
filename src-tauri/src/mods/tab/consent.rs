@@ -29,10 +29,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
 
+use crate::mods::ai as money;
 use crate::mods::api::grants::{self, Decision, GrantError};
 use crate::mods::api::permissions::{self, Class, PolicyTier, When};
 use crate::mods::ids::ModId;
 use crate::mods::store;
+
+use super::error::ModsError;
 
 /// The user's answers: permission id to granted (true) or refused (false).
 pub type Answers = BTreeMap<String, bool>;
@@ -295,13 +298,30 @@ fn announce_with(
 /// One permission decision from the Mods tab's toggle (`mod_permission_decide`): refused for a mod
 /// the safety list removed (its grants were revoked and stay so), then
 /// [`grants::set_decision`], whole or not at all. Returns the mods to tell afterwards.
+///
+/// **A monthly limit rides with the yes to `ai`.** `cap_usd` is the limit the money prompt's field
+/// held. It is written in the same transaction as the grant, so a yes that is refused (D3, the
+/// sealed engine) leaves no limit behind and a limit that cannot be written leaves no yes: the
+/// prompt can never half-answer. It is accepted only with a yes to `ai`, and only a number the
+/// ledger can use ([`money::valid_cap`]); anything else is refused before the store is read. With
+/// no limit the grant is written and the limit stays as it was (none, or the one already set), and
+/// a paid call still asks for one: the handler's state rule, not this write, is what stops spending.
 pub fn decide(
     conn: &mut Connection,
     id: &ModId,
     permission: &str,
     granted: bool,
+    cap_usd: Option<f64>,
     engine_sealed: bool,
 ) -> Result<Vec<ModId>, DecideError> {
+    if let Some(cap) = cap_usd {
+        if permission != "ai" || !granted {
+            return Err(DecideError::Limit(LimitRefusal::NotWithThis));
+        }
+        if !money::valid_cap(cap) {
+            return Err(DecideError::Limit(LimitRefusal::NotAnAmount));
+        }
+    }
     let tx = conn.transaction()?;
     let reason: Option<Option<String>> = tx
         .query_row(
@@ -327,9 +347,25 @@ pub fn decide(
         Decision::Denied
     };
     grants::set_decision(&tx, id, permission, decision, engine_sealed)?;
+    if let Some(cap) = cap_usd {
+        money::set_cap(&tx, id.as_str(), Some(cap)).map_err(|e| match e {
+            money::CapError::BadAmount => DecideError::Limit(LimitRefusal::NotAnAmount),
+            money::CapError::ModGone => DecideError::Grant(GrantError::NotInstalled),
+            money::CapError::Db(e) => DecideError::Grant(e.into()),
+        })?;
+    }
     let tell = announce(&tx, id, [permission])?;
     tx.commit()?;
     Ok(tell)
+}
+
+/// Why a limit sent with a decision was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitRefusal {
+    /// A limit goes only with a yes to `ai`.
+    NotWithThis,
+    /// Not a number from 0 to the ceiling.
+    NotAnAmount,
 }
 
 #[derive(Debug)]
@@ -337,6 +373,8 @@ pub enum DecideError {
     Grant(GrantError),
     /// The safety list removed the mod: its permissions stay revoked.
     Removed,
+    /// The limit sent with the decision can't be used; nothing was written.
+    Limit(LimitRefusal),
 }
 
 impl From<GrantError> for DecideError {
@@ -349,6 +387,19 @@ impl From<rusqlite::Error> for DecideError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Grant(e.into())
     }
+}
+
+/// The gate on `mod_ai_prompt_info`: PM tells the page which model the person uses, and whether it
+/// is paid, only for a mod that is installed and that asked for the AI. Any other mod would learn
+/// about the person's setup for nothing. A pure read of the mod's row.
+pub fn ai_prompt_target(conn: &Connection, id: &ModId) -> Result<(), ModsError> {
+    let facts = grants::read_mod(conn, id)
+        .map_err(ModsError::internal)?
+        .ok_or_else(ModsError::not_installed)?;
+    if !facts.declared.contains("ai") {
+        return Err(ModsError::bad_request("That mod didn't ask for the AI."));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -542,16 +593,32 @@ mod tests {
         );
         // set_decision is the writer an unsigned grant goes through; the unsigned reader holds a
         // read, so the other's internet is refused, and the refusal writes nothing.
-        decide(&mut c, &id("zed.reader"), "documents.meta", true, true).unwrap();
-        let refused = decide(&mut c, &id("acme.web"), "internet", true, true);
+        decide(
+            &mut c,
+            &id("zed.reader"),
+            "documents.meta",
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+        let refused = decide(&mut c, &id("acme.web"), "internet", true, None, true);
         assert!(
             matches!(refused, Err(DecideError::Grant(GrantError::Refused(_, _)))),
             "{refused:?}"
         );
         assert!(grants_of(&c, "acme.web").is_empty());
         // Taking one away is always allowed, and frees the other.
-        decide(&mut c, &id("zed.reader"), "documents.meta", false, true).unwrap();
-        decide(&mut c, &id("acme.web"), "internet", true, true).unwrap();
+        decide(
+            &mut c,
+            &id("zed.reader"),
+            "documents.meta",
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        decide(&mut c, &id("acme.web"), "internet", true, None, true).unwrap();
     }
 
     #[test]
@@ -566,14 +633,192 @@ mod tests {
             },
         );
         assert!(matches!(
-            decide(&mut c, &id("atlas.map"), "storage", true, true),
+            decide(&mut c, &id("atlas.map"), "storage", true, None, true),
             Err(DecideError::Removed)
         ));
         assert!(matches!(
-            decide(&mut c, &id("nobody.here"), "storage", true, true),
+            decide(&mut c, &id("nobody.here"), "storage", true, None, true),
             Err(DecideError::Grant(GrantError::NotInstalled))
         ));
         assert!(grants_of(&c, "atlas.map").is_empty());
+    }
+
+    fn chat(c: &Connection) {
+        insert(
+            c,
+            &Row {
+                id: "acme.chat",
+                signed: true,
+                tier: "second",
+                manifest: manifest(&["ai", "storage"]),
+                ..Row::default()
+            },
+        );
+    }
+
+    fn cap_of(c: &Connection, id: &str) -> Option<f64> {
+        c.query_row("SELECT ai_cap_usd FROM mods WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// `mod_ai_prompt_info` answers only for an installed mod that asked for the AI: no other mod
+    /// may learn which model the person uses or whether it is paid.
+    #[test]
+    fn the_prompt_facts_go_only_to_an_installed_mod_that_asked_for_the_ai() {
+        use crate::mods::tab::error::Code;
+        let (_dir, c) = test_store();
+        assert_eq!(
+            ai_prompt_target(&c, &id("acme.chat")).unwrap_err().code,
+            Code::NotInstalled
+        );
+        insert(
+            &c,
+            &Row {
+                id: "acme.notes",
+                signed: true,
+                tier: "second",
+                manifest: manifest(&["storage"]),
+                ..Row::default()
+            },
+        );
+        assert_eq!(
+            ai_prompt_target(&c, &id("acme.notes")).unwrap_err().code,
+            Code::BadRequest
+        );
+        chat(&c);
+        assert!(ai_prompt_target(&c, &id("acme.chat")).is_ok());
+    }
+
+    /// The money prompt's yes: the grant and the limit are one write.
+    #[test]
+    fn a_yes_to_ai_carries_the_limit_and_both_are_written() {
+        let (_dir, mut c) = test_store();
+        chat(&c);
+        decide(&mut c, &id("acme.chat"), "ai", true, Some(2.5), true).unwrap();
+        assert_eq!(
+            grants_of(&c, "acme.chat"),
+            BTreeMap::from([("ai".into(), "granted".into())])
+        );
+        assert_eq!(cap_of(&c, "acme.chat"), Some(2.5));
+        // Zero is a limit: it allows the AI and no cloud spend.
+        decide(&mut c, &id("acme.chat"), "ai", true, Some(0.0), true).unwrap();
+        assert_eq!(cap_of(&c, "acme.chat"), Some(0.0));
+    }
+
+    /// A limit that cannot be used, or sent with the wrong answer, is refused before anything is
+    /// written: no grant, no limit.
+    #[test]
+    fn a_limit_that_does_not_belong_is_refused_and_writes_nothing() {
+        let (_dir, mut c) = test_store();
+        chat(&c);
+        let refuse = |c: &mut Connection, permission: &str, granted, cap| {
+            decide(c, &id("acme.chat"), permission, granted, Some(cap), true)
+        };
+        for bad in [
+            -0.01,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+            crate::mods::ai::MAX_CAP_USD + 1.0,
+        ] {
+            assert!(
+                matches!(
+                    refuse(&mut c, "ai", true, bad),
+                    Err(DecideError::Limit(LimitRefusal::NotAnAmount))
+                ),
+                "{bad}"
+            );
+        }
+        // A limit goes only with a yes to `ai`.
+        assert!(matches!(
+            refuse(&mut c, "ai", false, 1.0),
+            Err(DecideError::Limit(LimitRefusal::NotWithThis))
+        ));
+        assert!(matches!(
+            refuse(&mut c, "storage", true, 1.0),
+            Err(DecideError::Limit(LimitRefusal::NotWithThis))
+        ));
+        assert!(grants_of(&c, "acme.chat").is_empty());
+        assert_eq!(cap_of(&c, "acme.chat"), None);
+        // Neither does a mod that didn't ask for `ai` get a limit with a refused grant.
+        insert(
+            &c,
+            &Row {
+                id: "acme.noai",
+                signed: true,
+                tier: "second",
+                manifest: manifest(&["storage"]),
+                ..Row::default()
+            },
+        );
+        let e = decide(&mut c, &id("acme.noai"), "ai", true, Some(1.0), true);
+        assert!(matches!(
+            e,
+            Err(DecideError::Grant(GrantError::Undeclared(_)))
+        ));
+        assert_eq!(cap_of(&c, "acme.noai"), None);
+        assert!(grants_of(&c, "acme.noai").is_empty());
+    }
+
+    /// One transaction: when the limit cannot be written, the yes is not either.
+    #[test]
+    fn a_limit_that_fails_to_write_takes_the_grant_with_it() {
+        let (_dir, mut c) = test_store();
+        chat(&c);
+        c.execute_batch(
+            "CREATE TRIGGER refuse_cap BEFORE UPDATE OF ai_cap_usd ON mods \
+             BEGIN SELECT RAISE(ABORT, 'no'); END;",
+        )
+        .unwrap();
+        let failed = decide(&mut c, &id("acme.chat"), "ai", true, Some(1.0), true);
+        assert!(matches!(failed, Err(DecideError::Grant(GrantError::Db(_)))));
+        assert!(grants_of(&c, "acme.chat").is_empty(), "the yes was undone");
+        assert_eq!(cap_of(&c, "acme.chat"), None);
+    }
+
+    /// A yes with no limit writes the grant and leaves the limit as it was; a no never touches it.
+    /// What stops a paid call with no limit is the call's own state check, not this write.
+    #[test]
+    fn a_decision_with_no_limit_leaves_the_limit_alone() {
+        let (_dir, mut c) = test_store();
+        chat(&c);
+        decide(&mut c, &id("acme.chat"), "ai", true, None, true).unwrap();
+        assert_eq!(cap_of(&c, "acme.chat"), None);
+        c.execute("UPDATE mods SET ai_cap_usd = 4.0", []).unwrap();
+        decide(&mut c, &id("acme.chat"), "ai", false, None, true).unwrap();
+        assert_eq!(cap_of(&c, "acme.chat"), Some(4.0));
+        decide(&mut c, &id("acme.chat"), "ai", true, None, true).unwrap();
+        assert_eq!(cap_of(&c, "acme.chat"), Some(4.0));
+        // A new limit replaces it.
+        decide(&mut c, &id("acme.chat"), "ai", true, Some(0.5), true).unwrap();
+        assert_eq!(cap_of(&c, "acme.chat"), Some(0.5));
+    }
+
+    /// A mod the safety list removed takes no limit either.
+    #[test]
+    fn a_removed_mod_takes_no_limit() {
+        let (_dir, mut c) = test_store();
+        insert(
+            &c,
+            &Row {
+                id: "acme.chat",
+                signed: true,
+                tier: "second",
+                manifest: manifest(&["ai"]),
+                state: "paused",
+                reason: Some("blacklist-removed"),
+                ..Row::default()
+            },
+        );
+        assert!(matches!(
+            decide(&mut c, &id("acme.chat"), "ai", true, Some(1.0), true),
+            Err(DecideError::Removed)
+        ));
+        assert_eq!(cap_of(&c, "acme.chat"), None);
     }
 
     #[test]
@@ -620,7 +865,7 @@ mod tests {
         // A signed mod's read says nothing to the unsigned ones: no exclusion applies to it.
         assert_eq!(told(&c, "atlas.map", &["documents.meta"]), ["atlas.map"]);
         // And the decide command returns the same set.
-        let tell = decide(&mut c, &id("acme.two"), "internet", true, true).unwrap();
+        let tell = decide(&mut c, &id("acme.two"), "internet", true, None, true).unwrap();
         let mut tell: Vec<&str> = tell.iter().map(ModId::as_str).collect();
         tell.sort();
         assert_eq!(tell, ["acme.one", "acme.two"]);

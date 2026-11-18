@@ -120,3 +120,24 @@ export function rememberHide(showing: Showing): void {
 export function offersHide(showing: Showing): boolean {
   return showing.number >= 2 && !showing.hide;
 }
+
+/** Whether the open vault has "Don't show this again" on. Anything that can't be told reads as not
+ *  folded (the notice shows), so this is only ever true for a vault that really has it on. */
+export async function isHidden(): Promise<boolean> {
+  const key = await currentKey();
+  return key !== null && readShown(key).hide;
+}
+
+/**
+ * Bring the Mods notice back for the open vault: "Don't show this again" goes off and the count of
+ * showings is kept, so the box is offered again at the next showing (it is offered from the second
+ * showing on, and the person has seen the notice at least twice to have folded it). Nothing is done
+ * when the vault can't be told or nothing is folded. A write that fails leaves it folded; the caller
+ * reads `isHidden()` again to say what is true.
+ */
+export async function showAgain(): Promise<void> {
+  const key = await currentKey();
+  if (key === null) return;
+  const before = readShown(key);
+  if (before.hide) writeShown(key, { shown: before.shown, hide: false });
+}

@@ -13,6 +13,9 @@ export type MapLayoutMode = "project" | "semantic";
 
 export const MAP_MODE_KEY = "pm.map.layoutMode";
 export const MAP_COHESION_KEY = "pm.map.cohesion";
+/** Per-device "show each document's file name" switch (GraphView). Here so the Map handover's copy of
+ *  the key (`pilotHandover.ts`) has one place to be checked against while both exist. */
+export const MAP_LABELS_KEY = "pm.map.labels";
 
 /** The stored arrangement; anything but "semantic" (including absent) is the by-project default. */
 export function readMapMode(): MapLayoutMode {

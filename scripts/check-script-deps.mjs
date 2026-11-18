@@ -84,6 +84,13 @@ const ALLOWED = [
       "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
   },
   {
+    file: "scripts/check-files-in-place.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. The gate had no test of its own, and its mods rules (a tracked packed mod or stage dir, a mod test no runner collects, the mods root entry) each fail silently in the passing direction if a regex drifts; the test runs a copy of the gate in a throwaway git repo. `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
     file: "scripts/check-calendar-write-fence.test.mjs",
     specifier: "vitest",
     why: "The repo's existing test runner, on the same terms as the entries around it. This gate is what keeps every model path away from the code that changes someone's Google Calendar (#884), and a text fence is only as good as the shapes it is shown — each rule is pinned against a tree that breaks it; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
@@ -124,6 +131,41 @@ const ALLOWED = [
     why: "The repo's existing test runner, reached by a scripts/ test the same way 56 src/ tests reach it. It adds no new dependency — `just frontend-test` already runs this file via a vitest include glob.",
     pinExempt:
       "Exact-pinning is the right bar for a format library whose behaviour we cannot verify by hand. It is the wrong bar for the shared test runner: vitest is a repo-wide devDependency on `^`, governed by the normal npm/Dependabot flow and used by every other test in the tree. Pinning it here would let one scripts/ test dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/pack-mod.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. pack-mod writes the `.pmmod` file PM verifies and the pm-mods job signs, so its zip writer, its mirror of package.rs's refusals and its constants are each pinned by a test that fails without them; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/mods-build.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. This file runs the real Vite build of a mod and the pack-mod step after it, because what Vite emits (a module script, `crossorigin`, `data:` URLs, a worker's packages) cannot be faked; `just frontend-test` already collects it through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/mods-build.test.mjs",
+    specifier: "vite",
+    why: "The mods' build is Vite (mods/vite.config.ts), and the test runs that build in-process the way `just build-mods` runs it from the command line. vite is already the app's own devDependency, so nothing new is installed; this file lives in a test (collected by `just frontend-test`, which has node_modules), never in the dependency-free hygiene job, and the packer itself imports no vite.",
+    pinExempt:
+      "vite is the repo-wide build tool on a `^` range, governed by the normal npm/Dependabot flow and used by the app's own build. A scripts/ test must not dictate its version.",
+  },
+  {
+    file: "scripts/npm-audit.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. The npm audit gate has one way out (a dated acceptance that holds only while the advisory stays out of the shipped tree), and each rule that keeps it shut fails silently in the passing direction if it drifts, so each is shown a report that breaks it; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
+    file: "scripts/check-mods.test.mjs",
+    specifier: "vitest",
+    why: "The repo's existing test runner, on the same terms as the entries around it. check-mods decides whether a mod folder ships in the installer or a PM file reaches into a mod, and its D12 half decides whether a change owes PM's version bump at all; each rule fails silently in the passing direction if a pattern drifts, so each is shown a tree that breaks it, run over throwaway trees and git repos; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
   },
 ];
 

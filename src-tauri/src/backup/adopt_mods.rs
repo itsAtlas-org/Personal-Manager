@@ -8,10 +8,12 @@
 //! before it is attached, so before anything serves from it. A backup comes from somewhere else
 //! (another computer, or this one at another time), and three things in it describe that other
 //! place, not this one: developer mode (so a restore never enables unsigned installs on a machine
-//! whose owner didn't: [`devmode::all_devices_off`] empties the per-device record and turns the old
-//! row off, and the load that follows the store's open pauses the unsigned mods, INVARIANTS.md
+//! whose owner didn't: [`devmode::all_devices_off`] empties the per-device record, forgets the
+//! vault in this device's own record and turns the old row off, and the load that follows the store's open pauses the unsigned mods, INVARIANTS.md
 //! I-34), the connected apps (`mcp_clients`: their tokens belong to the device that issued them),
-//! and the MCP switch. The cached safety list is the fourth thing a
+//! and the MCP switch. A fourth is not believed at all: the mods' typed keys (`mod_secrets`; a
+//! backup is written without them, so any row in a restored store was planted, and the restore
+//! deletes it). The cached safety list is the fifth thing a
 //! restore must meet before a mod runs, and it needs no step here: the restore hands the backup's
 //! copy to the acceptance rules (`mods::refresh::take_restored`), and the writer's open applies the
 //! cached list before it loads a row (`ledger::after_writer_open`), which is before any frame can
@@ -19,7 +21,8 @@
 //!
 //! **Joining a shared vault writes nothing.** Its store is the vault's, in use by the vault's
 //! other accounts and machines at the same time, so switching dev mode off or deleting the
-//! connected apps there would do it for them. Dev mode is per device (a joiner's device has no
+//! connected apps or the mods' keys there would do it for them (the keys are the vault's own, typed
+//! by whoever can open it). Dev mode is per device (a joiner's device has no
 //! entry in the record, so it reads off, and nothing else ever switches it on: the old row is
 //! never read, `mods::devmode`), and the connected apps have a seam where PR C makes that true
 //! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The
@@ -32,6 +35,8 @@
 //! the open command returns), and settled after ([`settled`]), where "back" means the registry
 //! serves it, not merely that its row says `active`.
 
+use std::path::Path;
+
 use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -42,22 +47,33 @@ use crate::mods::ids::ModId;
 use crate::mods::ledger::ServeCheck;
 use crate::mods::runtime::ModRuntime;
 use crate::mods::safety::SafetyCheck;
+use crate::mods::secrets;
 use crate::mods::store;
 use crate::AppState;
 
 /// Reset what a restored store carries from where it came from (module doc). One transaction:
 /// either the store is safe to serve or the caller refuses to adopt it. Any failure is the
 /// caller's to treat as "don't adopt". A restore's commit only: never a shared vault's join.
-pub fn reset_for_adopt(conn: &Connection) -> Result<()> {
+pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
-    // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no write here: the load
-    // that follows the store's open reads the record first and pauses each active unsigned row
-    // with the reason `dev-mode` (`ledger::after_writer_open`), the same pause switching it off
-    // makes; the page asks the backend (`dev_mode_state`), not its own copy.
-    devmode::all_devices_off(&tx)?;
     tx.execute("DELETE FROM mcp_clients", [])?;
+    // The typed keys. A backup is written without them (`backup::strip`), so a row here came from
+    // somewhere that is not this person's own typing: a crafted file, or a copy made before the
+    // strip existed. Either way it would be sent to a host as the user's credential, so none is
+    // believed; the person types the keys again, as the restore card says.
+    secrets::purge_all(&tx)?;
     switch_mcp_off(&tx)?;
+    // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
+    // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no
+    // write here: the load that follows the store's open reads the record first and pauses each
+    // active unsigned row with the reason `dev-mode` (`ledger::after_writer_open`), the same pause
+    // switching it off makes; the page asks the backend (`dev_mode_state`), not its own copy. This
+    // device's own record of the vault goes too (`data_dir`: a restore keeps the vault id, so the
+    // file would otherwise still say on). Last, so a reset that fails earlier changes nothing here;
+    // one that can't forget fails and is rolled back, and the restore is refused.
+    devmode::all_devices_off(&tx, data_dir, vault_id).map_err(|e| {
+        crate::error::Error::Other(format!("developer mode couldn't be reset ({e})"))
+    })?;
     tx.commit()?;
     Ok(())
 }
@@ -306,6 +322,20 @@ mod tests {
         (dir, conn)
     }
 
+    const VAULT: &str = "vault-1";
+
+    /// Where device `id` keeps its record: a folder of its own (two devices are two machines).
+    fn dir_of(dir: &tempfile::TempDir, id: &str) -> std::path::PathBuf {
+        let own = dir.path().join(id);
+        std::fs::create_dir_all(&own).unwrap();
+        own
+    }
+
+    /// A device of the test vault.
+    fn here(dir: &tempfile::TempDir, id: &str) -> devmode::Here {
+        devmode::Here::new(id, VAULT, &dir_of(dir, id))
+    }
+
     const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn add(conn: &Connection, id: &str, signed: bool, state: &str, reason: Option<&str>) {
@@ -370,8 +400,8 @@ mod tests {
     fn adopting_turns_developer_mode_off_for_every_device_and_clears_connected_apps() {
         let (_d, mut conn) = store_conn();
         set_legacy(&conn, "true");
-        devmode::write(&mut conn, A, true).unwrap();
-        devmode::write(&mut conn, B, true).unwrap();
+        devmode::write(&mut conn, &here(&_d, A), true).unwrap();
+        devmode::write(&mut conn, &here(&_d, B), true).unwrap();
         conn.execute(
             "INSERT INTO mcp_clients(name, token_hash) VALUES ('one', 'h1'), ('two', 'h2')",
             [],
@@ -379,12 +409,12 @@ mod tests {
         .unwrap();
         add(&conn, "atlas.board", true, "active", None);
 
-        reset_for_adopt(&conn).unwrap();
+        reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).unwrap();
 
         // The restored store's record named this machine (or the one the backup came from): both
         // are off now, whatever the backup said.
-        assert!(!devmode::is_on(&conn, A).unwrap());
-        assert!(!devmode::is_on(&conn, B).unwrap());
+        assert!(!devmode::is_on(&conn, &here(&_d, A)).unwrap());
+        assert!(!devmode::is_on(&conn, &here(&_d, B)).unwrap());
         assert_eq!(legacy(&conn).as_deref(), Some("false"));
         let clients: i64 = conn
             .query_row("SELECT count(*) FROM mcp_clients", [], |r| r.get(0))
@@ -394,16 +424,80 @@ mod tests {
         assert_eq!(read_rows(&conn).unwrap().len(), 1);
     }
 
+    /// The restore keeps the vault id, so the machine that switched developer mode on still holds
+    /// its own record of it: the reset forgets it, and a credential written back into the restored
+    /// store afterwards (from a copy of the backup, say) switches nothing on.
+    #[test]
+    fn a_restore_makes_the_device_forget_so_a_replayed_credential_stays_off() {
+        let (_d, mut conn) = store_conn();
+        let me = here(&_d, A);
+        devmode::write(&mut conn, &me, true).unwrap();
+        let kept = record(&conn).unwrap();
+        reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).unwrap();
+        conn.execute(
+            "UPDATE settings SET value = ?1 WHERE key = ?2",
+            rusqlite::params![kept, store::SETTING_DEV_DEVICES],
+        )
+        .unwrap();
+        assert!(!devmode::is_on(&conn, &me).unwrap());
+    }
+
+    /// A reset that cannot make this device forget is refused, and the store is left as it was.
+    #[test]
+    fn a_reset_that_cannot_clear_the_devices_record_fails_and_changes_nothing() {
+        let (_d, mut conn) = store_conn();
+        let me = here(&_d, A);
+        devmode::write(&mut conn, &me, true).unwrap();
+        let before = record(&conn);
+        let file = dir_of(&_d, A).join(devmode::DEVICE_FILE);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).is_err());
+        assert_eq!(record(&conn), before, "rolled back");
+    }
+
+    /// A crafted backup can carry a `mod_secrets` row (the strip writes none, but nothing stops a
+    /// hand-made file): the restore's commit deletes every row, and keeps the mod itself.
+    #[test]
+    fn adopting_deletes_every_mod_secret_a_restored_store_carries() {
+        let (_d, conn) = store_conn();
+        add(&conn, "atlas.board", true, "active", None);
+        add(&conn, "acme.tool", false, "active", None);
+        conn.execute(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.board', 'a', 'h.example.com', 'X-A', 'planted-1'), \
+             ('acme.tool', 'b', 'h.example.com', 'X-B', 'planted-2')",
+            [],
+        )
+        .unwrap();
+        reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM mod_secrets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+        assert_eq!(read_rows(&conn).unwrap().len(), 2, "the mods stay");
+    }
+
+    #[test]
+    fn a_reset_that_cannot_delete_the_secrets_changes_nothing_and_fails() {
+        let (_d, mut conn) = store_conn();
+        set_legacy(&conn, "true");
+        devmode::write(&mut conn, &here(&_d, A), true).unwrap();
+        conn.execute_batch("DROP TABLE mod_secrets").unwrap();
+        assert!(reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).is_err());
+        assert!(devmode::is_on(&conn, &here(&_d, A)).unwrap(), "rolled back");
+    }
+
     #[test]
     fn adopting_a_store_that_never_had_developer_mode_writes_the_empty_record_and_no_old_row() {
         let (_d, conn) = store_conn();
         assert_eq!(record(&conn), None);
-        reset_for_adopt(&conn).unwrap();
+        reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).unwrap();
         assert!(record(&conn).is_some(), "an empty record is written");
         assert_eq!(legacy(&conn), None, "an old row is not invented");
         // Even an old "on" that turns up afterwards is never read.
         set_legacy(&conn, "true");
-        assert!(!devmode::is_on(&conn, A).unwrap());
+        assert!(!devmode::is_on(&conn, &here(&_d, A)).unwrap());
     }
 
     #[test]
@@ -412,13 +506,13 @@ mod tests {
         // half of a reset that the caller then treats as failed.
         let (_d, mut conn) = store_conn();
         set_legacy(&conn, "true");
-        devmode::write(&mut conn, A, true).unwrap();
+        devmode::write(&mut conn, &here(&_d, A), true).unwrap();
         let before = record(&conn);
         conn.execute_batch("DROP TABLE mcp_clients").unwrap();
-        assert!(reset_for_adopt(&conn).is_err());
+        assert!(reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).is_err());
         assert_eq!(record(&conn), before, "rolled back");
         assert_eq!(legacy(&conn).as_deref(), Some("true"), "rolled back");
-        assert!(devmode::is_on(&conn, A).unwrap());
+        assert!(devmode::is_on(&conn, &here(&_d, A)).unwrap());
     }
 
     #[test]
@@ -438,13 +532,19 @@ mod tests {
                 set_legacy(&conn, old);
             }
             if let Some(device) = record_for {
-                devmode::write(&mut conn, device, true).unwrap();
+                devmode::write(&mut conn, &here(&_d, device), true).unwrap();
             }
             let before = (record(&conn), legacy(&conn));
-            assert!(!devmode::is_on(&conn, A).unwrap(), "the joiner is off");
+            assert!(
+                !devmode::is_on(&conn, &here(&_d, A)).unwrap(),
+                "the joiner is off"
+            );
             assert_eq!((record(&conn), legacy(&conn)), before);
             // The owner's device keeps its switch.
-            assert_eq!(devmode::is_on(&conn, B).unwrap(), record_for.is_some());
+            assert_eq!(
+                devmode::is_on(&conn, &here(&_d, B)).unwrap(),
+                record_for.is_some()
+            );
         }
     }
 
@@ -499,6 +599,8 @@ mod tests {
             "joiner_inherits",
             "drop_inherited",
             "mcp_clients",
+            "mod_secrets",
+            "purge_all",
         ]
         .into_iter()
         .filter(|name| join.contains(name))
@@ -756,7 +858,7 @@ mod tests {
             "conn.execute(\"DELETE FROM settings WHERE key = 'dev_mode'\", [])",
             "conn.execute(\"UPDATE settings SET value = '' WHERE key = 'mods_dev_devices'\", [])",
             "store::SETTING_DEV_DEVICES",
-            "reset_for_adopt(&conn)",
+            "reset_for_adopt(&conn, &dir_of(&_d, A), VAULT)",
             "conn.execute(\"DELETE FROM mcp_clients\", [])",
         ] {
             assert!(!join_touches(body).is_empty(), "{body}");

@@ -58,6 +58,7 @@ use super::policy::{
 };
 use super::runtime::{InstalledMod, ModRuntime, ServedFile};
 use super::safety::SafetyCheck;
+use super::secrets;
 use super::store;
 use crate::AppState;
 
@@ -72,6 +73,9 @@ mod dev_switch;
 mod unsigned;
 // A developer's unpacked test folder: loaded for the session, never persisted (slice 6, part 4).
 mod folder;
+// The pilots' auto-install: a fresh unconsented install whose marker and handover share its
+// transaction (PR B, B8).
+mod pilots;
 #[allow(unused_imports)]
 pub use blacklist::{
     clear_waiting, dismiss_resumed, read_resumed, read_waiting, set_waiting, ApplyReport, Resumed,
@@ -82,6 +86,7 @@ pub use folder::{
     list_test_mods, reload_test_mod, unload_test_mod, FolderLoad, Reloaded, TestModStatus,
     ALLOW_ATLAS_FOLDERS,
 };
+pub use pilots::PilotLanded;
 pub use unsigned::{UnsignedInstall, UnsignedOptions};
 #[allow(unused_imports)]
 pub use updates::{Landed, Pass, RepairTarget};
@@ -163,6 +168,15 @@ impl From<rusqlite::Error> for LedgerError {
     }
 }
 
+impl From<crate::mods::devmode::Error> for LedgerError {
+    fn from(e: crate::mods::devmode::Error) -> Self {
+        match e {
+            crate::mods::devmode::Error::Db(e) => Self::Db(e),
+            crate::mods::devmode::Error::Disk(e) => Self::Disk(e),
+        }
+    }
+}
+
 impl From<Refusal> for LedgerError {
     fn from(r: Refusal) -> Self {
         Self::Refused(r)
@@ -191,6 +205,30 @@ pub trait LedgerStore {
         layout: &Layout,
         f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
     ) -> Result<T, LedgerError>;
+
+    /// Whether the open vault is the one `device` was named in: its id AND its folder. Asked with
+    /// the connection held ([`Self::with_device_conn`]), so the answer is about the store `f`
+    /// reaches.
+    fn holds_device(&self, device: &super::devmode::Here) -> bool;
+
+    /// [`Self::with_conn`] for a step that reads or writes `device`'s developer-mode answer
+    /// ([`super::devmode::is_on`], [`super::devmode::write`]). A vault id is only a name its own
+    /// files claim, so a store can share one with the vault the device was named in; the folder
+    /// tells them apart, and it is checked once the connection is held, when the open vault can't
+    /// change under it.
+    fn with_device_conn<T>(
+        &self,
+        layout: &Layout,
+        device: &super::devmode::Here,
+        f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        self.with_conn(layout, |conn| {
+            if !self.holds_device(device) {
+                return Err(LedgerError::VaultChanged);
+            }
+            f(conn)
+        })
+    }
 }
 
 impl LedgerStore for AppState {
@@ -205,6 +243,10 @@ impl LedgerStore for AppState {
         }
         same_store(&conn, layout)?;
         f(&mut conn)
+    }
+
+    fn holds_device(&self, device: &super::devmode::Here) -> bool {
+        device.is_open_in(self)
     }
 }
 
@@ -493,6 +535,29 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         self.store.with_conn(self.layout, f)
     }
 
+    /// [`LedgerStore::with_device_conn`] on this ledger's store: one step that reads or writes
+    /// `device`'s developer-mode answer, refused unless the open vault is the device's by id AND
+    /// folder.
+    pub(crate) fn with_device_conn<T>(
+        &self,
+        device: &super::devmode::Here,
+        f: impl FnOnce(&mut Connection) -> Result<T, LedgerError>,
+    ) -> Result<T, LedgerError> {
+        self.store.with_device_conn(self.layout, device, f)
+    }
+
+    /// The device was named in the vault this ledger is for: its developer-mode answer is that
+    /// vault's, so a device named before a vault switch never answers for the store after it. An
+    /// early, connection-free check on the id alone: every step that reads the answer goes through
+    /// [`Self::with_device_conn`], which also checks the folder.
+    pub(crate) fn bound_to(&self, device: &super::devmode::Here) -> Result<(), LedgerError> {
+        if device.vault() == self.layout.vault_id() {
+            Ok(())
+        } else {
+            Err(LedgerError::VaultChanged)
+        }
+    }
+
     /// The folders this ledger writes to.
     pub(crate) fn layout(&self) -> &Layout {
         self.layout
@@ -509,9 +574,24 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
+        self.install_package_with(bytes, keys, opts, now, &|_, _| Ok(()))
+    }
+
+    /// [`Self::install_package`] with `in_tx` run inside the transaction that writes the row, after
+    /// the row and before the commit (the pilots' auto-install: its marker and handover land with
+    /// the row or not at all). An error from it rolls the row back, and the files go the way a
+    /// failed commit's do.
+    pub(crate) fn install_package_with(
+        &self,
+        bytes: &[u8],
+        keys: &TrustedKeys,
+        opts: &InstallOptions<'_>,
+        now: DateTime<Utc>,
+        in_tx: InTx<'_>,
+    ) -> Result<Installed, LedgerError> {
         let pkg = package::verify(bytes, keys.public_keys()).map_err(LedgerError::Package)?;
         let sha = hex::encode(Sha256::digest(bytes));
-        self.install_verified(&pkg, &sha, opts, now)
+        self.install_verified_with(&pkg, &sha, opts, now, in_tx)
     }
 
     /// Every check an install makes, before anything is written, as the Mods tab's consent screen
@@ -640,6 +720,17 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
+        self.install_verified_with(pkg, package_sha256, opts, now, &|_, _| Ok(()))
+    }
+
+    fn install_verified_with(
+        &self,
+        pkg: &VerifiedPackage,
+        package_sha256: &str,
+        opts: &InstallOptions<'_>,
+        now: DateTime<Utc>,
+        in_tx: InTx<'_>,
+    ) -> Result<Installed, LedgerError> {
         let m = &pkg.manifest;
         let _ledger = self.runtime.ledger_lock();
 
@@ -680,7 +771,7 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         // The state and consent come from the row as the commit reads it, not as the checks did:
         // a pause written while the files were staging survives the install.
         let Committed { state, consented } =
-            self.with_conn(|c| commit(c, &write, kind, expected))?;
+            self.with_conn(|c| commit_with(c, &write, kind, expected, in_tx))?;
         placed.keep();
         if policy::serves(&state, consented) {
             self.runtime.install(installed);
@@ -1140,24 +1231,31 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<Row>> {
     rows.collect()
 }
 
+/// What an install runs inside its own transaction after the row is written, told which kind of
+/// install it is (see [`Ledger::install_package_with`]).
+pub(crate) type InTx<'a> = &'a dyn Fn(&Connection, InstallKind) -> Result<(), LedgerError>;
+
 /// Write the row, after checking the pin is still what the checks read: a fresh install needs no
 /// row, an update or repair the very row it was decided against. The state is decided here, from
 /// the row this transaction reads: another owner's pause written since the checks (the blacklist,
-/// the user) is kept, never overwritten from the earlier read.
-fn commit(
+/// the user) is kept, never overwritten from the earlier read. `in_tx` runs between the row and the
+/// commit: its failure drops the transaction, so the row goes with it.
+fn commit_with(
     conn: &mut Connection,
     w: &RowWrite<'_>,
     kind: InstallKind,
     expected: Option<&Pinned>,
+    in_tx: InTx<'_>,
 ) -> Result<Committed, LedgerError> {
     let tx = conn.transaction()?;
     let committed = write_row(&tx, w, kind, expected)?;
+    in_tx(&tx, kind)?;
     disk::failpoint(Step::Commit).map_err(LedgerError::Disk)?;
     tx.commit()?;
     Ok(committed)
 }
 
-/// [`commit`]'s writes, in the caller's transaction (the unsigned install adds its own rule to the
+/// [`commit_with`]'s writes, in the caller's transaction (the unsigned install adds its own rule to the
 /// same one).
 fn write_row(
     tx: &Connection,
@@ -1221,6 +1319,13 @@ fn write_row(
             values,
         )?,
     };
+    // A key whose slot this version moved or dropped goes now, in this transaction: its value was
+    // typed for another host or header, and must not wait in the store for a later slot to match
+    // (`secrets` also refuses to read a row whose pair is not the slot's). The approval that let
+    // the move land was about the new destination, never about the old key.
+    if matches!(kind, InstallKind::Update | InstallKind::Repair) {
+        secrets::prune_to_slots(tx, w.id, w.manifest)?;
+    }
     // A waiting update this install satisfies is no longer waiting.
     blacklist::clear_waiting(tx, w.id, Some(w.version))?;
     Ok(Committed { state, consented })
@@ -1593,6 +1698,10 @@ pub fn after_settle(app: &AppHandle, writes: impl FnOnce() -> bool) {
     };
     if settle_registry(runtime.inner(), writes) {
         after_writer_open(app);
+        // A pilot owed to this store (a marker; nothing without one) with the index held on this
+        // machine. After the load, not inside it: `after_writer_open` returns early for a store with
+        // no mods yet, which is exactly the store that is owed one.
+        super::autoinstall::spawn_after_open(app);
     }
     // Either way the sessions of test folders are gone (a close forgot them, a writer's open
     // deleted their rows): so are their watches.
@@ -1638,6 +1747,7 @@ pub fn quiesce(app: &AppHandle) -> Option<MutexGuard<'_, ()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mods::devmode;
     use crate::mods::engine::Platform;
     use crate::mods::package::tests::signed_package;
     use crate::mods::runtime::FrameError;
@@ -1648,6 +1758,8 @@ mod tests {
 
     // The safety list against the ledger (slice 5).
     mod slice5;
+    // The pilots' auto-install (PR B, B8).
+    mod pilots;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).
@@ -1666,6 +1778,8 @@ mod tests {
     struct TestStore {
         conn: Mutex<Connection>,
         vault_id: Mutex<String>,
+        /// Where the vault sits on this computer ([`devmode::place_of`]'s value).
+        place: Mutex<String>,
         closed: AtomicBool,
         steps: AtomicUsize,
         before_step: Mutex<Option<(usize, String)>>,
@@ -1693,6 +1807,10 @@ mod tests {
             same_store(&conn, layout)?;
             f(&mut conn)
         }
+
+        fn holds_device(&self, device: &devmode::Here) -> bool {
+            device.names_place(&self.vault_id.lock().unwrap(), &self.place.lock().unwrap())
+        }
     }
 
     struct World {
@@ -1715,6 +1833,7 @@ mod tests {
             store: TestStore {
                 conn: Mutex::new(conn),
                 vault_id: Mutex::new(VAULT.into()),
+                place: Mutex::new(devmode::TEST_PLACE.into()),
                 closed: AtomicBool::new(false),
                 steps: AtomicUsize::new(0),
                 before_step: Mutex::new(None),
@@ -2119,6 +2238,64 @@ mod tests {
         );
     }
 
+    /// A key is bound to its slot's host and header: an approved update that moves or drops the
+    /// slot deletes the key in the install's own transaction, one that leaves the slot alone keeps
+    /// it, and a refused or failed install deletes nothing.
+    #[test]
+    fn an_approved_update_that_moves_a_slot_deletes_its_key_and_the_rest_stay() {
+        use serde_json::json;
+        let w = world();
+        let with = |version: &str, k_host: &str| {
+            let k_host = k_host.to_owned();
+            pkg(version, move |m| {
+                m["permissions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id": "internet", "why": "x"}));
+                m["internetHosts"] = json!(["a.example.com", "b.example.com"]);
+                m["secrets"] = json!([
+                    {"name": "k", "host": k_host, "header": "X-Key"},
+                    {"name": "j", "host": "a.example.com", "header": "X-J"},
+                ]);
+            })
+        };
+        let keys = |w: &World| {
+            w.sql::<String>(
+                "SELECT group_concat(name, ',') FROM (SELECT name FROM mod_secrets ORDER BY name)",
+            )
+        };
+        w.install(&with("1.0.0", "a.example.com"), Approval::Approved)
+            .unwrap();
+        w.exec(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'k', 'a.example.com', 'X-Key', 'v1'), \
+             ('atlas.map', 'j', 'a.example.com', 'X-J', 'v2')",
+        );
+        // The same slots: both keys stay.
+        w.install(&with("1.1.0", "a.example.com"), Approval::Unattended)
+            .unwrap();
+        assert_eq!(keys(&w), "j,k");
+        // `k` goes to another host: unattended it waits, and nothing is deleted by a refusal.
+        let moved = with("1.2.0", "b.example.com");
+        assert!(w.install(&moved, Approval::Unattended).is_err());
+        assert_eq!(keys(&w), "j,k");
+        // Approved, it installs and `k`'s old key is gone; `j` is untouched.
+        w.install(&moved, Approval::Approved).unwrap();
+        assert_eq!(keys(&w), "j");
+        // A repair keeps what is exactly a slot and deletes a row that is not one.
+        w.exec(
+            "INSERT INTO mod_secrets(mod_id, name, host, header, value) VALUES \
+             ('atlas.map', 'k', 'b.example.com', 'X-Key', 'v3'), \
+             ('atlas.map', 'stale', 'a.example.com', 'X-S', 'v4')",
+        );
+        w.install(&moved, Approval::Approved).unwrap();
+        assert_eq!(keys(&w), "j,k");
+        // Dropping the slot altogether.
+        let dropped = pkg("1.3.0", |_| {});
+        w.install(&dropped, Approval::Approved).unwrap();
+        assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_secrets"), 0);
+    }
+
     /// Write, fsync (file and folder), rename and the row's commit: each failure leaves no row, no
     /// folder outside staging and quarantine, nothing in staging, and nothing served.
     #[test]
@@ -2220,6 +2397,51 @@ mod tests {
         );
     }
 
+    /// The pin is the publisher (tier, author, source repo). The names that credit a mod are
+    /// display only, so an update may add, change or drop them, and the stored manifest then
+    /// carries the new ones.
+    #[test]
+    fn an_update_that_changes_only_the_credited_authors_is_accepted() {
+        let w = world();
+        w.install(
+            &pkg("1.0.0", |m| m["authors"] = serde_json::json!(["Bobby Yu"])),
+            Approval::Approved,
+        )
+        .unwrap();
+        for (version, authors) in [
+            ("1.1.0", serde_json::json!(["Bobby Yu", "Someone New"])),
+            ("1.2.0", serde_json::json!(["Someone Else Entirely"])),
+        ] {
+            let got = w
+                .install(
+                    &pkg(version, |m| m["authors"] = authors.clone()),
+                    Approval::Approved,
+                )
+                .unwrap();
+            assert_eq!(got.kind, InstallKind::Update, "{version}");
+            let stored: String = w.sql("SELECT manifest FROM mods");
+            let stored: Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(stored["authors"], authors, "{version}");
+        }
+        // Dropping them is an update too.
+        let got = w
+            .install(&pkg("1.3.0", |_| {}), Approval::Approved)
+            .unwrap();
+        assert_eq!(got.kind, InstallKind::Update);
+        // The publisher is still what pins: another author name still refuses, authors or not.
+        assert!(matches!(
+            w.install(
+                &pkg("2.0.0", |m| {
+                    m["authors"] = serde_json::json!(["Bobby Yu"]);
+                    m["publisher"]["author"] = "Someone".into();
+                }),
+                Approval::Approved,
+            )
+            .unwrap_err(),
+            LedgerError::Refused(Refusal::Publisher)
+        ));
+    }
+
     #[test]
     fn a_repair_puts_back_exactly_the_pinned_package() {
         let w = world();
@@ -2288,7 +2510,7 @@ mod tests {
             (InstallKind::Update, Some(&stale)),
         ] {
             assert!(matches!(
-                commit(&mut conn, &write, kind, expected),
+                commit_with(&mut conn, &write, kind, expected, &|_, _| Ok(())),
                 Err(LedgerError::Refused(Refusal::Changed))
             ));
         }
@@ -2298,7 +2520,13 @@ mod tests {
         let mut conn = w.store.conn.lock().unwrap();
         assert!(
             matches!(
-                commit(&mut conn, &write, InstallKind::Update, Some(&pin)),
+                commit_with(
+                    &mut conn,
+                    &write,
+                    InstallKind::Update,
+                    Some(&pin),
+                    &|_, _| Ok(())
+                ),
                 Err(LedgerError::Refused(Refusal::Changed))
             ),
             "an uninstall since the checks isn't updated back into being"

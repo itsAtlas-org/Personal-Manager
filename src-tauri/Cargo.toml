@@ -1,6 +1,6 @@
 [package]
 name = "pm"
-version = "3.183.4-alpha"
+version = "3.184.0-alpha"
 description = "PM — a local-first personal manager (Archivist + Personal Assistant)"
 authors = ["Bobby Yu"]
 edition = "2021"
@@ -251,3 +251,6 @@ webkit2gtk = { version = "2", features = ["v2_40"] }
 # already in Cargo.lock (ring through rustls, blake2 through argon2), so no new package.
 ring = "0.17"
 blake2 = "0.11"
+# The same tokio, with its paused clock: the tests of `ai.complete`'s fifteen-second lookups advance
+# time instead of waiting. A feature, not a package: Cargo.lock does not change.
+tokio = { version = "1", features = ["test-util"] }

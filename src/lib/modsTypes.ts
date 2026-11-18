@@ -175,13 +175,38 @@ export interface ModResumed {
   text: string;
 }
 
+/** One help entry a mod's manifest wrote (`contributions.help`). `body` is Markdown source. */
+export interface ModHelpEntry {
+  id: string;
+  title: string;
+  body: string;
+}
+
+/** One key slot a mod's manifest declares: the one host the key goes to and the one header it goes
+ *  in, and whether a key is stored for it now (bound to this host and header). The key itself is
+ *  never sent to the page; the user types it into PM's own field (`modSecretSave`). */
+export interface ModSecretSlot {
+  name: string;
+  host: string;
+  header: string;
+  set: boolean;
+}
+
 export interface ModInfo {
   id: string;
+  /** The one entry that is no row: a mod PM is still installing for this vault (the Map, once a
+   *  migration says so). It has a tab and the Installing words and nothing else: no permissions, no
+   *  files, nothing to uninstall, and the Mods tab's list leaves it out. */
+  pending: boolean;
   name: string;
   description: string;
   /** What the row says; an unsigned row is third party whatever it claims (`signed`). */
   tier: "first" | "second" | "third";
+  /** The publisher the signature and the update pin are about. */
   author: string;
+  /** The people the mod credits (its manifest's `authors`), in its order; empty when it names none.
+   *  Display only, and the mod's own claim like its name. Draw both through `makerCredit`. */
+  authors: string[];
   /** `owner/repo`. */
   repo: string;
   commit: string;
@@ -192,9 +217,21 @@ export interface ModInfo {
   state: ModStanding;
   permissions: ModPermission[];
   internetHosts: string[];
+  /** The key slots the manifest declares (empty for most mods). */
+  secrets: ModSecretSlot[];
+  /** The monthly AI limit in dollars, or null until the person sets one (a paid call asks first). */
+  aiCapUsd: number | null;
+  /** What counts against the limit now: this month's settled spend plus the bookings still held.
+   *  The limit's own ledger, which can differ from the Usage and cost table's best-effort log. */
+  aiSpentUsd: number;
+  /** The month that number is for (`YYYY-MM`). */
+  aiMonth: string;
   /** The sidebar tab's label, when the mod has one. */
   navTab: string | null;
   calendarOverlay: string | null;
+  /** The mod's own help (`contributions.help`), shown in PM's "About this mod" panel. The maker's
+   *  words: the title is a plain line and the body goes through `markdown.tsx` only. */
+  help: ModHelpEntry[];
   /** `modIcon` answers it. */
   hasIcon: boolean;
   update: ModUpdateWaiting | null;
@@ -202,6 +239,26 @@ export interface ModInfo {
   installedAt: string;
   updatedAt: string;
 }
+
+/** The kind of route a mod's AI call would take now (`mod_ai_prompt_info`). */
+export type AiPromptRoute = "none" | "local" | "cloud" | "local-then-cloud" | "cloud-for-power";
+
+/** What the money prompt is told about the route: facts about the person's own settings, never
+ *  anything the mod supplied. `paid` means a cloud arm exists, so the prompt asks for a monthly
+ *  limit; `unpriced` means PM cannot price the route and every call will be refused. */
+export interface AiPromptInfo {
+  route: AiPromptRoute;
+  paid: boolean;
+  unpriced: boolean;
+  /** The person's whole Background cloud model list, in their order. Empty with no cloud arm. */
+  cloudModels: string[];
+  /** The Background role's local model (on battery, the one the policy set aside), or none. */
+  localModel: string | null;
+  suggestedCapUsd: number;
+}
+
+/** The largest monthly limit PM stores (`mods::ai::MAX_CAP_USD`; a Rust test holds them equal). */
+export const MAX_AI_CAP_USD = 100000;
 
 /** A mod's icon: a media type (`image/png` or `image/webp`) and its bytes in base64. */
 export interface ModIcon {
@@ -238,7 +295,11 @@ export interface ConsentScreen {
   name: string;
   description: string;
   version: string;
+  /** The publisher the signature and the update pin are about. */
   author: string;
+  /** The people the manifest credits, in its order; empty when it names none. The mod's own claim:
+   *  for a file or folder nobody has checked, so are the publisher and the repository. */
+  authors: string[];
   repo: string;
   /** The commit the maker's signed build came from (second party shows "reviewed at commit …"). */
   commit: string;
@@ -326,6 +387,25 @@ export interface KitLimits {
   maxIdsPerEvent: number;
   eventCoalesceMs: number;
   maxPendingIds: number;
+  // The experimental calls' limits (PR B); times in milliseconds.
+  callTimeoutMs: number;
+  aiMaxInFlight: number;
+  aiCallsPerMinute: number;
+  aiCallBurst: number;
+  maxAiPromptBytes: number;
+  maxAiMessages: number;
+  maxAiOutputTokens: number;
+  netMaxInFlight: number;
+  netFetchesPerSecond: number;
+  netFetchBurst: number;
+  maxFetchRequestBytes: number;
+  maxFetchResponseBytes: number;
+  fetchConnectTimeoutMs: number;
+  fetchTotalTimeoutMs: number;
+  maxFetchRedirects: number;
+  notifyMaxChars: number;
+  notifyPerDay: number;
+  secretAsksPerSession: number;
 }
 
 /** What `devKitInfo` answers: the Developer kit's rail sections. */
@@ -521,6 +601,21 @@ export interface ModsResetResult {
   problem: string | null;
 }
 
+/** How "Try now" went (`retryAutoInstall`). */
+export interface ModsRetryResult {
+  /** The safety list was fetched and taken, so the install ran against a fresh one. */
+  fetched: boolean;
+  /** When it wasn't, why, in the backend's words. */
+  problem: string | null;
+}
+
+/** What the page asks once it has the rows (`modsHandoverState`): the auto-installed mods that landed
+ *  in this vault, and whether the Map's device-local view prefs still wait to be handed over. */
+export interface ModsHandoverState {
+  landed: string[];
+  adoptMapPrefs: boolean;
+}
+
 /** Why `mods://changed` fired. The page's answer is the same for every cause: read the rows again. */
 export type ModsChangedCause =
   | "recovered"
@@ -534,7 +629,10 @@ export type ModsChangedCause =
   | "loaded"
   | "decided"
   | "dev-mode"
-  | "test-mod";
+  | "test-mod"
+  | "auto-installed"
+  | "secret"
+  | "ai-cap";
 
 export interface ModsChanged {
   cause: ModsChangedCause;

@@ -22,7 +22,10 @@ name: Linux bundle dry-run
 # Widening it has a consequence worth stating rather than discovering: the
 # version-lockstep rule means EVERY pull request touches package.json,
 # package-lock.json, tauri.conf.json, Cargo.toml and Cargo.lock, so in practice
-# this lane now runs on every PR. That is the intended trade — PM ships three
+# this lane now runs on every PR. The one exception is a PR that touches only mod folders
+# (Mods spec D12: it bumps the mod's own version, not PM's, and no mod ships in the
+# installer, I-25), which skips this lane because there is nothing here to prove; it
+# is not a required check, so nothing waits on it. That is the intended trade — PM ships three
 # Linux package formats and nothing else proves they assemble — and it is one
 # line to undo (drop the manifests/lockfiles below and the job goes back to
 # firing only on deliberate packaging edits).

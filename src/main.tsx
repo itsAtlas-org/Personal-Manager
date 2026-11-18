@@ -6,6 +6,8 @@ import ReactDOM from "react-dom/client";
 import { ThemeProvider, UserTimeProvider } from "./theme";
 import { CapabilityProvider } from "./lib/capabilities";
 import { ModRowsProvider } from "./lib/modRowsProvider";
+import { modPageHooks } from "./lib/modSurface";
+import { ModPageHooksContext } from "./components/mods/modPageHooks";
 import { ContextMenuHost, ErrorBoundary, TitleBar } from "./components/ui";
 import { LinkNotice } from "./components/LinkNotice";
 import { showMainWindow } from "./lib/ipc";
@@ -67,7 +69,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
                       <App />
                     ) : (
                       <ModRowsProvider>
-                        <App />
+                        {/* What a mod's `notify` and `secrets.set` draw (lib/modSurface). */}
+                        <ModPageHooksContext.Provider value={modPageHooks}>
+                          <App />
+                        </ModPageHooksContext.Provider>
                       </ModRowsProvider>
                     )}
                   </Suspense>

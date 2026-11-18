@@ -93,6 +93,16 @@ fn holds_writer(engaged: bool, mode: Option<LockMode>) -> bool {
     !engaged || mode == Some(LockMode::Active)
 }
 
+/// [`holds_writer`], read now from the live session: the mods' auto-install asks it before every step
+/// that writes, so a profile that stepped back mid-pass (or a poisoned lock) installs nothing.
+pub fn this_instance_writes(state: &AppState) -> bool {
+    state
+        .lock_session
+        .lock()
+        .map(|session| holds_writer(session.root.is_some(), session.mode))
+        .unwrap_or(false)
+}
+
 /// Once the lock is settled: if this instance came out of it as the writer with the store still
 /// open, load its mods and sweep their folders; otherwise serve none. A store can close without
 /// `close_store` (a detach whose next vault is locked takes the connection itself), so this is
@@ -577,6 +587,40 @@ mod tests {
         assert!(!holds_writer(true, Some(LockMode::Waiting)));
         assert!(!holds_writer(true, Some(LockMode::Requesting)));
         assert!(!holds_writer(true, None));
+    }
+
+    /// The live read the mods' auto-install asks before every write: a device vault and an Active
+    /// baton write; a profile waiting behind another, asking for the baton, or with a poisoned lock
+    /// does not.
+    #[test]
+    fn this_instance_writes_reads_the_live_session() {
+        use crate::sidecar::{SidecarManager, SidecarPaths};
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = SidecarManager::new(SidecarPaths {
+            source_dir: dir.path().join("sidecar"),
+            venv_dir: dir.path().join("venv"),
+        });
+        let state = AppState::new(None, None, sidecar, None, None);
+        assert!(this_instance_writes(&state), "a device vault never engages");
+        let set = |root: Option<&str>, mode: Option<LockMode>| {
+            let mut s = state.lock_session.lock().unwrap();
+            s.root = root.map(PathBuf::from);
+            s.mode = mode;
+        };
+        set(Some("/shared"), Some(LockMode::Active));
+        assert!(this_instance_writes(&state));
+        for mode in [Some(LockMode::Waiting), Some(LockMode::Requesting), None] {
+            set(Some("/shared"), mode);
+            assert!(!this_instance_writes(&state), "{mode:?} is a guest");
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = state.lock_session.lock().unwrap();
+            panic!("poison");
+        }));
+        assert!(
+            !this_instance_writes(&state),
+            "a lock that can't be read installs nothing"
+        );
     }
 
     #[test]

@@ -219,6 +219,9 @@ const TABLES: &[Table] = &[
             plain("provider"),
             plain("latency_ms"),
             plain("fallback_reason"),
+            // v60: the mod a row's spend was for (NULL for PM's own calls). A mod id is public (it
+            // names a published mod, or a developer's own test folder), not personal text.
+            plain("mod_id"),
         ],
     },
     Table {
@@ -877,6 +880,20 @@ mod tests {
         assert!(table_page(&c, "secrets", 50, 0).is_err());
     }
 
+    /// A mod's typed keys (`mod_secrets`, Mods spec §1.7) are never browsable, even redacted: the
+    /// table is not on the allow-list, so showing it would take a deliberate edit that fails here.
+    #[test]
+    fn the_inspector_never_reads_a_mods_keys() {
+        let c = fixture();
+        c.execute_batch(
+            "CREATE TABLE mod_secrets (mod_id TEXT, name TEXT, host TEXT, header TEXT, value TEXT);
+             INSERT INTO mod_secrets VALUES ('acme.tool', 'k', 'h.example.com', 'X-K', 'sentinel');",
+        )
+        .unwrap();
+        assert!(table_page(&c, "mod_secrets", 50, 0).is_err());
+        assert!(TABLES.iter().all(|t| t.name != "mod_secrets"));
+    }
+
     #[test]
     fn an_allowed_table_returns_only_its_projected_columns() {
         let c = fixture();
@@ -897,6 +914,25 @@ mod tests {
         assert_eq!(page.rows.len(), 1);
         // canonical_name is shown (short, under the truncation limit).
         assert_eq!(page.rows[0][2], "Personal Manager");
+    }
+
+    /// A mod's spend row shows which mod it was for (v60 `usage_log.mod_id`), read from the real
+    /// store so a column the schema lacks, or one the list forgot, fails here.
+    #[test]
+    fn the_usage_log_inspector_shows_the_mod_a_row_was_for() {
+        let (_dir, conn) = crate::mods::api::test_support::store();
+        conn.execute(
+            "INSERT INTO usage_log(model, kind, mod_id) VALUES ('m', 'background', 'acme.tool')",
+            [],
+        )
+        .unwrap();
+        let page = table_page(&conn, "usage_log", 50, 0).unwrap();
+        let col = page
+            .columns
+            .iter()
+            .position(|c| c == "mod_id")
+            .expect("mod_id is inspectable");
+        assert_eq!(page.rows[0][col], "acme.tool");
     }
 
     #[test]

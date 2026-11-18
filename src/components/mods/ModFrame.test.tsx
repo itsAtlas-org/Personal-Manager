@@ -15,7 +15,15 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { HelpOverlay } from "../HelpOverlay";
+import { HELP as HELP_TEXT, HelpContext } from "../../lib/help";
 import { ModFrame, type ModTier } from "./ModFrame";
+import {
+  ModPageHooksContext,
+  NOTICE_MAX_CHARS,
+  readNotice,
+  type ModPageHooks,
+} from "./modPageHooks";
 import { PROMPT_GUARD_MS } from "./ModPermissionPrompt";
 import {
   FLOOD_BURST,
@@ -34,11 +42,13 @@ const modEventsAck = vi.fn();
 const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
 const modPermissionDecide = vi.fn();
+const modAiPromptInfo = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
-  modPermissionDecide: (id: string, permission: string, granted: boolean) =>
-    modPermissionDecide(id, permission, granted),
+  // Every argument is forwarded as it came, so a test sees whether a limit travelled with the yes.
+  modPermissionDecide: (...args: unknown[]) => modPermissionDecide(...args),
+  modAiPromptInfo: (modId: string) => modAiPromptInfo(modId),
   modFrameOpen: (modId: string, onEvent: (message: unknown) => void) =>
     modFrameOpen(modId, onEvent),
   modFrameClose: (session: string) => modFrameClose(session),
@@ -319,6 +329,100 @@ describe("ModFrame", () => {
     });
     expect(openReaderById).toHaveBeenCalledTimes(1);
     expect(openReaderById).toHaveBeenCalledWith(12);
+  });
+
+  describe("secrets.set and notify", () => {
+    const SLOT = { name: "token", host: "api.example.com", header: "X-Api-Key", set: false };
+    const mountWith = (hooks: ModPageHooks) =>
+      render(
+        <ModPageHooksContext.Provider value={hooks}>
+          <ModFrame modId="acme.tool" name="Acme Tool" tier="second" />
+        </ModPageHooksContext.Provider>,
+      );
+
+    it("shows PM's key field for the slot the backend named, and tells the mod only whether a key was held", async () => {
+      const askSecret = vi.fn();
+      modCall.mockResolvedValue({ kind: "page", action: "secrets.set", args: SLOT });
+      mountWith({ askSecret });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "secrets.set", args: { name: "token" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: { set: false },
+      });
+      // The mod is named by PM's own record, never by anything the frame sent.
+      expect(askSecret).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        SLOT,
+      );
+    });
+
+    it("shows a notice strip with the text and tone the backend checked, and answers null", async () => {
+      const showNotice = vi.fn();
+      modCall.mockResolvedValue({
+        kind: "page",
+        action: "notify",
+        args: { text: "Rates updated", tone: "good" },
+      });
+      mountWith({ showNotice });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "notify", args: { text: "x" } })).toEqual({
+        id: 1,
+        ok: true,
+        result: null,
+      });
+      expect(showNotice).toHaveBeenCalledWith(
+        { modId: "acme.tool", name: "Acme Tool", tier: "second" },
+        { text: "Rates updated", tone: "good" },
+      );
+    });
+
+    it.each([
+      ["secrets.set", SLOT],
+      ["notify", { text: "hi", tone: "info" }],
+    ])(
+      "answers %s as PM's own failure, not as a success that showed nothing, when nothing draws it",
+      async (action, args) => {
+        modCall.mockResolvedValue({ kind: "page", action, args });
+        mount();
+        const { port } = connect(await theFrame());
+        expect(await ask(port, { id: 1, method: action })).toEqual({
+          id: 1,
+          ok: false,
+          error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+        });
+      },
+    );
+
+    it.each([
+      ["secrets.set", null],
+      ["secrets.set", { ...SLOT, set: "yes" }],
+      ["secrets.set", { ...SLOT, name: "" }],
+      ["secrets.set", { name: "token" }],
+      ["notify", null],
+      ["notify", { text: "hi", tone: "loud" }],
+      ["notify", { text: "", tone: "info" }],
+      ["notify", { text: 5, tone: "info" }],
+      ["notify", { text: "a".repeat(141), tone: "info" }],
+    ])("draws nothing for %s with the arguments %j", async (action, args) => {
+      const hooks = { askSecret: vi.fn(), showNotice: vi.fn() };
+      modCall.mockResolvedValue({ kind: "page", action, args });
+      mountWith(hooks);
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: action })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+      expect(hooks.askSecret).not.toHaveBeenCalled();
+      expect(hooks.showNotice).not.toHaveBeenCalled();
+    });
+
+    it("counts a notice's length in characters, as the backend does", () => {
+      const heavy = "é𝄞".repeat(NOTICE_MAX_CHARS / 2);
+      expect(readNotice({ text: heavy, tone: "warn" }).text).toBe(heavy);
+      expect(() => readNotice({ text: heavy + "x", tone: "warn" })).toThrow();
+    });
   });
 
   it("performs no page action for a session that ended while the backend was answering", async () => {
@@ -934,6 +1038,65 @@ describe("the first-use question", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("asks the money question on a paid route with a limit field, and the limit travels with the yes", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      cloudModels: ["a/b"],
+      localModel: null,
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValueOnce(NEEDS_AI).mockResolvedValueOnce(VALUE);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    const limit = await within(dialog).findByRole("textbox");
+    expect((limit as HTMLInputElement).value).toBe("1.00");
+    expect(modAiPromptInfo).toHaveBeenCalledWith("acme.tool");
+    fireEvent.change(limit, { target: { value: "2.50" } });
+    // Content arrived after the dialog opened: its own wait runs before the buttons answer.
+    const allow = within(dialog).getByRole("button", { name: "Allow" }) as HTMLButtonElement;
+    expect(allow.disabled).toBe(true);
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(allow);
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", true, 2.5);
+    expect(modCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("No on the money question sends no limit", async () => {
+    const NEEDS_AI = {
+      kind: "error",
+      error: { code: "MOD-2002", message: "x", permission: "ai" },
+    };
+    modAiPromptInfo.mockResolvedValue({
+      route: "cloud",
+      paid: true,
+      unpriced: false,
+      cloudModels: ["a/b"],
+      localModel: null,
+      suggestedCapUsd: 1,
+    });
+    modCall.mockResolvedValue(NEEDS_AI);
+    mount();
+    const { port } = connect(await theFrame());
+    const got = listen(port);
+    call(port);
+    const dialog = await freshQuestion();
+    await within(dialog).findByRole("textbox");
+    act(() => void vi.advanceTimersByTime(PROMPT_GUARD_MS));
+    fireEvent.click(within(dialog).getByRole("button", { name: "No" }));
+    await waitFor(() => expect(got).toHaveLength(1));
+    expect(modPermissionDecide).toHaveBeenCalledWith("acme.tool", "ai", false);
+  });
+
   it("No records the no and tells the mod it isn't granted, without a retry", async () => {
     modCall.mockResolvedValue(NEEDS);
     mount();
@@ -1081,5 +1244,178 @@ describe("the first-use question", () => {
     await settle();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(got).toEqual([]);
+  });
+});
+
+// B7: the mod's own help, shown by PM over the frame. The mod's words are drawn as text or through
+// the sanitizing Markdown component, never as markup, and the frame keeps its session underneath.
+describe("About this mod", () => {
+  const HELP = [
+    { id: "map-overview", title: "The map", body: "Hover a dot.\nClick it to read." },
+    { id: "map-names", title: "Names", body: "Shows **each** file name." },
+  ];
+
+  function mountAbout(about: { description: string; help: typeof HELP }) {
+    return render(<ModFrame modId="acme.tool" name="Acme Tool" tier="second" about={about} />);
+  }
+
+  const aboutButton = () => screen.queryByRole("button", { name: "About this mod" });
+
+  it("offers no button when the mod wrote neither a description nor any help", async () => {
+    mountAbout({ description: "", help: [] });
+    await theFrame();
+    expect(aboutButton()).toBeNull();
+    cleanup();
+    // Help that is only blank or invisible characters is nothing.
+    mountAbout({ description: " \u200b ", help: [{ id: "x", title: "T", body: "\u200b\n " }] });
+    await theFrame();
+    expect(aboutButton()).toBeNull();
+  });
+
+  it("opens the maker's help over the frame, keeps the session running, and Close gives the page back", async () => {
+    mountAbout({ description: "Draws your documents.", help: HELP });
+    const frame = await theFrame();
+    expect(frame.closest("section")?.getAttribute("data-help")).toBe("nav-mod-tab");
+    const button = aboutButton()!;
+    fireEvent.click(button);
+
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(within(panel).getByRole("heading", { name: "About this mod" })).toBeTruthy();
+    expect(panel.textContent).toContain("Written by the mod's maker, not by PM");
+    expect(panel.textContent).toContain("Draws your documents.");
+    expect(within(panel).getByRole("heading", { name: "The map" })).toBeTruthy();
+    expect(within(panel).getByRole("heading", { name: "Names" })).toBeTruthy();
+    // Markdown is rendered (bold), through the sanitizing component.
+    expect(panel.querySelector("strong")?.textContent).toBe("each");
+    // Over the frame, and the frame is still there under one session, not reopened.
+    expect(frameNow()).toBe(frame);
+    expect(modFrameOpen).toHaveBeenCalledTimes(1);
+    expect(modFrameClose).not.toHaveBeenCalled();
+    // PM's band is still drawn above the panel, and the panel's own sits over the one with the button.
+    expect(screen.getAllByText("Acme Tool", { selector: "span" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
+    expect(frameNow()).toBe(frame);
+    expect(document.activeElement).toBe(aboutButton());
+    expect(modFrameClose).not.toHaveBeenCalled();
+  });
+
+  it("takes focus when it opens, and Escape closes it", async () => {
+    mountAbout({ description: "", help: HELP });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(document.activeElement).toBe(within(panel).getByRole("button", { name: "Close" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
+  });
+
+  it("draws a hostile title and body as text: no markup, no link, no image, no handler reaches the page", async () => {
+    mountAbout({
+      description: "<img src=x onerror=alert(1)> desc",
+      help: [
+        {
+          id: "evil",
+          title: "<b>Bold</b><script>alert(1)</script>",
+          body: [
+            "<script>alert(2)</script><img src=x onerror=alert(3)>",
+            '<a href="https://evil.test" onclick="alert(4)">raw anchor</a>',
+            "[markdown link](https://evil.test/phish) and [js](javascript:alert(5))",
+            "![tracker](https://track.test/pixel.png)",
+            "https://bare.test/autolink",
+          ].join("\n\n"),
+        },
+      ],
+    });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(
+      panel.querySelector("script, img, iframe, object, embed, style, form, input"),
+    ).toBeNull();
+    // No link at all: not even a safe-looking one a click could send to the OS browser.
+    expect(panel.querySelector("a, [href], [src], [target]")).toBeNull();
+    for (const el of panel.querySelectorAll("*")) {
+      for (const attr of el.getAttributeNames()) expect(attr, el.outerHTML).not.toMatch(/^on/i);
+    }
+    // The title's markup is its literal text.
+    expect(within(panel).getByRole("heading", { name: /<b>Bold<\/b>/ })).toBeTruthy();
+    // The words that were links are still there to read, and an image is its alt text.
+    expect(panel.textContent).toContain("markdown link");
+    expect(panel.textContent).toContain("[tracker]");
+    expect(panel.textContent).toContain("https://bare.test/autolink");
+    // The description is a plain line, so its tag is text too.
+    expect(panel.textContent).toContain("<img src=x onerror=alert(1)> desc");
+  });
+
+  it("speaks for the frame in help mode (which can't see inside it) and for the panel", async () => {
+    render(
+      <HelpContext.Provider value={{ enabled: true, setEnabled: () => {} }}>
+        <HelpOverlay />
+        <ModFrame
+          modId="acme.tool"
+          name="Acme Tool"
+          tier="second"
+          about={{ description: "", help: HELP }}
+        />
+      </HelpContext.Provider>,
+    );
+    const frame = await theFrame();
+    // A hover over the frame lands on the iframe element itself, never on anything inside it.
+    fireEvent.mouseOver(frame);
+    expect(await screen.findByText(HELP_TEXT["nav-mod-tab"].title)).toBeTruthy();
+    expect(screen.getByText(/About this mod button above the page/)).toBeTruthy();
+    fireEvent.click(aboutButton()!);
+    fireEvent.mouseOver(document.querySelector('[data-help="mod-about"] h3')!);
+    expect(await screen.findByText(/simple text, with no links/)).toBeTruthy();
+  });
+
+  it("says so when only a description was written", async () => {
+    mountAbout({ description: "Draws your documents.", help: [] });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel.textContent).toContain("hasn't written any help");
+    expect(panel.textContent).toContain("Draws your documents.");
+  });
+
+  it("keeps the line breaks a maker typed and cleans invisible characters out of the body", async () => {
+    mountAbout({
+      description: "",
+      help: [
+        {
+          id: "a",
+          title: "T\u202e",
+          body: "First line.\nSecond\u200bline.\r\n\r\n\r\n\r\nThird.",
+        },
+      ],
+    });
+    await theFrame();
+    fireEvent.click(aboutButton()!);
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    const paragraphs = [...panel.querySelectorAll("p")].map((p) => p.textContent);
+    expect(paragraphs).toContain("First line.\nSecond line.");
+    expect(paragraphs).toContain("Third.");
+    expect(panel.textContent).not.toMatch(/[\u200b\u202e]/);
+  });
+
+  it("leaves an Escape to a question PM asks over the frame, which it answers, and doesn't close with it", async () => {
+    modCall.mockResolvedValue({
+      kind: "error",
+      error: { code: "MOD-2002", message: "ask", permission: "calendar.details" },
+    });
+    mountAbout({ description: "", help: HELP });
+    const { port } = connect(await theFrame());
+    fireEvent.click(aboutButton()!);
+    port.postMessage({ id: 1, method: "calendar.events", args: null });
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.querySelector('[data-help="mod-about"]')).not.toBeNull();
+    // With the question gone, the next Escape is the panel's.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector('[data-help="mod-about"]')).toBeNull();
   });
 });

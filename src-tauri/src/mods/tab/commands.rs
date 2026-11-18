@@ -41,9 +41,10 @@ use super::listing::{self, ModDto};
 use super::stage::{Stage, Staged, Trust};
 use super::status::{self, SafetyStatus};
 use super::uninstall::{self, UninstallPreview, Uninstalled};
+use crate::mods::ai as money;
 use crate::mods::api::events as mod_events;
 use crate::mods::api::grants;
-use crate::mods::api::Host;
+use crate::mods::api::{self, Host, PromptInfo};
 use crate::mods::fetch::{Endpoints, ReqwestTransport};
 use crate::mods::folder_watch;
 use crate::mods::ids::ModId;
@@ -53,6 +54,7 @@ use crate::mods::keys::TrustedKeys;
 use crate::mods::ledger::{self, Ledger, Mint, Source, Standing};
 use crate::mods::refresh::{self, RefreshError};
 use crate::mods::safety::{self, Mode, SafetyCheck};
+use crate::mods::secrets;
 use crate::mods::store;
 use crate::mods::MAIN_LABEL;
 use crate::AppState;
@@ -624,12 +626,17 @@ pub async fn consent_mod(
 
 /// One permission toggled on a mod's row (the user's yes or no, or a first-use prompt's answer).
 /// A grant D3 or the unsealed engine forbids is refused and writes nothing.
+///
+/// `cap_usd` is the monthly AI limit the money prompt's field held, written in the same transaction
+/// as a yes to `ai` (see [`consent::decide`]); it is refused with anything else. The Mods row's
+/// plain Allow and Turn off send none.
 #[tauri::command]
 pub async fn mod_permission_decide(
     webview: Webview,
     mod_id: String,
     permission: String,
     granted: bool,
+    cap_usd: Option<f64>,
 ) -> Result<()> {
     let id = parse_id(&mod_id)?;
     blocking(&webview, move |app| {
@@ -637,17 +644,115 @@ pub async fn mod_permission_decide(
         let told = {
             let state = app.state::<AppState>();
             let mut conn = state.conn().map_err(|_| ModsError::no_store())?;
-            consent::decide(&mut conn, &id, &permission, granted, sealed).map_err(|e| match e {
-                consent::DecideError::Grant(g) => ModsError::from(g),
-                consent::DecideError::Removed => ModsError::new(
-                    Code::NotAllowed,
-                    "PM's safety list removed this mod, so its permissions stay off.",
-                ),
+            consent::decide(&mut conn, &id, &permission, granted, cap_usd, sealed).map_err(|e| {
+                match e {
+                    consent::DecideError::Grant(g) => ModsError::from(g),
+                    consent::DecideError::Removed => ModsError::new(
+                        Code::NotAllowed,
+                        "PM's safety list removed this mod, so its permissions stay off.",
+                    ),
+                    consent::DecideError::Limit(l) => ModsError::from(l),
+                }
             })?
         };
         announce(app, &told);
         refresh::emit_changed(app, refresh::CHANGED_DECIDED);
         Ok(())
+    })
+    .await
+}
+
+// ---- The AI's money (Mods spec §1.6) --------------------------------------------------------------
+
+/// What the money prompt needs to say about the route a mod's AI call would take now: whether it
+/// can cost money, which model and which kind of route, and the limit to start from. Facts about the
+/// person's own settings; nothing the mod supplied. Refused for a mod that is not installed or never
+/// asked for the AI. Reads only, and fetches no prices.
+#[tauri::command]
+pub async fn mod_ai_prompt_info(webview: Webview, mod_id: String) -> Result<PromptInfo> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        consent::ai_prompt_target(&conn, &id)
+    })
+    .await?;
+    // The DB guard is gone: the route's address lookup is a network wait.
+    api::prompt_info(webview.app_handle())
+        .await
+        .map_err(|e| ModsError::internal(e.message))
+}
+
+/// Set (or, with none, take away) a mod's monthly AI limit from its row in the Mods tab. Raising it
+/// is felt by the next call; lowering it below what is used refuses further paid calls; with none
+/// set, the next paid call asks for one. Local models never use the limit.
+#[tauri::command]
+pub async fn mod_ai_cap_set(webview: Webview, mod_id: String, cap_usd: Option<f64>) -> Result<()> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        Ok(money::set_cap(&conn, id.as_str(), cap_usd)?)
+    })
+    .await?;
+    refresh::emit_changed(webview.app_handle(), refresh::CHANGED_AI_CAP);
+    Ok(())
+}
+
+// ---- Keys a mod's slots hold (Mods spec §1.7) --------------------------------------------------------
+//
+// The three commands below are the only way a key gets into `mod_secrets`, and none of them returns
+// one: the value goes in, the page gets back a bool per slot. They are the PM-drawn field's
+// backend (the Mods row's Details and the Developer tab's Test keys), so the typed text crosses the
+// webview once, into Rust, and is never echoed, logged or kept (`mods::secrets`). A frame cannot
+// call them: `mod_call` has no row that does.
+
+/// Save the key typed for slot `name` of `mod_id` (an empty value deletes it): stored encrypted,
+/// bound to the manifest slot's host and header. Answers the mod's slots, a bool each.
+#[tauri::command]
+pub async fn mod_secret_save(
+    webview: Webview,
+    mod_id: String,
+    name: String,
+    value: String,
+) -> Result<Vec<secrets::SlotStatus>> {
+    let id = parse_id(&mod_id)?;
+    let slots = blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let mut conn = state.conn().map_err(|_| ModsError::no_store())?;
+        secrets::save(&mut conn, id.as_str(), &name, &value)?;
+        Ok(secrets::status(&conn, id.as_str())?)
+    })
+    .await?;
+    refresh::emit_changed(webview.app_handle(), refresh::CHANGED_SECRET);
+    Ok(slots)
+}
+
+/// Delete the key of slot `name`.
+#[tauri::command]
+pub async fn mod_secret_clear(webview: Webview, mod_id: String, name: String) -> Result<()> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        Ok(secrets::clear(&conn, id.as_str(), &name)?)
+    })
+    .await?;
+    refresh::emit_changed(webview.app_handle(), refresh::CHANGED_SECRET);
+    Ok(())
+}
+
+/// The mod's slots and whether each has a key now (never the key).
+#[tauri::command]
+pub async fn mod_secret_status(
+    webview: Webview,
+    mod_id: String,
+) -> Result<Vec<secrets::SlotStatus>> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        let conn = state.conn().map_err(|_| ModsError::no_store())?;
+        Ok(secrets::status(&conn, id.as_str())?)
     })
     .await
 }

@@ -144,6 +144,7 @@ mod tray;
 mod update_delivery;
 mod vault;
 mod wipe;
+mod wire_mark;
 
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -1025,6 +1026,16 @@ impl AppState {
     pub fn active_vault_id(&self) -> Option<String> {
         let guard = self.vault.lock().ok()?;
         guard.as_ref().map(|rt| rt.cipher.vault_id().to_owned())
+    }
+
+    /// The open vault's id and its folder, read together (one lock), or `None` while no vault is
+    /// open. Developer mode ties its on-device record to both (`mods::devmode::Here`), so a pair
+    /// read in two steps could name one vault's id with another's folder.
+    pub fn active_vault_place(&self) -> Option<(String, PathBuf)> {
+        let guard = self.vault.lock().ok()?;
+        guard
+            .as_ref()
+            .map(|rt| (rt.cipher.vault_id().to_owned(), rt.vault_root.clone()))
     }
 
     /// The key the open store was opened with, for opening a copy of it (`backup::strip`: every
@@ -2166,11 +2177,20 @@ pub fn run() {
             mods::tab::commands::resume_mod,
             mods::tab::commands::consent_mod,
             mods::tab::commands::mod_permission_decide,
+            mods::tab::commands::mod_ai_prompt_info,
+            mods::tab::commands::mod_ai_cap_set,
+            mods::tab::commands::mod_secret_save,
+            mods::tab::commands::mod_secret_clear,
+            mods::tab::commands::mod_secret_status,
             mods::tab::commands::mods_disclaimer_state,
             mods::tab::commands::accept_mods_disclaimer,
             mods::tab::commands::mods_safety_status,
             mods::tab::commands::dismiss_mod_resumed,
             mods::tab::commands::reset_safety_record,
+            // The pilots' auto-install (PR B, B8): "Try now", what landed, the Map's device-local prefs.
+            mods::tab::pilots::retry_auto_install,
+            mods::tab::pilots::mods_handover_state,
+            mods::tab::pilots::adopt_map_prefs,
             // Developer mode's switch, per device, and the unsigned file install's first step
             // (Mods slice 6, part 3). Not the `commands_dev` readers below: those are harmless
             // reads; these decide whether unsigned mods may be installed and run.

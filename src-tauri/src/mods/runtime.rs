@@ -263,6 +263,19 @@ struct Session {
     /// what the frozen-page watchdog reads to name the frame that was last active (`watchdog`).
     opened: Instant,
     touched: Instant,
+    /// How many times this session's frame has asked PM to show a key field (`secrets.set`), counted
+    /// here so the limit is Rust's: PM's page can't be talked round it and a new frame starts at 0.
+    secret_asks: u32,
+}
+
+impl Session {
+    /// Whether `ticket` is this session's own call: live, the same mod, generation and store.
+    fn is_current(&self, ticket: &CallTicket) -> bool {
+        matches!(self.state, SessionState::Live)
+            && self.mod_id == ticket.mod_id
+            && self.generation == ticket.generation
+            && self.store_epoch == ticket.store_epoch
+    }
 }
 
 #[derive(Default)]
@@ -753,6 +766,7 @@ impl ModRuntime {
                 outbox,
                 opened: now,
                 touched: now,
+                secret_asks: 0,
             },
         );
         Ok(FrameOpened {
@@ -852,17 +866,25 @@ impl ModRuntime {
     pub fn still_current(&self, ticket: &CallTicket) -> Result<(), FrameError> {
         let inner = self.lock();
         match inner.sessions.get(&ticket.session) {
-            Some(Session {
-                mod_id,
-                state: SessionState::Live,
-                generation,
-                store_epoch,
-                ..
-            }) if *mod_id == ticket.mod_id
-                && *generation == ticket.generation
-                && *store_epoch == ticket.store_epoch =>
-            {
-                Ok(())
+            Some(session) if session.is_current(ticket) => Ok(()),
+            _ => Err(FrameError::ClosedOrUnknown),
+        }
+    }
+
+    /// Count one more key-field ask (`secrets.set`) against the call's session, if it is still
+    /// current: `Ok(true)` when it may go ahead, `Ok(false)` when the session has already asked
+    /// `max` times (nothing is counted then). The count lives and dies with the session, and the
+    /// check and the count are one step under the registry's lock, so parallel asks cannot both
+    /// take the last one.
+    pub fn note_secret_ask(&self, ticket: &CallTicket, max: u32) -> Result<bool, FrameError> {
+        let mut inner = self.lock();
+        match inner.sessions.get_mut(&ticket.session) {
+            Some(session) if session.is_current(ticket) => {
+                if session.secret_asks >= max {
+                    return Ok(false);
+                }
+                session.secret_asks += 1;
+                Ok(true)
             }
             _ => Err(FrameError::ClosedOrUnknown),
         }

@@ -98,9 +98,16 @@ use Class::{Egress, Local, Money, Read, Write};
 use When::{Ask as AskEach, Auto, FirstUse, Install, InstallThenFirstUse};
 
 /// Spec §1.5's table. Where a cell says more than when to ask, the rest belongs to the call that
-/// uses it: `ai`'s money prompt only for a paid provider (PR B's `ai.complete`), and `links`' PM-drawn
-/// confirmation on every `shell.openLink` (PR C), which the second-party and unsigned rows need on
-/// top of their grant.
+/// uses it: `links`' PM-drawn confirmation on every `shell.openLink` (PR C), which the second-party
+/// and unsigned rows need on top of their grant.
+///
+/// **`ai` is two questions.** Whether a mod may use the AI at all is this table; whether it may
+/// SPEND is the cap, and that is state, not tier. A first-party mod's cell is `Auto` so that its
+/// first use on a free local route asks nothing (Q8b: first party never prompts on local), while
+/// `ai.complete` asks for a monthly limit (MOD-2002, permission `ai`) the moment the route is a
+/// paid one and no limit is set (`mods::ai::Gate::NeedsCap`), so a first-party mod cannot spend a
+/// cent before the person has named a ceiling. Second-party and unsigned mods keep `FirstUse`:
+/// they are asked once whatever the route, and the same state rule asks again for the limit.
 pub const POLICIES: &[Policy] = &[
     row("storage", Local, Auto, Auto, Auto),
     row("ui.tab", Local, Auto, Auto, Auto),
@@ -121,7 +128,7 @@ pub const POLICIES: &[Policy] = &[
     row("tasks.write", Write, Install, Install, AskEach),
     row("milestones.write", Write, Install, Install, AskEach),
     row("documents.write", Write, Install, FirstUse, AskEach),
-    row("ai", Money, FirstUse, FirstUse, FirstUse),
+    row("ai", Money, Auto, FirstUse, FirstUse),
     row("internet", Egress, Install, Install, AskEach),
     row("links", Egress, Install, Install, AskEach),
 ];
@@ -243,7 +250,7 @@ mod tests {
         assert_eq!(cell("tasks.write"), (Write, Install, Install, AskEach));
         assert_eq!(cell("milestones.write"), (Write, Install, Install, AskEach));
         assert_eq!(cell("documents.write"), (Write, Install, FirstUse, AskEach));
-        assert_eq!(cell("ai"), (Money, FirstUse, FirstUse, FirstUse));
+        assert_eq!(cell("ai"), (Money, Auto, FirstUse, FirstUse));
         assert_eq!(cell("internet"), (Egress, Install, Install, AskEach));
         assert_eq!(cell("links"), (Egress, Install, Install, AskEach));
         assert_eq!(policy("nope"), None);

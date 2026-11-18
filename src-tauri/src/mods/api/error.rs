@@ -6,8 +6,11 @@
 //! test here holds the two together.
 //!
 //! Ranges: `1xxx` the call's shape, `2xxx` permission, `3xxx` limits, `4xxx` the data, `5xxx` the
-//! state of PM or the mod, `9xxx` PM's own failure. **Never renumber or reuse a shipped code:** a mod
-//! branches on them, and they travel in bug reports.
+//! state of PM or the mod, `6xxx` the network (`net.fetch`), `9xxx` PM's own failure. **Never
+//! renumber or reuse a shipped code:** a mod branches on them, and they travel in bug reports. The
+//! codes of the experimental calls (PR B: `ai.complete`, `net.fetch`, `secrets.set`, `notify`) are
+//! appended below `Internal` in `Code::ALL`; their numbers freeze at the first release after PR C,
+//! not at merge (D13).
 //!
 //! A message is PM's own short sentence. Nothing from a database error, a path or another mod ever
 //! reaches one: a failure inside PM is logged in full and answered with [`Code::Internal`]'s fixed
@@ -48,12 +51,37 @@ pub enum Code {
     SessionEnded,
     /// PM couldn't complete the call.
     Internal,
+    // The experimental calls' codes (PR B). Appended, never reordered.
+    /// The mod's monthly AI limit is reached (or it has none set on a paid route).
+    AiCapReached,
+    /// The call waited longer than `limits::CALL_TIMEOUT` and was stopped.
+    CallTimedOut,
+    /// PM has no AI model to answer with (no provider is set up).
+    NoModel,
+    /// The model's price is unknown, so its worst-case cost can't be reserved: fails closed.
+    PriceUnknown,
+    /// The model didn't answer (every failure of the route, whatever the provider said).
+    ModelCallFailed,
+    /// The website isn't one the mod declared (or the URL isn't one a mod may fetch).
+    HostNotAllowed,
+    /// The website's address isn't on the public internet.
+    HostNotPublic,
+    /// The website's name couldn't be resolved.
+    HostUnresolved,
+    /// The website couldn't be reached in time (offline, refused, or too slow).
+    NetworkUnavailable,
+    /// The website redirected more times than PM follows.
+    TooManyRedirects,
+    /// The website's answer is past `limits::MAX_FETCH_RESPONSE_BYTES`.
+    ResponseTooLarge,
+    /// The mod's key for the website has not been typed in.
+    SecretNotSet,
 }
 
 // `ALL` and `name` are the tests' (and the Developer tab's, slice 6).
 #[cfg_attr(not(test), allow(dead_code))]
 impl Code {
-    pub const ALL: [Code; 14] = [
+    pub const ALL: [Code; 26] = [
         Self::UnknownMethod,
         Self::RemovedMethod,
         Self::BadArgs,
@@ -68,6 +96,18 @@ impl Code {
         Self::Paused,
         Self::SessionEnded,
         Self::Internal,
+        Self::AiCapReached,
+        Self::CallTimedOut,
+        Self::NoModel,
+        Self::PriceUnknown,
+        Self::ModelCallFailed,
+        Self::HostNotAllowed,
+        Self::HostNotPublic,
+        Self::HostUnresolved,
+        Self::NetworkUnavailable,
+        Self::TooManyRedirects,
+        Self::ResponseTooLarge,
+        Self::SecretNotSet,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -86,6 +126,18 @@ impl Code {
             Self::Paused => "MOD-5002",
             Self::SessionEnded => "MOD-5003",
             Self::Internal => "MOD-9001",
+            Self::AiCapReached => "MOD-3004",
+            Self::CallTimedOut => "MOD-3005",
+            Self::NoModel => "MOD-5004",
+            Self::PriceUnknown => "MOD-5005",
+            Self::ModelCallFailed => "MOD-5006",
+            Self::HostNotAllowed => "MOD-6001",
+            Self::HostNotPublic => "MOD-6002",
+            Self::HostUnresolved => "MOD-6003",
+            Self::NetworkUnavailable => "MOD-6004",
+            Self::TooManyRedirects => "MOD-6005",
+            Self::ResponseTooLarge => "MOD-6006",
+            Self::SecretNotSet => "MOD-6007",
         }
     }
 
@@ -106,6 +158,18 @@ impl Code {
             Self::Paused => "paused",
             Self::SessionEnded => "sessionEnded",
             Self::Internal => "internal",
+            Self::AiCapReached => "aiCapReached",
+            Self::CallTimedOut => "callTimedOut",
+            Self::NoModel => "noModel",
+            Self::PriceUnknown => "priceUnknown",
+            Self::ModelCallFailed => "modelCallFailed",
+            Self::HostNotAllowed => "hostNotAllowed",
+            Self::HostNotPublic => "hostNotPublic",
+            Self::HostUnresolved => "hostUnresolved",
+            Self::NetworkUnavailable => "networkUnavailable",
+            Self::TooManyRedirects => "tooManyRedirects",
+            Self::ResponseTooLarge => "responseTooLarge",
+            Self::SecretNotSet => "secretNotSet",
         }
     }
 }
@@ -167,6 +231,87 @@ impl ModError {
 
     pub fn locked() -> Self {
         Self::new(Code::Locked, "PM is locked, or its data is closed.")
+    }
+}
+
+// The experimental calls' errors (PR B). Each is one fixed PM sentence: nothing a provider said,
+// no URL, host, header, path or number from the request ever reaches one (D-25), so a mod can't
+// use the text to learn what PM saw, and a malicious website or model can't write into it. The
+// handlers use these and no other sentence for these codes.
+impl ModError {
+    pub fn ai_cap_reached() -> Self {
+        Self::new(
+            Code::AiCapReached,
+            "This mod has reached its monthly AI limit.",
+        )
+    }
+
+    pub fn call_timed_out() -> Self {
+        Self::new(
+            Code::CallTimedOut,
+            "That call took too long and was stopped.",
+        )
+    }
+
+    pub fn no_model() -> Self {
+        Self::new(Code::NoModel, "PM has no AI model set up to answer with.")
+    }
+
+    pub fn price_unknown() -> Self {
+        Self::new(
+            Code::PriceUnknown,
+            "PM can't tell what that AI model costs, so it won't run it for a mod.",
+        )
+    }
+
+    pub fn model_call_failed() -> Self {
+        Self::new(Code::ModelCallFailed, "The AI model didn't answer.")
+    }
+
+    pub fn host_not_allowed() -> Self {
+        Self::new(
+            Code::HostNotAllowed,
+            "That isn't a web address this mod may use.",
+        )
+    }
+
+    pub fn host_not_public() -> Self {
+        Self::new(
+            Code::HostNotPublic,
+            "That website isn't on the public internet.",
+        )
+    }
+
+    pub fn host_unresolved() -> Self {
+        Self::new(Code::HostUnresolved, "PM couldn't find that website.")
+    }
+
+    pub fn network_unavailable() -> Self {
+        Self::new(
+            Code::NetworkUnavailable,
+            "PM couldn't reach that website in time.",
+        )
+    }
+
+    pub fn too_many_redirects() -> Self {
+        Self::new(
+            Code::TooManyRedirects,
+            "That website sent PM around too many times.",
+        )
+    }
+
+    pub fn response_too_large() -> Self {
+        Self::new(
+            Code::ResponseTooLarge,
+            "That website's answer is larger than PM allows.",
+        )
+    }
+
+    pub fn secret_not_set() -> Self {
+        Self::new(
+            Code::SecretNotSet,
+            "This mod's key for that website hasn't been set.",
+        )
     }
 }
 
@@ -259,6 +404,99 @@ mod tests {
             seen += 1;
         }
         assert!(seen >= 4, "{block}");
+        // The experimental calls' codes are all in the page's table (the page's `MOD_ERRORS` lists
+        // them so a page-side answer names them by word).
+        for code in &Code::ALL[SHIPPED_BY_PR_A.len()..] {
+            assert!(
+                block.contains(&format!("{}: \"{}\"", code.name(), code.as_str())),
+                "the page doesn't list {}",
+                code.name()
+            );
+        }
+        assert_eq!(seen, 6 + Code::ALL.len() - SHIPPED_BY_PR_A.len(), "{block}");
+    }
+
+    /// The codes PR A shipped, which a mod may already branch on. A test pins them so a later edit
+    /// can't renumber one (the codes in the ranges below are free until the first release after C).
+    const SHIPPED_BY_PR_A: [(&str, &str); 14] = [
+        ("unknownMethod", "MOD-1001"),
+        ("removedMethod", "MOD-1002"),
+        ("badArgs", "MOD-1003"),
+        ("notGranted", "MOD-2001"),
+        ("needsPrompt", "MOD-2002"),
+        ("rateLimited", "MOD-3001"),
+        ("tooLarge", "MOD-3002"),
+        ("quotaExceeded", "MOD-3003"),
+        ("staleRevision", "MOD-4001"),
+        ("notFound", "MOD-4002"),
+        ("locked", "MOD-5001"),
+        ("paused", "MOD-5002"),
+        ("sessionEnded", "MOD-5003"),
+        ("internal", "MOD-9001"),
+    ];
+
+    #[test]
+    fn the_codes_pr_a_shipped_keep_their_numbers_and_stay_first() {
+        for (i, (name, number)) in SHIPPED_BY_PR_A.iter().enumerate() {
+            assert_eq!(
+                (Code::ALL[i].name(), Code::ALL[i].as_str()),
+                (*name, *number),
+                "slot {i}"
+            );
+        }
+    }
+
+    /// Every code of the experimental calls has its one fixed sentence, and the sentence carries
+    /// nothing from a request (a digit, a double quote, a colon or a slash would be a leak waiting
+    /// to happen): D-25.
+    #[test]
+    fn every_experimental_code_has_one_fixed_sentence_with_nothing_from_a_request() {
+        let made = [
+            ModError::ai_cap_reached(),
+            ModError::call_timed_out(),
+            ModError::no_model(),
+            ModError::price_unknown(),
+            ModError::model_call_failed(),
+            ModError::host_not_allowed(),
+            ModError::host_not_public(),
+            ModError::host_unresolved(),
+            ModError::network_unavailable(),
+            ModError::too_many_redirects(),
+            ModError::response_too_large(),
+            ModError::secret_not_set(),
+        ];
+        let new_codes: Vec<Code> = Code::ALL[SHIPPED_BY_PR_A.len()..].to_vec();
+        assert_eq!(
+            made.iter().map(|e| e.code).collect::<Vec<_>>(),
+            new_codes,
+            "a code of the experimental calls has no constructor, or they are out of order"
+        );
+        let mut sentences = BTreeSet::new();
+        for e in &made {
+            assert!(sentences.insert(e.message.clone()), "{} repeats", e.message);
+            assert!(e.message.ends_with('.') && e.message.len() <= 80, "{e}");
+            assert!(
+                !e.message
+                    .chars()
+                    .any(|c| c.is_ascii_digit() || "\"/:\\@".contains(c)),
+                "{e}"
+            );
+            assert!(e.permission.is_none() && e.revision.is_none());
+        }
+        // The network range is 6xxx, and the money and timeout codes are with their kind.
+        for code in [
+            Code::HostNotAllowed,
+            Code::HostNotPublic,
+            Code::HostUnresolved,
+            Code::NetworkUnavailable,
+            Code::TooManyRedirects,
+            Code::ResponseTooLarge,
+            Code::SecretNotSet,
+        ] {
+            assert!(code.as_str().starts_with("MOD-6"), "{}", code.as_str());
+        }
+        assert_eq!(Code::AiCapReached.as_str(), "MOD-3004");
+        assert_eq!(Code::CallTimedOut.as_str(), "MOD-3005");
     }
 
     #[test]

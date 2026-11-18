@@ -435,20 +435,43 @@ same bridge, and fails on any IPC escape or network leak on all three engines. W
 `mods/runtime.rs`'s serve decision (which file, and which as a document): its scheme is a small mirror of
 that, and runtime.rs's unit tests are what hold it.
 
-### I-25 · No mod ships in the installer — **Forward**
+### I-25 · No mod ships in the installer — **Enforced**
 
 A mod reaches a user only as a signed `.pmmod` release asset, installed through the Mods tab (Mods
 spec §1.1, §1.3). First-party mod source lives under `mods/` in this repo and is built into its own
-`.pmmod` files: nothing under `mods/` is in any `bundle.resources`, and nothing in `src/` imports
-`mods/`.
+`.pmmod` files: nothing under `mods/` is in any `bundle.resources` (or any other bundle key the gate
+reads that copies repo files into the installer: `linux.{deb,rpm,appimage}.files`, `macOS.files`,
+`externalBin`, and the path-valued keys `icon`, `licenseFile`, `macOS.frameworks`, the NSIS and WiX
+templates, hooks and fragments, and the deb/rpm scripts, all listed in `PATH_KEYS`, each read under
+every spelling Tauri accepts: camelCase, kebab-case aliases such as `license-file`, and `macos`), and
+nothing in `src/` imports `mods/`. The list is Tauri 2.10's path-valued bundle keys as of writing: a
+new Tauri bundle key that copies files is not seen until it is added to it, so adding a key to a tauri
+config is a review item for it.
 
 **Why.** An installed mod is one the ledger recorded after the verifier accepted it, under the
 switches, the blacklist and the user's own uninstall. A mod inside the installer would skip every one
 of those, and would ship to every user with each PM release.
 
-**Co-signers.** The first mod (the Map, spec §3) lands with `check-mods.mjs` (spec §7), which fails on
-a `mods/` path in a bundle's resources or a `src/` import of `mods/`; this entry is **Enforced** from
-then on.
+**Co-signers.** `scripts/check-mods.mjs` (`just mods`, in `check-fast`, pr.yml's hygiene job and
+pre-commit) fails on a `mods/` path in a bundle's resources (and the other file-copying keys above)
+and on a `src/` import of `mods/`. The sources are read the way Tauri reads them (each platform file merged onto the base per RFC 7386, a
+list or a map, a glob matched against `mods/`, a folder that holds the repository refused), and each
+import specifier is resolved against its file, so PM's own `src/components/mods/` is not confused for
+the top-level folder. It reads source only. It also reads every Rust file under `src-tauri/` and
+fails on an `include_str!`, `include_bytes!` or `include!` of a `mods/` file in non-test code: a
+string literal is resolved from the folder of the file holding the macro (as rustc does), and
+`concat!(env!("CARGO_MANIFEST_DIR"), "...")` from the crate's folder. A form it cannot resolve that
+mentions `mods/` fails closed. Test code is exempt: `tests.rs`, `*_tests.rs`, a `tests/` folder and
+an item behind `#[cfg(test)]` exactly; any other test-only use is allow-listed by file path in
+`RUST_INCLUDE_ALLOWED`. A `build.rs` that names a `mods/` path and uses `OUT_DIR` is refused too.
+What it does not read: a path built at run time or by joining pieces in code (a `build.rs` doing
+`Path::new("..").join("mods")`), which is a review item. The same gate holds each
+manifest to `package.rs`'s rules (and pins a first-party mod's author and `sourceRepo`), and
+`check-version-lockstep.mjs` uses it for D12: a change that touches only mod folders (`mods/<id>/`)
+owes the mod's own version bump, not PM's. A shared file directly under `mods/` (`vite.config.ts`,
+`tsconfig.json`) decides every mod's bytes and no one mod folder owes a bump for it, so it is PM's
+change and PM's version moves. The key-id and permission-row rules of Mods spec §7 are held by the
+Rust tests (`keys.rs`, `api/table.rs`), not repeated here.
 
 ### I-26 · Every PM window is built through `mods::build_window` — **Held**
 
@@ -763,23 +786,51 @@ holds a differently-separated value, `tab::device::credential`, and a record in 
 reads as off), never a vault-wide switch, so a restore onto another machine, a joined shared vault or a copied database carries no
 "on" with it, and switching it never reaches another machine using the same vault. Only Rust reads
 or writes it, and **nothing but a record that lists the device switches it on, ever**: asking
-(`devmode::is_on`) is a pure read, so a vault with no record is off for every device, and a record
-that is deleted (by a member of a shared vault, who holds the store key) leaves everyone off. The
+(`devmode::is_on`) writes only toward off (below), so a vault with no record is off for every
+device, and a record that is deleted (by a member of a shared vault, who holds the store key) leaves
+everyone off. The
 old webview-written `dev_mode` row is out of the page's allow-list and is **never read** (an earlier
 build carried an old "on" over to the first device that asked, which made a deleted record plus a
 written old row switch a victim's device on with no click: unsigned mods the victim had paused
 resumed and the install gate opened; removed, so upgrading turns developer mode off once and each
 person switches it on again in Settings > Developer). Rust writes the old row in one place only: the
 restore reset (`devmode::all_devices_off`, which also writes an empty record) sets it `"false"` for
-an older PM sharing the vault. A shared-vault join writes nothing (I-32). **Known limit:** a
-listed credential is a bearer value (a one-way hash of the device id, no device-held secret), so a
-store writer who has ever read this device's credential (it sits in the record while the device is
-on; an old copy of the store keeps it) can write it back after the device was switched off or
-reset, and the device is on again with no click. The record is trustworthy only against a writer who
-has never seen this device's credential. A keyed MAC over each entry would not close that (a
-replayed entry still verifies); the device itself must remember whether it is on, so closing it
-means keeping the on/off answer on the device (`data_dir`, per vault) instead of in the store, an
-open follow-up for the owner. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
+an older PM sharing the vault. A shared-vault join writes nothing (I-32). **The device remembers too.** A listed credential is a bearer value (a
+one-way hash of the device id, no device-held secret), so the store's record alone could be replayed:
+a store writer who had ever read this device's credential (it sits in the record while the device is
+on; an old copy of the store keeps it) could write it back after the device was switched off or
+reset. So the store's record is only half the answer. The other half is `data_dir/mods-dev-mode.json`
+(versioned, each entry a vault's id AND a one-way tag of the folder that vault sat in on this
+computer when it was switched on, written atomically, at most 16 KiB and 64 entries): developer mode
+is on for this device in this vault **only if both say so**, the store's record lists the device's
+credential AND the device's file lists the open vault's id at the open vault's folder
+(`devmode::Here`, built from `data_dir`, the device id file and `AppState::active_vault_place`; the
+ledger refuses a device named in another vault than its own, `Ledger::bound_to` early and
+`LedgerStore::with_device_conn` (id AND folder, once the connection is held) on every ledger step
+that reads or writes the answer, and the commands that read it check `Here::is_open_in` once they
+hold the store's connection, so a vault that closed between naming the device and taking the store
+answers off and clears nothing). The
+folder tag is what stops a lookalike: the vault id is only what `vault-meta.json` says, whoever
+wrote that vault chose it, and the credential is the same value in every store, so a hostile
+vault that claims the id of one this device switched on in, and lists a credential its writer saw
+there, would otherwise inherit the on; the folder is something only this computer decides, so
+it is off. A vault moved to another folder reads as off until it is switched on again. A vault id
+PM could not have made (`disk::check_vault_id`) names nobody: `Here::open` refuses it and the file
+never takes it. Missing, unreadable,
+corrupt, oversized or capped out is off, for every vault. Switching on writes the store's record then
+the device's file, off writes the device's file then the store's record, so a crash between leaves it
+off. **The store can only ever turn it off:** whenever a read finds the store's record does not list
+this device (a record without it, or none), `is_on` clears the vault from the device's file (best
+effort; a failed clear still answers off), so a restore or reset that removed the device can't be
+undone later by writing an old credential back; the restore reset (`devmode::all_devices_off`,
+which `reset_for_adopt` runs last, inside its transaction, with `data_dir` and the restored vault's
+id) clears it directly and fails, refusing the restore, if it can't. A copied database, a restore, a
+joined vault or another machine has no entry in the device's file, so it is off there. Held: a store
+writer, whatever they have read or kept, can never switch this device on. Not held, and out of scope
+as for every file kept in `data_dir`: someone who can write this computer's `data_dir` can write the
+device's file (and the device id file) as they like. Upgrading from a build that kept the answer in
+the store alone turns developer mode off once more (there is no device file yet); each person
+switches it on again in Settings > Developer. The page's answer is the `dev_mode_state` command's; its `localStorage` copy is a
 cache for first paint and never wins. The one function that switches it for this device
 (`ledger::set_dev_mode_for_this_device`) writes the record and then reloads the registry; and the
 **ledger's load itself** (`policy::dev_mode_state`, in `Ledger::load`) pauses an active unsigned row

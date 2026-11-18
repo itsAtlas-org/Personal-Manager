@@ -131,7 +131,14 @@ function MarkdownImage({ alt }: { alt?: string }) {
   return alt ? <span className="pm-markdown-image">[{alt}]</span> : null;
 }
 
+/** A link drawn as its text and nothing else: no `href`, no `target`, nothing to click. */
+function InertLink({ children }: { children?: React.ReactNode }) {
+  return <span>{children}</span>;
+}
+
 const COMPONENTS = { img: MarkdownImage };
+// Module-level for the same reason as the plugin arrays: a stable identity across renders.
+const COMPONENTS_NO_LINKS = { img: MarkdownImage, a: InertLink };
 
 /**
  * Render user-authored Markdown through the app's single sanitizing boundary. Element styling lives in
@@ -141,15 +148,20 @@ const COMPONENTS = { img: MarkdownImage };
  * `dashLists` opts into the note dialect's second bullet kind (see `markdownDashLists`). Off by
  * default, deliberately: it is a rendering claim about a `+` bullet that only a PM note means.
  * `plainLines` reads plain typed lines as such (see `remarkPlainLines`): an event's description.
+ * `links={false}` draws every link as its text only. For words a third party wrote that PM shows in
+ * its own voice (a mod's help): a link there would be a button PM seems to vouch for, and a click
+ * goes to the OS browser.
  */
 export function Markdown({
   children,
   dashLists = false,
   plainLines = false,
+  links = true,
 }: {
   children: string;
   dashLists?: boolean;
   plainLines?: boolean;
+  links?: boolean;
 }) {
   return (
     <div className="pm-markdown">
@@ -163,7 +175,7 @@ export function Markdown({
         }
         rehypePlugins={REHYPE_PLUGINS}
         urlTransform={safeUrl}
-        components={COMPONENTS}
+        components={links ? COMPONENTS : COMPONENTS_NO_LINKS}
       >
         {children}
       </ReactMarkdown>

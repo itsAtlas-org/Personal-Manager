@@ -82,6 +82,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: mods
+        name: mods folder (manifests, no mod in the installer, src/ never imports mods/)
+        entry: just mods
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: sync-set
         name: sync-set register covers every table
         entry: just sync-set

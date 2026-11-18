@@ -10,7 +10,14 @@
 //
 //   1. LOCKSTEP   — all six version-bearing files carry one identical value.
 //   2. BUMPED      (--base <ref>) — that value is strictly greater, by semver,
-//                  than the base branch's, so every PR moves the number.
+//                  than the base branch's, so every PR moves the number. The one exception
+//                  is D12 (Mods spec): a change whose every touched path is inside a mod's
+//                  own folder (mods/<id>/) does not ship in PM (I-25), so PM's version need
+//                  not move (a shared file directly under mods/ is PM's). It bumps the
+//                  mod's own version instead, and that is enforced here too, through
+//                  check-mods.mjs, for EVERY changed mod folder in any PR, mixed or not.
+//                  Keyed on the files touched (a changed path outside mods/, or no changed
+//                  path at all, keeps the rule), never on judgement.
 //   3. TAG MATCH   (--tag <vX.Y.Z>) — that value equals the release tag, AND the
 //                  .github/RELEASE_NOTES.md header names the same version (that
 //                  file is the published release body; a stale header would ship
@@ -37,6 +44,9 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+
+import { bumpSummary, changedPaths, checkModBumps, isModsOnly } from "./check-mods.mjs";
+import { semverCmp } from "./semver.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 // Normalise CRLF — lockfiles/manifests are CRLF on Windows checkouts, and the
@@ -129,48 +139,6 @@ const SOURCES = [
   },
 ];
 
-// ---- semver compare (enough for our `X.Y.Z[-pre]` scheme) ----------------
-
-function parseSemver(v) {
-  const dash = v.indexOf("-");
-  const core = dash === -1 ? v : v.slice(0, dash);
-  const pre = dash === -1 ? "" : v.slice(dash + 1);
-  const [maj, min, pat] = core.split(".").map(Number);
-  if ([maj, min, pat].some((n) => !Number.isInteger(n))) {
-    throw new Error(`Not a valid X.Y.Z version: "${v}"`);
-  }
-  return { maj, min, pat, pre };
-}
-
-/** -1 if a<b, 0 if equal, 1 if a>b. A release outranks its own pre-release. */
-function semverCmp(a, b) {
-  const A = parseSemver(a);
-  const B = parseSemver(b);
-  for (const k of ["maj", "min", "pat"]) {
-    if (A[k] !== B[k]) return A[k] < B[k] ? -1 : 1;
-  }
-  if (A.pre === B.pre) return 0;
-  if (A.pre === "") return 1;
-  if (B.pre === "") return -1;
-  const ai = A.pre.split(".");
-  const bi = B.pre.split(".");
-  for (let i = 0; i < Math.max(ai.length, bi.length); i++) {
-    if (ai[i] === undefined) return -1;
-    if (bi[i] === undefined) return 1;
-    const an = /^\d+$/.test(ai[i]);
-    const bn = /^\d+$/.test(bi[i]);
-    if (an && bn) {
-      const d = Number(ai[i]) - Number(bi[i]);
-      if (d !== 0) return d < 0 ? -1 : 1;
-    } else if (an !== bn) {
-      return an ? -1 : 1; // numeric identifiers rank below alphanumeric
-    } else if (ai[i] !== bi[i]) {
-      return ai[i] < bi[i] ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
 // ---- args ----------------------------------------------------------------
 
 function argValue(name) {
@@ -179,6 +147,14 @@ function argValue(name) {
 }
 const baseRef = argValue("--base");
 const tag = argValue("--tag");
+// A flag with nothing after it used to skip its check and print a green tick (an empty
+// `$BASE_SHA` in CI would have done exactly that).
+for (const flag of ["--base", "--tag"]) {
+  if (process.argv.includes(flag) && !argValue(flag)) {
+    console.error(`\n✗ version-lockstep: ${flag} needs a value`);
+    process.exit(1);
+  }
+}
 
 // ---- run -----------------------------------------------------------------
 
@@ -225,13 +201,37 @@ if (baseRef) {
     );
   }
   const baseVersion = JSON.parse(basePkg).version;
-  if (semverCmp(current, baseVersion) <= 0) {
+
+  // D12 (Mods spec): what this change touches decides whether PM's version must move. Failing to
+  // list the touched paths is a failure, never a reason to relax the rule.
+  const diff = changedPaths(baseRef, repoRoot);
+  if (!diff.ok) {
     fail(
-      `version was not bumped — base ${baseRef} is ${baseVersion}, this branch is ${current}. ` +
-        `Every PR must bump the version (feature → minor, fix/chore → patch) and add a What's New entry.`,
+      `could not list what changed against "${baseRef}" (${diff.why}) — the base needs its history ` +
+        `(e.g. \`git fetch origin main\`, not a shallow clone).`,
     );
   }
-  console.log(`✓ bumped: ${current} > ${baseVersion} (${baseRef})`);
+  // Every changed mod folder moves its own version, in a mods-only change and in a mixed one alike.
+  const mods = checkModBumps(baseRef, diff, repoRoot);
+  if (mods.problems.length > 0) {
+    fail(`a changed mod folder is not ready:\n  • ${mods.problems.join("\n  • ")}`);
+  }
+  if (isModsOnly(diff.paths)) {
+    console.log(
+      `✓ mods-only change (D12): all ${diff.paths.length} changed path(s) are inside mod folders ` +
+        `(mods/<id>/), so PM's own version need not move (${bumpSummary(mods)})`,
+    );
+  } else {
+    if (semverCmp(current, baseVersion) <= 0) {
+      fail(
+        `version was not bumped — base ${baseRef} is ${baseVersion}, this branch is ${current}. ` +
+          `Every PR must bump the version (feature → minor, fix/chore → patch) and add a What's New entry. ` +
+          `The one exception is a change that touches only mod folders (mods/<id>/), which bumps the mod's own version (D12); ` +
+          `a shared file directly under mods/ (vite.config.ts, tsconfig.json) is not one.`,
+      );
+    }
+    console.log(`✓ bumped: ${current} > ${baseVersion} (${baseRef})`);
+  }
 }
 
 // 3. TAG MATCH (release)

@@ -12,7 +12,7 @@ import {
   RLO,
   ZERO_WIDTH,
 } from "./modFixtures";
-import { modText, quoteName } from "./modText";
+import { modBody, modText, quoteName } from "./modText";
 
 describe("modText", () => {
   it("leaves an ordinary line alone", () => {
@@ -65,5 +65,25 @@ describe("quoteName", () => {
       "“Calendar' was removed. 'Settings”",
     );
     expect(quoteName('say "hi"')).toBe("“say 'hi'”");
+  });
+});
+
+describe("modBody", () => {
+  it("keeps line breaks (a carriage return is one) and the spaces as written", () => {
+    expect(modBody("One.\r\nTwo.\rThree.  Four.")).toBe("One.\nTwo.\nThree.  Four.");
+  });
+
+  it("turns invisible, direction and separator characters into spaces, like a plain line", () => {
+    expect(modBody(`a${RLO}b${ZERO_WIDTH}c${LINE_SEP}d`)).toBe("a b c d");
+  });
+
+  it("cuts a run of combining marks, and a run of blank lines to one", () => {
+    expect(modBody(`A${MARK_ABOVE.repeat(39)}`)).toBe(`A${MARK_ABOVE.repeat(3)}`);
+    expect(modBody("a\n\n\n\n\nb")).toBe("a\n\nb");
+  });
+
+  it("trims the ends and has nothing left of nothing", () => {
+    expect(modBody("\n  text \n")).toBe("text");
+    expect(modBody(`${ZERO_WIDTH}\n `)).toBe("");
   });
 });

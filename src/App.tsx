@@ -32,6 +32,8 @@ import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
 import { ModsRoute } from "./components/mods/ModsRoute";
+import { ModKeyAsks } from "./components/mods/ModKeyAsk";
+import { ModNoticeStrips } from "./components/mods/ModNoticeStrips";
 import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
@@ -66,6 +68,7 @@ import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
 import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
 import { useModRows } from "./lib/modRows";
+import { usePilotHandover } from "./lib/pilotHandover";
 
 const LAST_SEEN_VERSION_KEY = "pm:lastSeenVersion";
 import {
@@ -262,6 +265,8 @@ export default function App() {
   // store re-opens the provider empties the rows until the new read lands, and the tab must survive
   // that gap (ModTab draws its own Loading panel meanwhile).
   const { loaded: modsLoaded } = useModRows();
+  // What an auto-installed mod (the Map, once it is one) leaves for this device to carry over.
+  usePilotHandover();
   useEffect(() => {
     if (!isReachable(view, navEntries, nav, modsLoaded)) setView("focus");
   }, [view, navEntries, nav, modsLoaded]);
@@ -1146,6 +1151,12 @@ export default function App() {
                 which draws them itself. Settings draws its own copy while it is open, as its scrim
                 covers this one. */}
             {!showSettings && <ModsAppStrips view={view} onOpenMods={() => setView("mods")} />}
+            {/* What a mod said through `notify` (text and a Dismiss, on every tab), and the key
+                field a mod's `secrets.set` asked for. Both wait while Settings is open: its scrim
+                covers the strips (it draws its own copy), and a second dialog would fight it for
+                focus. */}
+            {!showSettings && <ModNoticeStrips />}
+            {!showSettings && <ModKeyAsks />}
             <div
               className={`relative flex flex-1 overflow-hidden ${leftBar.resizing ? "select-none" : ""}`}
             >

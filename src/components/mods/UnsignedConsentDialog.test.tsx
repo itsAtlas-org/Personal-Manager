@@ -119,6 +119,11 @@ describe("what it says", () => {
     expect(dialog.textContent).toContain("Third party");
     expect(dialog.textContent).toContain("says about itself. PM has not checked any of it");
     expect(dialog.textContent).toContain("Made by: Acme");
+    cleanup();
+    open(unsigned({ authors: ["Ann Lee", `Bo${RLO}b`] }));
+    const credited = screen.getByRole("dialog");
+    expect(credited.textContent).toContain("Made by: Acme · authors: Ann Lee, Bo b");
+    expect(credited.textContent).not.toContain(RLO);
     expect(dialog.textContent).toContain("Repository: acme/tool");
     expect(dialog.textContent).toContain("Commit: abcdef0123456789");
     // It never claims a review.

@@ -16,6 +16,7 @@ import { resetModActions, useModActions } from "../../lib/modActions";
 import { ModRowsContext } from "../../lib/modRows";
 import { NAV_PLACEMENT_KEY, parsePlacement, writeNavPlacement } from "../../lib/nav";
 import type { ModInfo } from "../../lib/modsTypes";
+import { MONEY_PROMPT_WORDS } from "./aiMoneyWords";
 import { consentScreen, LRI, MARK_ABOVE, mod, perm, RLO, standing } from "./modFixtures";
 
 const resumeMod = vi.fn();
@@ -24,8 +25,14 @@ const repairMod = vi.fn();
 const approveUpdate = vi.fn();
 const modPermissionDecide = vi.fn();
 const modIcon = vi.fn();
+const modAiCapSet = vi.fn();
+const modSecretSave = vi.fn();
+const modSecretClear = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
+  modAiCapSet: (id: string, cap: number | null) => modAiCapSet(id, cap),
+  modSecretSave: (id: string, name: string, value: string) => modSecretSave(id, name, value),
+  modSecretClear: (id: string, name: string) => modSecretClear(id, name),
   resumeMod: (id: string) => resumeMod(id),
   pauseMod: (id: string) => pauseMod(id),
   repairMod: (id: string) => repairMod(id),
@@ -206,12 +213,32 @@ describe("what the row says", () => {
     expect(screen.getByRole("heading").textContent).toBe(evil);
   });
 
+  it("names the publisher first, then the people the mod credits, and the publisher alone otherwise", () => {
+    const { container, unmount } = draw(
+      mod({
+        author: "Atlas",
+        authors: ["Bobby Yu", "Ann Lee"],
+        repo: "itsAtlas-org/Personal-Manager",
+      }),
+    );
+    openDetails();
+    expect(container.textContent).toContain(
+      "Made by Atlas · authors: Bobby Yu, Ann Lee · itsAtlas-org/Personal-Manager",
+    );
+    unmount();
+    const plain = draw(mod({ author: "Atlas", authors: [] }));
+    openDetails();
+    expect(plain.container.textContent).toContain("Made by Atlas");
+    expect(plain.container.textContent).not.toContain("·  ·");
+  });
+
   it("takes direction-changing characters and line breaks out of everything the mod supplied", () => {
     const { container } = draw(
       mod({
         name: `Ac${RLO}me`,
         description: "line one\nPM says: trust me",
         author: `Mal${LRI}lory`,
+        authors: [`Ev${RLO}e`],
         repo: `a${RLO}/b`,
         internetHosts: [`h${RLO}.example`],
         permissions: [perm("documents.meta", { why: `to\nmap${RLO}` })],
@@ -221,7 +248,7 @@ describe("what the row says", () => {
     openDetails();
     expect(screen.getByRole("heading").textContent).toBe("Ac me");
     expect(container.textContent).toContain("line one PM says: trust me");
-    expect(container.textContent).toContain("Made by Mal lory · a /b");
+    expect(container.textContent).toContain("Made by Mal lory · author: Ev e · a /b");
     expect(container.textContent).toContain("Sites it may reach: h .example");
     expect(container.textContent).toContain("The maker says: “to map”");
     expect(container.textContent).not.toContain(RLO);
@@ -564,6 +591,127 @@ describe("what the mod can do", () => {
   });
 });
 
+describe("the monthly AI limit", () => {
+  const withAi = (extra: Partial<ModInfo> = {}) =>
+    mod({
+      permissions: [perm("ai", { access: "asks", when: "first-use", class: "money" })],
+      ...extra,
+    });
+  const field = () => screen.getByRole("textbox") as HTMLInputElement;
+  const save = () =>
+    screen.getByRole("button", {
+      name: "Save the monthly AI limit for Acme Tool",
+    }) as HTMLButtonElement;
+
+  it("is shown for a mod that asks for the AI, with no number until one is set", () => {
+    draw(withAi());
+    openDetails();
+    expect(field().value).toBe("");
+    expect(screen.getByText(/No limit is set/)).toBeTruthy();
+    expect(save().disabled).toBe(true);
+    expect(screen.queryByText(/Used in/)).toBeNull();
+  });
+
+  it("is not shown for a mod that never asked for the AI, or one nobody has turned on or the safety list removed", () => {
+    draw(mod({ permissions: [perm("storage", { access: "allowed", when: "auto" })] }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    cleanup();
+    draw(withAi({ consented: false }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    cleanup();
+    draw(withAi({ state: standing("removed-by-safety-list", { fix: "uninstall" }) }));
+    openDetails();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("shows the limit and what the ledger counts against it this month", () => {
+    draw(withAi({ aiCapUsd: 2, aiSpentUsd: 0.75, aiMonth: "2026-11" }));
+    openDetails();
+    expect(field().value).toBe("2.00");
+    expect(screen.getByText("Used in 2026-11: $0.75 of $2.00.")).toBeTruthy();
+    expect(screen.queryByText(/limit is reached/)).toBeNull();
+  });
+
+  it("says plainly when the limit is reached", () => {
+    draw(withAi({ aiCapUsd: 1, aiSpentUsd: 1, aiMonth: "2026-11" }));
+    openDetails();
+    expect(screen.getByText(/The limit is reached/)).toBeTruthy();
+    cleanup();
+    // Lowered below what is used: the same.
+    draw(withAi({ aiCapUsd: 0.5, aiSpentUsd: 0.75, aiMonth: "2026-11" }));
+    openDetails();
+    expect(screen.getByText(/The limit is reached/)).toBeTruthy();
+  });
+
+  it("Save sends the typed amount, and the rows are read again", async () => {
+    modAiCapSet.mockResolvedValue(undefined);
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "5" } });
+    expect(save().textContent).toBe("Save limit");
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenCalledWith("acme.tool", 5));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("0 is a limit, and an empty field takes the limit away", async () => {
+    modAiCapSet.mockResolvedValue(undefined);
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "0" } });
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenLastCalledWith("acme.tool", 0));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    cleanup();
+    resetModActions();
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    fireEvent.change(field(), { target: { value: "  " } });
+    expect(save().textContent).toBe("Remove limit");
+    fireEvent.click(save());
+    await waitFor(() => expect(modAiCapSet).toHaveBeenLastCalledWith("acme.tool", null));
+  });
+
+  it("will not send a number PM would not store, or a limit that is already the stored one", () => {
+    draw(withAi({ aiCapUsd: 2 }));
+    openDetails();
+    expect(save().disabled).toBe(true);
+    for (const bad of ["abc", "-1", "1e3", "$2", "100001"]) {
+      fireEvent.change(field(), { target: { value: bad } });
+      expect(save().disabled, bad).toBe(true);
+      expect(screen.getByRole("alert").textContent).toContain("Type an amount");
+    }
+    fireEvent.change(field(), { target: { value: "2.00" } });
+    expect(save().disabled).toBe(true);
+    expect(modAiCapSet).not.toHaveBeenCalled();
+  });
+
+  it("shows the backend's refusal in the row when the limit can't be saved", async () => {
+    modAiCapSet.mockRejectedValue({ code: "bad-request", message: "Nope, fixed words." });
+    draw(withAi());
+    openDetails();
+    fireEvent.change(field(), { target: { value: "3" } });
+    fireEvent.click(save());
+    expect(await screen.findByText("Nope, fixed words.")).toBeTruthy();
+  });
+
+  it("a first-party mod's AI says what still comes instead of 'Allowed'", () => {
+    draw(
+      mod({
+        tier: "first",
+        permissions: [
+          perm("ai", { access: "allowed", when: "auto", class: "money", decision: null }),
+        ],
+      }),
+    );
+    openDetails();
+    expect(screen.queryByText("Allowed.")).toBeNull();
+    expect(screen.getByText(MONEY_PROMPT_WORDS.standingAuto())).toBeTruthy();
+  });
+});
+
 describe("folds", () => {
   it("starts closed for a mod that is fine and open for one that needs the person", () => {
     draw(mod());
@@ -691,5 +839,59 @@ describe("a name made of stacked marks", () => {
     const heading = screen.getByRole("heading", { level: 3 });
     expect(heading.textContent).toBe(`A${MARK_ABOVE.repeat(3)}`);
     expect(heading.className).toContain("overflow-hidden");
+  });
+});
+
+describe("a mod's keys", () => {
+  const slots = [{ name: "weather", host: "api.example.com", header: "X-Api-Key", set: false }];
+  const withKeys = (extra: Partial<ModInfo> = {}) => mod({ secrets: slots, ...extra });
+  const keyField = () => screen.getByLabelText(/Key: weather/) as HTMLInputElement;
+
+  it("shows a masked field in Details that says where the key goes", () => {
+    draw(withKeys());
+    openDetails();
+    expect(keyField().type).toBe("password");
+    expect(screen.getByText(/only to api.example.com, in the X-Api-Key header/)).toBeTruthy();
+  });
+
+  it("shows none for a mod with no key slots", () => {
+    draw(mod());
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+  });
+
+  it("shows none until the person has turned the mod on, or after the safety list removed it", () => {
+    draw(withKeys({ consented: false }));
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+    cleanup();
+    draw(withKeys({ state: standing("removed-by-safety-list") }));
+    openDetails();
+    expect(screen.queryByLabelText(/Key: /)).toBeNull();
+  });
+
+  it("saves through the backend, empties the field and reads the rows again", async () => {
+    modSecretSave.mockResolvedValue([{ ...slots[0], set: true }]);
+    draw(withKeys());
+    openDetails();
+    fireEvent.change(keyField(), { target: { value: "typed-not-a-real-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save the key weather" }));
+    expect(modSecretSave).toHaveBeenCalledExactlyOnceWith(
+      "acme.tool",
+      "weather",
+      "typed-not-a-real-key",
+    );
+    expect(keyField().value).toBe("");
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("is held while another command for the mod runs", async () => {
+    let settle: () => void = () => {};
+    pauseMod.mockReturnValue(new Promise<void>((r) => (settle = r)));
+    draw(withKeys({ state: standing("running", { running: true }) }));
+    openDetails();
+    fireEvent.click(screen.getByRole("button", { name: "Pause Acme Tool" }));
+    await waitFor(() => expect(keyField().disabled).toBe(true));
+    await act(async () => settle());
   });
 });

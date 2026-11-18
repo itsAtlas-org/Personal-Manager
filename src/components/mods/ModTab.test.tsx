@@ -22,6 +22,7 @@ const modFrameClose = vi.fn();
 const consentMod = vi.fn();
 const resumeMod = vi.fn();
 const repairMod = vi.fn();
+const retryAutoInstall = vi.fn();
 let faulted: (() => void) | null = null;
 let changed: ((e: ModsChanged) => void) | null = null;
 
@@ -37,6 +38,7 @@ vi.mock("../../lib/ipc", () => ({
   consentMod: (id: string, answers: Record<string, boolean>) => consentMod(id, answers),
   resumeMod: (id: string) => resumeMod(id),
   repairMod: (id: string) => repairMod(id),
+  retryAutoInstall: () => retryAutoInstall(),
   onVaultFault: (handler: () => void) => {
     faulted = handler;
     return Promise.resolve(() => {});
@@ -93,10 +95,12 @@ const perm = (id: string, extra: Partial<ModPermission> = {}): ModPermission => 
 function mod(extra: Partial<ModInfo> = {}): ModInfo {
   return {
     id: "acme.tool",
+    pending: false,
     name: "Acme Tool",
     description: "Does a thing.",
     tier: "second",
     author: "Acme",
+    authors: [],
     repo: "acme/tool",
     commit: "abc",
     version: "1.2.0",
@@ -106,8 +110,13 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
     state: RUNNING,
     permissions: [],
     internetHosts: [],
+    secrets: [],
+    aiCapUsd: null,
+    aiSpentUsd: 0,
+    aiMonth: "2026-11",
     navTab: "Acme Tool",
     calendarOverlay: null,
+    help: [],
     hasIcon: false,
     update: null,
     resumed: null,
@@ -161,6 +170,7 @@ beforeEach(() => {
   consentMod.mockResolvedValue({ state: "active", reason: null, serving: true });
   resumeMod.mockResolvedValue({ state: "active", reason: null, serving: true });
   repairMod.mockResolvedValue({ id: "acme.tool", version: "1.2.0", state: "active" });
+  retryAutoInstall.mockResolvedValue({ fetched: true, problem: null });
 });
 afterEach(cleanup);
 
@@ -171,6 +181,35 @@ describe("a mod that can run", () => {
     expect(modFrameOpen).toHaveBeenCalledWith("acme.tool", expect.any(Function));
     expect(screen.getByLabelText("Mod: Acme Tool")).toBeTruthy();
     expect(screen.getByText("Reviewed by Atlas")).toBeTruthy();
+  });
+
+  it("offers the maker's help (the row's description and help entries) as About this mod", async () => {
+    render(
+      <Tab
+        rows={[
+          mod({
+            author: "Atlas",
+            authors: ["Bobby Yu"],
+            help: [
+              { id: "map-overview", title: "The map", body: "Hover a dot.\nClick it to read." },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "About this mod" }));
+    const panel = document.querySelector('[data-help="mod-about"]') as HTMLElement;
+    expect(panel.textContent).toContain("Does a thing.");
+    expect(panel.textContent).toContain("The map");
+    expect(panel.textContent).toContain("Hover a dot.");
+    expect(panel.textContent).toContain("Made by Atlas · author: Bobby Yu");
+  });
+
+  it("offers no About button for a mod with no help and no description", async () => {
+    render(<Tab rows={[mod({ description: "" })]} />);
+    await waitFor(() => expect(iframe()).not.toBeNull());
+    expect(screen.queryByRole("button", { name: "About this mod" })).toBeNull();
   });
 
   it("ends the frame's session when the tab goes away (a tab switch unmounts it)", async () => {
@@ -477,6 +516,67 @@ describe("a mod that can't run", () => {
     expect(modFrameOpen).not.toHaveBeenCalled();
   });
 
+  const pending = () =>
+    mod({
+      pending: true,
+      state: standing("installing", {
+        state: "installing",
+        text: "Installing. If it doesn't finish, PM tries again at the next safety list check.",
+      }),
+    });
+
+  it("offers Try now only for a mod that has no row yet, and reads the rows again after it", async () => {
+    render(<Tab rows={[pending()]} />);
+    await act(async () => {});
+    expect(screen.getByText(/PM tries again at the next safety list check/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Try now" }));
+    await waitFor(() => expect(retryAutoInstall).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    // Nothing was wrong, so nothing is said.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(modFrameOpen).not.toHaveBeenCalled();
+    cleanup();
+    // A real row that is installing has nothing to try: the backend's own pass owns it.
+    render(
+      <Tab
+        rows={[
+          mod({ state: standing("installing", { state: "installing", text: "Installing." }) }),
+        ]}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Try now" })).toBeNull();
+  });
+
+  it("says in the backend's words when Try now couldn't reach the internet, and when it refused", async () => {
+    retryAutoInstall.mockResolvedValueOnce({
+      fetched: false,
+      problem: "PM couldn't reach the internet just now. It tries again on its own.",
+    });
+    render(<Tab rows={[pending()]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Try now" }));
+    expect(await screen.findByText(/couldn't reach the internet just now/)).toBeTruthy();
+    // The next press clears the old sentence while it works; a typed refusal shows through the store.
+    retryAutoInstall.mockRejectedValueOnce({
+      code: "no-store",
+      message: "PM's data isn't open here.",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Try now" }));
+    expect(await screen.findByText("PM's data isn't open here.")).toBeTruthy();
+    expect(screen.queryByText(/couldn't reach the internet just now/)).toBeNull();
+  });
+
+  it("can't send Try now twice while one is running", async () => {
+    let finish: (v: { fetched: boolean; problem: null }) => void = () => {};
+    retryAutoInstall.mockReturnValueOnce(new Promise((r) => (finish = r)));
+    render(<Tab rows={[pending()]} />);
+    const button = screen.getByRole("button", { name: "Try now" });
+    fireEvent.click(button);
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(button);
+    expect(retryAutoInstall).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ fetched: true, problem: null }));
+  });
+
   it("keeps the installing placeholder across a tab switch, because the row is what holds it", async () => {
     const rows = [
       mod({ state: standing("installing", { state: "installing", text: "Installing." }) }),
@@ -722,6 +822,7 @@ describe("what a mod supplied is plain text", () => {
             name: `Ac${RLO}me`,
             description: "one\nPM says: fine",
             author: `Mal${LRI}lory`,
+            authors: ["Ann Lee"],
             consented: false,
             state: { ...RUNNING, kind: "waiting-for-you", fix: "turn-on", running: false },
             permissions: [perm("tasks.read", { why: `to\nmap${RLO}` })],
@@ -733,7 +834,7 @@ describe("what a mod supplied is plain text", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Turn on “Ac me”?");
     expect(text).toContain("one PM says: fine");
-    expect(text).toContain("Made by Mal lory");
+    expect(text).toContain("Made by Mal lory · author: Ann Lee");
     expect(text).toContain("The maker says: “to map”");
     expect(text).toContain("Sites it may reach: h .example");
     expect(text).not.toContain(RLO);
@@ -773,6 +874,7 @@ describe("help", () => {
     }
     expect([...named].sort()).toEqual(
       expect.arrayContaining([
+        "mod-about",
         "mod-first-open",
         "mod-tab-status",
         "mods-permission-prompt",

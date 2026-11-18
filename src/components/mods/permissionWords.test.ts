@@ -67,6 +67,15 @@ describe("standingLine", () => {
       "Nobody has checked this mod.",
     );
   });
+
+  it("does not call a first-party mod's AI 'always on': the money question still comes", () => {
+    expect(standingLine({ id: "ai", when: "auto", offBecause: null })).toContain("monthly limit");
+    // Only `ai`: every other automatic permission is plainly on.
+    expect(standingLine({ id: "storage", when: "auto", offBecause: null })).toBe("Always on.");
+    expect(standingLine({ id: "ai", when: "first-use", offBecause: null })).toBe(
+      "PM asks you the first time the mod needs this.",
+    );
+  });
 });
 
 describe("wideningWords", () => {

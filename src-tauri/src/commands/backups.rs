@@ -557,7 +557,7 @@ pub async fn switch_to_vault(
     // fails refuses the switch: nothing is attached yet, and the restored folder stays as it was.
     // (The cached safety list is applied by that engage, before the load and so before any frame can
     // mount: `ledger::after_writer_open`; the restore already took the backup's copy of it.)
-    adopt_mods::reset_for_adopt(&conn).map_err(|e| {
+    adopt_mods::reset_for_adopt(&conn, &data_dir, &meta.vault_id).map_err(|e| {
         Error::Other(format!(
             "the restored vault couldn't be made safe to open on this computer ({e}); it was not \
              switched to"

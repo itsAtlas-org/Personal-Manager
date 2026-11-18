@@ -16,6 +16,7 @@ import {
 import { formatDate } from "../lib/format";
 import {
   MAP_COHESION_KEY,
+  MAP_LABELS_KEY,
   MAP_MODE_KEY,
   readMapCohesion,
   readMapMode,
@@ -47,12 +48,11 @@ import { graphColor, useTheme, useDepth } from "../theme";
  * toggle is a redraw, not a relayout.
  */
 
-// Arrangement + cohesion prefs live in lib/mapPrefs (shared with the Settings → Map section).
-const LABELS_KEY = "pm.map.labels";
+// Arrangement, cohesion and names prefs' keys live in lib/mapPrefs (shared with the Settings → Map section).
 
 /** Show each document's file name on its node? Off by default (keeps a dense map clean); per-device. */
 function initialShowLabels(): boolean {
-  return localStorage.getItem(LABELS_KEY) === "1";
+  return localStorage.getItem(MAP_LABELS_KEY) === "1";
 }
 
 /** The widest prefix of `text` (with a trailing … if shortened) that fits `maxWidth` px in the ctx's
@@ -185,7 +185,7 @@ export function GraphView() {
     localStorage.setItem(MAP_COHESION_KEY, String(cohesion));
   }, [cohesion]);
   useEffect(() => {
-    localStorage.setItem(LABELS_KEY, showLabels ? "1" : "0");
+    localStorage.setItem(MAP_LABELS_KEY, showLabels ? "1" : "0");
   }, [showLabels]);
 
   // Follow the optional-t-SNE download's progress (it can be triggered here or from Settings).
