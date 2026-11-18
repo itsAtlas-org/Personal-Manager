@@ -4,7 +4,7 @@
 // Per-device view prefs for chat: which of the Chats tab sidebar's two sections ("Projects" and
 // "Global chats") the user has folded away, and the composer's Thinking toggle. The folds are
 // display-only with no backend consumer, so localStorage, never a backend Setting (mirrors
-// focusPrefs / mapPrefs).
+// focusPrefs).
 //
 // The chat Thinking toggle is the one pref here with a backend reader. Like Developer mode's
 // `capturePrompt`, it travels with each send (`sendMessage(..., showThinking)`). The backend never

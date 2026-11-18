@@ -3,7 +3,7 @@
 
 // Every per-device view pref for the Focus tab: the layout, the "Upcoming" section's display mode /
 // hour window / day count, and which panels the tab shows. Display-only with no backend consumer, so
-// they live in localStorage — never a backend Setting (mirrors mapPrefs).
+// they live in localStorage — never a backend Setting (as chatPrefs and calendarPrefs do).
 //
 // All of these are SET ON THE FOCUS TAB, beside the thing they change. Settings used to mirror the
 // first four; the mirrors are gone (they were a second place to keep in step, and the layout one had

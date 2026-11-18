@@ -249,9 +249,8 @@ pub struct ImageAnalysis {
 
 // ---- optional OCR component: status + install commands --------------------
 //
-// OCR (rapidocr + pi-heif) is an OPTIONAL on-demand component the user installs once (the same
-// delivery the core Map's t-SNE reducer used, before the Document Map mod replaced it). These two commands are the install surface
-// (the drop-time prompt and the Storage tab). Removal goes through the Storage manager's guarded
+// OCR (rapidocr + pi-heif) is an OPTIONAL on-demand component the user installs once. These two
+// commands are the install surface (the drop-time prompt and the Storage tab). Removal goes through the Storage manager's guarded
 // cascade ([`crate::components::remove_storage_component`] with id `"ocr"`), which reclaims the heavy
 // image deps in order — so there is deliberately no standalone uninstall command here.
 

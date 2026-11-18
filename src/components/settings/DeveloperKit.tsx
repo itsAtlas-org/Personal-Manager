@@ -16,7 +16,7 @@ import { useDevKit } from "../../lib/useDevKit";
 import type { DevKitInfo, KitEndpoint } from "../../lib/modsTypes";
 import { modText } from "../mods/modText";
 import { Button, Callout, Collapsible, HScroll, SectionLabel } from "../ui";
-import { LIMIT_KEYS, LIMIT_ROWS, OFF_HINT } from "./kitWords";
+import { CLASSIC_SCRIPT_NOTE, LIMIT_KEYS, LIMIT_ROWS, OFF_HINT } from "./kitWords";
 
 /** One section of the Developer tab: the rail's anchor, the help id and a heading. */
 export function DevSection({
@@ -160,6 +160,7 @@ export function DeveloperKit({ on }: { on: boolean }) {
             </div>
           </>
         ))}
+        <p className="text-xs text-ink3">{CLASSIC_SCRIPT_NOTE}</p>
       </DevSection>
 
       <DevSection id="sec-dev-endpoints" helpId="settings-developer-endpoints" title="Endpoints">

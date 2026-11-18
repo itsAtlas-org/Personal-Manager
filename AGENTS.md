@@ -61,7 +61,8 @@ chunked, embedded, indexed and retrievable, with bounded context cost); **index-
 connectors** for Google Drive, OneDrive and local folders (pointer + embedding, bytes
 fetched live — never imported); a **multi-provider calendar** (Google events editable, #884) with a unified
 **Calendar** view tab; **project milestones** and a **structured flag layer**; **encrypted
-portable backups** (Proton Drive / Google Drive); a **semantic memory map**; **spreadsheet**
+portable backups** (Proton Drive / Google Drive); the **Document Map**, a mod
+PM downloads once for people who had documents; **spreadsheet**
 and **photo/OCR** ingestion; a **document reader**; a **pinboard**; runtime **developer
 mode**; and the **V2 design system** (below). The deliberate cuts still stand (Google Tasks;
 everything in spec §10); design/polish, a pre-release security pass, and the public-repo
@@ -78,7 +79,7 @@ release remain the open post-v1 work.
     everywhere but this file, and the `frontend` CI job (pr.yml) runs it.
   - `src/lib/types.ts` — shared types mirroring the Rust structs.
   - `src/components/` — the nav surfaces (`Sidebar` → Focus / Chats / Documents / Review /
-    Map / Calendar / Pinboard, plus the capability-gated Teach + Dev; the list itself, its gating
+    Calendar / Pinboard, any installed mod's tab (the Document Map is one), plus the capability-gated Teach + Dev; the list itself, its gating
     and the user's pin and hide live in `src/lib/nav.ts`, which the sidebar, the command palette
     and App's fallback all read): `FocusView` (status
     cards + triage + milestones + the calendar agenda + the daily briefing), `ProjectView`
@@ -175,8 +176,8 @@ release remain the open post-v1 work.
     `secrets.rs` is where a mod's user-typed keys live (`mod_secrets` in the encrypted database, not
     the keychain; bound to one host and header, never handed to the frame, stripped from backups and
     exports); and
-    `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
-    `embeddings.documentVectors` share. `keys.rs` embeds the two
+    `src-tauri/src/doc_vectors.rs` is the document-vector assembly
+    `embeddings.documentVectors` (the Document Map's input) reads. `keys.rs` embeds the two
     Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
     against; `index.rs` is the signed index's format, verification and acceptance rules, and
     `index_state.rs` its per-machine record, `data_dir/mods-index.json` (INVARIANTS.md I-31).

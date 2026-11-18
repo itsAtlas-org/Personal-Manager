@@ -30,7 +30,7 @@ vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
 
 import { HELP } from "../../lib/help";
 import { DeveloperKit } from "./DeveloperKit";
-import { LIMIT_KEYS, LIMIT_ROWS, OFF_HINT } from "./kitWords";
+import { CLASSIC_SCRIPT_NOTE, LIMIT_KEYS, LIMIT_ROWS, OFF_HINT } from "./kitWords";
 import { SETTINGS_TABS } from "./registry";
 
 const section = (id: string) => within(document.getElementById(id)!);
@@ -71,6 +71,13 @@ describe("the API version", () => {
     expect(api.getByText(/PM serves mod API 1.4 and, for older majors/)).toBeTruthy();
     expect(api.getByText("ai.complete")).toBeTruthy();
     expect(api.getByText("net.fetch")).toBeTruthy();
+  });
+
+  it("tells a mod's developer that only classic scripts load, even with developer mode off", () => {
+    render(<DeveloperKit on={false} />);
+    expect(section("sec-dev-api").getByText(CLASSIC_SCRIPT_NOTE)).toBeTruthy();
+    expect(CLASSIC_SCRIPT_NOTE).toMatch(/module script/);
+    expect(CLASSIC_SCRIPT_NOTE).toMatch(/classic/);
   });
 
   it("says plainly when nothing is experimental", async () => {

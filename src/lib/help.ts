@@ -640,7 +640,7 @@ export const HELP: Record<string, HelpEntry> = {
   // — the one place where "what does this actually do?" most deserves an answer.
   "settings-remove-data": {
     title: "Remove PM data",
-    body: "Erases what PM has put on this machine, in the classes you tick. 'Downloaded components' is safe — the Python engine, the OCR and map add-ons, and the downloaded search and OCR models all re-download on next use. Two of the others are not: your vault and database ARE your documents, chats, and projects, and removing your keychain secrets takes the key to the encrypted store along with your API key and every sign-in, so the vault becomes unopenable without them. Tick everything and PM removes itself entirely. Nothing here is recoverable afterwards — take a backup first if you're unsure. Your existing backups are never touched; remove those at their source.",
+    body: "Erases what PM has put on this machine, in the classes you tick. 'Downloaded components' is safe — the Python engine, the OCR add-on, and the downloaded search and OCR models all re-download on next use. Two of the others are not: your vault and database ARE your documents, chats, and projects, and removing your keychain secrets takes the key to the encrypted store along with your API key and every sign-in, so the vault becomes unopenable without them. Tick everything and PM removes itself entirely. Nothing here is recoverable afterwards — take a backup first if you're unsure. Your existing backups are never touched; remove those at their source.",
   },
   "settings-vault": {
     title: "Vault mode",

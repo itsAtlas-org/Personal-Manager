@@ -15,7 +15,7 @@ encrypted, and your documents live in a Markdown vault you can keep private to t
 device or protect with a passphrase and carry between machines. Little leaves your device:
 the model API calls that power chat — to your cloud AI provider, or to a local model server you
 run (one on this machine sends nothing off it; a remote or LAN one receives the chats you route to
-it) — a launch-time update check, a one-time first-run download of PM's local models, and — only if
+it) — a launch-time update check, a fetch of PM's signed mod safety list, a one-time first-run download of PM's local models, and — only if
 you set them up — a calendar fetch (plus the event changes you make, if you turn on editing for a
 Google account), a read-only sync of any cloud accounts you connect, and encrypted backups to your
 own cloud.
@@ -71,8 +71,10 @@ not an exhaustive list; the in-app **What's New** is the complete, current recor
   resize and tidy into folders, with undo when you change your mind. Nothing on it is
   trapped there: a note can become a real document in your vault when it's ready, and a
   timeline can become a project's milestones.
-- **A map of your knowledge.** See your documents laid out by meaning — related material
-  clusters together — as a navigable map you can explore.
+- **A map of your knowledge (an optional mod).** The Document Map lays your documents out by
+  meaning — related material clusters together — as a navigable map you can explore. If you
+  already had documents, PM downloads it once for you, from the same catalogue as every mod,
+  and you switch it on the first time you open it; anyone else finds it in the Mods tab.
 - **One calendar, changed where it lives.** Gather Google, Outlook and iCal calendars into one
   agenda — Month, Week, Day, Year and Agenda views, extra timezones down the side, and your
   own working hours — with schedule-aware chat answers and an automatic "Due soon" when an
@@ -300,7 +302,7 @@ refuses to send a token and chats in the clear to a public address); a check for
 (and the download if you accept one); a fetch of PM's signed mod safety list — two small files from
 the project's public `PM-Mods` GitHub release, at launch and every six hours, which send nothing but
 a generic `PM-mods/1` user agent and which PM accepts only if they carry the project's signature
-(and, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them); the websites each installed mod declares it will fetch from and you allow (only those exact hostnames, over HTTPS to the public internet, never to an address on this machine or your network, with no proxy), and, if a mod uses AI, its requests through your own Background AI route with the monthly limit you set; a one-time first-run download of PM's on-device models
+(and, for a mod you install from the catalogue, its package and its updates from the same place, checked against that list's hash before PM reads them). PM also installs the Document Map once from that same catalogue, for a vault that already had documents when the Map stopped being built in; the screen where you turn it on says PM downloaded it for you; the websites each installed mod declares it will fetch from and you allow (only those exact hostnames, over HTTPS to the public internet, never to an address on this machine or your network, with no proxy), and, if a mod uses AI, its requests through your own Background AI route with the monthly limit you set; a one-time first-run download of PM's on-device models
 and Python dependencies (your local model runner, if you use one, fetches model weights itself —
 PM does not); and — only if you turn them on — a calendar fetch (plus the event changes you make,
 if you turn on editing for a Google account), a read-only sync of the cloud accounts you connect

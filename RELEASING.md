@@ -252,6 +252,35 @@ broken release; the Windows path must apply in-place.
 
 ---
 
+## Publishing a mod *(maintainer's hands — a published version is burned)*
+
+A first-party mod (`mods/atlas.*/`, today the Document Map, `atlas.map`) never ships in the
+installer. PM downloads it from the signed catalogue in the separate `itsAtlas-org/PM-Mods` repo,
+and PM's own release job never touches the mod signing key. So a PM release that depends on a mod
+version (for example, one that moves a feature out of core and into a mod) needs that version
+**published first**, and the app tag comes after. Nothing here is automatic and no agent runs it.
+
+1. **Merge the mod's PR into PM `main`.** The folder's `manifest.json` version went up (and its
+   `CHANGELOG.md` has the entry); `just mods --base main` and `just build-mods` were green.
+2. **Build it yourself at that exact commit** (the merge commit on `main`), on your own machine:
+   `just build-mods`, then read the `sha256  file` line `scripts/pack-mod.mjs` prints for
+   `mods/<id>/dist/<id>-<version>.pmmod`. Record the sha256 together with the commit.
+3. **Open a PM-Mods catalogue PR** that pins `{repo, commit, path: mods/<id>}` and that sha256, and
+   merge it. (The first time only, turn on CodeQL default setup in PM-Mods:
+   `gh api -X PATCH repos/itsAtlas-org/PM-Mods/code-scanning/default-setup -f state=configured`.)
+4. **Approve the `mod-signing` run.** The build job checks out the pinned commit and packs it with no
+   secrets; the sign job recomputes the sha256, refuses a mismatch, signs, uploads
+   `<id>-v<version>` and replaces the signed `index` release (next `seq`, new `expires`).
+   **Never make the `index` release immutable**: the sign job must be able to replace its assets.
+5. **Check the result.** The `index` release lists the new version and a PM build pointed at it
+   installs it. A published version is burned: a bad `1.1.0` is fixed by `1.1.1`, never re-tagged.
+
+Then, before the PM tag (step 4 of the release): confirm the version in each shipped mod's
+`mods/<id>/manifest.json` is listed in the PM-Mods index. That is a checklist line, not a network
+gate in the release job.
+
+---
+
 ## Fixing something already shipped — roll forward, never back
 
 There is **one release channel**, and auto-update keeps every install on the latest
@@ -330,6 +359,8 @@ git push origin v2.0.4-alpha                 # CI ships it (maintainer's go-ahea
 ## Definition of done
 
 - [ ] All lockstep files read the release version, and they agree.
+- [ ] The version in `mods/atlas.map/manifest.json` (and any other `mods/atlas.*` folder) is listed
+      in the PM-Mods signed index (see "Publishing a mod").
 - [ ] Release PR merged to `main`; post-merge CI green.
 - [ ] Annotated tag pushed, sitting on the bump commit; tag string == version.
 - [ ] CI workflow completed: installers built, **signed**, manifest generated, GitHub
