@@ -609,6 +609,12 @@ mod tests {
     /// The leak this guards: a hook that captures its own host (an `Arc` cycle through the scripted
     /// model) and a clone parked in another thread (as a hub timer parks one) kept the folder, with
     /// its store, in `/tmp` after every run. It goes with the host the test made.
+    ///
+    /// Unix only. While a clone keeps the store's connection open, Windows refuses to delete
+    /// `pm.sqlite` (an open file can't be removed there), so the folder's best-effort removal
+    /// leaves it behind until the process ends. That costs disk in `%TEMP%`, which the OS clears,
+    /// not RAM. The leak this test is for is Linux's `/tmp`, which is a tmpfs: memory.
+    #[cfg(unix)]
     #[test]
     fn the_folder_goes_with_the_host_a_test_made_though_clones_outlive_it() {
         let host = TestHost::new();
