@@ -227,4 +227,56 @@ describe("the page's markup and stylesheet", () => {
   it("hides what is hidden whatever display it was given", () => {
     expect(styleCss).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
   });
+
+  // WCAG 1.4.11: a control's edge needs 3:1 against its ground, and only --ink4 gives it (--border and
+  // --border2 are decoration). The built-in Map's tests held this by reading its source; they go when the
+  // Map becomes this mod, so the mod holds its own edges here.
+  describe("holds the control edges at 3:1 (WCAG 1.4.11)", () => {
+    const rules = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    /** The declarations of every rule whose selector list names exactly `selector`. */
+    const declarations = (selector: string): string[] => {
+      const found: string[] = [];
+      for (const m of rules.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const list = m[1].split(",").map((part) => part.trim());
+        if (list.includes(selector)) {
+          found.push(...m[2].split(";").map((d) => d.trim().replace(/\s+/g, " ")));
+        }
+      }
+      return found;
+    };
+    /** The colour of the edge: the `border` or `border-color` declarations that draw one (not `border: 0`). */
+    const edges = (selector: string) =>
+      declarations(selector).filter((d) => /^border(-color)?:/.test(d) && !/^border: 0$/.test(d));
+
+    it.each(["select", 'input[type="number"]', ".chip", ".seg", ".nav-button", ".check"])(
+      "draws the edge of %s in --ink4, never --border or --border2",
+      (selector) => {
+        const drawn = edges(selector);
+        expect(drawn.length, `${selector} has no edge`).toBeGreaterThan(0);
+        for (const edge of drawn) {
+          expect(edge, selector).toMatch(/var\(--ink4\b/);
+          expect(edge, selector).not.toMatch(/--border2?\b/);
+        }
+      },
+    );
+
+    it("gives the active segment an inset --ink4 rim", () => {
+      const shadow = declarations(".seg-button.active").filter((d) => d.startsWith("box-shadow:"));
+      expect(shadow).toHaveLength(1);
+      expect(shadow[0]).toMatch(/^box-shadow: inset 0 0 0 1px var\(--ink4\b/);
+    });
+
+    it("draws the Enhanced checkbox itself: appearance none, so its edge is the --ink4 one", () => {
+      expect(declarations(".check")).toContain("appearance: none");
+      // The page builds that checkbox with the class this rule is on.
+      expect(code(named("shell.ts"))).toMatch(/enhanced\.className = "check"/);
+    });
+
+    it("sets Cancel and Sharpen as link buttons, in the accent text colour", () => {
+      const shell = code(named("shell.ts"));
+      expect(shell).toContain('button("link", CANCEL)');
+      expect(shell).toContain('button("link", SHARPEN)');
+      expect(declarations(".link")).toContain("color: var(--accent-text, LinkText)");
+    });
+  });
 });
