@@ -104,7 +104,8 @@ describe("a cold open", () => {
     await loadSemanticCoords(pm.host, counting, { nodeCap: 1000, sleep: noSleep });
     expect(pm.of("embeddings.documentVectors")).toHaveLength(1);
     expect(jobs).toHaveLength(1);
-    // The map is PCA until the enhanced layout is wired in (the next change): one job, PCA only.
+    // Without `enhanced` the run is the quick layout alone: one job, PCA only (semanticEnhanced.test.ts
+    // has the runs that ask for t-SNE).
     expect(jobs[0]).toMatchObject({ pca: true, tsne: false });
   });
 
@@ -535,7 +536,14 @@ describe("edges", () => {
     const docs = documents(5, 2);
     const pm = memoryHost({ docs, dimension: DIM });
     const result = await load(pm.host);
-    expect(result).toEqual({ coords: [], source: "computed", total: 0, placed: 0, saved: true });
+    expect(result).toEqual({
+      method: "pca",
+      coords: [],
+      source: "computed",
+      total: 0,
+      placed: 0,
+      saved: true,
+    });
     expect(methods(pm)).toEqual(["embeddings.signature"]);
   });
 

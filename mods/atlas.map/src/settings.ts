@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The Map's view settings: ONE content key, `settings`, holding `{layoutMode, cohesion, labels,
-// nodeCap}`. In the core Map these were split across per-device localStorage (arrangement, cohesion,
+// nodeCap, enhanced}`. In the core Map these were split across per-device localStorage (arrangement, cohesion,
 // labels: src/lib/mapPrefs.ts and GraphView) and a per-vault database setting (the node cap); a sealed
 // frame only has per-vault storage, so all four live there and travel with the vault and its backups
 // (Mods PR B plan, Q4; Bobby approved the per-vault default). A content key is the user's: kept on
@@ -12,6 +12,10 @@
 // the install-time handover that writes only `nodeCap`, or garbage) parses to a complete, in-range
 // settings object: a field that is missing or not understood takes its default, a number out of range is
 // clamped, as the core clamps them. What is written is always the complete object.
+//
+// Unknown fields are dropped on a save, on purpose ("writing is exact"; `saveSettings` re-parses what it
+// writes). The loss is accepted: an older Map never runs over newer settings, because PM refuses a
+// downgrade, and every published version of this Map knows `enhanced`.
 
 import { codeOf, CODE, isCount, readKey, writeKey, type MapHost } from "./hostApi";
 
@@ -28,6 +32,8 @@ export interface MapSettings {
   labels: boolean;
   /** The most documents the by-meaning layout places individually. */
   nodeCap: number;
+  /** Work out the enhanced (t-SNE) layout for the by-meaning arrangement; off keeps the quick one. */
+  enhanced: boolean;
 }
 
 export const NODE_CAP_MIN = 200;
@@ -40,6 +46,8 @@ export const DEFAULT_SETTINGS: Readonly<MapSettings> = {
   cohesion: 0,
   labels: false,
   nodeCap: NODE_CAP_DEFAULT,
+  // On for everyone, with a switch (Bobby, 2026-11-18): the enhanced layout is built in, nothing to download.
+  enhanced: true,
 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -60,6 +68,8 @@ export function parseSettings(value: unknown): MapSettings {
     nodeCap: isCount(raw.nodeCap)
       ? clamp(raw.nodeCap, NODE_CAP_MIN, NODE_CAP_MAX)
       : DEFAULT_SETTINGS.nodeCap,
+    // A stored boolean is kept; anything else (a string, a number, null) is the default.
+    enhanced: typeof raw.enhanced === "boolean" ? raw.enhanced : DEFAULT_SETTINGS.enhanced,
   };
 }
 

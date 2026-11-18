@@ -28,6 +28,7 @@ describe("parseSettings", () => {
       cohesion: 0,
       labels: false,
       nodeCap: 1000,
+      enhanced: true,
     });
     expect([NODE_CAP_MIN, NODE_CAP_DEFAULT, NODE_CAP_MAX, COHESION_MAX]).toEqual([
       200, 1000, 5000, 0.5,
@@ -42,7 +43,13 @@ describe("parseSettings", () => {
   it("reads a complete value", () => {
     expect(
       parseSettings({ layoutMode: "semantic", cohesion: 0.3, labels: true, nodeCap: 2500 }),
-    ).toEqual({ layoutMode: "semantic", cohesion: 0.3, labels: true, nodeCap: 2500 });
+    ).toEqual({
+      layoutMode: "semantic",
+      cohesion: 0.3,
+      labels: true,
+      nodeCap: 2500,
+      enhanced: true,
+    });
   });
 
   it("a partial value (the install-time handover writes only nodeCap) takes defaults for the rest", () => {
@@ -78,6 +85,20 @@ describe("parseSettings", () => {
     expect(parseSettings({ nodeCap: 5000 }).nodeCap).toBe(5000);
     for (const nodeCap of [-5, 1500.5, "1500", NaN, Infinity, null]) {
       expect(parseSettings({ nodeCap }).nodeCap).toBe(1000);
+    }
+  });
+
+  it("enhanced is on by default, and a stored boolean is kept", () => {
+    expect(DEFAULT_SETTINGS.enhanced).toBe(true);
+    expect(parseSettings({}).enhanced).toBe(true);
+    expect(parseSettings(null).enhanced).toBe(true);
+    expect(parseSettings({ enhanced: true }).enhanced).toBe(true);
+    expect(parseSettings({ enhanced: false }).enhanced).toBe(false);
+  });
+
+  it("enhanced that is not a boolean is the default, not coerced", () => {
+    for (const enhanced of ["false", "true", 0, 1, null, [], {}, undefined, NaN]) {
+      expect(parseSettings({ enhanced }).enhanced, JSON.stringify(enhanced)).toBe(true);
     }
   });
 
@@ -125,7 +146,13 @@ describe("saveSettings", () => {
     const pm = memoryHost({ docs: [] });
     await saveSettings(pm.host, { layoutMode: "semantic", labels: true });
     const next = await saveSettings(pm.host, { cohesion: 0.3 });
-    expect(next).toEqual({ layoutMode: "semantic", cohesion: 0.3, labels: true, nodeCap: 1000 });
+    expect(next).toEqual({
+      layoutMode: "semantic",
+      cohesion: 0.3,
+      labels: true,
+      nodeCap: 1000,
+      enhanced: true,
+    });
     expect(pm.kv.get(KEY_SETTINGS)!.revision).toBe(2);
   });
 
@@ -136,7 +163,18 @@ describe("saveSettings", () => {
     expect(next.cohesion).toBe(0.5);
   });
 
-  it("completes a handed-over value: only nodeCap was there, now all four are", async () => {
+  it("saves the Enhanced switch like any other setting, and keeps the rest", async () => {
+    const pm = memoryHost({ docs: [] });
+    await saveSettings(pm.host, { labels: true });
+    const next = await saveSettings(pm.host, { enhanced: false });
+    expect(next).toEqual({ ...DEFAULT_SETTINGS, labels: true, enhanced: false });
+    expect(pm.kv.get(KEY_SETTINGS)?.value).toEqual(next);
+    // And junk in storage is the default again on the next read.
+    pm.kv.set(KEY_SETTINGS, { value: { enhanced: "no" }, revision: 5 });
+    expect((await loadSettings(pm.host)).settings.enhanced).toBe(true);
+  });
+
+  it("completes a handed-over value: only nodeCap was there, now all five are", async () => {
     const pm = memoryHost({ docs: [] });
     pm.kv.set(KEY_SETTINGS, { value: { nodeCap: 1500 }, revision: 1 });
     await saveSettings(pm.host, { labels: true });

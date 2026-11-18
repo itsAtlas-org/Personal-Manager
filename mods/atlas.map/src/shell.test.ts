@@ -86,9 +86,43 @@ describe("buildShell", () => {
     const shell = buildShell(document);
     expect(shell.settingsButton.getAttribute("aria-controls")).toBe(shell.settingsPanel.id);
     expect(shell.settingsButton.getAttribute("aria-expanded")).toBe("false");
-    expect(shell.computing.getAttribute("role")).toBe("status");
+    // The phase text is the live region; the bar and Cancel sit beside it, outside it.
+    expect(shell.computing.getAttribute("role")).toBeNull();
+    expect(shell.computingText.getAttribute("role")).toBe("status");
     expect(shell.notice.getAttribute("role")).toBe("status");
     expect(shell.error.getAttribute("role")).toBe("alert");
+  });
+
+  it("holds the enhanced layout's strip: a phase that is the live region, a progressbar and Cancel outside it, and a note with Sharpen", () => {
+    const shell = buildShell(document);
+    expect(shell.progress.getAttribute("role")).toBe("progressbar");
+    expect(shell.progress.getAttribute("aria-label")).toBe("Sharpening clusters");
+    expect(shell.progress.getAttribute("aria-valuemin")).toBe("0");
+    expect(shell.progress.getAttribute("aria-valuemax")).toBe("100");
+    expect(shell.progress.getAttribute("aria-valuenow")).toBe("0");
+    expect(shell.computingText.contains(shell.progress)).toBe(false);
+    expect(shell.computingText.contains(shell.cancel)).toBe(false);
+    expect(shell.computing.contains(shell.progress)).toBe(true);
+    expect(shell.computing.contains(shell.cancel)).toBe(true);
+    // The fill is an SVG rect (a style attribute is not allowed in the frame).
+    expect(shell.progressFill.namespaceURI).toBe("http://www.w3.org/2000/svg");
+    for (const b of [shell.cancel, shell.sharpen]) {
+      expect(b.className).toBe("link");
+      expect(b.type).toBe("button");
+    }
+    expect(shell.cancel.textContent).toBe("Cancel");
+    expect(shell.sharpen.textContent).toBe("Sharpen");
+    for (const el of [shell.progress, shell.cancel, shell.held]) expect(el.hidden).toBe(true);
+    expect(shell.held.getAttribute("role")).toBe("status");
+    expect(shell.held.contains(shell.sharpen)).toBe(true);
+  });
+
+  it("puts the Enhanced switch in the settings popover as a native checkbox with its label", () => {
+    const shell = buildShell(document);
+    expect(shell.enhanced.type).toBe("checkbox");
+    expect(shell.settingsPanel.contains(shell.enhanced)).toBe(true);
+    const label = shell.settingsPanel.querySelector(`label[for="${shell.enhanced.id}"]`);
+    expect(label?.textContent).toBe("Enhanced layout (t-SNE)");
   });
 
   it("ties each label to its control", () => {

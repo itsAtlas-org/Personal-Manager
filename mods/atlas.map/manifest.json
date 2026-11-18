@@ -34,7 +34,7 @@
       {
         "id": "map-arrangement",
         "title": "How the map is arranged",
-        "body": "Switch how documents are laid out.\nBy project (the default) groups documents by where you filed them: each project is a hub with its documents gathered around it and linked to it, so the map shows how your library is organised.\nSemantic places documents so that similar ones sit close together, worked out from their meaning on this computer. Here projects only colour the dots; they do not decide where a dot goes.\nThe Semantic layout is worked out once and saved, so the first time after big changes it can take a moment."
+        "body": "Switch how documents are laid out.\nBy project (the default) groups documents by where you filed them: each project is a hub with its documents gathered around it and linked to it, so the map shows how your library is organised.\nSemantic places documents so that similar ones sit close together, worked out from their meaning on this computer. Here projects only colour the dots; they do not decide where a dot goes.\nSemantic can also be enhanced: the enhanced (t-SNE) layout pulls similar documents into tighter clusters. It shows the quick layout first, then sharpens it. Turn it off in Map settings to keep the quick layout.\nThe Semantic layout is worked out once and saved, so the first time after big changes it can take a moment."
       },
       {
         "id": "map-cohesion",
@@ -54,12 +54,12 @@
       {
         "id": "map-settings",
         "title": "Map settings",
-        "body": "Most documents placed by meaning caps how many documents the Semantic arrangement places one by one, from 200 to 5,000. Above it, the rest are gathered at their project's spot. Raise it for a fuller picture, lower it on a slower computer.\nYour settings are kept with your vault, so they travel with a backup and with a shared vault."
+        "body": "Most documents placed by meaning caps how many documents the Semantic arrangement places one by one, from 200 to 5,000. Above it, the rest are gathered at their project's spot. Raise it for a fuller picture, lower it on a slower computer.\nEnhanced layout (t-SNE) is on by default. It works out tighter clusters for the Semantic arrangement. Turn it off to keep the quick layout, which is faster on a big library.\nYour settings are kept with your vault, so they travel with a backup and with a shared vault."
       },
       {
         "id": "map-updates",
         "title": "Working it out, and refreshing",
-        "body": "The first time you open the Semantic arrangement after your documents change, the map is worked out on this computer, which can take a moment: a bar under the title says so. The result is saved, so the next opening is quick.\nIf documents are added or removed while the map is open, it does not move under you. A bar says so, and Refresh draws the map again."
+        "body": "The first time you open the Semantic arrangement after your documents change, the map is worked out on this computer, which can take a moment: a bar under the title says so. With the enhanced layout on, the quick layout shows first and a progress bar sharpens it. On a large library that can take 10 to 30 seconds. Cancel keeps the quick layout until you press Sharpen. The result is saved, so the next opening is quick.\nIf documents are added or removed while the map is open, it does not move under you. A bar says so, and Refresh draws the map again."
       }
     ]
   },
@@ -68,6 +68,8 @@
       { "key": "settings", "class": "content" },
       { "key": "semantic-meta", "class": "cache" },
       { "key": "semantic-coords", "class": "cache" },
+      { "key": "semantic-meta-tsne", "class": "cache" },
+      { "key": "semantic-coords-tsne", "class": "cache" },
       { "key": "project-layout", "class": "cache" }
     ]
   },

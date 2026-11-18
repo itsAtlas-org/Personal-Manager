@@ -13,7 +13,7 @@ import { inlineCompute, type Compute } from "./compute";
 import { domTesting } from "./domTesting";
 import { type MapHost } from "./hostApi";
 import { memoryHost, type MemoryHost, type MemoryHostOptions } from "./memoryHost";
-import { doc, vectorsFor } from "./testing";
+import { doc, scriptedCompute, vectorsFor } from "./testing";
 import type { MapDoc } from "./types";
 import { QUIET_MS } from "./changes";
 import tableRs from "../../../src-tauri/src/mods/api/table.rs?raw";
@@ -339,28 +339,29 @@ describe("starting", () => {
 describe("the two arrangements", () => {
   it("works the by-meaning layout out on first use, says so while it does, and saves the choice", async () => {
     let gate!: Gate;
-    const o = await open({ wrap: (pm) => (gate = gated(pm, "embeddings.documentVectors")).host });
+    const o = await open({
+      settings: { enhanced: false },
+      wrap: (pm) => (gate = gated(pm, "embeddings.documentVectors")).host,
+    });
     click(o.el("button.seg-button:last-child"));
     await tick();
     expect(gate.held).toBe(1);
-    expect(o.hidden(".strip[role=status]")).toBe(false);
-    expect(o.text(".strip[role=status] .strip-text")).toBe(
-      "Reading what your documents are about…",
-    );
+    expect(o.hidden(".strip-computing")).toBe(false);
+    expect(o.text(".strip-computing .strip-text")).toBe("Reading what your documents are about…");
     expect(o.text(".message span:last-child")).toBe("Preparing the map…");
     expect(o.hidden(".canvas")).toBe(true);
     gate.open();
     await tick();
     await tick();
     expect(o.hidden(".canvas")).toBe(false);
-    expect(o.hidden(".strip[role=status]")).toBe(true);
+    expect(o.hidden(".strip-computing")).toBe(true);
     expect(draw()).toHaveLength(12);
     expect(o.text(".subtitle")).toBe("12 documents by meaning · scroll to zoom, drag to pan");
     expect(stored(o)).toMatchObject({ layoutMode: "semantic" });
   });
 
   it("does not flash a strip for a map it already has saved", async () => {
-    const first = await open({ settings: { layoutMode: "semantic" } });
+    const first = await open({ settings: { layoutMode: "semantic", enhanced: false } });
     const kv = new Map(first.pm.kv);
     const rows = new Map(first.pm.rows);
     for (const app of apps.splice(0)) app.destroy();
@@ -379,7 +380,7 @@ describe("the two arrangements", () => {
     const mount = document.createElement("div");
     document.body.append(mount);
     const watcher = new MutationObserver(() => {
-      const strip = mount.querySelector<HTMLElement>(".strip[role=status]");
+      const strip = mount.querySelector<HTMLElement>(".strip-computing");
       seen.push(strip && !strip.hidden ? (strip.textContent ?? "") : null);
     });
     watcher.observe(mount, {
@@ -454,7 +455,7 @@ describe("the two arrangements", () => {
     // The late by-meaning answer did not replace the by-project map the person went back to.
     expect(draw()).toHaveLength(15);
     expect(o.text(".subtitle")).toContain("across 3 projects");
-    expect(o.hidden(".strip[role=status]")).toBe(true);
+    expect(o.hidden(".strip-computing")).toBe(true);
     expect(stored(o)).toMatchObject({ layoutMode: "project" });
   });
 
@@ -641,9 +642,7 @@ describe("the two arrangements", () => {
     await tick();
     await tick();
     // Under the strip, not behind a blank "Preparing the map…": every dot, the new one parked and faded.
-    expect(o.text(".strip[role=status] .strip-text")).toBe(
-      "Reading what your documents are about…",
-    );
+    expect(o.text(".strip-computing .strip-text")).toBe("Reading what your documents are about…");
     expect(o.hidden(".message")).toBe(true);
     expect(o.hidden(".canvas")).toBe(false);
     draw();
@@ -655,7 +654,7 @@ describe("the two arrangements", () => {
     await tick();
     await tick();
     await tick();
-    expect(o.hidden(".strip[role=status]")).toBe(true);
+    expect(o.hidden(".strip-computing")).toBe(true);
     draw();
     const placed = lastFrame().filter((c) => c.op === "fill");
     expect(placed).toHaveLength(13);
@@ -708,7 +707,7 @@ describe("the subtitle while a layout is being worked out", () => {
     await tick();
     await tick();
     await tick();
-    expect(o.text(".strip[role=status] .strip-text")).toBe("Arranging your projects…");
+    expect(o.text(".strip-computing .strip-text")).toBe("Arranging your projects…");
     expect(o.text(".subtitle")).toContain("12 documents across 3 projects");
     release();
     await o.app.ready;
@@ -1185,7 +1184,9 @@ describe("documents changing while the map is open", () => {
 
 /** The strip that carries the "documents changed" notice: the status strip with a Refresh button. */
 function noticeStrip(o: Opened): HTMLElement {
-  const strips = Array.from(o.mount.querySelectorAll<HTMLElement>(".strip[role=status]"));
+  const strips = Array.from(
+    o.mount.querySelectorAll<HTMLElement>(".strip[role=status]:not(.strip-held)"),
+  );
   const found = strips.find((s) => s.querySelector("button.link") !== null);
   if (!found) throw new Error("no notice strip");
   return found;
@@ -1233,7 +1234,8 @@ describe("what the page asks PM for is what the manifest declares", () => {
   const keys = new Map(manifest.data.keys.map((k) => [k.key, k.class]));
 
   it("every call of a whole session is a row of the dispatch table under a permission it asks for, on a declared key", async () => {
-    const o = await open({ settings: { layoutMode: "semantic" } });
+    // A Worker that runs both layouts to their end by itself, so the enhanced layout's keys are used too.
+    const o = await open({ settings: { layoutMode: "semantic" }, compute: scriptedCompute(true) });
     // Everything a person can do: arrangement, cohesion, names, the cap, a click, a refresh.
     click(o.el("button.seg-button:first-child"));
     await tick();
@@ -1281,7 +1283,9 @@ describe("what the page asks PM for is what the manifest declares", () => {
     expect(Array.from(usedKeys).sort()).toEqual([
       "project-layout",
       "semantic-coords",
+      "semantic-coords-tsne",
       "semantic-meta",
+      "semantic-meta-tsne",
       "settings",
     ]);
     // The one user's key is content class; per-document rows are only ever under a cache key.
@@ -1301,5 +1305,484 @@ describe("what the page asks PM for is what the manifest declares", () => {
     for (const name of ["theme.changed", "documents.added", "documents.deleted"]) {
       expect(permissions.has(events.get(name) as string), name).toBe(true);
     }
+  });
+});
+
+// ---- the enhanced layout ---------------------------------------------------------------------------------
+// A steered job (testing.ts scriptedCompute): the test says when the quick layout lands, how far t-SNE
+// is, and when it ends. Its t-SNE is PCA mirrored, so the two pictures differ.
+
+describe("the enhanced layout", () => {
+  /** Wait until `check` holds, a few ticks at a time. */
+  async function until(check: () => boolean) {
+    for (let i = 0; i < 50 && !check(); i++) await tick();
+    expect(check()).toBe(true);
+  }
+
+  /** The page in the by-meaning arrangement, a steered job, and nothing finished yet. */
+  async function semanticOpen(extra: OpenOptions = {}) {
+    const compute = scriptedCompute();
+    const o = await open({
+      settings: { layoutMode: "semantic" },
+      compute,
+      noWait: true,
+      ...extra,
+    });
+    await until(() => compute.jobs.length > 0);
+    return { o, compute, job: compute.jobs[0] };
+  }
+
+  /** The note strip and its button. */
+  const held = (o: Opened) => o.mount.querySelector<HTMLElement>(".strip-held") as HTMLElement;
+  const cancelButton = (o: Opened) => o.el<HTMLButtonElement>(".strip-computing button.link");
+  const sharpenButton = (o: Opened) => o.el<HTMLButtonElement>(".strip-held button.link");
+  const phaseText = (o: Opened) => o.text(".strip-computing .strip-text");
+  const progressbar = (o: Opened) => o.el(".progress[role=progressbar]");
+  const settingsWrites = (o: Opened) =>
+    o.pm.of("storage.set").filter((c) => (c.args as { key: string }).key === "settings");
+  /** Open the quick layout (provisional) and let the page see it. */
+  const land = async (job: { provisional(): void }) => {
+    job.provisional();
+    await tick();
+    await tick();
+  };
+
+  describe("the strip", () => {
+    it("says Reading, then Placing, then Sharpening, with Cancel beside the phase, and a bar only while sharpening", async () => {
+      const { o, job } = await semanticOpen();
+      expect(o.hidden(".strip-computing")).toBe(false);
+      expect(phaseText(o)).toBe("Placing documents by meaning…");
+      expect(cancelButton(o).hidden).toBe(false);
+      expect(cancelButton(o).textContent).toBe("Cancel");
+      expect(progressbar(o).hidden).toBe(true);
+      expect(o.hidden(".canvas")).toBe(true);
+
+      await land(job);
+      expect(phaseText(o)).toBe("Sharpening clusters…");
+      expect(progressbar(o).hidden).toBe(false);
+      expect(cancelButton(o).hidden).toBe(false);
+      // The quick layout is on screen already, under the strip, and the subtitle does not claim more.
+      expect(o.hidden(".canvas")).toBe(false);
+      expect(draw()).toHaveLength(12);
+      expect(o.text(".subtitle")).toBe("12 documents by meaning · scroll to zoom, drag to pan");
+
+      job.finish();
+      await until(() => o.hidden(".strip-computing"));
+      expect(o.text(".subtitle")).toBe(
+        "12 documents by meaning, enhanced · scroll to zoom, drag to pan",
+      );
+      expect(held(o).hidden).toBe(true);
+    });
+
+    it("draws the quick layout first and the enhanced one after it: two different pictures", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      const quick = draw();
+      job.finish();
+      await until(() => o.hidden(".strip-computing"));
+      const sharp = draw();
+      expect(sharp).toHaveLength(12);
+      expect(sharp).not.toEqual(quick);
+    });
+
+    it("the progress is a progressbar outside the live region, named, 0 to 100, and moves with t-SNE", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      const bar = progressbar(o);
+      expect(bar.closest("[role=status]")).toBeNull();
+      expect(bar.getAttribute("aria-label")).toBe("Sharpening clusters");
+      expect(bar.getAttribute("aria-valuemin")).toBe("0");
+      expect(bar.getAttribute("aria-valuemax")).toBe("100");
+      expect(bar.getAttribute("aria-valuenow")).toBe("0");
+      job.progress(0.42);
+      expect(bar.getAttribute("aria-valuenow")).toBe("42");
+      expect(o.el(".progress rect").getAttribute("width")).toBe("42");
+      // The live region is the phase text alone.
+      const live = o.el("[role=status].strip-text");
+      expect(live.textContent).toBe("Sharpening clusters…");
+      expect(live.contains(bar)).toBe(false);
+    });
+
+    it("the live region's text changes once for the phase while thirty progress ticks arrive", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      const live = o.el("[role=status].strip-text");
+      let changes = 0;
+      const watcher = new MutationObserver((records) => {
+        changes += records.length;
+      });
+      watcher.observe(live, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+      for (let i = 1; i <= 30; i++) job.progress(i / 30);
+      await tick();
+      expect(changes).toBe(0);
+      expect(o.el(".progress").getAttribute("aria-valuenow")).toBe("100");
+      watcher.disconnect();
+    });
+
+    it("builds Cancel and Sharpen as plain text buttons, in the order a keyboard meets them", async () => {
+      const { o } = await semanticOpen();
+      for (const b of [cancelButton(o), sharpenButton(o)]) {
+        expect(b.tagName).toBe("BUTTON");
+        expect(b.type).toBe("button");
+        expect(b.className).toBe("link");
+        expect(b.disabled).toBe(false);
+        expect(b.tabIndex).toBeGreaterThanOrEqual(0);
+      }
+      const all = Array.from(o.mount.querySelectorAll("button, select, input"));
+      expect(all.indexOf(cancelButton(o))).toBeGreaterThan(-1);
+      expect(all.indexOf(cancelButton(o))).toBeLessThan(all.indexOf(sharpenButton(o)));
+    });
+  });
+
+  describe("Cancel", () => {
+    it("keeps the quick layout, turns the strip into a note with Sharpen, moves the focus to Sharpen, and never writes the setting", async () => {
+      const { o, job } = await semanticOpen();
+      document.body.append(o.mount);
+      await land(job);
+      const before = draw();
+      cancelButton(o).focus();
+      click(cancelButton(o));
+      expect(o.hidden(".strip-computing")).toBe(true);
+      expect(held(o).hidden).toBe(false);
+      expect(held(o).textContent).toContain(
+        "Showing the quick layout. Sharpen to work out the enhanced one.",
+      );
+      expect(document.activeElement).toBe(sharpenButton(o));
+      await until(() => job.cancelled);
+      await tick();
+      expect(draw()).toEqual(before);
+      expect(o.text(".subtitle")).toBe("12 documents by meaning · scroll to zoom, drag to pan");
+      // Cancel is not a choice about the setting: nothing was written to it, and it still says on.
+      expect(settingsWrites(o)).toEqual([]);
+      expect(o.el<HTMLInputElement>("#map-enhanced").checked).toBe(true);
+      // The quick layout was kept for next time, the enhanced pair was not.
+      expect(o.pm.kv.has("semantic-meta")).toBe(true);
+      expect(o.pm.kv.has("semantic-meta-tsne")).toBe(false);
+    });
+
+    it("then a new cap works out the quick layout only, starts no t-SNE, and never labels it enhanced", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      const input = o.el<HTMLInputElement>("#map-node-cap");
+      input.value = "300";
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => compute.jobs.length === 2);
+      expect(compute.jobs[1]).toMatchObject({ pca: true, tsne: false });
+      compute.jobs[1].finishQuick();
+      await until(() => o.hidden(".strip-computing"));
+      expect(compute.jobs).toHaveLength(2);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+      expect(held(o).hidden).toBe(false);
+      expect(sharpenButton(o).hidden).toBe(false);
+    });
+
+    it("then Refresh starts no t-SNE either: the saved quick layout is drawn, with the note still there", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      await tick();
+      const reads = o.pm.of("embeddings.documentVectors").length;
+      await o.app.reload();
+      await tick();
+      expect(compute.jobs).toHaveLength(1);
+      expect(o.pm.of("embeddings.documentVectors")).toHaveLength(reads);
+      expect(o.text(".subtitle")).toBe("12 documents by meaning · scroll to zoom, drag to pan");
+      expect(held(o).hidden).toBe(false);
+      expect(sharpenButton(o).hidden).toBe(false);
+      expect(o.hidden(".canvas")).toBe(false);
+    });
+
+    it("then Refresh after the documents changed works out the quick layout only", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      await tick();
+      o.pm.addDoc(doc(99, "Atlas", 3, "New one"), new Float32Array(8).fill(0.5));
+      void o.app.reload();
+      await until(() => compute.jobs.length === 2);
+      expect(compute.jobs[1]).toMatchObject({ pca: true, tsne: false });
+      compute.jobs[1].finishQuick();
+      await until(() => o.hidden(".strip-computing"));
+      expect(compute.jobs).toHaveLength(2);
+      expect(o.text(".subtitle")).toContain("13 documents by meaning ·");
+      expect(held(o).hidden).toBe(false);
+    });
+
+    it("then a change of cohesion runs nothing and the subtitle still does not say enhanced", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      await tick();
+      const select = o.el<HTMLSelectElement>("#map-cohesion");
+      select.value = "0.3";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await tick();
+      expect(compute.jobs).toHaveLength(1);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+      expect(o.pm.of("embeddings.documentVectors")).toHaveLength(1);
+    });
+
+    it("before the quick layout lands waits for it, and the note shows at once", async () => {
+      const { o, job } = await semanticOpen();
+      click(cancelButton(o));
+      expect(held(o).hidden).toBe(false);
+      expect(job.cancelled).toBe(false);
+      job.provisional();
+      await until(() => job.cancelled);
+      await tick();
+      expect(o.text(".subtitle")).toBe("12 documents by meaning · scroll to zoom, drag to pan");
+      expect(o.hidden(".canvas")).toBe(false);
+    });
+  });
+
+  describe("Sharpen", () => {
+    it("after Cancel is a run of the enhanced layout alone with one more vector read, keeps the picture, and puts the focus on Cancel", async () => {
+      const { o, compute, job } = await semanticOpen();
+      document.body.append(o.mount);
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      await tick();
+      const before = draw();
+      const readsBefore = o.pm.of("embeddings.documentVectors").length;
+      sharpenButton(o).focus();
+      click(sharpenButton(o));
+      expect(held(o).hidden).toBe(true);
+      // At once, before anything is asked of PM: the picture the person is looking at is not blanked.
+      expect(o.hidden(".canvas")).toBe(false);
+      await until(() => compute.jobs.length === 2);
+      // A row 3 run: the quick layout is saved, so t-SNE alone, and exactly one read of the vectors.
+      expect(compute.jobs[1]).toMatchObject({ pca: false, tsne: true });
+      expect(o.pm.of("embeddings.documentVectors").length - readsBefore).toBe(1);
+      expect(o.hidden(".canvas")).toBe(false);
+      expect(draw()).toEqual(before);
+      expect(phaseText(o)).toBe("Sharpening clusters…");
+      expect(document.activeElement).toBe(cancelButton(o));
+      compute.jobs[1].finish();
+      await until(() => o.hidden(".strip-computing"));
+      expect(o.text(".subtitle")).toContain("by meaning, enhanced");
+      expect(held(o).hidden).toBe(true);
+      expect(settingsWrites(o)).toEqual([]);
+    });
+
+    it("a Cancel after Sharpen goes back to the note and Sharpen can be pressed again", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      click(sharpenButton(o));
+      await until(() => compute.jobs.length === 2);
+      click(cancelButton(o));
+      await until(() => compute.jobs[1].cancelled);
+      expect(held(o).hidden).toBe(false);
+      expect(sharpenButton(o).hidden).toBe(false);
+      click(sharpenButton(o));
+      await until(() => compute.jobs.length === 3);
+      expect(compute.jobs[2]).toMatchObject({ pca: false, tsne: true });
+    });
+  });
+
+  describe("when the layout cannot be kept, or does not finish", () => {
+    it("a refused save of the quick layout starts no t-SNE and says so, with Sharpen", async () => {
+      const { o, job } = await semanticOpen({
+        arm: (pm) => pm.failNext("storage.set", "MOD-3003"),
+      });
+      await land(job);
+      await until(() => job.cancelled);
+      await tick();
+      expect(held(o).textContent).toContain(
+        "The layout couldn't be saved, so it will be worked out again next time.",
+      );
+      expect(sharpenButton(o).hidden).toBe(false);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+      expect(o.hidden(".canvas")).toBe(false);
+      expect(o.pm.kv.has("semantic-meta-tsne")).toBe(false);
+    });
+
+    it("a refused save of the enhanced layout leaves the enhanced picture, with the same note and no Sharpen", async () => {
+      const { o, job } = await semanticOpen({
+        wrap: (pm) => ({
+          ...pm.host,
+          call: (method, args) => {
+            const key = (args as { key?: string } | undefined)?.key;
+            if (method === "storage.doc.set" && key === "semantic-coords-tsne") {
+              return Promise.reject(new Error("refused"));
+            }
+            return pm.host.call(method, args);
+          },
+        }),
+      });
+      await land(job);
+      job.finish();
+      await until(() => o.hidden(".strip-computing"));
+      expect(o.text(".subtitle")).toContain("by meaning, enhanced");
+      expect(held(o).textContent).toContain("The layout couldn't be saved");
+      expect(sharpenButton(o).hidden).toBe(true);
+    });
+
+    it("the deadline keeps the quick layout with a note and Sharpen", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      job.deadline();
+      await until(() => !held(o).hidden);
+      expect(held(o).textContent).toContain("was taking too long");
+      expect(sharpenButton(o).hidden).toBe(false);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+      expect(o.hidden(".canvas")).toBe(false);
+    });
+
+    it("a worker that fails after the quick layout is not a failed map", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      job.fail();
+      await until(() => !held(o).hidden);
+      expect(held(o).textContent).toContain("couldn't be worked out");
+      expect(sharpenButton(o).hidden).toBe(false);
+      expect(o.mount.querySelector(".strip-error")).not.toBeNull();
+      expect((o.mount.querySelector(".strip-error") as HTMLElement).hidden).toBe(true);
+    });
+
+    it("a worker that fails with no quick layout is a failed layout, with Try again", async () => {
+      const { o, job } = await semanticOpen();
+      job.fail();
+      await until(() => !(o.mount.querySelector(".strip-error") as HTMLElement).hidden);
+      expect(o.text(".strip-error .strip-text")).toBe(
+        "The map couldn't be laid out. Your documents are unchanged.",
+      );
+    });
+
+    it("no Worker at all: the quick layout, and a note that the enhanced one needs a worker, with no Sharpen", async () => {
+      const compute = scriptedCompute(true);
+      compute.mode = "inline";
+      const o = await open({ settings: { layoutMode: "semantic" }, compute });
+      await tick();
+      expect(held(o).hidden).toBe(false);
+      expect(held(o).textContent).toContain(
+        "The enhanced layout needs a background worker, which this page could not start.",
+      );
+      expect(sharpenButton(o).hidden).toBe(true);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+    });
+  });
+
+  describe("a run that is superseded", () => {
+    it("switching to By project ends the job and the answer is dropped", async () => {
+      const { o, job } = await semanticOpen();
+      await land(job);
+      click(o.el("button.seg-button:first-child"));
+      await tick();
+      expect(job.cancelled).toBe(true);
+      expect(o.text(".subtitle")).toContain("across");
+    });
+
+    it("a Refresh ends the job of the run before it", async () => {
+      const { o, compute, job } = await semanticOpen();
+      void o.app.reload();
+      await until(() => compute.jobs.length === 2);
+      expect(job.cancelled).toBe(true);
+      expect(compute.jobs[1].cancelled).toBe(false);
+    });
+
+    it("a new cap ends the job of the run before it", async () => {
+      const { o, compute, job } = await semanticOpen();
+      const input = o.el<HTMLInputElement>("#map-node-cap");
+      input.value = "300";
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => compute.jobs.length === 2);
+      expect(job.cancelled).toBe(true);
+    });
+
+    it("closing the page ends the job", async () => {
+      const { o, job } = await semanticOpen();
+      o.app.destroy();
+      await tick();
+      expect(job.cancelled).toBe(true);
+    });
+  });
+
+  describe("the Enhanced switch", () => {
+    it("is a labelled checkbox in the settings popover, on by default, with a hint", async () => {
+      const o = await open();
+      const box = o.el<HTMLInputElement>("#map-enhanced");
+      expect(box.type).toBe("checkbox");
+      expect(box.checked).toBe(true);
+      expect(o.el("#map-settings").contains(box)).toBe(true);
+      const label = o.mount.querySelector(`label[for=map-enhanced]`) as HTMLElement;
+      expect(label.textContent).toBe("Enhanced layout (t-SNE)");
+      expect(o.el("#map-settings").textContent).toContain("Turn it off to keep the quick layout.");
+    });
+
+    it("shows a stored off", async () => {
+      const o = await open({ settings: { enhanced: false } });
+      expect(o.el<HTMLInputElement>("#map-enhanced").checked).toBe(false);
+    });
+
+    it("switching it off and on again costs no recompute: each layout is read from its own cache", async () => {
+      const compute = scriptedCompute(true);
+      const o = await open({ settings: { layoutMode: "semantic" }, compute });
+      await until(() => o.text(".subtitle").includes("enhanced"));
+      expect(compute.jobs).toHaveLength(1);
+      const box = o.el<HTMLInputElement>("#map-enhanced");
+      const readsBefore = o.pm.of("embeddings.documentVectors").length;
+
+      box.checked = false;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => !o.text(".subtitle").includes("enhanced"));
+      await until(() => stored(o).enhanced === false);
+      expect(o.text(".subtitle")).toContain("12 documents by meaning");
+
+      box.checked = true;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => o.text(".subtitle").includes("enhanced"));
+      await until(() => stored(o).enhanced === true);
+      expect(compute.jobs).toHaveLength(1);
+      expect(o.pm.of("embeddings.documentVectors").length).toBe(readsBefore);
+    });
+
+    it("turning it off in the middle of a run ends the job and shows the quick layout with no note", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      const box = o.el<HTMLInputElement>("#map-enhanced");
+      box.checked = false;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => job.cancelled);
+      await until(() => compute.jobs.length === 2 || o.hidden(".strip-computing"));
+      if (compute.jobs.length === 2) {
+        expect(compute.jobs[1]).toMatchObject({ pca: true, tsne: false });
+        compute.jobs[1].finishQuick();
+      }
+      await until(() => o.hidden(".strip-computing"));
+      expect(held(o).hidden).toBe(true);
+      expect(o.text(".subtitle")).not.toContain("enhanced");
+      expect(o.hidden(".canvas")).toBe(false);
+    });
+
+    it("turning it back on lifts the hold that Cancel put on", async () => {
+      const { o, compute, job } = await semanticOpen();
+      await land(job);
+      click(cancelButton(o));
+      await until(() => job.cancelled);
+      const box = o.el<HTMLInputElement>("#map-enhanced");
+      box.checked = false;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+      // The quick layout was saved when Cancel ended the run, so turning Enhanced off needs no job.
+      await until(() => held(o).hidden === true);
+      expect(compute.jobs).toHaveLength(1);
+      box.checked = true;
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+      await until(() => compute.jobs.length === 2);
+      expect(compute.jobs[1]).toMatchObject({ pca: false, tsne: true });
+      expect(held(o).hidden).toBe(true);
+    });
   });
 });

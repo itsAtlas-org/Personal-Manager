@@ -8,7 +8,7 @@
 import type { ChangeNotice } from "./changes";
 import type { LayoutMode } from "./settings";
 import type { ProjectPhase } from "./projectLayout";
-import type { SemanticPhase } from "./semantic";
+import type { LayoutMethod, SemanticPhase, StoppedReason } from "./semantic";
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -20,11 +20,14 @@ export function subtitle(
   documents: number,
   projects: number,
   placed: number,
+  method: LayoutMethod = "pca",
 ): string {
   if (mode === "semantic") {
+    // "enhanced" is a fact about the picture on screen (its method), never about the setting.
+    const how = method === "tsne" ? "by meaning, enhanced" : "by meaning";
     return placed > 0 && placed < documents
-      ? `showing the top ${placed} of ${documents} documents by meaning · ${HINT}`
-      : `${plural(documents, "document", "documents")} by meaning · ${HINT}`;
+      ? `showing the top ${placed} of ${documents} documents ${how} · ${HINT}`
+      : `${plural(documents, "document", "documents")} ${how} · ${HINT}`;
   }
   return `${plural(documents, "document", "documents")} across ${plural(projects, "project", "projects")} · ${HINT}, click a document to read it`;
 }
@@ -41,6 +44,8 @@ export function phaseText(phase: SemanticPhase | ProjectPhase): string | null {
       return "Placing documents by meaning…";
     case "computing":
       return "Arranging your projects…";
+    case "sharpening":
+      return "Sharpening clusters…";
     case "saving":
       return "Saving the map for next time…";
   }
@@ -59,6 +64,28 @@ export function noticeText(notice: ChangeNotice): string {
     }
   }
   return "Your documents changed while the map was open.";
+}
+
+/** The progress bar's name for a screen reader; the strip's text (the live region) is the phase. */
+export const SHARPENING_LABEL = "Sharpening clusters";
+export const CANCEL = "Cancel";
+export const SHARPEN = "Sharpen";
+
+/** The note that stays after the enhanced layout was not made, so the quick layout is showing. The
+ *  Sharpen button beside it (where it makes sense) tries again. */
+export function stoppedNote(reason: StoppedReason): string {
+  switch (reason) {
+    case "cancelled":
+      return "Showing the quick layout. Sharpen to work out the enhanced one.";
+    case "deadline":
+      return "The enhanced layout was taking too long, so the quick layout is showing.";
+    case "failed":
+      return "The enhanced layout couldn't be worked out, so the quick layout is showing.";
+    case "unsaved":
+      return "The layout couldn't be saved, so it will be worked out again next time.";
+    case "no-worker":
+      return "The enhanced layout needs a background worker, which this page could not start.";
+  }
 }
 
 export const TITLE = "Document Map";
