@@ -25,11 +25,15 @@
 // top-left corner instead (see `NewEventButton`). It shows once a Google account is connected.
 //
 // THE RUNWAY'S PIECES (Agenda, Runway layout) join the left group, where the nav sits in the other
-// views: the board draws its readout ("3/7 done", the bar, Next up), Hide events and + Window into
-// a slot beside "From today" (the board stays the owner of what they open), and + Task is this
-// header's own button, handed to CalendarView, which owns the editor. That group is wide, so the
-// Runway keeps it on the first row until the header is much wider than the other views need.
-// Besides the Runway's, the rest here only changes what you see.
+// views: the board draws Hide events and + Window into a slot beside "From today" (the board stays
+// the owner of what they open), and + Task is this header's own button, handed to CalendarView,
+// which owns the editor. Besides the Runway's, the rest here only changes what you see.
+//
+// ONE HEIGHT: every control in the row is the height of a SegmentedControl (Button's "bar" size,
+// Select's `bar`), so + New event, + Task, the tertiary buttons and the switches line up at every
+// Text size and Density, even an icon-only one (Pop out, Refresh). Button.test.tsx pins the
+// arithmetic. The date label that opens the month picker is a text-sm heading, not a text-xs
+// control, but it carries the same height floor so its hover highlight matches the row.
 //
 // Refresh is an icon (circular arrows) at every Depth. When it last synced is the one fact that
 // tells you whether pressing it is worth it, so it is in the tooltip (hover and keyboard focus) and
@@ -100,8 +104,8 @@ interface Props {
   /** The Agenda's layout: the Runway board or the dated list. Its switch shows in Agenda only. */
   agendaMode?: AgendaMode;
   onAgendaModeChange?: (mode: AgendaMode) => void;
-  /** The Runway's slot beside "From today", given to the board to draw its readout, Hide events
-   *  and + Window into. Called with the element when the Runway shows, and with null when it goes. */
+  /** The Runway's slot beside "From today", given to the board to draw Hide events and + Window
+   *  into. Called with the element when the Runway shows, and with null when it goes. */
   runwaySlotRef?: (el: HTMLDivElement | null) => void;
   /** Start a new task (the Runway's + Task, before + New event). Absent outside the Runway. */
   onCreateTask?: () => void;
@@ -216,8 +220,8 @@ export function CalendarHeader({
           {runway ? (
             <>
               <span className="px-1 font-head text-sm text-ink">From today</span>
-              {/* The Runway draws its readout, Hide events and + Window here (portaled by the board,
-                which owns them). A real box, not display:contents, so help mode has a rect; hidden
+              {/* The Runway draws Hide events and + Window here (portaled by the board, which owns
+                them). A real box, not display:contents, so help mode has a rect; hidden
                 while empty so it takes no gap before the board has drawn. */}
               <div
                 ref={runwaySlotRef}
@@ -232,6 +236,7 @@ export function CalendarHeader({
                 <Tooltip label={`Previous · ${prevKeys.glyphs}`}>
                   <Button
                     variant="tertiary"
+                    size="bar"
                     onClick={onPrev}
                     aria-label="Previous"
                     aria-keyshortcuts={prevKeys.shortcuts}
@@ -242,6 +247,7 @@ export function CalendarHeader({
                 <Tooltip label={todayKeys.tip}>
                   <Button
                     variant="tertiary"
+                    size="bar"
                     onClick={onToday}
                     aria-keyshortcuts={todayKeys.shortcuts}
                   >
@@ -251,6 +257,7 @@ export function CalendarHeader({
                 <Tooltip label={`Next · ${nextKeys.glyphs}`}>
                   <Button
                     variant="tertiary"
+                    size="bar"
                     onClick={onNext}
                     aria-label="Next"
                     aria-keyshortcuts={nextKeys.shortcuts}
@@ -268,8 +275,8 @@ export function CalendarHeader({
         <div
           className={cn(
             "col-span-2 row-start-2 flex flex-wrap items-center justify-end gap-3",
-            // The Runway's left group is wide (the readout), so it keeps the first row to itself
-            // until the header is wider than the other views need.
+            // The Runway keeps the wider breakpoint from when its left group held a readout; with
+            // that gone it may fit the other views' @4xl (check it in a window before changing).
             runway
               ? "@7xl:col-span-1 @7xl:col-start-2 @7xl:row-start-1"
               : "@4xl:col-span-1 @4xl:col-start-2 @4xl:row-start-1",
@@ -291,6 +298,7 @@ export function CalendarHeader({
             // control that hides things has to stay reachable. The count is what it is hiding now.
             <Button
               variant="tertiary"
+              size="bar"
               onClick={onToggleHideDone}
               data-help="calendar-filters"
               title={
@@ -326,7 +334,7 @@ export function CalendarHeader({
             <label className="flex items-center gap-1.5 text-xs text-ink3">
               Days
               <Select
-                compact
+                bar
                 value={String(dayCount)}
                 onChange={(e) => onDayCountChange(Number(e.currentTarget.value))}
                 aria-label="How many days to show"
@@ -369,7 +377,12 @@ export function CalendarHeader({
           {onCreateTask && (
             // The Runway's new task, beside + New event: both make something, and this one is the
             // board's (it opens the editor CalendarView owns, starting today). In the Runway's help.
-            <Button variant="secondary" onClick={onCreateTask} data-help="calendar-runway">
+            <Button
+              variant="secondary"
+              size="bar"
+              onClick={onCreateTask}
+              data-help="calendar-runway"
+            >
               + Task
             </Button>
           )}
@@ -380,7 +393,7 @@ export function CalendarHeader({
             <Tooltip label="Pop out · keep the calendar in a window of its own" placement="below">
               <Button
                 variant="tertiary"
-                size="sm"
+                size="bar"
                 onClick={onPopOut}
                 aria-label="Pop out"
                 data-help="calendar-popout"
@@ -408,7 +421,7 @@ export function CalendarHeader({
           <Tooltip label={refreshTip(lastSync, syncing, now)} placement="below">
             <Button
               variant="tertiary"
-              size="sm"
+              size="bar"
               aria-label="Refresh"
               aria-describedby={syncedId}
               aria-busy={syncing || undefined}

@@ -48,7 +48,7 @@ export function CalendarsPopover({
       trigger={({ open, toggle }) => (
         <Button
           variant="tertiary"
-          size="sm"
+          size="bar"
           onClick={toggle}
           aria-expanded={open}
           // The sidebar's help entry: it is the same list.

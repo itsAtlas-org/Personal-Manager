@@ -94,8 +94,8 @@ export interface RunwayProps {
   events: CalendarEvent[];
   /** The model CalendarView built from the tasks, milestones and windows (`useRunwayModel`). */
   runway: RunwayState;
-  /** The header's slot for the readout and the events and window buttons: they are drawn there, by
-   *  the board that owns them, and nowhere in the board. Null until the header has mounted it. */
+  /** The header's slot for the events and window buttons: they are drawn there, by the board that
+   *  owns them, and nowhere in the board. Null until the header has mounted it. */
   chrome: HTMLElement | null;
   /** A calendar's colour, for the dot beside an event in a strip. */
   colorOf?: (calendarId: string) => string;

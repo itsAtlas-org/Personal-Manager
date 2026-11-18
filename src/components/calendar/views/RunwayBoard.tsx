@@ -194,7 +194,6 @@ export function RunwayBoard(props: RunwayProps) {
     >
       <RunwayChrome
         chrome={chrome}
-        model={model}
         showEvents={showEvents}
         onToggleEvents={toggleEvents}
         onAddWindow={() => setWindowEdit({ window: null })}

@@ -33,7 +33,6 @@ import {
   orderAfterStep,
   placeCards,
   placeEvents,
-  runwayProgressWords,
   samePlan,
   taskOverlayEvents,
   setFoldKey,
@@ -338,18 +337,6 @@ describe("remembered folds", () => {
   });
 });
 
-describe("the Runway readout's words", () => {
-  it("counts done out of total, and adds what's in progress", () => {
-    expect(runwayProgressWords({ done: 3, total: 7, doing: 0 })).toBe("3/7 done");
-    expect(runwayProgressWords({ done: 3, total: 7, doing: 1 })).toBe("3/7 done · 1 in progress");
-    expect(runwayProgressWords({ done: 7, total: 7, doing: 0 })).toBe("7/7 done");
-  });
-
-  it("says nothing planned, not 0/0 done, when nothing is planned from today", () => {
-    expect(runwayProgressWords({ done: 0, total: 0, doing: 0 })).toBe("Nothing planned");
-  });
-});
-
 describe("placeCards", () => {
   it("puts a task on its plan start, else its effective deadline, else on the Parked shelf", () => {
     const { model } = place([
@@ -421,7 +408,6 @@ describe("placeCards", () => {
     const today = new Date(2026, 10, 4, 15);
     const { model } = place([task({ id: 1, status: "done", completed_at: today.toISOString() })]);
     expect(where(model)).toEqual({ "today/foreground": "1" });
-    expect(model.progress).toEqual({ done: 1, total: 1, doing: 0 });
   });
 
   it("folds two or more of a stack in one column and lane into one card, where the first is", () => {
@@ -488,7 +474,7 @@ describe("placeCards", () => {
     expect(next.kind === "stack" && next.tasks.map((t) => t.id)).toEqual([4, 5]);
   });
 
-  it("keeps a rolled task ticked off today in today, counted as done, and lets it go tomorrow", () => {
+  it("keeps a rolled task ticked off today in today, and lets it go tomorrow", () => {
     const tasks = [
       task({ id: 1, do_start: "2026-11-02", status: "done", completed_at: "2026-11-04T09:00:00" }),
       task({ id: 2, do_start: "2026-11-02" }),
@@ -496,11 +482,9 @@ describe("placeCards", () => {
     ];
     const { model } = place(tasks);
     expect(where(model)).toEqual({ "today/foreground": "1 2↻2 3↻2" });
-    expect(model.progress).toEqual({ done: 1, total: 3, doing: 0 });
     // The next day it has gone back to Before today, with the open ones still rolled.
     const { model: tomorrow } = place(tasks, { today: day("2026-11-05") });
     expect(where(tomorrow)).toEqual({ "past/foreground": "1", "today/foreground": "2↻3 3↻3" });
-    expect(tomorrow.progress).toEqual({ done: 0, total: 2, doing: 0 });
   });
 
   it("says why a task rolled: its plan, or a deadline it was never planned for", () => {
@@ -648,16 +632,12 @@ describe("placeCards", () => {
       expect(model.hiddenDone).toBe(0);
     });
 
-    it("still counts what it hides in the progress, and leaves next up alone", () => {
+    it("still gives what it hides its column", () => {
       const tasks = [
         task({ id: 1, do_start: "2026-11-04", status: "done", completed_at: before }),
         task({ id: 2, do_start: "2026-11-04", effective_deadline: "2026-11-06", title: "Send it" }),
       ];
-      const shown = place(tasks);
       const hidden = place(tasks, { hideDoneBefore: OPENED });
-      expect(hidden.model.progress).toEqual(shown.model.progress);
-      expect(hidden.model.progress).toEqual({ done: 1, total: 2, doing: 0 });
-      expect(hidden.model.nextUp).toEqual(shown.model.nextUp);
       // A hidden task still has its column, for a drag or a move that starts elsewhere.
       expect(hidden.model.columnOf.get(1)).toBe("today");
     });
@@ -732,35 +712,8 @@ describe("placeCards", () => {
     });
   });
 
-  it("counts progress from today on, and finds the next deadline", () => {
-    const { model } = place(
-      [
-        task({ id: 1, do_start: "2026-11-04", status: "done" }),
-        task({ id: 2, do_start: "2026-11-04", status: "doing", effective_deadline: "2026-11-09" }),
-        task({ id: 3, effective_deadline: "2026-11-06", title: "Send the deck" }),
-        task({ id: 4, parked: true, effective_deadline: "2026-11-04" }),
-        task({ id: 5, status: "done", do_start: "2026-11-01" }),
-      ],
-      { milestones: [milestone({ id: 1, due_date: "2026-11-07", label: "Launch" })] },
-    );
-    expect(model.progress).toEqual({ done: 1, total: 4, doing: 1 });
-    expect(model.nextUp).toEqual({
-      title: "Send the deck",
-      deadlineText: `2d · ${formatDateLocal(day("2026-11-06"))}`,
-      tone: "soon",
-    });
-  });
-
-  it("a late milestone is next up, ahead of a task due today", () => {
-    const { model } = place([task({ id: 1, effective_deadline: "2026-11-04" })], {
-      milestones: [milestone({ id: 1, due_date: "2026-11-02", label: "Late one" })],
-    });
-    expect(model.nextUp).toEqual({ title: "Late one", deadlineText: "2d late", tone: "late" });
-  });
-
-  it("has nothing next up without a dated open thing, and every column has lanes", () => {
+  it("gives every column its lanes", () => {
     const { model, columns } = place([task({ id: 1 })]);
-    expect(model.nextUp).toBeNull();
     for (const c of columns) expect(model.lanes[c.id]).toBeDefined();
   });
 });

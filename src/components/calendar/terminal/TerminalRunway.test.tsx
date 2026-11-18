@@ -66,7 +66,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-// The header's slot the Runway draws its readout and buttons into (CalendarView holds the model and
+// The header's slot the Runway draws its buttons into (CalendarView holds the model and
 // the header holds the slot): a div on the body, so `screen` finds what lands in it.
 const slots: HTMLElement[] = [];
 function makeSlot(): HTMLElement {
@@ -199,16 +199,17 @@ describe("TerminalRunway", () => {
     expect(screen.getByRole("button", { name: /Show events/ })).toBeTruthy();
   });
 
-  it("draws the readout in the header's slot in mono, with no bar and no + Task", () => {
+  it("draws only Hide events and + Window in the header's slot: no count, no next up, no + Task", () => {
     const { chrome } = runway({
       tasks: [
         task({ id: 1, status: "done" }),
         task({ id: 2, title: "Send the deck", effective_deadline: "2026-11-06" }),
       ],
     });
-    const words = within(chrome).getByText("1/2 done");
-    expect(words.parentElement!.className).toContain("font-mono");
-    expect(within(chrome).getByText("Send the deck")).toBeTruthy();
+    // The count and next up are gone (the board's own cards still say "Send the deck").
+    expect(within(chrome).queryByText(/\d+\/\d+ done/)).toBeNull();
+    expect(within(chrome).queryByText(/Next up/)).toBeNull();
+    expect(within(chrome).queryByText("Send the deck")).toBeNull();
     expect(within(chrome).queryByRole("progressbar")).toBeNull();
     expect(within(chrome).getByRole("button", { name: /Hide events/ })).toBeTruthy();
     expect(within(chrome).getByRole("button", { name: /\+ Window/ })).toBeTruthy();
@@ -217,13 +218,13 @@ describe("TerminalRunway", () => {
     const root = screen
       .getByRole("region", { name: "Today" })
       .closest<HTMLElement>('[data-help="calendar-runway"]')!;
-    expect(within(root).queryByText("1/2 done")).toBeNull();
+    expect(within(root).queryByText(/Next up/)).toBeNull();
     expect(within(root).queryByRole("button", { name: /Hide events/ })).toBeNull();
   });
 
-  it("with nothing planned it says so, not 0/0 done", () => {
+  it("says nothing about being empty in the header when nothing is planned", () => {
     const { chrome } = runway({ tasks: [] });
-    expect(within(chrome).getByText("Nothing planned")).toBeTruthy();
+    expect(within(chrome).queryByText("Nothing planned")).toBeNull();
     expect(within(chrome).queryByText("0/0 done")).toBeNull();
   });
 
