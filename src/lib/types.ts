@@ -1596,29 +1596,9 @@ export interface LocalFolderSyncState {
   stopping: boolean;
 }
 
-/** One document's 2-D position on the semantic memory map (coords are in [0,1]²). */
-export interface SemanticCoord {
-  id: number;
-  x: number;
-  y: number;
-}
-
-/** The cached semantic layout: which reducer produced it (`pca`|`tsne`|`none`), the coordinates, and
- *  whether a recompute is currently in flight. */
-export interface SemanticLayout {
-  method: string;
-  coords: SemanticCoord[];
-  computing: boolean;
-}
-
-/** Whether the optional t-SNE reducer (an on-demand download) is installed. */
-export interface TsneStatus {
-  installed: boolean;
-}
-
-/** Progress for an optional component's install-download — t-SNE, photo-OCR, or the macOS Python fetch
+/** Progress for an optional component's install-download — photo-OCR, or the macOS Python fetch
  *  (0..1, monotonic). Rendered as a percentage — a download has no file count — tiered by Depth (bar at
- *  minimal, bar + % at standard and power). One shape for all three channels (X-D6). */
+ *  minimal, bar + % at standard and power). One shape for both channels (X-D6). */
 export interface InstallProgressEvent {
   fraction: number;
 }
@@ -1675,14 +1655,6 @@ export interface StorageReport {
   components: StorageComponent[];
   mods: StorageMod[];
 }
-
-/** Global progress for the semantic-layout precompute (fires regardless of which view started it). */
-export type LayoutProgressEvent =
-  | { state: "preparing" }
-  | { state: "reducing"; count: number; method: string }
-  | { state: "deferred" }
-  | { state: "done"; method: string }
-  | { state: "error"; message: string };
 
 /** One attendee on an event, as surfaced in the detail popup. */
 export interface Attendee {

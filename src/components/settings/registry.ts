@@ -73,7 +73,6 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDef[] = [
         sections: [
           { id: "sec-general-appearance", label: "Appearance" },
           { id: "sec-general-focus", label: "Focus" },
-          { id: "sec-general-map", label: "Memory map" },
           { id: "sec-general-timezone", label: "Time zone" },
           { id: "sec-general-help", label: "Help mode" },
         ],

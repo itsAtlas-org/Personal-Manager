@@ -200,10 +200,10 @@ describe("contrast axis — WCAG targets across every system × mode", () => {
   });
 });
 
-// The tokens measured above only protect the controls that actually use them. This reads the five
+// The tokens measured above only protect the controls that actually use them. This reads the
 // segmented-control sources (the way designGuards.test.ts reads the tree) and pins the classes the
 // measurement was made for: the group edge in `--ink4`, never `--border2`/`--border`, and the active
-// segment's inset `--ink4` rim.
+// segment's inset `--ink4` rim. The Document Map's own switch is held by the mod's page.test.ts.
 describe("segmented controls use the measured edge and rim", () => {
   const RAW = import.meta.glob(
     [
@@ -211,7 +211,6 @@ describe("segmented controls use the measured edge and rim", () => {
       "../components/ui/IconButton.tsx",
       "../components/calendar/RangeControl.tsx",
       "../components/PinboardView.tsx",
-      "../components/GraphView.tsx",
       "../components/calendar/edit/CustomRecurrenceDialog.tsx",
       "../components/calendar/edit/GuestField.tsx",
     ],
@@ -246,12 +245,6 @@ describe("segmented controls use the measured edge and rim", () => {
     expect(src("PinboardView.tsx")).toContain(`"bg-accent text-accent-ink ${RIM}"`);
   });
 
-  it("Map's By project / Semantic switch: ink4 edge and a rimmed active button", () => {
-    const t = src("GraphView.tsx");
-    expect(t).toContain("rounded-[var(--radius-sm)] border border-ink4 p-0.5 text-xs");
-    expect(t).toContain(`"bg-accent text-accent-ink ${RIM}"`);
-  });
-
   it("Custom repeat's weekday buttons: the rim is there on and off", () => {
     const t = src("calendar/edit/CustomRecurrenceDialog.tsx");
     expect(t).toContain(`"${RIM}",`);
@@ -278,7 +271,7 @@ describe("segmented controls use the measured edge and rim", () => {
 //
 // The pairs are the ones the sweep found, by class:
 //   rest edge     border-ink4          on --bg / --panel / --surface  (fields sit on all three)
-//   hover edge    border-ink2          never weaker than rest (DocumentFolders, GraphView, RemovePmData)
+//   hover edge    border-ink2          never weaker than rest (DocumentFolders, RemovePmData)
 //   focus/hover   border-accent-text   not `--accent`: a pale accent in a light theme is 1.4:1
 //   invalid edge  border-st-due        already the text-status colour, so it clears 4.5:1 too
 // Disabled controls drop back to `--border2` on purpose (exempt from 1.4.11, and they should recede).

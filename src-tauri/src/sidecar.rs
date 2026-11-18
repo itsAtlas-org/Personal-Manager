@@ -224,10 +224,11 @@ const MAX_SKIP_LINES: usize = 1024;
 /// guard is the backstop for any caller that doesn't.
 const MAX_SIDECAR_REQUEST_LINE: usize = 48 * 1024 * 1024;
 
-/// The OPTIONAL t-SNE reducer for the semantic memory map, pinned. **Not** in `requirements.txt` —
-/// the base venv stays lean; the user installs it on demand from Settings (see
-/// [`SidecarManager::install_optional_tsne`]). openTSNE pulls scikit-learn + scipy (numpy is already
-/// present via fastembed) and ships a binary wheel for our pinned Python, so there's no compile step.
+/// The OPTIONAL t-SNE reducer the core semantic Map used, pinned. **Not** in `requirements.txt` —
+/// the base venv stays lean. Nothing installs it any more (the Document Map mod computes its own
+/// layout); the pin stays until the clean-up of what machines already downloaded. openTSNE pulls
+/// scikit-learn + scipy (numpy is already present via fastembed) and ships a binary wheel for our
+/// pinned Python, so there's no compile step.
 const OPTIONAL_TSNE_PIN: &str = "openTSNE==1.0.4";
 
 /// The OPTIONAL photo-OCR component, pinned. **Not** in `requirements.txt` — like t-SNE, the base
@@ -1360,7 +1361,7 @@ impl SidecarManager {
     /// every other caller (ingest, the chat-index sweep, …) uses the no-op
     /// [`ensure_installed`]. A dedicated method — rather than a parameter bolted
     /// onto the shared one — keeps those many call sites untouched, mirroring how
-    /// `install_optional_tsne` is its own method.
+    /// `install_optional_ocr` is its own method.
     ///
     /// [`ensure_installed`]: SidecarManager::ensure_installed
     pub fn ensure_installed_with_progress(&self, on_progress: impl FnMut(f32)) -> Result<()> {
@@ -1957,60 +1958,9 @@ impl SidecarManager {
         })
     }
 
-    /// Project per-document vectors to 2-D for the semantic memory map. `method` is `"pca"` (the
-    /// numpy-only default) or `"tsne"` (only requested when the optional component is installed; the
-    /// sidecar falls back to PCA if it isn't, so this always returns a usable layout). Returns the
-    /// coordinates (already scaled into `[0,1]²`) and the method actually used. Blocking — run off the
-    /// async runtime and never while holding the DB lock, like every other sidecar call.
-    pub fn reduce(&self, vectors: &[Vec<f32>], method: &str) -> Result<(Vec<[f32; 2]>, String)> {
-        if vectors.is_empty() {
-            return Ok((Vec::new(), "none".to_string()));
-        }
-        let result = self.request("reduce", json!({ "vectors": vectors, "method": method }))?;
-        let used = result["method"].as_str().unwrap_or("pca").to_string();
-        let coords = result["coords"]
-            .as_array()
-            .ok_or_else(|| Error::Other("sidecar reduce returned no coords".into()))?
-            .iter()
-            .map(|row| {
-                let point = row.as_array().ok_or_else(|| {
-                    Error::Other("sidecar reduce returned a malformed point".into())
-                })?;
-                // Reject a non-finite coordinate rather than placing a node at infinity.
-                let at = |i: usize| {
-                    point
-                        .get(i)
-                        .and_then(|n| n.as_f64())
-                        .filter(|f| f.is_finite())
-                        .map(|f| f as f32)
-                        .ok_or_else(|| {
-                            Error::Other("sidecar reduce returned a non-finite coordinate".into())
-                        })
-                };
-                Ok([at(0)?, at(1)?])
-            })
-            .collect::<Result<Vec<[f32; 2]>>>()?;
-        Ok((coords, used))
-    }
-
-    /// Whether the OPTIONAL t-SNE reducer is installed in this venv at the pinned version. Cheap (a
-    /// marker read) so it can be polled on every layout request to decide PCA-vs-t-SNE.
-    pub fn optional_tsne_ready(&self) -> bool {
-        self.optional_ready(&OPTIONAL_TSNE_COMPONENT)
-    }
-
-    /// Install the OPTIONAL t-SNE reducer (openTSNE) into the managed venv on demand — the shared
-    /// [`Self::install_optional`] flow with the t-SNE marker + pin. openTSNE pulls scikit-learn +
-    /// scipy (numpy is already present via fastembed). The download has no file-count, so the UI
-    /// renders `on_progress` as a percentage.
-    pub fn install_optional_tsne(&self, on_progress: impl FnMut(f32)) -> Result<()> {
-        self.install_optional(&OPTIONAL_TSNE_COMPONENT, on_progress)
-    }
-
-    /// Remove the OPTIONAL t-SNE component again (the "delete" action) — the shared
+    /// Remove the OPTIONAL t-SNE component (the Storage row's "delete" action) — the shared
     /// [`Self::uninstall_optional`] flow. Only openTSNE is removed: its heavier transitive deps
-    /// (scipy / scikit-learn) are left in place; a later re-install is then quick. Once the marker is
-    /// gone the map falls back to PCA.
+    /// (scipy / scikit-learn) have their own rows.
     pub fn uninstall_optional_tsne(&self) -> Result<()> {
         self.uninstall_optional(&OPTIONAL_TSNE_COMPONENT)
     }
@@ -4112,7 +4062,9 @@ pub(crate) mod tests {
         });
         {
             let _updating = Provisioning::begin(&mgr.provisioning);
-            let err = mgr.reduce(&[vec![0.0, 1.0]], "pca").unwrap_err();
+            let err = mgr
+                .analyze_spreadsheet(Path::new("any.csv"), "csv")
+                .unwrap_err();
             assert!(err.to_string().contains(ENGINE_UPDATING), "{err}");
             assert_eq!(
                 std::fs::read_to_string(&log).unwrap_or_default(),
@@ -4182,7 +4134,9 @@ pub(crate) mod tests {
                 assert!(Instant::now() < deadline, "pip never started");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let err = mgr.reduce(&[vec![0.0, 1.0]], "pca").unwrap_err();
+            let err = mgr
+                .analyze_spreadsheet(Path::new("any.csv"), "csv")
+                .unwrap_err();
             assert!(err.to_string().contains(ENGINE_UPDATING), "{err}");
             std::fs::write(&release, b"").unwrap();
             update.join().unwrap().unwrap();

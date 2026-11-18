@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The sidebar's half of a core tab becoming a mod's (the Map, PR B plan B8): a placement stored for
-// `graph` means `mod:atlas.map` the day `graph` is no longer one of PM's own tabs, and not before; and
-// the one-time "installed hidden" rule. Both are keyed on that fact, so PM's removal of the core entry
-// is what switches them on, and both are tested in either state.
+// `graph` means `mod:atlas.map` once `graph` is no longer one of PM's own tabs, and not before; and
+// the one-time "installed hidden" rule. Both are keyed on that fact. The core Map tab is gone now
+// (Mods PR B2), so the real list is the "after" state; the "before" state is tested by passing the
+// set of ids that still had `graph`.
 
 import { describe, expect, it } from "vitest";
 import {
@@ -23,25 +24,37 @@ import {
   type NavPlacement,
 } from "./nav";
 
+/** PM's own tabs: the core Map is gone, so `graph` is not among them. */
 const CORE = new Set(CORE_NAV.map((e) => e.id as string));
-/** PM's own tabs once the core Map is gone. */
-const WITHOUT_GRAPH = new Set([...CORE].filter((id) => id !== "graph"));
+const WITHOUT_GRAPH = CORE;
+/** What they were while the core Map tab existed. */
+const WITH_GRAPH = new Set([...CORE, "graph"]);
 const MAP = "mod:atlas.map";
 const NONE: NavPlacement = { hidden: [], pinned: [] };
 const STANDARD: NavContext = { depth: "standard", devMode: false };
 const MINIMAL: NavContext = { depth: "min", devMode: false };
 
 describe("a stored `graph` placement", () => {
-  it("is the core Map tab for as long as it exists: nothing is renamed", () => {
-    expect(CORE.has("graph")).toBe(true);
-    expect(renamedNavId("graph")).toBe("graph");
-    expect(renamedNavId("graph", CORE)).toBe("graph");
-    expect(parsePlacement('{"hidden":["graph"],"pinned":["pinboard"]}')).toEqual({
+  it("is the core Map tab for as long as one exists: nothing is renamed", () => {
+    expect(WITH_GRAPH.has("graph")).toBe(true);
+    expect(renamedNavId("graph", WITH_GRAPH)).toBe("graph");
+    expect(parsePlacement('{"hidden":["graph"],"pinned":["pinboard"]}', WITH_GRAPH)).toEqual({
       hidden: ["graph"],
       pinned: ["pinboard"],
     });
     // A pin the user made on the mod's tab ahead of time is kept as a mod tab, as before.
-    expect(parsePlacement('{"hidden":[],"pinned":["mod:atlas.map"]}').pinned).toEqual([MAP]);
+    expect(parsePlacement('{"hidden":[],"pinned":["mod:atlas.map"]}', WITH_GRAPH).pinned).toEqual([
+      MAP,
+    ]);
+  });
+
+  it("is the Map mod's tab in PM as it ships: the core list has no `graph`", () => {
+    expect(CORE.has("graph")).toBe(false);
+    expect(renamedNavId("graph")).toBe(MAP);
+    expect(parsePlacement('{"hidden":["graph"],"pinned":["pinboard"]}')).toEqual({
+      hidden: [MAP],
+      pinned: ["pinboard"],
+    });
   });
 
   it("means the Map mod's tab once the core entry is gone, for a pin and for a hide", () => {
@@ -55,7 +68,7 @@ describe("a stored `graph` placement", () => {
     // The state the ordering hazard is about: without the translation, removing `graph` from the core
     // list would make `isNavIdShape` refuse every stored one.
     expect(isNavIdShape("graph", WITHOUT_GRAPH)).toBe(false);
-    expect(isNavIdShape("graph", CORE)).toBe(true);
+    expect(isNavIdShape("graph", WITH_GRAPH)).toBe(true);
     expect(isNavIdShape(MAP, WITHOUT_GRAPH)).toBe(true);
   });
 
@@ -67,7 +80,7 @@ describe("a stored `graph` placement", () => {
   });
 
   it("leaves every other id alone, whichever state PM is in", () => {
-    for (const core of [CORE, WITHOUT_GRAPH]) {
+    for (const core of [WITH_GRAPH, WITHOUT_GRAPH]) {
       for (const id of ["focus", "pinboard", "mods", "mod:acme.tool", "mod:atlas.pinboard"]) {
         expect(renamedNavId(id, core), id).toBe(id);
       }
@@ -80,11 +93,18 @@ describe("a stored `graph` placement", () => {
 });
 
 describe("the installed-hidden rule", () => {
-  it("does nothing while the core Map tab still exists", () => {
-    expect(pilotHiddenRuleApplies("atlas.map")).toBe(false);
-    expect(pilotHiddenRuleApplies("atlas.map", CORE)).toBe(false);
-    expect(placementAfterPilotLanded(NONE, "atlas.map", "min")).toBe(NONE);
-    expect(placementAfterPilotLanded(NONE, "atlas.map", "min", CORE)).toBe(NONE);
+  it("does nothing while a core Map tab still exists", () => {
+    expect(pilotHiddenRuleApplies("atlas.map", WITH_GRAPH)).toBe(false);
+    expect(placementAfterPilotLanded(NONE, "atlas.map", "min", WITH_GRAPH)).toBe(NONE);
+  });
+
+  it("applies in PM as it ships, where the core Map tab is gone", () => {
+    expect(pilotHiddenRuleApplies("atlas.map")).toBe(true);
+    expect(placementAfterPilotLanded(NONE, "atlas.map", "min")).toEqual({
+      hidden: [MAP],
+      pinned: [],
+    });
+    expect(placementAfterPilotLanded(NONE, "atlas.map", "standard")).toBe(NONE);
   });
 
   it("hides the new tab on a Minimal device that wasn't showing the core tab, once the core entry is gone", () => {

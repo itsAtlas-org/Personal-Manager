@@ -120,15 +120,15 @@ export function themeVars(
   contrast: Contrast = "aa",
 ): ThemeVars {
   // The colour-blind axis swaps the semantic status row for the Okabe–Ito-derived CVD set (one per
-  // Mode, System-independent); the categorical graph/source palettes are swapped at their own call
-  // sites (graphColor / sourceColors) since they're consumed as JS values, not CSS vars.
+  // Mode, System-independent); the categorical source palette is swapped at its own call
+  // site (sourceColors) since it's consumed as JS values, not CSS vars.
   const stat = colorblind ? STATUS_CVD[mode] : STATUS[system][mode];
   const v: ThemeVars = {};
 
   if (accent === MONO_ACCENT) {
     // Monochrome (Eigengrau) treatment: a chroma-0 neutral ramp with white text/accents (dark)
     // or near-black (light). No accent hue tints the cosmetics — only the *informational* feature
-    // colours (the semantic status set just below, and the map palette in graphPalette.ts) stay
+    // colours (the semantic status set just below) stay
     // in colour. --bg is pinned to the exact Eigengrau hex in dark so the base colour is precise.
     const ramp = MONO_RAMP[mode];
     ROLES.forEach((r) => {

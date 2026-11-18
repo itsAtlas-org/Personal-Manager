@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// DOCUMENTED EXCEPTION to the "no hex literals" rule — a sibling of sourcePalette.ts and
-// graphPalette.ts. Google Calendar lets you give one event its own colour, from a fixed set of
+// DOCUMENTED EXCEPTION to the "no hex literals" rule — a sibling of sourcePalette.ts. Google Calendar lets you give one event its own colour, from a fixed set of
 // eleven ("Lavender", "Tomato" …), and the event keeps it as a `colorId` "1"–"11" (#884, F4). PM
 // fills the event with that colour, solid, as Google does, and keeps the calendar's own colour for
 // the stripe down its edge. These are colours the user chose by name in Google, not PM chrome, so

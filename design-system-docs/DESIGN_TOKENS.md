@@ -85,8 +85,8 @@ Slate's default accent (so a fresh install is Eigengrau). `themeVars` special-ca
   cosmetics), *not* the §2 slate ramp. `--bg` is pinned to the exact **Eigengrau `#16161D`** in dark.
 - **Accent-derived tokens** → dark: `--accent`/`--accent-text` = white, `--accent-ink` = Eigengrau,
   `--accent-soft` = `rgba(255,255,255,.12)`. light: near-black text/accents on paper.
-- **Feature colours are unaffected** — the §4 semantic status set and the map palette
-  (`graphPalette.ts`) still render in colour; only cosmetic hue is removed.
+- **Feature colours are unaffected** — the §4 semantic status set still renders in colour (so does the
+  Document Map mod's own node palette, `mods/atlas.map/src/palette.ts`); only cosmetic hue is removed.
 
 `sourcePalette` always drops `mono` (it's not a colour), so calendar source hues are never affected.
 

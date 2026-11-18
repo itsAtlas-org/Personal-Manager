@@ -31,8 +31,6 @@ const CONTENT_WRITES: ReadonlySet<string> = new Set([
   "set_milestone_event",
   "set_milestone_state",
   "set_milestone_status",
-  // A view cache PM maintains for itself — the user never "changed a setting" by panning the map.
-  "set_project_layout",
 ]);
 
 /** Whether a command name is a settings write worth acknowledging. Pure, so the boundary is tested

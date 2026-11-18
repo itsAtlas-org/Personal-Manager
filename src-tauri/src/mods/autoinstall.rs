@@ -943,11 +943,12 @@ mod tests {
         );
     }
 
-    /// The pass is dormant until a migration writes a marker (PR B's B9, v61): no code in this crate
-    /// names a marker key outside this file and its tests. B9 changes this test on purpose, in the
-    /// commit that adds the migration, so that it can't happen by accident.
+    /// The pass is awake since v61, which writes the Map's marker for a store that has documents
+    /// (`db/migrations.rs`, the one writer). No other code in this crate names a marker key outside
+    /// this file, that migration and the tests: a second writer would start downloads nobody asked
+    /// for, so it can't happen by accident.
     #[test]
-    fn no_code_but_this_file_names_a_marker_key() {
+    fn only_this_file_and_the_migration_name_a_marker_key() {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
@@ -958,6 +959,7 @@ mod tests {
                     // Test code may seed a marker; production code may not (this file defines them).
                     let production = text.split("#[cfg(test)]\nmod tests").next().unwrap();
                     let own = path.ends_with("mods/autoinstall.rs")
+                        || path.ends_with("db/migrations.rs")
                         || path.components().any(|c| c.as_os_str() == "tests");
                     // Built so this file doesn't match its own search.
                     if !own && production.contains(concat!("mods_auto", "install_")) {
@@ -972,5 +974,13 @@ mod tests {
             &mut found,
         );
         assert!(found.is_empty(), "{found:?}");
+        // And the migration really writes the one marker this file reads (the pass is not dormant).
+        let migrations = include_str!("../db/migrations.rs");
+        let production = migrations.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            production.contains(&format!("SELECT '{}', '1'", PILOTS[0].marker)),
+            "v61 must write {}",
+            PILOTS[0].marker
+        );
     }
 }

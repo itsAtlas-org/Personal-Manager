@@ -83,8 +83,8 @@ release remain the open post-v1 work.
     and App's fallback all read): `FocusView` (status
     cards + triage + milestones + the calendar agenda + the daily briefing), `ProjectView`
     (per-project files + scoped chat), `ChatView` / `Composer` (+ `ContextMeter`,
-    `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`, `GraphView`
-    (the canvas memory map), `calendar/` (the unified calendar view, incl. a Terminal fork),
+    `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`,
+    `calendar/` (the unified calendar view, incl. a Terminal fork),
     `PinboardView`, `TeachView` / `TeachPreferences` (entities + preferences), `DevView`
     (read-only inspectors), `ConnectorsSettings` + per-provider connection components,
     `SettingsView` (tabbed: keys/model, appearance, storage, backup, security, developer…),
@@ -117,7 +117,7 @@ release remain the open post-v1 work.
     `spreadsheets.rs` (dedicated processors), `review.rs` (sorting-review proposal +
     corrections), `projects.rs` (triage + the pure `derive_status`, spec §4.1), `entities.rs`,
     `preferences.rs`, `milestones.rs`, `flags.rs`, `project_activity.rs`,
-    `briefing.rs`, `layout.rs` (semantic-map dimensionality reduction).
+    `briefing.rs`.
   - **Chat pipeline** — `chat.rs` (turn model, vault-as-truth), `chat_index.rs` (append-only
     indexing), `chat_summary.rs` (rolling summary), `chat_title.rs`, `chat_prefs.rs`,
     `context_budget.rs`.
@@ -263,7 +263,8 @@ Contrast level lifts it, so the text ramp stops at `ink4` and a guard test enfor
 `--accent --accent-text --accent-ink
 --accent-soft`; status `--st-due --st-blocked --st-quick --st-look --st-part --st-track`; type
 `--head --ui --mono`; corners `--radius --radius-sm`. The only documented hex exceptions are the
-GraphView categorical node palette (`src/theme/graphPalette.ts`), the calendar's per-calendar
+Document Map mod's categorical node palette (`mods/atlas.map/src/palette.ts`; categorical hues the token
+system can't express), the calendar's per-calendar
 colours (`src/theme/sourcePalette.ts`), the colours Google lets you give one event
 and the text colour each carries (`src/theme/eventPalette.ts`), and the fixed modal scrim tint.
 
@@ -285,7 +286,11 @@ otherwise). Implemented in `src/lib/format.ts`.
 2. **Encryption stays on.** The store is opened with `PRAGMA key`; don't add code
    paths that open it unencrypted.
 3. **Migrations are additive.** Never write a migration that drops or rewrites
-   user data — app updates must never wipe the store. A re-key of index-only rows
+   user data — app updates must never wipe the store. The one exception is a
+   retired derived cache nothing reads or refills any more (`doc_layout`, v61): its bare
+   `DROP TABLE` is allowed by `RETIRED_DERIVED_CACHES` in the migration guard
+   (`db/migrations.rs`), keyed to that table and that one migration index, and the table
+   moves to the "Retired" section of `SYNC-SET.md`. A re-key of index-only rows
    (e.g. connector row IDs) must ship an old→new mapping so user classifications
    survive.
    - **`writable_schema` + a later `ALTER` gotcha.** Several migrations relax a

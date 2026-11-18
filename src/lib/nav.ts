@@ -44,7 +44,6 @@ export type CoreView =
   | "documents"
   | "review"
   | "teach"
-  | "graph"
   | "pinboard"
   | "mods"
   | "dev";
@@ -162,14 +161,6 @@ export const CORE_NAV: readonly NavEntryDef[] = [
     hideable: true,
     defaultShown: notMinimal,
     group: LEARNING_GROUP,
-  },
-  {
-    id: "graph",
-    label: "Map",
-    source: "core",
-    helpId: "nav-graph",
-    hideable: true,
-    defaultShown: notMinimal,
   },
   {
     id: "pinboard",
@@ -490,10 +481,10 @@ export function isNavIdShape(id: string, core: ReadonlySet<string> = CORE_IDS): 
  *  became `mod:atlas.map`). A pin or a hide the user made on the old tab belongs to the new one. */
 const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([["graph", "mod:atlas.map"]]);
 
-/** The id a stored placement entry means now. The translation takes effect only once the old id is
- *  no longer one of PM's own entries (`core`): while `graph` is still a core tab a stored `graph` IS
- *  that tab, and the day the core entry is removed this switches on by itself, so the pins and hides
- *  stored for it are carried over and not silently dropped as an id nobody knows. */
+/** The id a stored placement entry means now. The translation takes effect only while the old id is
+ *  not one of PM's own entries (`core`), which is the case for `graph` now that the core Map tab is
+ *  gone, so the pins and hides stored for it are carried over and not silently dropped as an id
+ *  nobody knows. */
 export function renamedNavId(id: string, core: ReadonlySet<string> = CORE_IDS): string {
   const to = RENAMED_NAV_IDS.get(id);
   return to !== undefined && !core.has(id) ? to : id;
@@ -512,7 +503,7 @@ function cleanIds(value: unknown, core: ReadonlySet<string>): string[] {
 }
 
 /** A stored value, read defensively: anything malformed degrades to "nothing chosen". `core` is the
- *  set of PM's own tab ids (the tests pass one without `graph` to read the state after its removal). */
+ *  set of PM's own tab ids (a test may pass a set that still has `graph`, to read the state before the core Map tab went). */
 export function parsePlacement(
   raw: string | null,
   core: ReadonlySet<string> = CORE_IDS,
@@ -542,8 +533,8 @@ export function pilotFeature(modId: string): string | null {
 }
 
 /** Whether the installed-hidden rule applies to `modId` at all: only once the core tab it replaced
- *  is gone from PM's own entries (`core`). Until then the core tab is still the user's Map and the
- *  mod's arrival changes nothing they see. */
+ *  is gone from PM's own entries (`core`), which it is for the Map. A set that still names the tab
+ *  says the core tab is the user's Map and the mod's arrival changes nothing they see. */
 export function pilotHiddenRuleApplies(
   modId: string,
   core: ReadonlySet<string> = CORE_IDS,

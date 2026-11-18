@@ -1096,6 +1096,86 @@ mod tests {
         assert_eq!(vec0_dim(&conn).unwrap(), 1024);
     }
 
+    /// The encrypted store across v61: a keyed v60 file with a document opens at v61 with the Map's
+    /// marker and without its cache table, reopens without running v61 again, and a wrong key is
+    /// refused as before.
+    #[test]
+    fn a_keyed_v60_store_opens_at_v61_with_the_marker_and_no_doc_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v60.sqlite");
+        let marker = |conn: &Connection| -> Option<String> {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'mods_autoinstall_map'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        let has_layout = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'doc_layout'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                > 0
+        };
+        {
+            let conn = open_at_version(&path, KEY, 60).unwrap();
+            conn.execute(
+                "INSERT INTO documents(vault_path, title, content_hash) VALUES ('a.md', 'A', 'h')",
+                [],
+            )
+            .unwrap();
+            assert!(has_layout(&conn), "a v60 store still has the cache");
+        }
+
+        let rowid_of_marker = {
+            let conn = open(&path, KEY).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 61);
+            assert_eq!(marker(&conn).as_deref(), Some("1"));
+            assert!(!has_layout(&conn));
+            conn.query_row(
+                "SELECT rowid FROM settings WHERE key = 'mods_autoinstall_map'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+
+        // Opened again with the same key: v61 does not re-run, so the marker's row is the same row
+        // (and one the install cleared would stay cleared).
+        {
+            let conn = open(&path, KEY).unwrap();
+            let again: i64 = conn
+                .query_row(
+                    "SELECT rowid FROM settings WHERE key = 'mods_autoinstall_map'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(again, rowid_of_marker);
+            conn.execute(
+                "DELETE FROM settings WHERE key = 'mods_autoinstall_map'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            marker(&open(&path, KEY).unwrap()),
+            None,
+            "not written twice"
+        );
+
+        // A wrong key is refused exactly as before.
+        let wrong = "ff".repeat(32);
+        let err = open(&path, &wrong).unwrap_err().to_string();
+        assert!(err.contains(WRONG_KEY_OR_CORRUPT_MSG), "{err}");
+    }
+
     #[test]
     fn migration_v10_backfills_one_entity_per_project_no_auto_merge() {
         // The canonical-entity backfill, exercised over a realistic v9→v10 upgrade: tear the v10
@@ -1183,7 +1263,6 @@ mod tests {
              ALTER TABLE calendar_events DROP COLUMN color_id; \
              ALTER TABLE calendar_events DROP COLUMN event_label_id; \
              DROP TABLE document_locations; \
-             DROP TABLE doc_layout; \
              DROP TABLE document_proposals; \
              DROP TABLE shared_drive_access; \
              DROP TABLE shared_with_me_access; \
@@ -1396,7 +1475,6 @@ mod tests {
              ALTER TABLE calendar_events DROP COLUMN color_id; \
              ALTER TABLE calendar_events DROP COLUMN event_label_id; \
              DROP TABLE document_locations; \
-             DROP TABLE doc_layout; \
              DROP TABLE document_proposals; \
              DROP TABLE shared_drive_access; \
              DROP TABLE shared_with_me_access; \

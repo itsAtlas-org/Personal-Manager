@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// DOCUMENTED EXCEPTION to the "no hex literals" rule — the sibling of graphPalette.ts. The unified
+// DOCUMENTED EXCEPTION to the "no hex literals" rule — the sibling of the Document Map mod's `palette.ts`. The unified
 // calendar view (card 8) colours each source (calendar) categorically: one distinct hue per
 // calendar, which the single-accent token system (one accent + tinted neutrals) cannot express.
 // Rather than a fresh hardcoded set, the source hues are the active System's *accent picker palette*

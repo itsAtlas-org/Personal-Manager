@@ -12,9 +12,10 @@
 //     wasn't showing here (Minimal and not pinned), so installing it doesn't make a tab appear that
 //     this sidebar had left out (`placementAfterPilotLanded`).
 //
-// Both start from `modsHandoverState`, which is empty for a vault with no auto-install (every vault
-// until a migration writes a marker), so this does nothing until then. The sidebar rule additionally
-// waits for the core Map tab to be gone from PM's own entries (`pilotHiddenRuleApplies`).
+// Both start from `modsHandoverState`, which is empty for a vault with no auto-install (a fresh one,
+// or one with no documents: v61 writes the Map's marker only where a document exists), so this does
+// nothing there. The sidebar rule additionally waits for the core Map tab to be gone from PM's own
+// entries (`pilotHiddenRuleApplies`), which it now is.
 
 import { useEffect, useState } from "react";
 import { useTheme, type Depth } from "../theme";
@@ -30,8 +31,8 @@ import {
 } from "./nav";
 import { subscribeUntilCleanup } from "./subscribe";
 
-// The core Map's own localStorage keys (written by GraphView and Settings until the Map is removed;
-// named here so that removal can't take the handover with it).
+// The core Map's own localStorage keys (written by the Map and by Settings before the Map became a
+// mod; they stay named here so the handover can still read what a device saved).
 export const MAP_MODE_KEY = "pm.map.layoutMode";
 export const MAP_COHESION_KEY = "pm.map.cohesion";
 export const MAP_LABELS_KEY = "pm.map.labels";

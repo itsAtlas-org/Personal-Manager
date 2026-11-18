@@ -40,15 +40,33 @@ import {
   writeNavPlacement,
   type NavContext,
   type NavEntryDef,
+  type NavId,
   type NavPlacement,
 } from "./nav";
+
+// The Map was a core tab: hideable, in no group, shown at every Depth but Minimal. A good many rules
+// below are about exactly that shape, and no core tab has it now (the Document Map is a mod's tab),
+// so the list under test carries a stand-in with the same shape rather than the rules losing their
+// subject. It is only ever in these lists; `CORE_NAV` itself is checked on its own where it matters.
+const SPARE = "spare" as unknown as NavId;
+const SPARE_TAB: NavEntryDef = {
+  id: SPARE,
+  label: "Spare",
+  source: "core",
+  helpId: "nav-pinboard",
+  hideable: true,
+  defaultShown: (depth) => depth !== "min",
+};
+const WITH_SPARE: readonly NavEntryDef[] = CORE_NAV.flatMap((e) =>
+  e.id === "pinboard" ? [SPARE_TAB, e] : [e],
+);
 
 const NONE: NavPlacement = { hidden: [], pinned: [] };
 const STANDARD: NavContext = { depth: "standard", devMode: false };
 const MINIMAL: NavContext = { depth: "min", devMode: false };
 const ids = (list: readonly NavEntryDef[]) => list.map((e) => e.id);
 const shown = (p: NavPlacement, ctx: NavContext = STANDARD) =>
-  ids(resolveNav(CORE_NAV, p, ctx).shown);
+  ids(resolveNav(WITH_SPARE, p, ctx).shown);
 
 // The hand-written sidebar this replaced, in its order, with its gates, then the Mods tab (spec
 // §1.13), which sits after Pinboard and before Dev.
@@ -59,7 +77,7 @@ const BEFORE = [
   "documents",
   "review",
   "teach",
-  "graph",
+  SPARE,
   "pinboard",
   "mods",
 ];
@@ -71,9 +89,9 @@ describe("resolveNav: the default", () => {
   });
 
   it("leaves the learning tools and the Map out on Minimal, as teachVisible/mapVisible did", () => {
-    const r = resolveNav(CORE_NAV, NONE, MINIMAL);
+    const r = resolveNav(WITH_SPARE, NONE, MINIMAL);
     expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
-    expect(ids(r.dormant)).toEqual(["review", "teach", "graph"]);
+    expect(ids(r.dormant)).toEqual(["review", "teach", SPARE]);
     expect(r.hidden).toEqual([]);
   });
 
@@ -93,13 +111,13 @@ describe("resolveNav: placement", () => {
       "documents",
       "review",
       "teach",
-      "graph",
+      SPARE,
       "mods",
     ]);
   });
 
   it("drops hidden entries from the sidebar but keeps them to offer", () => {
-    const r = resolveNav(CORE_NAV, { hidden: ["graph", "chat"], pinned: [] }, STANDARD);
+    const r = resolveNav(WITH_SPARE, { hidden: [SPARE, "chat"], pinned: [] }, STANDARD);
     expect(ids(r.shown)).toEqual([
       "focus",
       "calendar",
@@ -109,13 +127,13 @@ describe("resolveNav: placement", () => {
       "pinboard",
       "mods",
     ]);
-    expect(ids(r.hidden)).toEqual(["chat", "graph"]);
+    expect(ids(r.hidden)).toEqual(["chat", SPARE]);
   });
 
   it("lets a pin override a Depth default and a hide alike", () => {
-    expect(shown({ hidden: [], pinned: ["graph"] }, MINIMAL)[0]).toBe("graph");
+    expect(shown({ hidden: [], pinned: [SPARE] }, MINIMAL)[0]).toBe(SPARE);
     // Both lists naming it (only a hand edit can do that): the rule says a pin shows.
-    expect(shown({ hidden: ["graph"], pinned: ["graph"] })[0]).toBe("graph");
+    expect(shown({ hidden: [SPARE], pinned: [SPARE] })[0]).toBe(SPARE);
   });
 
   it("ignores ids it doesn't know, and repeats", () => {
@@ -134,7 +152,7 @@ describe("resolveNav: placement", () => {
   });
 
   it("never shows an entry whose capability is off, even pinned", () => {
-    const r = resolveNav(CORE_NAV, { hidden: [], pinned: ["dev"] }, STANDARD);
+    const r = resolveNav(WITH_SPARE, { hidden: [], pinned: ["dev"] }, STANDARD);
     expect([...r.shown, ...r.hidden, ...r.dormant].map((e) => e.id)).not.toContain("dev");
   });
 
@@ -147,7 +165,7 @@ describe("resolveNav: placement", () => {
       hideable: true,
       defaultShown: () => true,
     };
-    expect(ids(resolveNav([...CORE_NAV, mod], NONE, STANDARD).shown)).toEqual([
+    expect(ids(resolveNav([...WITH_SPARE, mod], NONE, STANDARD).shown)).toEqual([
       ...BEFORE,
       "mod:atlas.map",
     ]);
@@ -156,90 +174,94 @@ describe("resolveNav: placement", () => {
 
 describe("the learning tools", () => {
   it("pin, hide and show as one", () => {
-    const pinned = pinEntry(NONE, "teach", CORE_NAV);
+    const pinned = pinEntry(NONE, "teach", WITH_SPARE);
     expect(pinned.pinned).toEqual(["review", "teach"]);
-    const hidden = hideEntry(pinned, "review", CORE_NAV);
+    const hidden = hideEntry(pinned, "review", WITH_SPARE);
     expect(hidden).toEqual({ hidden: ["review", "teach"], pinned: [] });
-    expect(showEntry(hidden, "teach", CORE_NAV, STANDARD)).toEqual(NONE);
-    expect(unpinEntry(pinned, "review", CORE_NAV)).toEqual(NONE);
+    expect(showEntry(hidden, "teach", WITH_SPARE, STANDARD)).toEqual(NONE);
+    expect(unpinEntry(pinned, "review", WITH_SPARE)).toEqual(NONE);
   });
 
   it("keep teachVisible's meaning: shown at Standard, gone when hidden or on Minimal", () => {
-    expect(learningToolsShown(resolveNav(CORE_NAV, NONE, STANDARD))).toBe(true);
-    expect(learningToolsShown(resolveNav(CORE_NAV, NONE, MINIMAL))).toBe(false);
-    const hidden = hideEntry(NONE, "teach", CORE_NAV);
-    expect(learningToolsShown(resolveNav(CORE_NAV, hidden, STANDARD))).toBe(false);
-    const shownOnMinimal = showEntry(NONE, "review", CORE_NAV, MINIMAL);
-    expect(learningToolsShown(resolveNav(CORE_NAV, shownOnMinimal, MINIMAL))).toBe(true);
+    expect(learningToolsShown(resolveNav(WITH_SPARE, NONE, STANDARD))).toBe(true);
+    expect(learningToolsShown(resolveNav(WITH_SPARE, NONE, MINIMAL))).toBe(false);
+    const hidden = hideEntry(NONE, "teach", WITH_SPARE);
+    expect(learningToolsShown(resolveNav(WITH_SPARE, hidden, STANDARD))).toBe(false);
+    const shownOnMinimal = showEntry(NONE, "review", WITH_SPARE, MINIMAL);
+    expect(learningToolsShown(resolveNav(WITH_SPARE, shownOnMinimal, MINIMAL))).toBe(true);
   });
 });
 
 describe("placement changes", () => {
   it("pins after what's already pinned, and pinning un-hides", () => {
-    const p = pinEntry({ hidden: ["graph"], pinned: ["calendar"] }, "graph", CORE_NAV);
-    expect(p).toEqual({ hidden: [], pinned: ["calendar", "graph"] });
+    const p = pinEntry({ hidden: [SPARE], pinned: ["calendar"] }, SPARE, WITH_SPARE);
+    expect(p).toEqual({ hidden: [], pinned: ["calendar", SPARE] });
     // Pinning again changes nothing.
-    expect(pinEntry(p, "graph", CORE_NAV)).toEqual(p);
+    expect(pinEntry(p, SPARE, WITH_SPARE)).toEqual(p);
   });
 
   it("unpins on hide, or the pin would keep it showing", () => {
-    expect(hideEntry({ hidden: [], pinned: ["graph"] }, "graph", CORE_NAV)).toEqual({
-      hidden: ["graph"],
+    expect(hideEntry({ hidden: [], pinned: [SPARE] }, SPARE, WITH_SPARE)).toEqual({
+      hidden: [SPARE],
       pinned: [],
     });
   });
 
   it("refuses to hide what can't hide, and leaves unknown ids alone", () => {
-    expect(hideEntry(NONE, "focus", CORE_NAV)).toBe(NONE);
-    expect(hideEntry(NONE, "mod:atlas.gone", CORE_NAV)).toBe(NONE);
-    expect(pinEntry(NONE, "nope", CORE_NAV)).toBe(NONE);
+    expect(hideEntry(NONE, "focus", WITH_SPARE)).toBe(NONE);
+    expect(hideEntry(NONE, "mod:atlas.gone", WITH_SPARE)).toBe(NONE);
+    expect(pinEntry(NONE, "nope", WITH_SPARE)).toBe(NONE);
   });
 
   it("shows by un-hiding where the Depth shows it, and by pinning where it doesn't", () => {
-    expect(showEntry({ hidden: ["graph"], pinned: [] }, "graph", CORE_NAV, STANDARD)).toEqual(NONE);
-    expect(showEntry({ hidden: ["graph"], pinned: [] }, "graph", CORE_NAV, MINIMAL)).toEqual({
+    expect(showEntry({ hidden: [SPARE], pinned: [] }, SPARE, WITH_SPARE, STANDARD)).toEqual(NONE);
+    expect(showEntry({ hidden: [SPARE], pinned: [] }, SPARE, WITH_SPARE, MINIMAL)).toEqual({
       hidden: [],
-      pinned: ["graph"],
+      pinned: [SPARE],
     });
   });
 
   it("keeps ids it doesn't know, for a mod that may come back", () => {
     const p = { hidden: ["mod:atlas.gone"], pinned: [] };
-    expect(hideEntry(p, "graph", CORE_NAV).hidden).toEqual(["mod:atlas.gone", "graph"]);
+    expect(hideEntry(p, SPARE, WITH_SPARE).hidden).toEqual(["mod:atlas.gone", SPARE]);
   });
 });
 
 describe("isReachable and isActiveEntry", () => {
   it("keeps a hidden tab reachable, and drops one that's gone", () => {
-    const hidden = resolveNav(CORE_NAV, { hidden: ["graph"], pinned: [] }, STANDARD);
-    expect(isReachable("graph", CORE_NAV, hidden, true)).toBe(true);
-    expect(isReachable("teach", CORE_NAV, resolveNav(CORE_NAV, NONE, MINIMAL), true)).toBe(false);
-    expect(isReachable("dev", CORE_NAV, resolveNav(CORE_NAV, NONE, STANDARD), true)).toBe(false);
+    const hidden = resolveNav(WITH_SPARE, { hidden: [SPARE], pinned: [] }, STANDARD);
+    expect(isReachable(SPARE, WITH_SPARE, hidden, true)).toBe(true);
+    expect(isReachable("teach", WITH_SPARE, resolveNav(WITH_SPARE, NONE, MINIMAL), true)).toBe(
+      false,
+    );
+    expect(isReachable("dev", WITH_SPARE, resolveNav(WITH_SPARE, NONE, STANDARD), true)).toBe(
+      false,
+    );
     expect(
       isReachable(
         "dev",
-        CORE_NAV,
-        resolveNav(CORE_NAV, NONE, { depth: "min", devMode: true }),
+        WITH_SPARE,
+        resolveNav(WITH_SPARE, NONE, { depth: "min", devMode: true }),
         true,
       ),
     ).toBe(true);
   });
 
   it("always allows a view with no entry, and never a mod tab that isn't there", () => {
-    const r = resolveNav(CORE_NAV, NONE, MINIMAL);
-    expect(isReachable("project", CORE_NAV, r, true)).toBe(true);
-    expect(isReachable("mod:atlas.map", CORE_NAV, r, true)).toBe(false);
+    const r = resolveNav(WITH_SPARE, NONE, MINIMAL);
+    expect(isReachable("project", WITH_SPARE, r, true)).toBe(true);
+    expect(isReachable("mod:atlas.map", WITH_SPARE, r, true)).toBe(false);
   });
 
   it("keeps a mod's tab while the mods haven't been read, but never one of PM's own that is gone", () => {
     // The store re-opening empties the rows until the new read lands; the tab is unknown, not gone.
-    const r = resolveNav(CORE_NAV, NONE, MINIMAL);
-    expect(isReachable("mod:atlas.map", CORE_NAV, r, false)).toBe(true);
-    expect(isReachable("teach", CORE_NAV, r, false)).toBe(false);
+    const r = resolveNav(WITH_SPARE, NONE, MINIMAL);
+    expect(isReachable("mod:atlas.map", WITH_SPARE, r, false)).toBe(true);
+    expect(isReachable("teach", WITH_SPARE, r, false)).toBe(false);
   });
 
   it("lights Focus for an open project", () => {
-    const focus = CORE_NAV.find((e) => e.id === "focus")!;
+    const focus = WITH_SPARE.find((e) => e.id === "focus")!;
     expect(isActiveEntry(focus, "project")).toBe(true);
     expect(isActiveEntry(focus, "chat")).toBe(false);
   });
@@ -250,8 +272,8 @@ describe("the Mods tab", () => {
     expect(shown(NONE)).toContain("mods");
     expect(shown(NONE, MINIMAL)).toContain("mods");
     expect(shown({ hidden: ["mods"], pinned: [] })).toContain("mods");
-    expect(CORE_NAV.find((e) => e.id === "mods")?.hideable).toBe(false);
-    expect(hideEntry(NONE, "mods", CORE_NAV)).toEqual(NONE);
+    expect(WITH_SPARE.find((e) => e.id === "mods")?.hideable).toBe(false);
+    expect(hideEntry(NONE, "mods", WITH_SPARE)).toEqual(NONE);
   });
 
   it("can be pinned, like any tab", () => {
@@ -272,7 +294,7 @@ describe("mods' own tabs", () => {
       hideable: true,
     });
     expect(entries[0].defaultShown("min")).toBe(true);
-    expect(ids(resolveNav([...CORE_NAV, ...entries], NONE, STANDARD).shown)).toEqual([
+    expect(ids(resolveNav([...WITH_SPARE, ...entries], NONE, STANDARD).shown)).toEqual([
       ...BEFORE,
       "mod:acme.tool",
     ]);
@@ -325,17 +347,17 @@ describe("mods' own tabs", () => {
   });
 
   it("keeps a hidden mod tab reachable, and drops one that is gone", () => {
-    const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
+    const entries = [...WITH_SPARE, ...modNavEntries([row("acme.tool", "Acme Tool")])];
     const hidden = resolveNav(entries, { hidden: ["mod:acme.tool"], pinned: [] }, STANDARD);
     expect(ids(hidden.hidden)).toEqual(["mod:acme.tool"]);
     expect(isReachable("mod:acme.tool", entries, hidden, true)).toBe(true);
     // Uninstalled (no row, so no entry): back to Focus.
-    const gone = resolveNav(CORE_NAV, NONE, STANDARD);
-    expect(isReachable("mod:acme.tool", CORE_NAV, gone, true)).toBe(false);
+    const gone = resolveNav(WITH_SPARE, NONE, STANDARD);
+    expect(isReachable("mod:acme.tool", WITH_SPARE, gone, true)).toBe(false);
   });
 
   it("pins, hides and shows like a core tab", () => {
-    const entries = [...CORE_NAV, ...modNavEntries([row("acme.tool", "Acme Tool")])];
+    const entries = [...WITH_SPARE, ...modNavEntries([row("acme.tool", "Acme Tool")])];
     const pinned = pinEntry(NONE, "mod:acme.tool", entries);
     expect(pinned.pinned).toEqual(["mod:acme.tool"]);
     const hidden = hideEntry(pinned, "mod:acme.tool", entries);
@@ -354,19 +376,19 @@ describe("navMenuItems", () => {
   };
 
   it("offers Pin and Hide on a tab, and Show for each tab that isn't there", () => {
-    const p = { hidden: ["graph"], pinned: [] };
-    expect(labels(navMenuItems("calendar", CORE_NAV, p, STANDARD, () => {}))).toEqual([
+    const p = { hidden: [SPARE], pinned: [] };
+    expect(labels(navMenuItems("calendar", WITH_SPARE, p, STANDARD, () => {}))).toEqual([
       "Pin to the top",
       "Hide",
       "—",
-      "Show Map",
+      "Show Spare",
     ]);
   });
 
   it("quotes and marks a mod's tab, so a name like PM's own can't pass for it", () => {
     // A mod may call its tab "Settings" or "Review"; the item then acts on the mod's tab, not PM's.
     const entries = [
-      ...CORE_NAV,
+      ...WITH_SPARE,
       ...modNavEntries([{ id: "acme.tool", name: "x", navTab: "Review" }]),
     ];
     // Pin and Hide act on the tab under the pointer and name nothing; Show names what comes back.
@@ -384,35 +406,35 @@ describe("navMenuItems", () => {
   });
 
   it("names both learning tools, and offers them back as one line", () => {
-    expect(labels(navMenuItems("review", CORE_NAV, NONE, STANDARD, () => {}))).toEqual([
+    expect(labels(navMenuItems("review", WITH_SPARE, NONE, STANDARD, () => {}))).toEqual([
       "Pin Review and Teach to the top",
       "Hide Review and Teach",
     ]);
-    expect(labels(navMenuItems("focus", CORE_NAV, NONE, MINIMAL, () => {}))).toEqual([
+    expect(labels(navMenuItems("focus", WITH_SPARE, NONE, MINIMAL, () => {}))).toEqual([
       "Pin to the top",
       "—",
       "Show Review and Teach",
-      "Show Map",
+      "Show Spare",
     ]);
   });
 
   it("offers Unpin on a pinned tab, and no Hide where it can't hide", () => {
     const p = { hidden: [], pinned: ["focus"] };
-    expect(labels(navMenuItems("focus", CORE_NAV, p, STANDARD, () => {}))).toEqual(["Unpin"]);
+    expect(labels(navMenuItems("focus", WITH_SPARE, p, STANDARD, () => {}))).toEqual(["Unpin"]);
   });
 
   it("hands the new placement to apply", () => {
     const applied: NavPlacement[] = [];
     const apply = (next: NavPlacement) => void applied.push(next);
-    pick(navMenuItems("graph", CORE_NAV, NONE, STANDARD, apply), "Hide").onSelect();
-    expect(applied[0]).toEqual({ hidden: ["graph"], pinned: [] });
+    pick(navMenuItems(SPARE, WITH_SPARE, NONE, STANDARD, apply), "Hide").onSelect();
+    expect(applied[0]).toEqual({ hidden: [SPARE], pinned: [] });
     // From the empty part of the list, on Minimal: showing the hidden Map pins it.
-    pick(navMenuItems(null, CORE_NAV, applied[0], MINIMAL, apply), "Show Map").onSelect();
-    expect(applied[1]).toEqual({ hidden: [], pinned: ["graph"] });
+    pick(navMenuItems(null, WITH_SPARE, applied[0], MINIMAL, apply), "Show Spare").onSelect();
+    expect(applied[1]).toEqual({ hidden: [], pinned: [SPARE] });
   });
 
   it("has nothing for the empty part of the list when every tab is there", () => {
-    expect(navMenuItems(null, CORE_NAV, NONE, STANDARD, () => {})).toEqual([]);
+    expect(navMenuItems(null, WITH_SPARE, NONE, STANDARD, () => {})).toEqual([]);
   });
 });
 
@@ -426,29 +448,31 @@ describe("stored placement", () => {
   beforeEach(() => localStorage.clear());
 
   it("reads defensively: anything malformed is nothing chosen", () => {
-    for (const raw of [null, "", "{", "[]", "null", '"x"', '{"hidden":"graph"}']) {
+    for (const raw of [null, "", "{", "[]", "null", '"x"', '{"hidden":"review"}']) {
       expect(parsePlacement(raw), String(raw)).toEqual(NONE);
     }
     expect(
-      parsePlacement('{"hidden":["graph",3,"project","nope","graph"],"pinned":["mod:atlas.map"]}'),
-    ).toEqual({ hidden: ["graph"], pinned: ["mod:atlas.map"] });
+      parsePlacement(
+        '{"hidden":["review",3,"project","nope","review"],"pinned":["mod:atlas.map"]}',
+      ),
+    ).toEqual({ hidden: ["review"], pinned: ["mod:atlas.map"] });
   });
 
   it("forgets an uninstalled mod's tab, and nothing else", () => {
     writeNavPlacement({
-      hidden: ["graph", "mod:acme.tool"],
+      hidden: ["review", "mod:acme.tool"],
       pinned: ["mod:acme.tool", "mod:acme.other", "pinboard"],
     });
     forgetNavTab("mod:acme.tool");
     expect(readNavPlacement("standard")).toEqual({
-      hidden: ["graph"],
+      hidden: ["review"],
       pinned: ["mod:acme.other", "pinboard"],
     });
     // Nothing stored, or nothing about it: nothing is written.
     localStorage.clear();
     forgetNavTab("mod:acme.tool");
     expect(localStorage.getItem(NAV_PLACEMENT_KEY)).toBeNull();
-    writeNavPlacement({ hidden: ["graph"], pinned: [] });
+    writeNavPlacement({ hidden: ["review"], pinned: [] });
     const before = localStorage.getItem(NAV_PLACEMENT_KEY);
     forgetNavTab("mod:acme.tool");
     expect(localStorage.getItem(NAV_PLACEMENT_KEY)).toBe(before);
@@ -470,9 +494,9 @@ describe("stored placement", () => {
 
   it("writes, reads back and resets", () => {
     expect(navPlacementIsDefault(readNavPlacement("standard"))).toBe(true);
-    writeNavPlacement({ hidden: ["graph"], pinned: ["pinboard"] });
+    writeNavPlacement({ hidden: ["review"], pinned: ["pinboard"] });
     const read = readNavPlacement("standard");
-    expect(read).toEqual({ hidden: ["graph"], pinned: ["pinboard"] });
+    expect(read).toEqual({ hidden: ["review"], pinned: ["pinboard"] });
     // The same object while nothing changes: useSyncExternalStore loops on a fresh one.
     expect(readNavPlacement("standard")).toBe(read);
     resetNavPlacement();
@@ -484,7 +508,7 @@ describe("stored placement", () => {
     let heard = 0;
     const listen = () => heard++;
     window.addEventListener("pm:settings-changed", listen);
-    writeNavPlacement({ hidden: ["graph"], pinned: [] });
+    writeNavPlacement({ hidden: ["review"], pinned: [] });
     resetNavPlacement();
     window.removeEventListener("pm:settings-changed", listen);
     expect(heard).toBe(2);

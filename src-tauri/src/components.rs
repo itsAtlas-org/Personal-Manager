@@ -675,9 +675,8 @@ pub async fn list_storage_components(app: AppHandle) -> Result<StorageReport> {
     .map_err(|e| Error::Other(format!("storage scan task panicked: {e}")))
 }
 
-/// Remove a component, enforcing the dependency cascade. For `openTSNE` it also recomputes the
-/// semantic Map with PCA in the background. Rejects anything not on the allow-list (numpy / venv /
-/// embedder).
+/// Remove a component, enforcing the dependency cascade. Rejects anything not on the allow-list
+/// (numpy / venv / embedder).
 #[tauri::command]
 pub async fn remove_storage_component(app: AppHandle, id: String) -> Result<()> {
     let venv = paths::venv_dir(&app)?;
@@ -686,13 +685,6 @@ pub async fn remove_storage_component(app: AppHandle, id: String) -> Result<()> 
     tauri::async_runtime::spawn_blocking(move || do_remove(&app2, &id2, &venv))
         .await
         .map_err(|e| Error::Other(format!("storage remove task panicked: {e}")))??;
-
-    if id == "openTSNE" {
-        let app3 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = crate::layout::precompute_semantic_layout(&app3, true, true).await;
-        });
-    }
     Ok(())
 }
 

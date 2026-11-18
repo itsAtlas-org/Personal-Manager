@@ -1716,8 +1716,8 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // v60: mods (the Mods spec, §1.12). Every table both Mods PRs need lands here, so PR-2 adds no
     // migration, and only generic ones, because a core table can never be dropped later. Purely
-    // additive; Mods PR-1's later slice adds the retired `doc_layout` drop and the existing-user
-    // markers (§5) to this same migration before it ships.
+    // additive. The Map's retired `doc_layout` drop and its existing-user marker are v61, the
+    // entry after this one, so v60 stays exactly as the builds that already ran it left it.
     //
     // `mods` is the ledger: one row per installed mod, holding everything needed to rebuild the mod at
     // startup without believing the disk (the verified manifest verbatim, every file's sha256 and
@@ -1880,13 +1880,34 @@ const MIGRATIONS: &[&str] = &[
 
     ALTER TABLE usage_log ADD COLUMN mod_id TEXT;
     "#,
+    // v61: the Map leaves core and becomes a mod (Mods PR B2. Mods spec section 5, D1, D11).
+    //
+    // Two statements. The marker is the existing-user rule (D11): a store that has any document was
+    // a Map user (the Map showed every non-archived document, chat included), so it is owed the
+    // Document Map mod. A fresh store, or one with no documents, is owed nothing. INSERT OR IGNORE
+    // keeps a marker that is already there and writes nothing when there is no document. It never
+    // reads doc_layout, so it does not depend on the drop below. Nothing else in PM writes this key.
+    // mods/autoinstall.rs acts only on it, clears it in the same transaction that installs the mod,
+    // and hands the core Map's settings rows over then (the guard allows no DELETE on settings, so
+    // those three rows go at runtime, verify-then-delete, not here). The Pinboard's markers are NOT
+    // here: its own migration writes them.
+    //
+    // doc_layout was the core Map's derived cache (SYNC-SET). Nothing reads it once the Map is gone,
+    // and nothing refills it: the Document Map keeps its own coordinates in its own storage. The drop
+    // is the one exception RETIRED_DERIVED_CACHES allows, at this index only.
+    r#"
+    INSERT OR IGNORE INTO settings(key, value)
+        SELECT 'mods_autoinstall_map', '1'
+        WHERE EXISTS (SELECT 1 FROM documents);
+    DROP TABLE IF EXISTS doc_layout;
+    "#,
 ];
 
 /// Whether a store at `stored` is one this build can open: at or below the migrations it knows.
 ///
 /// A higher version was written by a newer PM, whose later migrations this build has never seen
-/// and may not survive (the Mods v60 drop and the Pinboard move are the first such breaks), so it
-/// must be refused rather than opened as if current. A negative one is a version no PM writes, and
+/// and may not survive (the v61 `doc_layout` drop and the Pinboard move are the first such breaks),
+/// so it must be refused rather than opened as if current. A negative one is a version no PM writes, and
 /// untouched is the only safe answer for a schema this build can't name either. Pure, so the gate
 /// is pinned without a store.
 fn opens_here(stored: i64, known: usize) -> bool {
@@ -2060,6 +2081,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dupes, 0);
+
+        // The replay ran v61 too, over a store holding documents: the marker is there.
+        assert_eq!(marker(&conn).as_deref(), Some("1"));
     }
 
     /// A freshly-opened store reaches the latest `user_version` and carries the v14 connector
@@ -2079,7 +2103,7 @@ mod tests {
             "every migration applied"
         );
         assert_eq!(
-            version, 60,
+            version, 61,
             "migration count pin (connector registry is v14; usage cost_usd is v15; \
              semantic-map doc_layout is v16; importance 'archive' level is v17; \
              multi-provider calendar foundation is v18; shared-drive access relation is v19; \
@@ -2111,7 +2135,8 @@ mod tests {
              what editing a Google event needs to know is v57; \
              archiving a project is v58; \
              tasks and task_stacks are v59; \
-             the mods tables and usage_log.mod_id are v60)"
+             the mods tables and usage_log.mod_id are v60; \
+             the Map's doc_layout drop and its auto-install marker are v61)"
         );
 
         // A minimal insert takes the additive defaults (index_only mode, ok state, NULL cursor).
@@ -2137,6 +2162,24 @@ mod tests {
     const REBUILD_CLEARABLE: &[&str] = &["chunk_vec", "chunks_fts", "chunks"];
     /// Schema-catalog / ephemeral-state tables an UPDATE may touch without a sentinel.
     const UPDATE_METADATA: &[&str] = &["sqlite_master", "sqlite_schema"];
+    /// Derived caches a migration may drop: (table, zero-based `MIGRATIONS` index of the ONE entry
+    /// that does). A cache nothing reads and nothing refills any more is dead weight, and unlike
+    /// user data it holds nothing a Rebuild or a recompute cannot make again. The pairing is the
+    /// point: the drop is allowed at that index and nowhere else, so a second drop of the same
+    /// table in a later entry, or a drop of any other table, is still refused.
+    const RETIRED_DERIVED_CACHES: &[(&str, usize)] = &[("doc_layout", 60)];
+
+    /// Whether `toks` (a lower-cased statement, split on whitespace) is exactly the one drop
+    /// [`RETIRED_DERIVED_CACHES`] allows at `index`: `drop table [if exists] <name>`, nothing else.
+    /// Strict on purpose: no schema prefix, no quoting, no `CASCADE`, no comma list, so the match
+    /// is the table's bare name and cannot be a longer statement that merely starts with it.
+    fn retired_drop(toks: &[&str], index: usize) -> bool {
+        let name = match toks {
+            ["drop", "table", "if", "exists", n] | ["drop", "table", n] => *n,
+            _ => return false,
+        };
+        RETIRED_DERIVED_CACHES.contains(&(name, index))
+    }
 
     /// One SQL statement out of a migration, with whether a `guard:allow` sentinel preceded it.
     #[derive(Debug)]
@@ -2239,7 +2282,9 @@ mod tests {
     ///     rows (REPLACE is a delete-then-insert, which is why it belongs here and not with INSERT).
     ///     Allowed only against a rebuild-clearable derived index. **A sentinel never excuses one**:
     ///     user rows are re-keyed with UPDATE, never deleted.
-    ///   * `DROP TABLE` and `ALTER … DROP` — table or column loss, never allowed.
+    ///   * `DROP TABLE` and `ALTER … DROP` — table or column loss, never allowed. The one exception
+    ///     is a retired derived cache, dropped bare by the one migration that
+    ///     [`RETIRED_DERIVED_CACHES`] names for it.
     ///   * `ALTER … RENAME` — the rows survive, but every reader keyed on the old identifier breaks,
     ///     and an identifier rename is a one-way door for anyone already on the old schema.
     ///   * `UPDATE` — allowed against the schema catalogue, against `connector_sources SET cursor`
@@ -2248,12 +2293,17 @@ mod tests {
     ///
     /// `ON DELETE CASCADE` inside a `CREATE TABLE` is not a DELETE statement and never trips this:
     /// the verb has to LEAD the statement.
-    fn rule3_violation(stmt: &Stmt) -> Option<String> {
+    ///
+    /// `index` is the zero-based position in `MIGRATIONS` of the entry the statement came from.
+    fn rule3_violation(stmt: &Stmt, index: usize) -> Option<String> {
         let lower = stmt.text.to_ascii_lowercase();
         let toks: Vec<&str> = lower.split_whitespace().collect();
         let first = *toks.first().unwrap_or(&"");
 
         if lower.starts_with("drop table") {
+            if retired_drop(&toks, index) {
+                return None;
+            }
             return Some("`DROP TABLE` destroys user data".into());
         }
         if first == "alter" && lower.contains(" drop ") {
@@ -2323,7 +2373,7 @@ mod tests {
         for (i, migration) in super::MIGRATIONS.iter().enumerate() {
             for stmt in statements(migration) {
                 inspected += 1;
-                if let Some(why) = rule3_violation(&stmt) {
+                if let Some(why) = rule3_violation(&stmt, i) {
                     panic!("MIGRATIONS[{i}]: {why} (rule #3): {}", stmt.text);
                 }
             }
@@ -2342,9 +2392,17 @@ mod tests {
     // Feeding synthetic migrations through the same two functions the real check uses, so each
     // shape is proven to be caught rather than assumed to be.
 
-    /// The single verdict for a one-migration source string, or `None` if it is clean.
+    /// The single verdict for a one-migration source string, or `None` if it is clean. It is judged
+    /// as no entry in particular (`usize::MAX`), so no retired-cache exception applies to it.
     fn verdict(sql: &str) -> Option<String> {
-        statements(sql).iter().find_map(rule3_violation)
+        verdict_at(sql, usize::MAX)
+    }
+
+    /// The same, as the `MIGRATIONS` entry at `index`.
+    fn verdict_at(sql: &str, index: usize) -> Option<String> {
+        statements(sql)
+            .iter()
+            .find_map(|stmt| rule3_violation(stmt, index))
     }
 
     #[test]
@@ -2379,6 +2437,83 @@ mod tests {
         assert!(verdict("ALTER TABLE documents RENAME COLUMN project TO home;").is_some());
         // The additive shape this rule exists to permit.
         assert!(verdict("ALTER TABLE documents ADD COLUMN home TEXT;").is_none());
+    }
+
+    /// The one drop the guard lets through is the retired cache's bare drop, at its own entry.
+    #[test]
+    fn guard_allows_a_retired_cache_drop_only_at_its_own_index() {
+        for sql in [
+            "DROP TABLE doc_layout;",
+            "DROP TABLE IF EXISTS doc_layout;",
+            "drop table if exists doc_layout",
+        ] {
+            assert!(verdict_at(sql, 60).is_none(), "{sql} at 60");
+            for wrong in [59, 61, 0, usize::MAX] {
+                assert!(verdict_at(sql, wrong).is_some(), "{sql} at {wrong}");
+            }
+        }
+        // `verdict` is no entry in particular, so every existing guard test keeps its meaning.
+        assert!(verdict("DROP TABLE IF EXISTS doc_layout;").is_some());
+    }
+
+    /// Anything but the exact bare drop is refused even at the allowed index.
+    #[test]
+    fn guard_refuses_every_other_drop_even_at_the_allowed_index() {
+        for sql in [
+            "DROP TABLE documents;",
+            "DROP TABLE IF EXISTS documents;",
+            "DROP TABLE doc_layout, documents;",
+            "DROP TABLE documents, doc_layout;",
+            "DROP TABLE main.doc_layout;",
+            "DROP TABLE \"doc_layout\";",
+            "DROP TABLE doc_layout CASCADE;",
+            "DROP TABLE IF EXISTS main.doc_layout;",
+            "DROP TABLE doc_layout_2;",
+        ] {
+            assert!(
+                verdict_at(sql, 60).is_some(),
+                "{sql} must stay refused at 60"
+            );
+        }
+        // A bad second statement on the same line is still inspected.
+        let sql = "DROP TABLE IF EXISTS doc_layout; DROP TABLE documents;";
+        assert_eq!(statements(sql).len(), 2);
+        assert!(verdict_at(sql, 60).unwrap().contains("DROP TABLE"));
+        // The exception covers DROP only: a column drop on the same table is still refused.
+        assert!(verdict_at("ALTER TABLE doc_layout DROP COLUMN x;", 60).is_some());
+    }
+
+    /// Each retired entry is consistent with the real list: the named entry holds the drop, the
+    /// table was created before it, and no later entry names it.
+    #[test]
+    fn every_retired_cache_is_created_early_dropped_once_and_never_named_again() {
+        for &(table, index) in RETIRED_DERIVED_CACHES {
+            let drops = |m: &str| {
+                statements(m).iter().any(|s| {
+                    let lower = s.text.to_ascii_lowercase();
+                    let toks: Vec<&str> = lower.split_whitespace().collect();
+                    retired_drop(&toks, index) && toks.last() == Some(&table)
+                })
+            };
+            assert!(
+                drops(super::MIGRATIONS[index]),
+                "MIGRATIONS[{index}] must drop {table}"
+            );
+            let create = format!("create table {table}");
+            let created = super::MIGRATIONS[..index]
+                .iter()
+                .position(|m| m.to_ascii_lowercase().contains(&create));
+            assert!(
+                created.is_some(),
+                "{table} must be created below index {index}"
+            );
+            for (later, m) in super::MIGRATIONS.iter().enumerate().skip(index + 1) {
+                assert!(
+                    !m.to_ascii_lowercase().contains(table),
+                    "MIGRATIONS[{later}] names the retired {table}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3346,6 +3481,26 @@ mod tests {
             .unwrap()
     }
 
+    /// The Map's existing-user marker (v61), or `None` when it is not there.
+    fn marker(conn: &rusqlite::Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = 'mods_autoinstall_map'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+
+    fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
     /// Apply exactly the first `n` migrations (versions 1..=n) from the real
     /// `MIGRATIONS` array — the genuine historical schema, not a teardown of the
     /// current one.
@@ -3442,7 +3597,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(model, "BAAI/bge-small-en-v1.5");
+
+        // v61: this v2 store holds a document, so it comes out owed the Document Map mod, and the
+        // Map's old cache table is gone (the ladder re-creates it at v16 and v61 drops it again).
+        assert_eq!(
+            marker(&conn).as_deref(),
+            Some("1"),
+            "a store with a document is marked"
+        );
+        assert!(!has_table(&conn, "doc_layout"));
     }
+
+    /// The sibling over a v2 store with NO documents: the same ladder ends without the marker.
+    #[test]
+    fn full_ladder_from_v2_with_no_documents_ends_without_the_marker() {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open_keyed(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        apply_through(&conn, 2);
+        conn.execute_batch(
+            "INSERT INTO conversations(id, title) VALUES (1, 'Taxes 2025');
+             INSERT INTO messages(conversation_id, role, content)
+                 VALUES (1, 'user', 'when did I file?');",
+        )
+        .unwrap();
+        super::run(&conn).unwrap();
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+        assert_eq!(marker(&conn), None, "no document, no marker");
+        assert!(!has_table(&conn, "doc_layout"));
+    }
+
     /// v47 moves the free-form labels into the registry so `@tag` can scope by one. Same contract
     /// as v46: restate what the store already says, and survive a store that is merely untidy.
     #[test]
@@ -3958,5 +4142,97 @@ mod tests {
 
         admitted("INSERT INTO mcp_clients(name, token_hash) VALUES ('Desk', 'h1')");
         refused("INSERT INTO mcp_clients(name, token_hash) VALUES ('Again', 'h1')");
+    }
+
+    // --- v61: the Map leaves core ----------------------------------------------------------------
+
+    /// A real v60 store holding a document and the cache table v16 made, ready for v61.
+    fn v60_store_with_a_document() -> (tempfile::TempDir, rusqlite::Connection) {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open_keyed(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        apply_through(&conn, 60);
+        assert_eq!(user_version(&conn), 60);
+        assert!(
+            has_table(&conn, "doc_layout"),
+            "v60 still has the Map's cache"
+        );
+        conn.execute_batch(
+            "INSERT INTO documents(vault_path, title, content_hash)
+                 VALUES ('a.md', 'A', 'ha');
+             INSERT INTO doc_layout(document_id, method, x, y)
+                 VALUES ((SELECT id FROM documents), 'pca', 0.1, 0.2);",
+        )
+        .unwrap();
+        (dir, conn)
+    }
+
+    #[test]
+    fn v61_marks_a_store_with_documents_and_drops_the_map_cache() {
+        let (_d, conn) = v60_store_with_a_document();
+        assert_eq!(marker(&conn), None, "v60 writes no marker");
+        super::run(&conn).unwrap();
+        assert_eq!(user_version(&conn), 61);
+        assert_eq!(marker(&conn).as_deref(), Some("1"));
+        assert!(
+            !has_table(&conn, "doc_layout"),
+            "the cache table is dropped"
+        );
+        // The user's document is untouched.
+        assert_eq!(count(&conn, "SELECT count(*) FROM documents"), 1);
+    }
+
+    #[test]
+    fn v61_leaves_a_store_with_no_documents_unmarked() {
+        let (_d, conn) = v60_store_with_a_document();
+        conn.execute_batch("DELETE FROM documents;").unwrap();
+        super::run(&conn).unwrap();
+        assert_eq!(user_version(&conn), 61);
+        assert_eq!(marker(&conn), None, "no document, so owed nothing");
+        assert!(
+            !has_table(&conn, "doc_layout"),
+            "the drop does not depend on documents"
+        );
+    }
+
+    #[test]
+    fn v61_keeps_a_marker_that_is_already_there() {
+        let (_d, conn) = v60_store_with_a_document();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', 'kept')",
+            [],
+        )
+        .unwrap();
+        super::run(&conn).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some("kept"), "INSERT OR IGNORE");
+    }
+
+    /// v61 runs once: a second run changes nothing, and a cleared marker is not written again.
+    #[test]
+    fn v61_does_not_run_twice() {
+        let (_d, conn) = v60_store_with_a_document();
+        super::run(&conn).unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key = 'mods_autoinstall_map'",
+            [],
+        )
+        .unwrap();
+        super::run(&conn).unwrap();
+        assert_eq!(
+            marker(&conn),
+            None,
+            "the install cleared it; a reopen must not re-mark"
+        );
+    }
+
+    /// A fresh store (v16 to v61 in one pass) has neither the table nor the marker.
+    #[test]
+    fn a_fresh_store_has_no_map_cache_and_no_marker() {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        assert_eq!(user_version(&conn), 61);
+        assert!(!has_table(&conn, "doc_layout"));
+        assert_eq!(marker(&conn), None);
     }
 }

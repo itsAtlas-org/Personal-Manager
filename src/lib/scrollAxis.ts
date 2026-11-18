@@ -22,12 +22,12 @@
 //   • A horizontal wheel (a tilt wheel / MX-Master side-scroll, |deltaX| ≥ |deltaY|) drives the
 //     nearest horizontal scroller left/right.
 //   • Ctrl+wheel (zoom) and Shift+wheel (the native "wheel scrolls horizontally" convention) are left
-//     entirely alone — GraphView / the semantic Map bind these for zoom & pan themselves.
+//     entirely alone — a canvas that binds these for zoom & pan itself owns them.
 //
 // Why it's authoritative (finds the scroller and moves it itself, rather than trusting the browser):
 // the browser's own axis mapping is exactly what's wrong here, so we can't rely on it. We only ever
 // act when we FIND a scroller under the pointer; if there's none (e.g. the pointer is over the
-// Map/Graph canvas, which owns its wheel for zoom/pan), we do nothing and let that element's own
+// zoom/pan canvas, which owns its wheel for zoom/pan), we do nothing and let that element's own
 // handler run — we never preventDefault or stopPropagation in that case.
 
 const SCROLLABLE_OVERFLOW = /(auto|scroll|overlay)/;
@@ -122,7 +122,7 @@ function onWheel(e: WheelEvent): void {
   const target = e.target instanceof HTMLElement ? e.target : null;
   if (!target) return;
 
-  // The nearest scroller under the pointer, of either axis. If there's none — the Map/Graph canvas,
+  // The nearest scroller under the pointer, of either axis. If there's none — the zoom/pan canvas,
   // which owns its wheel for zoom/pan — do nothing so that element's own handler runs.
   const near = nearestAnyScroller(target);
   if (!near) return;

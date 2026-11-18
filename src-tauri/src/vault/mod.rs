@@ -1748,6 +1748,18 @@ mod tests {
             crate::db::open(&db_path, &device_key),
             "table mods already exists",
         );
+        // The same for the newest migration: a keyed v60 store on which v61 cannot run (its marker
+        // reads `documents`, which this store has lost), is reported as it is, never as a brick.
+        let dir61 = tempfile::tempdir().unwrap();
+        let db_path61 = dir61.path().join("pm.sqlite");
+        crate::db::open_at_version(&db_path61, &device_key, 60)
+            .unwrap()
+            .execute_batch("ALTER TABLE documents RENAME TO documents_gone;")
+            .unwrap();
+        unproven(
+            crate::db::open(&db_path61, &device_key),
+            "no such table: documents",
+        );
         // The probe's lock and disk errors, as `db::open` words them, and an I/O error.
         unproven(
             Err(Error::Other(
