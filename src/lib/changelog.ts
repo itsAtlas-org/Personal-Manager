@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.185.0-alpha",
+    date: "2026-11-18",
+    highlights: [
+      "The Document Map, the mod that will replace the built-in Map, now works out the enhanced layout itself, so nothing is lost when it takes over. It needs no download and is on by default. It shows the quick layout first, then sharpens it, with a progress bar and a Cancel button, and saves the result so the next opening is quick. The first opening after your documents change can take a little longer on a large library. Nothing changes yet: the built-in Map keeps working until the Document Map replaces it in a coming update.",
+      "Under the hood: PM's own tests no longer leave temporary folders behind on the computer that runs them.",
+    ],
+  },
+  {
     version: "3.184.0-alpha",
     date: "2026-11-17",
     highlights: [
