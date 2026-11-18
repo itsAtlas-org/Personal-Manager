@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The pieces both Runways draw alike (PA-2): the readout and buttons the Calendar header shows, a
-// column's read-only events strip, the Move… menu (the keyboard's way to do what a drag does, and the Terminal's only way) and the
-// dialog that adds, edits or deletes a named window. The hooks and words they share are in
+// The pieces both Runways draw alike (PA-2): the buttons the Calendar header shows, a column's
+// read-only events strip, the Move… menu (the keyboard's way to do what a drag does, and the
+// Terminal's only way) and the dialog that adds, edits or deletes a named window. The hooks and words they share are in
 // `runwayLogic.ts`.
 
 import { useId, useState } from "react";
@@ -14,18 +14,14 @@ import {
   dropPlan,
   isDropColumn,
   orderAfterStep,
-  runwayProgressWords,
   type RunwayCard,
   type RunwayColumn,
   type RunwayEventStrip,
-  type RunwayModel,
   type TaskPlan,
 } from "../../../lib/runway";
-import { TONE_CLASS } from "../../../lib/tasks";
 import type { CalendarEvent, Task, TaskLane } from "../../../lib/types";
-import { useDepth } from "../../../theme";
 import { DateField } from "../../DateField";
-import { Button, Callout, ConfirmDialog, Dialog, Input, Popover, Progress, cn } from "../../ui";
+import { Button, Callout, ConfirmDialog, Dialog, Input, Popover, cn } from "../../ui";
 import { newWindowId, placeName, stripWhen } from "./runwayLogic";
 
 /** A column's events, read-only, at its head (R1): each opens its details (a pinboard entry opens
@@ -118,47 +114,9 @@ export function EventsStrip({
   );
 }
 
-/** How far along, and what's next: the Runway's readout, drawn in the Calendar header's left group
- *  (see `RunwayChrome`). The words and "Next up" show at every Depth; the bar from Standard up, and
- *  never in the Terminal, which says it in words alone. With nothing planned from today there is no
- *  bar to draw and no next up, only "Nothing planned". */
-export function RunwayReadout({
-  model,
-  terminal = false,
-}: {
-  model: RunwayModel;
-  terminal?: boolean;
-}) {
-  const { showMeta } = useDepth();
-  const { done, total } = model.progress;
-  return (
-    <>
-      <span className={cn("flex items-center gap-2 text-xs", terminal && "font-mono")}>
-        <span className="text-ink2">{runwayProgressWords(model.progress)}</span>
-        {showMeta && !terminal && total > 0 && (
-          <Progress
-            value={done / total}
-            label="Done so far"
-            valueText={`${done} of ${total} done`}
-            className="w-24 shrink-0"
-          />
-        )}
-      </span>
-      {model.nextUp && (
-        <span
-          className={cn("min-w-0 max-w-full truncate text-xs text-ink3", terminal && "font-mono")}
-        >
-          Next up · <span className="text-ink">{model.nextUp.title}</span> ·{" "}
-          <span className={TONE_CLASS[model.nextUp.tone]}>{model.nextUp.deadlineText}</span>
-        </span>
-      )}
-    </>
-  );
-}
-
 /** The Runway's own two buttons: the events switch and + Window. They change and extend the board,
  *  so the board keeps them (and the window dialog they open), though they are drawn in the header.
- *  Both are the header's own size, so the row reads as one. */
+ *  Both are `bar` size, the height of the header's switches, so the row reads as one. */
 export function RunwayTools({
   showEvents,
   onToggleEvents,
@@ -173,6 +131,7 @@ export function RunwayTools({
     <div data-help="calendar-runway" className="flex items-center gap-1">
       <Button
         variant="tertiary"
+        size="bar"
         onClick={onToggleEvents}
         title={
           showEvents
@@ -182,43 +141,36 @@ export function RunwayTools({
       >
         {showEvents ? "Hide events" : "Show events"}
       </Button>
-      <Button variant="tertiary" onClick={onAddWindow} title="Name a stretch of days">
+      <Button variant="tertiary" size="bar" onClick={onAddWindow} title="Name a stretch of days">
         + Window
       </Button>
     </div>
   );
 }
 
-/** The Runway's readout and buttons, drawn into the slot the Calendar header holds beside "From
- *  today". Portaled, not lifted: the board stays the one owner of the dialogs the buttons open and
- *  of the events switch's effect, and every control exists once, in the header. CalendarView is the
- *  only mount of either board and sets the slot in the commit the header mounts, before paint, so
- *  there is no inline fallback to keep. Nothing is drawn until the slot is there. */
+/** The Runway's buttons, drawn into the slot the Calendar header holds beside "From today".
+ *  Portaled, not lifted: the board stays the one owner of the dialogs the buttons open and of the
+ *  events switch's effect, and every control exists once, in the header. CalendarView is the only
+ *  mount of either board and sets the slot in the commit the header mounts, before paint, so there
+ *  is no inline fallback to keep. Nothing is drawn until the slot is there. */
 export function RunwayChrome({
   chrome,
-  model,
   showEvents,
   onToggleEvents,
   onAddWindow,
-  terminal = false,
 }: {
   chrome: HTMLElement | null;
-  model: RunwayModel;
   showEvents: boolean;
   onToggleEvents: () => void;
   onAddWindow: () => void;
-  terminal?: boolean;
 }) {
   if (!chrome) return null;
   return createPortal(
-    <>
-      <RunwayReadout model={model} terminal={terminal} />
-      <RunwayTools
-        showEvents={showEvents}
-        onToggleEvents={onToggleEvents}
-        onAddWindow={onAddWindow}
-      />
-    </>,
+    <RunwayTools
+      showEvents={showEvents}
+      onToggleEvents={onToggleEvents}
+      onAddWindow={onAddWindow}
+    />,
     chrome,
   );
 }

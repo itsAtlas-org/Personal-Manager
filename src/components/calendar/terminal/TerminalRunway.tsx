@@ -95,8 +95,6 @@ export function TerminalRunway(props: RunwayProps) {
     <div data-help="calendar-runway" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <RunwayChrome
         chrome={chrome}
-        model={model}
-        terminal
         showEvents={showEvents}
         onToggleEvents={toggleEvents}
         onAddWindow={() => setWindowEdit({ window: null })}

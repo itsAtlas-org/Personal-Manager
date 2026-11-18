@@ -73,7 +73,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// The header's slot the board draws its readout and buttons into (CalendarView holds the model and
+// The header's slot the board draws its buttons into (CalendarView holds the model and
 // the header holds the slot): a div on the body, so `screen` finds what lands in it.
 const slots: HTMLElement[] = [];
 function makeSlot(): HTMLElement {
@@ -253,8 +253,6 @@ describe("RunwayBoard", () => {
     // Before today starts folded, as a rail.
     expect(screen.getByRole("button", { name: "Show Before today" })).toBeTruthy();
     expect(within(column("Next week")).getAllByText("empty")).toHaveLength(2);
-    // The strip: progress and what's next.
-    expect(screen.getByText("0/4 done")).toBeTruthy();
     expect(document.querySelector('[data-help="calendar-runway"]')).not.toBeNull();
   });
 
@@ -286,7 +284,7 @@ describe("RunwayBoard", () => {
     expect(strip()).not.toBeNull();
   });
 
-  it("draws its count, next up, Hide events and + Window in the given slot, none inside its own root", () => {
+  it("draws Hide events and + Window in the given slot, none inside its own root, and no count or next up", () => {
     const { chrome } = board({
       tasks: [
         task({ id: 1, status: "done" }),
@@ -294,16 +292,16 @@ describe("RunwayBoard", () => {
       ],
     });
     const inSlot = within(chrome);
-    expect(inSlot.getByText("1/2 done")).toBeTruthy();
-    expect(inSlot.getByText("Send the deck")).toBeTruthy();
-    expect(inSlot.getByText(`2d · ${formatDateLocal(new Date(2026, 10, 6))}`)).toBeTruthy();
     expect(inSlot.getByRole("button", { name: "Hide events" })).toBeTruthy();
     expect(inSlot.getByRole("button", { name: "+ Window" })).toBeTruthy();
-    // Standard depth draws the bar beside the count.
-    expect(inSlot.getByRole("progressbar")).toBeTruthy();
+    // The count, its bar and Next up were dropped from the Agenda's header (they took room and
+    // told little), at every Depth.
+    expect(inSlot.queryByText(/\d+\/\d+ done/)).toBeNull();
+    expect(inSlot.queryByText(/Next up/)).toBeNull();
+    expect(inSlot.queryByText("Send the deck")).toBeNull();
+    expect(inSlot.queryByRole("progressbar")).toBeNull();
     // Nothing of it is left in the board itself.
     const root = column("Today").closest<HTMLElement>('[data-help="calendar-runway"]')!;
-    expect(within(root).queryByText("1/2 done")).toBeNull();
     expect(within(root).queryByRole("button", { name: "Hide events" })).toBeNull();
     expect(within(root).queryByRole("button", { name: "+ Window" })).toBeNull();
     expect(within(root).queryByText(/Next up/)).toBeNull();
@@ -322,16 +320,14 @@ describe("RunwayBoard", () => {
         announce={vi.fn()}
       />,
     );
-    expect(screen.queryByText("0/1 done")).toBeNull();
     expect(screen.queryByRole("button", { name: "+ Window" })).toBeNull();
     expect(screen.getByRole("region", { name: "Today" })).toBeTruthy();
   });
 
-  it("with nothing planned it says so, not 0/0 done", () => {
+  it("says nothing about being empty in the header when nothing is planned", () => {
     const { chrome } = board({ tasks: [] });
-    expect(within(chrome).getByText("Nothing planned")).toBeTruthy();
+    expect(within(chrome).queryByText("Nothing planned")).toBeNull();
     expect(within(chrome).queryByText("0/0 done")).toBeNull();
-    expect(within(chrome).queryByRole("progressbar")).toBeNull();
   });
 
   it("remembers a folded column when the board comes back", () => {
@@ -584,9 +580,6 @@ describe("RunwayBoard", () => {
     // A done task on a later day, and a met milestone, are gone too.
     expect(screen.queryByText("Done for tomorrow")).toBeNull();
     expect(screen.queryByRole("button", { name: "◆ Pitch · Atlas" })).toBeNull();
-    // They still count: 5 tasks and 2 milestones from today on (Before today's isn't counted), 4 of
-    // them done.
-    expect(screen.getByText("4/7 done")).toBeTruthy();
     // Before today is the place to look back, and still holds what was done there.
     // Its fold counts the one it holds (the met milestone is due tomorrow, so it isn't there).
     fireEvent.click(screen.getByRole("button", { name: "Show Before today, 1" }));

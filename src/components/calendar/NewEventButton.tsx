@@ -54,7 +54,7 @@ export function NewEventButton({ onCreate, createReason, createRef, compact = fa
         <Button
           ref={createRef}
           variant="secondary"
-          size={compact ? "xs" : "sm"}
+          size={compact ? "xs" : "bar"}
           aria-disabled={createReason !== null || undefined}
           aria-describedby={createReason !== null ? reasonId : undefined}
           aria-keyshortcuts={keys.shortcuts}

@@ -382,7 +382,7 @@ export function CalendarView({
   const [taskEditing, setTaskEditing] = useState<
     { task: Task } | { defaults: Partial<TaskInput>; fromQuick?: true } | null
   >(null);
-  // The header's slot for the Runway's readout and buttons (the header holds the element, the board
+  // The header's slot for the Runway's buttons (the header holds the element, the board
   // draws into it). A state setter is a stable ref callback, so it is passed straight in.
   const [runwaySlot, setRunwaySlot] = useState<HTMLDivElement | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(() => readHidden());
@@ -1535,8 +1535,8 @@ export function CalendarView({
     () => (hidden.has(MILESTONE_CALENDAR_ID) ? [] : milestones),
     [hidden, milestones],
   );
-  // The Runway's model lives here, not in either board: the header's readout, Hide events and
-  // + Window are drawn from it (by the board, through the header's slot), and the Agenda's filters
+  // The Runway's model lives here, not in either board: Hide events and + Window are drawn
+  // from it (by the board, through the header's slot), and the Agenda's filters
   // read it where the Runway is not mounted. It is cheap (memoised on the lists) and, like the
   // events switch inside it, always built, so a layout switch loses nothing.
   // The events a milestone links to (All-day keeps them: the milestone has no overlay of its own)
