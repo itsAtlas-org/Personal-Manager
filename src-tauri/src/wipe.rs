@@ -5,7 +5,7 @@
 //! Windows uninstaller, which only removes the app + the regenerable `runtime/`). It erases, à la
 //! carte, the four classes of data PM leaves on a machine:
 //!
-//!   1. **Regenerable components** — the whole `runtime/` (Python venv incl. t-SNE/OCR, the
+//!   1. **Regenerable components** — the whole `runtime/` (Python venv incl. OCR, the
 //!      downloaded models, the bundled interpreter), re-downloaded on next use. The models have
 //!      lived in `runtime/models` since #286, so the search model, the reranker and the photo-OCR
 //!      weights go too: more than Settings → Storage frees, which never removes the search model.
@@ -62,7 +62,7 @@ pub const RESTORE_STAGING_DIR: &str = "restored-vaults";
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WipeSelection {
-    /// The regenerable `runtime/` (venv + t-SNE/OCR + downloaded models + bundled interpreter).
+    /// The regenerable `runtime/` (venv + OCR + downloaded models + bundled interpreter).
     pub regenerable: bool,
     /// The vault, encrypted store, and vault artifacts. Irreversible.
     pub vault_and_db: bool,

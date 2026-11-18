@@ -1724,7 +1724,12 @@ pub fn run() {
             {
                 let worker = handle.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    worker.state::<AppState>().sidecar.retire_voice();
+                    let sidecar = &worker.state::<AppState>().sidecar;
+                    sidecar.retire_voice();
+                    // The enhanced map layout's libraries (openTSNE, scikit-learn, scipy and
+                    // friends) are no use since the layout moved into the Document Map mod:
+                    // `SidecarManager::retire_tsne`, the same shape, one pip call, never numpy.
+                    sidecar.retire_tsne();
                 });
             }
 

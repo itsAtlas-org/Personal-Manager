@@ -80,7 +80,7 @@ export interface AppLockStatus {
 /** Which classes of PM's on-machine data to remove. Browser local storage is cleared in the
  *  webview (not part of the backend command), so it isn't represented here. */
 export interface WipeSelection {
-  /** The regenerable runtime (Python engine, t-SNE/OCR) — re-downloads on next use. */
+  /** The regenerable runtime (Python engine, OCR) — re-downloads on next use. */
   regenerable: boolean;
   /** The Markdown vault + encrypted database (the real user data). Irreversible. */
   vaultAndDb: boolean;
@@ -1608,7 +1608,7 @@ export interface OcrStatus {
   installed: boolean;
 }
 
-/** One on-device component in the Storage manager (the venv, the t-SNE libraries, the photo-OCR
+/** One on-device component in the Storage manager (the venv, the photo-OCR
  *  stack and the active search model). `status` drives the action: removable now, blocked behind a
  *  dependent, required, in-use (managed elsewhere), installable (an optional component not yet
  *  downloaded — the photo-OCR stack, whose `size_bytes` is then an estimate), or stale (on disk but
@@ -1632,7 +1632,7 @@ export interface StorageComponent {
   size_bytes: number;
   /** The size is an estimate, not a real on-disk measurement (the embedder's shared cache). */
   approximate: boolean;
-  /** Indented under the component above it (the t-SNE libraries under the enhanced layout). */
+  /** Indented under the component above it (the image libraries under photo OCR). */
   child: boolean;
   status: StorageStatus;
   blockers: StorageBlocker[];

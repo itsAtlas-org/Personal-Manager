@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! On-device storage inventory + a reference-counted, guarded teardown of the large, regenerable
-//! components PM downloads: the optional t-SNE stack (`openTSNE` → `scikit-learn`/`scipy`), the
-//! optional photo-OCR stack (`rapidocr`+`pi-heif` → OpenCV/`shapely`/`pyclipper`), and a
-//! **read-only** view of the active embedder.
+//! components PM downloads: the optional photo-OCR stack (`rapidocr`+`pi-heif` →
+//! OpenCV/`shapely`/`pyclipper`), and a **read-only** view of the active embedder.
 //!
 //! The photo-OCR stack is also **installable** from this inventory (the one place it's enabled or
 //! disabled): when absent it shows an Install action, when present it's removable with its cascade.
 //!
 //! The teardown is a cascade: a heavy shared library can only be removed once nothing still needs it
-//! (`scikit-learn` after `openTSNE`; `scipy` after both; the OCR image libs after `rapidocr`). `numpy`
+//! (the OCR image libs after `rapidocr`). `numpy`
 //! is shared with the embedder and is never offered or removed. The dependency guard is enforced
 //! **server-side** here, not just in the UI, and a final backstop in
 //! [`crate::sidecar::SidecarManager::pip_uninstall`] refuses `numpy` outright. No database is involved
@@ -70,26 +69,6 @@ fn ocr_weights_size(venv: &Path) -> u64 {
     }
 }
 
-/// What the Storage tab's scikit-learn row measures and removes: scikit-learn and the packages only
-/// it brings into the t-SNE lock (joblib, threadpoolctl, narwhals, and cloudpickle, which joblib 1.6
-/// added). `the_scikit_learn_row_removes_what_only_it_brings` checks this against the locks, so a
-/// dependency a new release adds can't be left behind uncounted.
-const SKLEARN_PACKAGES: &[&str] = &[
-    "scikit-learn",
-    "joblib",
-    "threadpoolctl",
-    "narwhals",
-    "cloudpickle",
-];
-const SKLEARN_GLOBS: &[&str] = &[
-    "sklearn",
-    "scikit_learn*",
-    "joblib*",
-    "threadpoolctl*",
-    "narwhals*",
-    "cloudpickle*",
-];
-
 /// A dependent that must be removed first; `anchor` is the component id to scroll to in this tab.
 #[derive(Serialize)]
 struct Blocker {
@@ -112,7 +91,7 @@ struct Component {
     size_bytes: u64,
     /// The size is an estimate, not a real on-disk measurement (the embedder's shared cache).
     approximate: bool,
-    /// Indented under the component above it (the t-SNE libraries under the enhanced layout).
+    /// Indented under the component above it (the image libraries under photo OCR).
     child: bool,
     status: Status,
     blockers: Vec<Blocker>,
@@ -181,16 +160,8 @@ fn measure_mod_folders(mods: &mut [ModStorage], layout: &crate::mods::disk::Layo
 
 /// Which component (if any) must be removed before `id` can be. `None` = removable now. Used both to
 /// label the UI and to guard the actual removal, so the two can never disagree.
-fn blocker_for(
-    id: &str,
-    tsne_present: bool,
-    sklearn_present: bool,
-    ocr_present: bool,
-) -> Option<&'static str> {
+fn blocker_for(id: &str, ocr_present: bool) -> Option<&'static str> {
     match id {
-        "scikit-learn" if tsne_present => Some("openTSNE"),
-        "scipy" if tsne_present => Some("openTSNE"),
-        "scipy" if sklearn_present => Some("scikit-learn"),
         "opencv-python" if ocr_present => Some("ocr"),
         "shapely" if ocr_present => Some("ocr"),
         "pyclipper" if ocr_present => Some("ocr"),
@@ -200,8 +171,6 @@ fn blocker_for(
 
 fn blocker_label(anchor: &str) -> String {
     match anchor {
-        "openTSNE" => "Remove the enhanced layout first".into(),
-        "scikit-learn" => "Remove scikit-learn first".into(),
         "ocr" => "Remove photo text recognition first".into(),
         other => format!("Remove {other} first"),
     }
@@ -383,19 +352,6 @@ fn ocr_row(present: bool, ready: bool, size: u64) -> Component {
 
 fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageReport {
     let site = site_packages_dir(venv);
-    // The dist-info is lower-case (`opentsne-1.0.4.dist-info`, and `opentsne.libs` on Linux); the
-    // import dir is `openTSNE`. Matching is case-sensitive.
-    let (tsne_present, tsne_size) = pkg(
-        site.as_ref(),
-        "openTSNE",
-        &["openTSNE", "openTSNE-*", "opentsne*"],
-    );
-    let (sklearn_present, sklearn_size) = pkg(site.as_ref(), "sklearn", SKLEARN_GLOBS);
-    // Without scikit-learn there is no row, so what its globs still match (a narwhals the older
-    // removal left behind) stays in the Document engine row rather than in no row at all.
-    let sklearn_size = if sklearn_present { sklearn_size } else { 0 };
-    let (scipy_present, scipy_size) = pkg(site.as_ref(), "scipy", &["scipy", "scipy*"]);
-
     // Optional photo-OCR stack. The top-level component bundles rapidocr + pi-heif (the two pins
     // `uninstall_optional_ocr` removes) plus its tiny pure-Python siblings; the heavy image libraries
     // (OpenCV / shapely / pyclipper) are separate, cascade-removable children. numpy is shared
@@ -454,8 +410,7 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
     let venv_total = dir_size(venv);
     // The base engine is the venv minus every optional library (each listed separately below), so the
     // total never double-counts them.
-    let optional_size =
-        tsne_size + sklearn_size + scipy_size + ocr_size + cv2_size + shapely_size + pyclipper_size;
+    let optional_size = ocr_size + cv2_size + shapely_size + pyclipper_size;
     let base = venv_total.saturating_sub(optional_size) + leftover_weights;
 
     let embedder_size = embedder_estimate_bytes(embedder.id);
@@ -475,24 +430,6 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
         note: None,
     });
 
-    if tsne_present {
-        components.push(Component {
-            id: "openTSNE",
-            label: "Enhanced map layout (openTSNE)".into(),
-            detail: "Sharper, tighter clusters for the semantic Map (t-SNE).".into(),
-            size_bytes: tsne_size,
-            approximate: false,
-            child: false,
-            status: Status::Removable,
-            blockers: Vec::new(),
-            manage: Some(Manage {
-                label: "Turn on/off in Memory map".into(),
-                tab: "general",
-            }),
-            note: Some("Removing it returns the Map to the basic (PCA) layout.".into()),
-        });
-    }
-
     // A cascade-removable child library row (indented under its parent feature). A free fn rather than
     // a closure so it never holds a long-lived mutable borrow of `components` across the pushes below.
     let lib = |components: &mut Vec<Component>,
@@ -500,7 +437,7 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
                label: &str,
                detail: &str,
                size: u64| {
-        let blk = blocker_for(id, tsne_present, sklearn_present, ocr_present);
+        let blk = blocker_for(id, ocr_present);
         components.push(Component {
             id,
             label: label.into(),
@@ -525,25 +462,6 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
             note: None,
         });
     };
-    if sklearn_present {
-        lib(
-            &mut components,
-            "scikit-learn",
-            "scikit-learn",
-            "Used by the enhanced layout. Includes joblib, threadpoolctl, narwhals and cloudpickle.",
-            sklearn_size,
-        );
-    }
-    if scipy_present {
-        lib(
-            &mut components,
-            "scipy",
-            "scipy",
-            "Used by the enhanced layout and scikit-learn.",
-            scipy_size,
-        );
-    }
-
     components.push(ocr_row(ocr_present, ocr_ready, ocr_size + ocr_row_weights));
     if cv2_present {
         lib(
@@ -603,22 +521,17 @@ fn build_report(venv: &Path, embedder: &ModelEntry, ocr_ready: bool) -> StorageR
 fn do_remove(app: &AppHandle, id: &str, venv: &Path) -> Result<()> {
     let site = site_packages_dir(venv);
     let present = |p: &str| site.as_ref().map(|s| s.join(p).is_dir()).unwrap_or(false);
-    let tsne = present("openTSNE");
-    let sklearn = present("sklearn");
     let ocr = present("rapidocr");
 
     // Re-check the cascade server-side (defence in depth — the UI greys blocked buttons, but never
     // trust the webview for a destructive uninstall).
-    if let Some(anchor) = blocker_for(id, tsne, sklearn, ocr) {
+    if let Some(anchor) = blocker_for(id, ocr) {
         return Err(Error::Other(blocker_label(anchor)));
     }
 
     let state = app.state::<AppState>();
     let sidecar = &state.sidecar;
     match id {
-        "openTSNE" => sidecar.uninstall_optional_tsne()?,
-        "scikit-learn" => sidecar.pip_uninstall(SKLEARN_PACKAGES)?,
-        "scipy" => sidecar.pip_uninstall(&["scipy"])?,
         "ocr" => sidecar.uninstall_optional_ocr()?,
         // The row keeps its old id (the frontend keys on it), but what is installed changed name:
         // rapidocr 3.10 depends on `opencv-python-headless`, and a venv that had OCR before still
@@ -692,71 +605,18 @@ pub async fn remove_storage_component(app: AppHandle, id: String) -> Result<()> 
 mod tests {
     use super::*;
 
-    /// The scikit-learn row removes scikit-learn and every package only it brings into the t-SNE
-    /// lock: not openTSNE or scipy (their own rows), and nothing the base lock or another
-    /// component's lock also installs.
-    #[test]
-    fn the_scikit_learn_row_removes_what_only_it_brings() {
-        use crate::sidecar::tests::{locked_elsewhere, locked_names};
-        let elsewhere = locked_elsewhere("requirements-tsne.lock");
-        let expected: std::collections::BTreeSet<String> = locked_names("requirements-tsne.lock")
-            .into_iter()
-            .filter(|n| !elsewhere.contains(n) && n != "opentsne" && n != "scipy")
-            .collect();
-        let removed: std::collections::BTreeSet<String> =
-            SKLEARN_PACKAGES.iter().map(|n| n.to_string()).collect();
-        assert_eq!(removed, expected);
-        for name in SKLEARN_PACKAGES {
-            let import = name.replace('-', "_");
-            let import = if import == "scikit_learn" {
-                "sklearn".to_string()
-            } else {
-                import
-            };
-            assert!(
-                SKLEARN_GLOBS.iter().any(|g| match_pat(&import, g)),
-                "{name} is removed but not measured"
-            );
-        }
-    }
-
-    #[test]
-    fn cascade_blocks_then_unblocks_in_order() {
-        // While openTSNE is present, neither heavy library can go.
-        assert_eq!(
-            blocker_for("scikit-learn", true, true, false),
-            Some("openTSNE")
-        );
-        assert_eq!(blocker_for("scipy", true, true, false), Some("openTSNE"));
-        // openTSNE removed → scikit-learn is free, but scipy still waits on scikit-learn.
-        assert_eq!(blocker_for("scikit-learn", false, true, false), None);
-        assert_eq!(
-            blocker_for("scipy", false, true, false),
-            Some("scikit-learn")
-        );
-        // Everything above gone → scipy is free.
-        assert_eq!(blocker_for("scipy", false, false, false), None);
-        // openTSNE itself, and unrelated ids, are never blocked.
-        assert_eq!(blocker_for("openTSNE", true, true, false), None);
-        assert_eq!(blocker_for("ocr", true, true, false), None);
-    }
-
     #[test]
     fn ocr_cascade_blocks_then_unblocks() {
         // The OCR image libraries wait on rapidocr while it's present...
-        assert_eq!(
-            blocker_for("opencv-python", false, false, true),
-            Some("ocr")
-        );
-        assert_eq!(blocker_for("shapely", false, false, true), Some("ocr"));
-        assert_eq!(blocker_for("pyclipper", false, false, true), Some("ocr"));
+        assert_eq!(blocker_for("opencv-python", true), Some("ocr"));
+        assert_eq!(blocker_for("shapely", true), Some("ocr"));
+        assert_eq!(blocker_for("pyclipper", true), Some("ocr"));
         // ...and free up once rapidocr is gone.
-        assert_eq!(blocker_for("opencv-python", false, false, false), None);
-        assert_eq!(blocker_for("shapely", false, false, false), None);
-        // rapidocr itself is never blocked; the two cascades don't interfere.
-        assert_eq!(blocker_for("ocr", true, true, true), None);
-        assert_eq!(blocker_for("opencv-python", true, true, false), None);
-        assert_eq!(blocker_for("scipy", false, false, true), None);
+        assert_eq!(blocker_for("opencv-python", false), None);
+        assert_eq!(blocker_for("shapely", false), None);
+        // rapidocr itself is never blocked, and the retired t-SNE rows are no ids here at all.
+        assert_eq!(blocker_for("ocr", true), None);
+        assert_eq!(blocker_for("scipy", true), None);
     }
 
     #[test]
@@ -796,10 +656,6 @@ mod tests {
         };
         put(venv.join("pyvenv.cfg"), 5);
         put(site.join("fastembed").join("__init__.py"), 1000);
-        put(site.join("openTSNE").join("__init__.py"), 10);
-        put(site.join("openTSNE-1.0.4.dist-info").join("RECORD"), 1);
-        put(site.join("sklearn").join("__init__.py"), 20);
-        put(site.join("scipy").join("__init__.py"), 40);
         put(site.join("rapidocr").join("__init__.py"), 80);
         put(site.join("cv2").join("__init__.py"), 160);
         put(site.join("shapely").join("__init__.py"), 320);
@@ -824,9 +680,6 @@ mod tests {
             ids,
             [
                 "venv",
-                "openTSNE",
-                "scikit-learn",
-                "scipy",
                 "ocr",
                 "opencv-python",
                 "shapely",
@@ -848,16 +701,6 @@ mod tests {
         );
         assert!(matches!(row("venv").status, Status::Required));
         assert_eq!(
-            row("openTSNE").size_bytes,
-            11,
-            "its import dir and dist-info"
-        );
-        assert!(matches!(row("openTSNE").status, Status::Removable));
-        assert_eq!(row("scikit-learn").size_bytes, 20);
-        assert_eq!(blocked_by("scikit-learn"), ["openTSNE"]);
-        assert_eq!(row("scipy").size_bytes, 40);
-        assert_eq!(blocked_by("scipy"), ["openTSNE"]);
-        assert_eq!(
             row("ocr").size_bytes,
             80 + 1280,
             "its packages and the models its removal deletes"
@@ -875,8 +718,35 @@ mod tests {
 
         // The rows split the venv between them, so the total is the venv once, the OCR models
         // once, and the embedder's estimate once.
-        assert_eq!(dir_size(&venv), 1005 + 11 + 20 + 40 + 80 + 160 + 320 + 640);
+        assert_eq!(dir_size(&venv), 1005 + 80 + 160 + 320 + 640);
         assert_eq!(report.total_bytes, dir_size(&venv) + 1280 + estimate);
+    }
+
+    /// The enhanced layout's libraries (openTSNE, scikit-learn, scipy) have no Storage rows any more.
+    /// On a computer that still holds them (until the next launch's clean-up, `retire_tsne`) they
+    /// are counted on the Document engine row, so the total still tells the truth about the disk.
+    #[test]
+    fn the_retired_tsne_libraries_have_no_row_and_count_as_the_document_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("runtime").join("venv");
+        let site = if cfg!(windows) {
+            venv.join("Lib").join("site-packages")
+        } else {
+            venv.join("lib").join("python3.12").join("site-packages")
+        };
+        let put = |path: PathBuf, bytes: usize| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; bytes]).unwrap();
+        };
+        put(venv.join("pyvenv.cfg"), 5);
+        put(site.join("openTSNE").join("__init__.py"), 10);
+        put(site.join("sklearn").join("__init__.py"), 20);
+        put(site.join("scipy").join("__init__.py"), 40);
+        let embedder = crate::registry::active_embedder();
+        let report = build_report(&venv, &embedder, false);
+        let ids: Vec<&str> = report.components.iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["venv", "ocr", "embedder"]);
+        assert_eq!(report.components[0].size_bytes, 5 + 10 + 20 + 40);
     }
 
     /// OCR models an older removal left behind (no rapidocr in the venv) are counted on the
@@ -1027,13 +897,9 @@ mod tests {
 
     #[test]
     fn match_pat_handles_globs_and_exact() {
-        assert!(match_pat("scikit_learn.libs", "scikit_learn*"));
-        assert!(match_pat("scipy", "scipy"));
-        assert!(!match_pat("scipython", "scipy"));
-        // The names openTSNE 1.0.4 really installs (its dist-info is lower-case).
-        assert!(match_pat("opentsne-1.0.4.dist-info", "opentsne*"));
-        assert!(match_pat("opentsne.libs", "opentsne*"));
-        assert!(!match_pat("opentsne-1.0.4.dist-info", "openTSNE-*"));
+        assert!(match_pat("pi_heif.libs", "pi_heif*"));
+        assert!(match_pat("shapely", "shapely"));
+        assert!(!match_pat("shapelyx", "shapely"));
         assert!(match_pat("pyclipper-1.3.0.dist-info", "pyclipper*"));
         assert!(match_pat(
             "opencv_python-4.10.0.84.dist-info",

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // The Settings → Storage tab: an inventory of the large, regenerable on-device components (the Python
-// document engine, the optional t-SNE libraries, the photo-OCR stack, and the active search model)
+// document engine, the photo-OCR stack, and the active search model)
 // with their sizes and a reference-counted teardown. A heavy shared library can only be removed once
 // nothing still needs it — its Remove button is greyed with a pill that jumps to the dependent to
 // remove first; the cascade is also enforced in the backend. numpy is never offered (shared with the
@@ -42,31 +42,15 @@ function formatSize(bytes: number, approximate: boolean): string {
   return approximate ? `~${s}` : s;
 }
 
-/** The big t-SNE libraries — removing these gets the extra "recommend keeping" confirm. */
-const HEAVY_LIBS = new Set(["scikit-learn", "scipy"]);
 /** The OCR image libraries — removed in the cascade after photo text recognition; their own confirm. */
 const OCR_LIBS = new Set(["opencv-python", "shapely", "pyclipper"]);
 
 function confirmCopy(c: StorageComponent): { title: string; body: string; danger: boolean } {
-  if (HEAVY_LIBS.has(c.id)) {
-    return {
-      title: `Remove ${c.label}?`,
-      danger: true,
-      body: "These libraries are only used by the enhanced map layout and total roughly 150 MB. We recommend keeping them unless you're short on space — removing them means another download if you re-enable the enhanced layout.",
-    };
-  }
   if (OCR_LIBS.has(c.id)) {
     return {
       title: `Remove ${c.label}?`,
       danger: true,
       body: "This library is only used by photo text recognition. We recommend keeping it unless you're short on space — removing it means another download if you reinstall photo text recognition.",
-    };
-  }
-  if (c.id === "openTSNE") {
-    return {
-      title: "Remove the enhanced layout?",
-      danger: true,
-      body: "The Map returns to the basic (PCA) layout. You can download the enhanced layout again any time from Settings → Memory map.",
     };
   }
   if (c.id === "ocr") {

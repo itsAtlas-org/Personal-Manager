@@ -224,14 +224,7 @@ const MAX_SKIP_LINES: usize = 1024;
 /// guard is the backstop for any caller that doesn't.
 const MAX_SIDECAR_REQUEST_LINE: usize = 48 * 1024 * 1024;
 
-/// The OPTIONAL t-SNE reducer the core semantic Map used, pinned. **Not** in `requirements.txt` —
-/// the base venv stays lean. Nothing installs it any more (the Document Map mod computes its own
-/// layout); the pin stays until the clean-up of what machines already downloaded. openTSNE pulls
-/// scikit-learn + scipy (numpy is already present via fastembed) and ships a binary wheel for our
-/// pinned Python, so there's no compile step.
-const OPTIONAL_TSNE_PIN: &str = "openTSNE==1.0.4";
-
-/// The OPTIONAL photo-OCR component, pinned. **Not** in `requirements.txt` — like t-SNE, the base
+/// The OPTIONAL photo-OCR component, pinned. **Not** in `requirements.txt` — the base
 /// venv stays lean and the user installs it on demand (see [`SidecarManager::install_optional_ocr`]).
 /// `rapidocr` runs OCR on the `onnxruntime` fastembed already ships (it pulls no runtime of its own)
 /// and downloads its small detection/recognition ONNX models on first use; `pi-heif` adds HEIC
@@ -430,9 +423,15 @@ fn venv_site_has(venv: &Path, wanted: impl Fn(&str) -> bool) -> bool {
 /// each package not installed, or refuses it, and a leftover nothing can delete would cost a worker
 /// stop and four interpreter starts on every launch it outlives.
 fn pip_can_uninstall_voice_engine(site: &Path) -> bool {
+    pip_can_uninstall(site, is_voice_engine_dist_info)
+}
+
+/// Whether `site` holds a `*.dist-info` folder `is_dist_info` names with a RECORD in it: what pip
+/// uninstalls a package by. Shared by the voice and t-SNE clean-ups.
+fn pip_can_uninstall(site: &Path, is_dist_info: impl Fn(&str) -> bool) -> bool {
     std::fs::read_dir(site).is_ok_and(|entries| {
         entries.flatten().any(|e| {
-            is_voice_engine_dist_info(&e.file_name().to_string_lossy())
+            is_dist_info(&e.file_name().to_string_lossy())
                 && e.file_type().is_ok_and(|t| t.is_dir())
                 && std::fs::symlink_metadata(e.path().join("RECORD")).is_ok_and(|m| m.is_file())
         })
@@ -447,6 +446,12 @@ fn pip_can_uninstall_voice_engine(site: &Path) -> bool {
 /// scripts pip would also have taken from the venv's `bin/` (nothing runs them), and setuptools
 /// always.
 fn remove_voice_engine_by_hand(venv: &Path) {
+    remove_site_entries(venv, is_voice_engine_leftover, "voice input");
+}
+
+/// Remove from every site-packages of the venv each entry `wanted` names, one at a time and never
+/// through a link ([`remove_leftover`]); `what` names the clean-up in the log.
+fn remove_site_entries(venv: &Path, wanted: impl Fn(&str) -> bool, what: &str) {
     for site in venv_site_dirs(venv) {
         let Ok(entries) = std::fs::read_dir(&site) else {
             continue;
@@ -454,11 +459,11 @@ fn remove_voice_engine_by_hand(venv: &Path) {
         // Collected first, so nothing is removed from the folder while it is being read.
         let leftovers: Vec<PathBuf> = entries
             .flatten()
-            .filter(|e| is_voice_engine_leftover(&e.file_name().to_string_lossy()))
+            .filter(|e| wanted(&e.file_name().to_string_lossy()))
             .map(|e| e.path())
             .collect();
         for path in leftovers {
-            remove_voice_leftover(&path);
+            remove_leftover(&path, what);
         }
     }
 }
@@ -529,9 +534,9 @@ fn is_dir_link(_meta: &std::fs::Metadata) -> bool {
 }
 
 /// Remove a file or a folder (a link itself, never what it points at) if it is there, and log a
-/// failure rather than return it: every step of the voice clean-up is best-effort, and whatever is
-/// left is tried again at the next launch.
-fn remove_voice_leftover(path: &Path) {
+/// failure rather than return it: every step of the voice and t-SNE clean-ups is best-effort, and
+/// whatever is left is tried again at the next launch. `what` names the feature in the log.
+fn remove_leftover(path: &Path, what: &str) {
     let removed = match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => Err(e),
@@ -543,18 +548,91 @@ fn remove_voice_leftover(path: &Path) {
     };
     if let Err(e) = removed {
         eprintln!(
-            "sidecar: couldn't remove {} that voice input left ({e}); the next launch tries again",
+            "sidecar: couldn't remove {} that {what} left ({e}); the next launch tries again",
             path.display()
         );
     }
 }
 
-/// One on-demand pip component (t-SNE / photo-OCR). The per-component ready/install/uninstall
+/// What the enhanced map layout's download put in the venv, as pip names the packages: openTSNE
+/// and everything it pulled in. The layout now runs inside the Document Map mod, nothing installs
+/// these, and pip never removes a package because a lock stopped listing it, so every computer that
+/// downloaded the layout (about 200 MB, scipy alone 138 MB) keeps them until
+/// [`SidecarManager::retire_tsne`] removes them, in ONE pip call (pip does not care about the
+/// order; the order was only the Storage tab's guard while they had rows).
+///
+/// **Never `numpy`**, which the embedder runs on, and never a package a lock PM still ships pins:
+/// `no_lock_installs_a_package_the_tsne_clean_up_removes` reads `requirements.lock` and
+/// `requirements-ocr.lock` and fails, naming the package, if one of these appears in either (scipy
+/// is a common dependency, so a future regeneration could pull it in). If it fails, drop that name
+/// from this list and from [`TSNE_STACK_DIRS`].
+const TSNE_STACK_PACKAGES: &[&str] = &[
+    "openTSNE",
+    "scikit-learn",
+    "joblib",
+    "threadpoolctl",
+    "narwhals",
+    "cloudpickle",
+    "scipy",
+];
+
+/// The same packages by the names they take in site-packages: the import dir or module
+/// (`<name>/`, or `threadpoolctl.py`), the native libraries a wheel bundles beside it
+/// (`<name>.libs`) and `<name>-<version>.dist-info`. openTSNE's dist-info is lower-case while its
+/// import dir is not, and scikit-learn imports as `sklearn` and writes `scikit_learn`.
+const TSNE_STACK_DIRS: &[&str] = &[
+    "openTSNE",
+    "opentsne",
+    "sklearn",
+    "scikit_learn",
+    "joblib",
+    "threadpoolctl",
+    "narwhals",
+    "cloudpickle",
+    "scipy",
+];
+
+/// Whether a site-packages entry is the `<name>-<version>.dist-info` of one of the stack's
+/// packages: the record pip finds an installed package by. The version must start with a digit, so
+/// another package's `scipy-stubs-1.0.dist-info` is not matched.
+fn is_tsne_stack_dist_info(name: &str) -> bool {
+    TSNE_STACK_DIRS.iter().any(|d| {
+        name.strip_prefix(d)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|v| {
+                v.ends_with(".dist-info") && v.starts_with(|c: char| c.is_ascii_digit())
+            })
+    })
+}
+
+/// Whether a site-packages entry belongs to one of the stack's packages: exactly `<name>` (the
+/// import dir), `<name>.py` (a single-file module), `<name>.libs` or its dist-info. Exact, so
+/// `scipy` never matches `scipython`.
+fn is_tsne_stack_entry(name: &str) -> bool {
+    is_tsne_stack_dist_info(name)
+        || TSNE_STACK_DIRS.iter().any(|d| {
+            name.strip_prefix(d)
+                .is_some_and(|rest| matches!(rest, "" | ".py" | ".libs"))
+        })
+}
+
+/// Whether a site-packages entry is anything of the stack's the clean-up removes by hand: one of
+/// its entries, or pip's stash of an import dir or a `.libs` folder (a removal cut short, or a
+/// delete Windows refused, leaves them). The quick look and the removal both ask this, so the
+/// clean-up can never find something it would not then remove.
+fn is_tsne_stack_leftover(name: &str) -> bool {
+    is_tsne_stack_entry(name)
+        || TSNE_STACK_DIRS
+            .iter()
+            .any(|d| is_pip_stash_name(name, d) || is_pip_stash_name(name, &format!("{d}.libs")))
+}
+
+/// One on-demand pip component (photo OCR). The per-component ready/install/uninstall
 /// operations differ only in these fields, so they share one implementation each
 /// (`optional_ready` / `install_optional` / `uninstall_optional` on [`SidecarManager`]); the
 /// public per-component methods are one-line delegates.
 struct OptionalComponent {
-    /// The venv marker recording what is installed (`.pm-tsne` / `.pm-ocr`). Its contents are
+    /// The venv marker recording what is installed (`.pm-ocr`). Its contents are
     /// derived by [`SidecarManager::optional_stamp`], never stored as a second literal — the
     /// hand-kept `OPTIONAL_OCR_MARKER` copy of the joined pins used to need its own test to stop
     /// the two drifting.
@@ -568,10 +646,10 @@ struct OptionalComponent {
     /// The component's top-level pins — the source of truth for its identity, mirrored into
     /// `sidecar/requirements-optional.txt` for `just pip-audit` and into the lock's `pm-pins` stamp.
     pins: &'static [&'static str],
-    /// The packages `pip uninstall` removes, and never one anything else needs. For t-SNE and OCR
-    /// that means the top-level ones only: their heavier transitive deps are LEFT in place so a
-    /// removal can never break the base venv by pulling a package something else relies on (see the
-    /// public delegates' docs for each component's cascade).
+    /// The packages `pip uninstall` removes, and never one anything else needs. For OCR that means
+    /// the top-level ones only: its heavier transitive deps are LEFT in place so a removal can
+    /// never break the base venv by pulling a package something else relies on (see the public
+    /// delegate's docs for the cascade).
     uninstall: &'static [&'static str],
     /// Packages an older lock of this component installed that the current lock replaces with a
     /// differently-named distribution of the SAME files, uninstalled before the lock is installed.
@@ -582,16 +660,54 @@ struct OptionalComponent {
     /// The folder under `runtime/models` holding the model weights only this component uses, which
     /// its removal deletes along with its packages (see [`SidecarManager::uninstall_optional`]).
     weights: Option<&'static str>,
+    /// A one-time answer to a lock that changed without changing a package (see [`LockRestamp`]).
+    restamp_from: Option<LockRestamp>,
 }
 
-const OPTIONAL_TSNE_COMPONENT: OptionalComponent = OptionalComponent {
-    marker: SidecarPaths::tsne_marker,
-    lock: "requirements-tsne.lock",
-    pins: &[OPTIONAL_TSNE_PIN],
-    uninstall: &["openTSNE"],
-    superseded: &[],
-    weights: None,
-};
+/// What lets [`SidecarManager::optional_ready`] keep vouching for a component installed from an
+/// earlier version of its lock whose BYTES have since changed but whose packages have not.
+///
+/// A marker holds `pins;lock=<sha256 of the lock's bytes>`, so any edit to the lock reads as "not
+/// installed": photos skip OCR, and Storage shows the component Stale. Taking the enhanced layout
+/// out of `requirements-optional.txt` changed the OCR lock's `pm-input` header line and nothing
+/// else, which would have switched OCR off for everyone who had installed it. The marker that
+/// carries `old_lock_sha256` is rewritten to the current stamp, but only while the lock's entries
+/// (every `==` pin, every `--hash` and every `# via` line, from the first non-comment line to the
+/// end, [`lock_entries_digest`]) still hash to `entries_sha256`: the packages and their hashes
+/// are then byte for byte what that marker vouched for. `the_ocr_lock_still_holds_what_the_pre_b10_marker_vouched_for`
+/// proves it for the lock PM ships; the first lock change that touches an entry fails it, and that
+/// change removes this re-stamp (the constants, the field and the tests).
+struct LockRestamp {
+    old_lock_sha256: &'static str,
+    entries_sha256: &'static str,
+}
+
+/// The OCR lock as it was before the enhanced layout's pin left `requirements-optional.txt`: the
+/// file `a520a130` (main, 3.182.2) last changed, `git show a520a130:sidecar/requirements-ocr.lock`.
+/// Its full digest is what an OCR marker written until then carries, and its entries' digest is
+/// what the current lock must still equal.
+const PRE_B10_OCR_LOCK_SHA256: &str =
+    "bb6b81e849119596d49e06f9c16c1ad82185490f17d3f67e0d8555386f91dbe2";
+const PRE_B10_OCR_ENTRIES_SHA256: &str =
+    "e6ce1a20b47a655c4b7b1269ff49e9bd7e915526f31b51cf4349fa88e7456037";
+
+/// The digest of a lock's entries: every line from the first one that is not a comment or blank to
+/// the end, each ended by a newline, CRLF read as LF. Headers (`# pm-input`, `# pm-constraint`)
+/// come before the first entry, so they never reach it.
+fn lock_entries_digest(lock: &[u8]) -> String {
+    let text = String::from_utf8_lossy(lock).replace("\r\n", "\n");
+    let mut entries = String::new();
+    let mut started = false;
+    for line in text.lines() {
+        if !started && (line.starts_with('#') || line.trim().is_empty()) {
+            continue;
+        }
+        started = true;
+        entries.push_str(line);
+        entries.push('\n');
+    }
+    crate::ingest::hex_digest(entries.as_bytes())
+}
 
 const OPTIONAL_OCR_COMPONENT: OptionalComponent = OptionalComponent {
     marker: SidecarPaths::ocr_marker,
@@ -624,6 +740,10 @@ const OPTIONAL_OCR_COMPONENT: OptionalComponent = OptionalComponent {
     // rapidocr's three ONNX models (~31 MB), which pm_sidecar.py copies into `runtime/models/
     // rapidocr` from rapidocr's own wheel the first time OCR runs (`_rapidocr_model_dir`).
     weights: Some(OCR_WEIGHTS_DIR),
+    restamp_from: Some(LockRestamp {
+        old_lock_sha256: PRE_B10_OCR_LOCK_SHA256,
+        entries_sha256: PRE_B10_OCR_ENTRIES_SHA256,
+    }),
 };
 
 /// The photo-OCR weights' folder under `runtime/models` (pm_sidecar.py `_rapidocr_model_dir`).
@@ -633,8 +753,7 @@ pub(crate) const OCR_WEIGHTS_DIR: &str = "rapidocr";
 /// Every optional component, so a caller that must treat them all alike can't miss one. `provision`
 /// is the reason this exists: a venv rebuild removes their markers along with the venv, and each new
 /// component would otherwise need remembering there too.
-const ALL_OPTIONAL_COMPONENTS: &[&OptionalComponent] =
-    &[&OPTIONAL_TSNE_COMPONENT, &OPTIONAL_OCR_COMPONENT];
+const ALL_OPTIONAL_COMPONENTS: &[&OptionalComponent] = &[&OPTIONAL_OCR_COMPONENT];
 
 /// Where the sidecar script and its requirements live, and where the venv goes.
 pub struct SidecarPaths {
@@ -690,16 +809,15 @@ impl SidecarPaths {
         self.venv_dir.join(".pm-ready")
     }
 
-    /// Marker that the OPTIONAL t-SNE component is installed in this venv. Separate from
-    /// `.pm-ready` so the base requirements hash is untouched and an existing user never re-installs
-    /// the base venv just because t-SNE became available. Holds the pin, so a future bump re-installs.
+    /// The marker the enhanced map layout's download kept in the venv. Nothing reads or writes it
+    /// any more; [`SidecarManager::retire_tsne`] removes it.
     fn tsne_marker(&self) -> PathBuf {
         self.venv_dir.join(".pm-tsne")
     }
 
     /// Marker that the OPTIONAL photo-OCR component is installed in this venv. Separate from
-    /// `.pm-ready` (so the base requirements hash is untouched) and from `.pm-tsne`. Holds the pins,
-    /// so a future bump re-installs.
+    /// `.pm-ready` (so the base requirements hash is untouched). Holds the pins, so a future bump
+    /// re-installs.
     fn ocr_marker(&self) -> PathBuf {
         self.venv_dir.join(".pm-ocr")
     }
@@ -1447,9 +1565,8 @@ impl SidecarManager {
             .flatten();
         // What the user has PAID FOR, noted before the teardown can erase it. The optional markers
         // live inside the venv dir, so `remove_dir_all` took them with it — silently uninstalling
-        // OCR and t-SNE. Nothing told the user: photos then ingested EXIF-only (no OCR text, and
-        // permanently for those documents unless re-ingested) and the memory map quietly fell back
-        // to PCA. A rebuild is triggered by a torn install or an outdated interpreter — neither of
+        // OCR. Nothing told the user: photos then ingested EXIF-only (no OCR text, and
+        // permanently for those documents unless re-ingested). A rebuild is triggered by a torn install or an outdated interpreter — neither of
         // which is a request to remove components.
         //
         // The in-place update loses them too, more quietly. Every optional lock is resolved against
@@ -1574,6 +1691,9 @@ impl SidecarManager {
         // under the install lock this already holds. A rebuilt venv took the engine with it; the
         // Whisper model and the rest outside the venv go here all the same.
         self.retire_voice_locked();
+        // And what the enhanced map layout's download left (see `retire_tsne`): after the base
+        // install for the same reason, and a no-op on the venv this just rebuilt.
+        self.retire_tsne_locked();
 
         // Once more before the marker says the venv is current: no worker can have started since
         // the first stop (`_provisioning`), but one that did would be running libraries from part
@@ -1958,13 +2078,6 @@ impl SidecarManager {
         })
     }
 
-    /// Remove the OPTIONAL t-SNE component (the Storage row's "delete" action) — the shared
-    /// [`Self::uninstall_optional`] flow. Only openTSNE is removed: its heavier transitive deps
-    /// (scipy / scikit-learn) have their own rows.
-    pub fn uninstall_optional_tsne(&self) -> Result<()> {
-        self.uninstall_optional(&OPTIONAL_TSNE_COMPONENT)
-    }
-
     /// Whether the OPTIONAL photo-OCR component is installed in this venv at the pinned versions.
     /// Cheap (a marker read) so the ingest path can check it per photo to decide whether to request
     /// OCR, and so Settings can show the install/remove state.
@@ -2056,12 +2169,12 @@ impl SidecarManager {
         // The markers only in a real venv: through a link they are somewhere PM doesn't own.
         if real_dir(venv) {
             for marker in self.paths.voice_markers() {
-                remove_voice_leftover(&marker);
+                remove_leftover(&marker, "voice input");
             }
         }
         if let Some(models) = self.paths.models_dir() {
             for path in whisper_paths(&models) {
-                remove_voice_leftover(&path);
+                remove_leftover(&path, "voice input");
             }
         }
         if let Some(tmp) = self.paths.voice_tmp_dir() {
@@ -2069,12 +2182,101 @@ impl SidecarManager {
             // `remove_dir` would take the link itself.
             if real_dir(&tmp) {
                 for clip in voice_clips(&tmp) {
-                    remove_voice_leftover(&clip);
+                    remove_leftover(&clip, "voice input");
                 }
                 // The folder too, once nothing is left in it. `remove_dir` refuses one that isn't
                 // empty, which leaves anything else someone put there alone.
                 let _ = std::fs::remove_dir(&tmp);
             }
+        }
+    }
+
+    /// Clear away what the enhanced map layout's download left on this computer: openTSNE,
+    /// scikit-learn, scipy and the small packages they brought ([`TSNE_STACK_PACKAGES`]) in the venv,
+    /// and the `.pm-tsne` marker. The layout is built into the Document Map mod now and nothing
+    /// installs them, so nothing here is any use. Modelled on [`Self::retire_voice`].
+    ///
+    /// What triggers it is what is on disk, not the marker: removing only openTSNE in the Storage
+    /// tab deleted the marker and left scikit-learn and scipy, so packages can be present without
+    /// it. It is ONE pip call and it never names numpy or a package a shipped lock pins.
+    ///
+    /// Run once per launch, on a background thread, and by `provision` after the base install. A
+    /// quick look on disk comes first, so once everything is gone a launch costs a few directory
+    /// reads and never waits on the install lock; with something to remove it waits for the lock,
+    /// so pip never runs beside a provision or an optional install. Best-effort and logged, nothing
+    /// is recorded as done (what a failure leaves is found and retried at the next launch), and it
+    /// never depends on a vault, so it needs no unlock. It stops the worker (`stop_worker`): a
+    /// request in flight fails and is retried.
+    pub fn retire_tsne(&self) {
+        if !self.tsne_leftovers_on_disk() {
+            return;
+        }
+        let _install = self.install.lock().unwrap();
+        self.retire_tsne_locked();
+    }
+
+    /// Whether anything [`Self::retire_tsne`] removes is still here.
+    fn tsne_leftovers_on_disk(&self) -> bool {
+        let venv = &self.paths.venv_dir;
+        venv_site_has(venv, is_tsne_stack_leftover)
+            // The marker only in a real venv: through a link it is somewhere PM doesn't own. A
+            // dangling link counts (`symlink_metadata` looks at the link).
+            || (real_dir(venv) && std::fs::symlink_metadata(self.paths.tsne_marker()).is_ok())
+    }
+
+    /// The clean-up itself, for a caller that already holds `self.install` (`provision`, and
+    /// [`Self::retire_tsne`] once it has taken it).
+    fn retire_tsne_locked(&self) {
+        // Looked at again under the lock: a clean-up that ran while this one waited took it all.
+        if !self.tsne_leftovers_on_disk() {
+            return;
+        }
+        let venv = &self.paths.venv_dir;
+        // pip only where it can help: a package of the stack is in the venv and one has a dist-info
+        // with its RECORD in the site-packages of the venv's own interpreter. A stack left in a stale
+        // `lib/python3.X` beside the one in use is only ever removed by hand.
+        let pip_helps = venv_site_has(venv, is_tsne_stack_entry)
+            && self
+                .pip_site_dir()
+                .is_some_and(|site| pip_can_uninstall(&site, is_tsne_stack_dist_info));
+        if pip_helps {
+            // Stopped first, as before every removal: a worker that ran anything native holds the
+            // libraries open, and on Windows that blocks their removal.
+            self.stop_worker();
+            self.uninstall_tsne_stack();
+        }
+        // Then by hand, whether pip ran or not: what pip could not take (an import dir with no
+        // dist-info, a dist-info with no RECORD, a stale site-packages) and its stashes.
+        remove_site_entries(venv, is_tsne_stack_leftover, "the enhanced map layout");
+        if real_dir(venv) {
+            remove_leftover(&self.paths.tsne_marker(), "the enhanced map layout");
+        }
+    }
+
+    /// `pip uninstall` the whole stack in one call ([`TSNE_STACK_PACKAGES`]), logging a failure
+    /// rather than returning it: the by-hand pass after this takes whatever pip leaves. pip skips a
+    /// package it does not find installed, so a half-run or a rerun is the same call.
+    fn uninstall_tsne_stack(&self) {
+        let py = self.paths.venv_python();
+        if !py.exists() {
+            return;
+        }
+        let mut pip = Command::new(&py);
+        pip.args([
+            "-m",
+            "pip",
+            "uninstall",
+            "-y",
+            "--disable-pip-version-check",
+        ]);
+        pip.args(TSNE_STACK_PACKAGES);
+        clean_python_env(&mut pip);
+        no_window(&mut pip);
+        if let Err(e) = run_command(&mut pip, "pip uninstall (enhanced map layout)") {
+            eprintln!(
+                "sidecar: couldn't uninstall the enhanced map layout's libraries ({e}); \
+                 the next launch tries again"
+            );
         }
     }
 
@@ -2133,7 +2335,7 @@ impl SidecarManager {
     ///
     /// The pins alone were enough while the pins WERE the install. Now the lock is, and
     /// regenerating it can move a component's entire transitive tree — opencv, shapely and
-    /// pyclipper for OCR, scikit-learn and scipy for t-SNE — without a single pin changing. Keyed
+    /// pyclipper for OCR — without a single pin changing. Keyed
     /// on pins only, an installed component would go on reporting Ready with the old, unhashed
     /// packages still in it: exactly the gap the base venv's `.ready` marker had before it moved
     /// onto the lock's hash.
@@ -2152,10 +2354,54 @@ impl SidecarManager {
         let Ok(expected) = self.optional_stamp(component) else {
             return false;
         };
-        self.paths.venv_python().exists()
-            && std::fs::read_to_string((component.marker)(&self.paths))
-                .map(|s| s.trim() == expected)
-                .unwrap_or(false)
+        if !self.paths.venv_python().exists() {
+            return false;
+        }
+        let marker = (component.marker)(&self.paths);
+        let Ok(found) = std::fs::read_to_string(&marker) else {
+            return false;
+        };
+        let found = found.trim();
+        found == expected || self.restamp_unchanged_packages(component, found, &expected, &marker)
+    }
+
+    /// The one-time re-stamp ([`LockRestamp`]): `found` is the stamp the component's previous lock
+    /// wrote, and the current lock still holds exactly its entries, so the marker is rewritten to
+    /// the current stamp and the component stays Ready. Anything else is not vouched for. A failed
+    /// write is logged and still Ready (the packages are what the marker said they were); the next
+    /// call finds the old stamp again and tries again.
+    fn restamp_unchanged_packages(
+        &self,
+        component: &OptionalComponent,
+        found: &str,
+        expected: &str,
+        marker: &Path,
+    ) -> bool {
+        let Some(restamp) = &component.restamp_from else {
+            return false;
+        };
+        if found
+            != format!(
+                "{};lock={}",
+                component.pins.join(";"),
+                restamp.old_lock_sha256
+            )
+        {
+            return false;
+        }
+        let Ok(lock) = std::fs::read(self.paths.optional_lock(component)) else {
+            return false;
+        };
+        if lock_entries_digest(&lock) != restamp.entries_sha256 {
+            return false;
+        }
+        if let Err(e) = std::fs::write(marker, expected) {
+            eprintln!(
+                "sidecar: couldn't update {} ({e}); it is tried again",
+                marker.display()
+            );
+        }
+        true
     }
 
     /// Shared install flow for an [`OptionalComponent`]. The base venv must exist first, so this
@@ -2338,7 +2584,7 @@ impl SidecarManager {
     }
 
     /// `pip uninstall -y` the given packages from the managed venv — the Storage manager's guarded
-    /// teardown of the optional t-SNE libraries (scikit-learn / scipy / their small siblings). The
+    /// teardown of the optional OCR image libraries (OpenCV / shapely / pyclipper). The
     /// caller MUST enforce the dependency cascade (see `components.rs`); this only adds a final
     /// backstop that **refuses to ever remove `numpy`** (shared with the embedder). Blocking;
     /// serialised by the install lock. Idempotent — pip skips a package that isn't installed.
@@ -2353,7 +2599,7 @@ impl SidecarManager {
             return Ok(());
         }
         let _install = self.install.lock().unwrap();
-        // OpenCV, shapely and scipy are native too (see `stop_worker`).
+        // OpenCV and shapely are native too (see `stop_worker`).
         self.stop_worker();
         let mut pip = Command::new(&py);
         pip.args([
@@ -3208,8 +3454,8 @@ fn request_timeout(method: &str) -> std::time::Duration {
     match method {
         // First use of any of these can download a model; keep the grace long.
         "embed" | "rerank" | "analyze_image" => Duration::from_secs(30 * 60),
-        // CPU-bound conversion / parse / projection of a possibly-large or pathological input.
-        "convert" | "analyze_spreadsheet" | "reduce" => Duration::from_secs(10 * 60),
+        // CPU-bound conversion / parse of a possibly-large or pathological input.
+        "convert" | "analyze_spreadsheet" => Duration::from_secs(10 * 60),
         // Pure tokeniser pass — fast once the tokeniser is loaded.
         "count_tokens" => Duration::from_secs(5 * 60),
         // A zip directory entry or a PDF trailer: milliseconds on any real file, and generous even
@@ -3227,7 +3473,7 @@ fn request_timeout(method: &str) -> std::time::Duration {
 /// `--only-binary=:all:` means pip never builds a package from its source archive: a build runs that
 /// package's own `setup.py` or build backend, which can start a pip of its own (build isolation
 /// installs the build requirements that way), and that pip has neither [`PIP_SHIM`] nor PM's flags.
-/// It costs nothing today: every version in the three locks publishes a wheel for CPython
+/// It costs nothing today: every version in the two locks publishes a wheel for CPython
 /// 3.12 to 3.14 on win_amd64, macOS arm64 and manylinux x86_64 (checked against PyPI in the
 /// 2026-11-06 refresh), so pip never had a reason to build. (An Intel Mac could not install the
 /// base lock with or without it: onnxruntime publishes no macOS x86_64 wheel, and no source.) A
@@ -3790,8 +4036,8 @@ fn pip_phase_fraction(line: &str, downloads: &mut u32) -> Option<f32> {
     if (l.starts_with("Downloading ") || l.starts_with("Using cached ")) && !l.contains(".metadata")
     {
         *downloads += 1;
-        // openTSNE pulls roughly scikit-learn, scipy, joblib, threadpoolctl, openTSNE (+ numpy if it
-        // isn't already cached). An estimate is fine — the running max keeps it monotonic regardless.
+        // The OCR install pulls roughly rapidocr, pi-heif, OpenCV, shapely, pyclipper and a few small
+        // ones. An estimate is fine — the running max keeps it monotonic regardless.
         const EST_PACKAGES: f32 = 6.0;
         let frac = (*downloads as f32 / EST_PACKAGES).min(1.0);
         return Some(0.28 + 0.50 * frac); // ramp 0.28 -> 0.78 across the downloads
@@ -4756,8 +5002,8 @@ pub(crate) mod tests {
     }
 
     /// L-6: the audit-only `sidecar/requirements-optional.txt` (which `just pip-audit` scans) must list
-    /// exactly the optional pins whose source of truth is `OPTIONAL_TSNE_PIN` + `OPTIONAL_OCR_PINS`,
-    /// so a bumped/added optional pin can't silently escape CVE scanning.
+    /// exactly the optional pins whose source of truth is `OPTIONAL_OCR_PINS`, so a bumped/added
+    /// optional pin can't silently escape CVE scanning.
     #[test]
     fn optional_requirements_file_matches_the_pins() {
         let path = concat!(
@@ -4772,16 +5018,15 @@ pub(crate) mod tests {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(str::to_string)
             .collect();
-        let mut expected = vec![OPTIONAL_TSNE_PIN.to_string()];
-        expected.extend(OPTIONAL_OCR_PINS.iter().map(|s| s.to_string()));
+        let expected: Vec<String> = OPTIONAL_OCR_PINS.iter().map(|s| s.to_string()).collect();
         assert_eq!(
             listed, expected,
             "requirements-optional.txt must list exactly the optional pins, in order"
         );
     }
 
-    /// The package names a committed lock pins, PEP 503-normalised (uv writes `opentsne`, a pin may
-    /// say `openTSNE`; `faster_whisper` and `faster-whisper` are one package). Shared with the
+    /// The package names a committed lock pins, PEP 503-normalised (uv writes `pi-heif`, a pin may
+    /// say `pi_heif`; `faster_whisper` and `faster-whisper` are one package). Shared with the
     /// Storage tab's tests (components.rs).
     pub(crate) fn locked_names(lock: &str) -> std::collections::BTreeSet<String> {
         let path = format!("{}/../sidecar/{lock}", env!("CARGO_MANIFEST_DIR"));
@@ -4901,13 +5146,259 @@ pub(crate) mod tests {
         assert_eq!(WHISPER_REPO_DIR, "models--Systran--faster-whisper-base.en");
     }
 
+    /// The stack the enhanced layout's clean-up removes, and the entries it finds it by, agree: every
+    /// package is found under its import name, and never numpy, which the embedder runs on.
+    #[test]
+    fn the_tsne_stack_lists_agree_and_never_name_numpy() {
+        for package in TSNE_STACK_PACKAGES {
+            assert!(
+                !package.eq_ignore_ascii_case("numpy"),
+                "numpy is shared with the embedder and is never removed"
+            );
+            let import = normalised(package).replace('-', "_");
+            let import = match import.as_str() {
+                "scikit_learn" => "sklearn".to_string(),
+                _ => import,
+            };
+            assert!(
+                TSNE_STACK_DIRS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&import) || d.eq_ignore_ascii_case(package)),
+                "{package} is uninstalled but never looked for on disk"
+            );
+        }
+        assert!(!TSNE_STACK_DIRS.iter().any(|d| d.contains("numpy")));
+        assert_eq!(TSNE_STACK_PACKAGES.len(), 7);
+    }
+
+    /// What the quick look and the by-hand removal take is exact: the stack's own import dirs,
+    /// modules, `.libs` and dist-infos, and pip's stashes of its dirs, never a neighbour with a
+    /// similar name and never numpy.
+    #[test]
+    fn the_tsne_stack_is_found_by_exact_names_only() {
+        for mine in [
+            "openTSNE",
+            "opentsne-1.0.4.dist-info",
+            "opentsne.libs",
+            "sklearn",
+            "scikit_learn-1.9.0.dist-info",
+            "scikit_learn.libs",
+            "scipy",
+            "scipy.libs",
+            "scipy-1.18.1.dist-info",
+            "joblib",
+            "joblib-1.6.0.dist-info",
+            "threadpoolctl.py",
+            "threadpoolctl-3.6.0.dist-info",
+            "narwhals",
+            "cloudpickle",
+            // pip's stash of scipy and of its libs folder.
+            "~cipy",
+            "~cipy.libs",
+        ] {
+            assert!(is_tsne_stack_leftover(mine), "{mine} is the stack's");
+        }
+        for not_mine in [
+            "numpy",
+            "numpy.libs",
+            "numpy-2.5.2.dist-info",
+            "scipython",
+            "scipy-stubs-1.0.0.dist-info",
+            "joblibspark",
+            "sklearn_pandas",
+            "fastembed",
+            "onnxruntime",
+            "pip",
+            "~umpy",
+            ".pm-tsne",
+        ] {
+            assert!(
+                !is_tsne_stack_leftover(not_mine),
+                "{not_mine} is not the stack's"
+            );
+        }
+    }
+
+    /// The clean-up uninstalls the stack from every venv that has a piece of it, so none of its
+    /// packages may be one the base venv or the OCR component installs: removing it at every launch
+    /// would break them. Reads every lock in `sidecar/`, so a lock added later is covered, and a
+    /// regeneration that brings one in (scipy is a common dependency) fails here before it ships.
+    #[test]
+    fn no_lock_installs_a_package_the_tsne_clean_up_removes() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../sidecar");
+        let mut locks: Vec<String> = std::fs::read_dir(dir)
+            .expect("the sidecar folder is checked in")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".lock"))
+            .collect();
+        locks.sort();
+        assert!(locks.iter().any(|l| l == "requirements.lock"));
+        assert!(locks.iter().any(|l| l == "requirements-ocr.lock"));
+        for lock in &locks {
+            let names = locked_names(lock);
+            assert!(
+                !names.is_empty(),
+                "{lock} pins nothing, so this proves nothing"
+            );
+            for package in TSNE_STACK_PACKAGES {
+                assert!(
+                    !names.contains(&normalised(package)),
+                    "{package} is in {lock}, so the enhanced layout's clean-up would remove it at \
+                     every launch. Drop {package} from TSNE_STACK_PACKAGES and TSNE_STACK_DIRS."
+                );
+            }
+        }
+    }
+
+    /// The lock entries digest reads packages, hashes and `# via` lines and nothing above them: a
+    /// regenerated header leaves it alone, and any entry that moves, moves it.
+    #[test]
+    fn the_lock_entries_digest_covers_every_entry_and_no_header() {
+        let lock = "# header\n# pm-input: a\n# pm-pins: x\n\
+                    certifi==1.0 \\\n    --hash=sha256:aaa \\\n    --hash=sha256:bbb\n    # via\n    #   rapidocr\n\
+                    idna==2.0 \\\n    --hash=sha256:ccc\n";
+        let base = lock_entries_digest(lock.as_bytes());
+        assert_eq!(
+            base,
+            lock_entries_digest(lock.replace("pm-input: a", "pm-input: b").as_bytes()),
+            "a header line is not an entry"
+        );
+        assert_eq!(
+            base,
+            lock_entries_digest(lock.replace('\n', "\r\n").as_bytes()),
+            "CRLF reads as LF"
+        );
+        for changed in [
+            lock.replace("certifi==1.0", "certifi==1.1"),
+            lock.replace("sha256:bbb", "sha256:bbc"),
+            lock.replace("#   rapidocr", "#   other"),
+            lock.replace("idna==2.0 \\\n    --hash=sha256:ccc\n", ""),
+        ] {
+            assert_ne!(base, lock_entries_digest(changed.as_bytes()), "{changed}");
+        }
+    }
+
+    /// B10 took openTSNE out of `requirements-optional.txt`, which moved one header line of the OCR
+    /// lock and so its file digest, the number every installed OCR marker carries. The re-stamp that
+    /// keeps OCR switched on is valid only while the lock still holds the packages and hashes that
+    /// marker vouched for. If this fails, an entry of the OCR lock changed: a re-stamp would now
+    /// vouch for packages nobody installed, so delete `restamp_from` and its constants and tests
+    /// (an OCR marker then reads Stale once and the user reinstalls) rather than the digest. To
+    /// see what moved: `git show a520a130:sidecar/requirements-ocr.lock`.
+    #[test]
+    fn the_ocr_lock_still_holds_what_the_pre_b10_marker_vouched_for() {
+        let lock = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../sidecar/requirements-ocr.lock"
+        ))
+        .expect("the OCR lock is checked in");
+        assert_eq!(
+            lock_entries_digest(&lock),
+            PRE_B10_OCR_ENTRIES_SHA256,
+            "an entry of sidecar/requirements-ocr.lock moved since a520a130; see this test's doc"
+        );
+        assert_ne!(
+            crate::ingest::hex_digest(&lock),
+            PRE_B10_OCR_LOCK_SHA256,
+            "the whole file did move (its pm-input line), which is why the re-stamp exists"
+        );
+    }
+
+    /// A manager over a copy of the real OCR lock (or `lock`), a venv that has an interpreter, and
+    /// the OCR marker holding `marker`.
+    fn ocr_marker_case(lock: &[u8], marker: &str) -> (tempfile::TempDir, SidecarManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("sidecar");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(OPTIONAL_OCR_COMPONENT.lock), lock).unwrap();
+        let paths = SidecarPaths {
+            source_dir,
+            venv_dir: dir.path().join("venv"),
+        };
+        let py = paths.venv_python();
+        std::fs::create_dir_all(py.parent().unwrap()).unwrap();
+        std::fs::write(&py, b"").unwrap();
+        std::fs::write(paths.ocr_marker(), marker).unwrap();
+        (dir, SidecarManager::new(paths))
+    }
+
+    fn real_ocr_lock() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../sidecar/requirements-ocr.lock"
+        ))
+        .unwrap()
+    }
+
+    fn pre_b10_ocr_stamp() -> String {
+        format!(
+            "{};lock={PRE_B10_OCR_LOCK_SHA256}",
+            OPTIONAL_OCR_PINS.join(";")
+        )
+    }
+
+    /// An OCR marker an older PM wrote still reads Ready after the lock's header moved, and is
+    /// rewritten to the current stamp, so photos keep their text and Storage shows no Stale row.
+    #[test]
+    fn an_ocr_marker_from_before_the_lock_header_moved_stays_ready_and_is_restamped() {
+        let (_dir, mgr) = ocr_marker_case(&real_ocr_lock(), &format!("{}\n", pre_b10_ocr_stamp()));
+        assert!(mgr.optional_ocr_ready());
+        let marker = mgr.paths.ocr_marker();
+        let now = mgr.optional_stamp(&OPTIONAL_OCR_COMPONENT).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), now);
+        assert_ne!(now, pre_b10_ocr_stamp());
+        // From then on it is an ordinary current marker.
+        assert!(mgr.optional_ocr_ready());
+    }
+
+    /// Any other marker that is not the current stamp stays Stale and is left as it is.
+    #[test]
+    fn every_other_stale_ocr_marker_stays_stale() {
+        let pins = OPTIONAL_OCR_PINS.join(";");
+        for stale in [
+            format!("{pins};lock=0000"),
+            // The old pins with the old lock's digest are not this component's.
+            format!("rapidocr==3.9.2;pi-heif==1.4.0;lock={PRE_B10_OCR_LOCK_SHA256}"),
+            String::new(),
+        ] {
+            let (_dir, mgr) = ocr_marker_case(&real_ocr_lock(), &stale);
+            assert!(!mgr.optional_ocr_ready(), "{stale:?}");
+            assert_eq!(
+                std::fs::read_to_string(mgr.paths.ocr_marker()).unwrap(),
+                stale
+            );
+        }
+    }
+
+    /// The re-stamp vouches only for the packages the old marker did: once the lock holds another
+    /// entry (a package or a hash moved), the old stamp is Stale.
+    #[test]
+    fn the_restamp_is_refused_once_the_lock_holds_other_packages() {
+        let lock = String::from_utf8(real_ocr_lock()).unwrap();
+        let first = lock
+            .lines()
+            .find(|l| !l.starts_with('#') && l.contains("=="))
+            .unwrap()
+            .to_string();
+        let moved = lock.replacen(&first, &first.replacen("==", "==9", 1), 1);
+        assert_ne!(moved, lock);
+        let (_dir, mgr) = ocr_marker_case(moved.as_bytes(), &pre_b10_ocr_stamp());
+        assert!(!mgr.optional_ocr_ready());
+        assert_eq!(
+            std::fs::read_to_string(mgr.paths.ocr_marker()).unwrap(),
+            pre_b10_ocr_stamp()
+        );
+    }
+
     /// A stand-in for the venv's interpreter, as a shell script. `--version` answers 3.`minor`;
     /// every other call is logged, a line each, to `log`; and `-m pip uninstall` does what real pip
     /// does in the venv's own `lib/python3.<minor>/site-packages`, the only one pip there looks in:
     /// a package with no dist-info there is skipped as not installed (exit 0), one whose dist-info
     /// has no RECORD stops the whole command (exit 1, pip's UninstallMissingRecord), and otherwise
-    /// the package's import dir, its `.libs` and its dist-info go. Anything else (an install) only
-    /// logs.
+    /// the package's import dir (or module), its `.libs` and its dist-info go, as the real wheels
+    /// lay them out (openTSNE's dist-info is lower-case, and scikit-learn imports as `sklearn`).
+    /// Anything else (an install) only logs.
     #[cfg(unix)]
     fn fake_python(venv: &Path, log: &Path, minor: u32) {
         use std::os::unix::fs::PermissionsExt;
@@ -4929,8 +5420,14 @@ site='{site}'
 for package; do
     case "$package" in -*) continue ;; esac
     name=$(printf '%s' "$package" | sed 's/-/_/g')
+    lname=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+    case "$lname" in
+        scikit_learn) imp=sklearn ;;
+        opentsne) imp=openTSNE ;;
+        *) imp=$name ;;
+    esac
     found=
-    for d in "$site/$name"-*.dist-info; do
+    for d in "$site/$lname"-[0-9]*.dist-info; do
         if [ -d "$d" ]; then found=$d; fi
     done
     if [ -z "$found" ]; then
@@ -4941,7 +5438,7 @@ for package; do
         echo "ERROR: Cannot uninstall $package, RECORD file not found." >&2
         exit 1
     fi
-    rm -rf "$site/$name" "$site/$name.libs" "$found"
+    rm -rf "$site/$imp" "$site/$imp.py" "$site/$lname.libs" "$found"
 done
 "#,
                 log = log.display(),
@@ -4950,6 +5447,17 @@ done
         )
         .unwrap();
         std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A script just written can still be "text file busy" for a moment: another test thread
+        // that forked while this one had the file open holds a copy of the descriptor until it
+        // execs. The code under test swallows that error (`detect_python_version` reads it as "no
+        // interpreter"), so the clean-up tests failed now and then. Run it once here, until it
+        // runs, so every later start finds it ready.
+        for _ in 0..400 {
+            if Command::new(&py).arg("--version").output().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// A file of `bytes` zeros at `path`, with its folders.
@@ -4957,6 +5465,256 @@ done
     fn put(path: PathBuf, bytes: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![0u8; bytes]).unwrap();
+    }
+
+    /// A venv on [`fake_python`] laid out the way a computer that downloaded the enhanced map layout
+    /// has it: the stack in site-packages beside numpy (which the embedder runs on) and the
+    /// document engine, `.pm-tsne` beside `.pm-ready` and `.pm-ocr`, and look-alikes the clean-up
+    /// must leave. `site` is the venv's own site-packages. Returns the manager, the pip log and
+    /// site-packages.
+    #[cfg(unix)]
+    fn fake_tsne_venv(dir: &Path) -> (SidecarManager, PathBuf, PathBuf) {
+        let venv = dir.join("runtime").join("venv");
+        let log = dir.join("pip.log");
+        fake_python(&venv, &log, 12);
+        let site = venv.join("lib").join("python3.12").join("site-packages");
+        for stack in [
+            "openTSNE/__init__.py",
+            "opentsne-1.0.4.dist-info/RECORD",
+            "opentsne.libs/libannoy.so",
+            "sklearn/__init__.py",
+            "scikit_learn-1.9.0.dist-info/RECORD",
+            "scikit_learn.libs/libgomp.so",
+            "scipy/__init__.py",
+            "scipy-1.18.1.dist-info/RECORD",
+            "scipy.libs/libopenblas.so",
+            "joblib/__init__.py",
+            "joblib-1.6.0.dist-info/RECORD",
+            "threadpoolctl.py",
+            "threadpoolctl-3.6.0.dist-info/RECORD",
+            "narwhals/__init__.py",
+            "narwhals-2.0.0.dist-info/RECORD",
+            "cloudpickle/__init__.py",
+            "cloudpickle-3.1.0.dist-info/RECORD",
+        ] {
+            put(site.join(stack), 3);
+        }
+        // What stays: numpy and the document engine, and names that only look like the stack's.
+        for kept in [
+            "numpy/__init__.py",
+            "numpy-2.5.2.dist-info/RECORD",
+            "numpy.libs/libscipy_openblas.so",
+            "fastembed/__init__.py",
+            "fastembed-0.9.1.dist-info/RECORD",
+            "onnxruntime/__init__.py",
+            "rapidocr/__init__.py",
+            "scipython/__init__.py",
+            "scipy-stubs-1.0.0.dist-info/RECORD",
+            "pip/__init__.py",
+        ] {
+            put(site.join(kept), 5);
+        }
+        for marker in [".pm-ready", ".pm-tsne", ".pm-ocr"] {
+            put(venv.join(marker), 1);
+        }
+        let mgr = SidecarManager::new(SidecarPaths {
+            source_dir: dir.join("sidecar"),
+            venv_dir: venv,
+        });
+        (mgr, log, site)
+    }
+
+    /// The stack's entries pip left behind in `site`, whatever they are.
+    #[cfg(unix)]
+    fn tsne_entries_in(site: &Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(site)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| is_tsne_stack_leftover(n))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Everything of the document engine, numpy and the look-alikes is still there.
+    #[cfg(unix)]
+    fn assert_the_rest_stays(site: &Path, venv: &Path) {
+        for kept in [
+            "numpy",
+            "numpy-2.5.2.dist-info",
+            "numpy.libs",
+            "fastembed",
+            "fastembed-0.9.1.dist-info",
+            "onnxruntime",
+            "rapidocr",
+            "scipython",
+            "scipy-stubs-1.0.0.dist-info",
+            "pip",
+        ] {
+            assert!(site.join(kept).is_dir(), "{kept} is not the stack's");
+        }
+        assert!(venv.join(".pm-ready").is_file());
+        assert!(venv.join(".pm-ocr").is_file());
+    }
+
+    /// One launch, the second: nothing is found, no pip call, no file changes.
+    #[cfg(unix)]
+    fn assert_tsne_gone_for_good(mgr: &SidecarManager, dir: &Path, log: &Path) {
+        assert!(!mgr.tsne_leftovers_on_disk(), "something is still found");
+        let _ = std::fs::remove_file(log);
+        let before = tree(dir);
+        mgr.retire_tsne();
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap_or_default(),
+            "",
+            "no pip call at the next launch"
+        );
+        assert_eq!(tree(dir), before, "and nothing else changes");
+    }
+
+    /// What pip is asked: the whole stack in ONE call, and nothing else (numpy least of all).
+    #[cfg(unix)]
+    const TSNE_REMOVAL: &str = "\
+-m pip uninstall -y --disable-pip-version-check openTSNE scikit-learn joblib threadpoolctl narwhals cloudpickle scipy
+";
+
+    /// A computer that downloaded the enhanced layout: one pip call takes the stack and the marker
+    /// goes, while numpy, the document engine, OCR and the look-alikes stay; the next launch finds
+    /// nothing. This is the upgrade end to end.
+    #[cfg(unix)]
+    #[test]
+    fn an_older_pms_enhanced_layout_libraries_are_removed_in_one_pip_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        let venv = dir.path().join("runtime").join("venv");
+
+        mgr.retire_tsne();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), TSNE_REMOVAL);
+        assert_eq!(tsne_entries_in(&site), Vec::<String>::new());
+        assert!(!venv.join(".pm-tsne").exists());
+        assert_the_rest_stays(&site, &venv);
+        assert_tsne_gone_for_good(&mgr, dir.path(), &log);
+    }
+
+    /// Removing only openTSNE in the old Storage tab deleted the marker and kept scikit-learn and
+    /// scipy, so the packages can be on disk with no marker: what is on disk decides, not the marker.
+    #[cfg(unix)]
+    #[test]
+    fn packages_with_no_marker_are_still_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        let venv = dir.path().join("runtime").join("venv");
+        // The older removal: openTSNE and its marker gone, the rest kept.
+        for gone in ["openTSNE", "opentsne-1.0.4.dist-info", "opentsne.libs"] {
+            std::fs::remove_dir_all(site.join(gone)).unwrap();
+        }
+        std::fs::remove_file(venv.join(".pm-tsne")).unwrap();
+        assert!(
+            mgr.tsne_leftovers_on_disk(),
+            "scikit-learn and scipy are found"
+        );
+
+        mgr.retire_tsne();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), TSNE_REMOVAL);
+        assert_eq!(tsne_entries_in(&site), Vec::<String>::new());
+        assert_the_rest_stays(&site, &venv);
+        assert_tsne_gone_for_good(&mgr, dir.path(), &log);
+    }
+
+    /// A marker with no package left (a clean-up that took the packages and was cut short before
+    /// the marker) costs no pip call: the marker alone goes.
+    #[cfg(unix)]
+    #[test]
+    fn a_lone_marker_goes_without_a_pip_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        let venv = dir.path().join("runtime").join("venv");
+        for gone in tsne_entries_in(&site) {
+            let path = site.join(gone);
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        assert!(mgr.tsne_leftovers_on_disk(), "the marker alone is found");
+
+        mgr.retire_tsne();
+        assert_eq!(std::fs::read_to_string(&log).unwrap_or_default(), "");
+        assert!(!venv.join(".pm-tsne").exists());
+        assert_the_rest_stays(&site, &venv);
+        assert_tsne_gone_for_good(&mgr, dir.path(), &log);
+    }
+
+    /// A clean-up cut short (PM closed mid-way, or Windows holding a library): pip took the
+    /// dist-infos and some folders, leaving an import dir with no dist-info (pip calls it not
+    /// installed), a `.libs`, and its own stash. None of it has a RECORD pip could remove it by, so
+    /// no pip call, and the by-hand pass takes it all; a rerun then does nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_half_run_is_finished_by_hand_and_a_rerun_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        let venv = dir.path().join("runtime").join("venv");
+        for gone in tsne_entries_in(&site) {
+            let path = site.join(gone);
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        for left in [
+            "scipy/__init__.py",
+            "scipy.libs/libopenblas.so",
+            "~cipy/__init__.py",
+        ] {
+            put(site.join(left), 7);
+        }
+
+        mgr.retire_tsne();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            "",
+            "nothing pip could remove, so pip is not run"
+        );
+        assert_eq!(tsne_entries_in(&site), Vec::<String>::new());
+        assert!(!venv.join(".pm-tsne").exists());
+        assert_the_rest_stays(&site, &venv);
+        assert_tsne_gone_for_good(&mgr, dir.path(), &log);
+    }
+
+    /// pip refuses the whole call when one dist-info has no RECORD (its real behaviour, and the
+    /// fake's), and the by-hand pass takes what it left, so a record-less package never strands the
+    /// rest.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_pip_refuses_never_strands_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        let venv = dir.path().join("runtime").join("venv");
+        std::fs::remove_file(site.join("joblib-1.6.0.dist-info/RECORD")).unwrap();
+
+        mgr.retire_tsne();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), TSNE_REMOVAL);
+        assert_eq!(tsne_entries_in(&site), Vec::<String>::new());
+        assert_the_rest_stays(&site, &venv);
+        assert_tsne_gone_for_good(&mgr, dir.path(), &log);
+    }
+
+    /// numpy is in no pip call and no by-hand removal, whatever else is found.
+    #[cfg(unix)]
+    #[test]
+    fn numpy_is_never_asked_of_pip_nor_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, log, site) = fake_tsne_venv(dir.path());
+        mgr.retire_tsne();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(!calls.to_ascii_lowercase().contains("numpy"), "{calls}");
+        for numpy in ["numpy", "numpy-2.5.2.dist-info", "numpy.libs"] {
+            assert!(site.join(numpy).is_dir(), "{numpy}");
+        }
     }
 
     /// A venv on [`fake_python`] laid out the way an older PM left it for someone who used voice:
@@ -5459,7 +6217,7 @@ done
             runtime.join("models/.locks").join(WHISPER_REPO_DIR),
             runtime.join("tmp"),
         ] {
-            remove_voice_leftover(&path);
+            remove_leftover(&path, "voice input");
         }
     }
 

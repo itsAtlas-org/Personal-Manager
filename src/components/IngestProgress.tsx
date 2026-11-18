@@ -3,12 +3,12 @@
 
 // Depth-aware progress. In the default "count" mode the document-engine file loop reports a known
 // total (the `counted` IngestEvent), so at standard+ the bar fills and shows an "X of Y" count, and
-// power adds a percentage. In "percent" mode the work has no countable items (e.g. the optional t-SNE
+// power adds a percentage. In "percent" mode the work has no countable items (e.g. the optional OCR
 // download), so standard and power both show just the percentage. At minimal — or before the total is
 // known (the opaque setup + model-download phase, where `total` is still null) — it falls back to the
 // indeterminate shimmer. At Power an elapsed timer is shown on the right, INCLUDING during the shimmer
 // phase (the longest ops run with no total yet, so that's exactly when it helps). This is the one place
-// the per-depth rule lives, so every progress surface (Documents ingest, Re-index modal, the t-SNE
+// the per-depth rule lives, so every progress surface (Documents ingest, Re-index modal, the OCR
 // download, and any future one) renders consistently by passing `processed` / `total`.
 
 import { useRef } from "react";
@@ -23,7 +23,7 @@ interface Props {
   /** Total items this run will work through, or null until known (count mode: the `counted` event;
    *  percent mode: pass 100). */
   total: number | null;
-  /** Accessible label for the bar (e.g. "Ingesting documents", "Re-indexing", "Downloading t-SNE"). */
+  /** Accessible label for the bar (e.g. "Ingesting documents", "Re-indexing", "Downloading photo text recognition"). */
   label: string;
   className?: string;
   /** "count" (default) → "X of Y" (+ % at power). "percent" → just the percentage (no item count). */

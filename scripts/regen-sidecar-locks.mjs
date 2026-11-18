@@ -58,16 +58,17 @@ export function pythonFloor(rustSource) {
 
 /** The optional components' pins, read from Rust — the source of truth for each (L-6). */
 export function optionalPins(rustSource) {
-  const tsne = rustSource.match(/const OPTIONAL_TSNE_PIN:\s*&str\s*=\s*"([^"]+)"/);
   const ocr = rustSource.match(/const OPTIONAL_OCR_PINS:\s*&\[&str\]\s*=\s*&\[([^\]]+)\]/);
-  if (!tsne || !ocr) throw new Error(`could not find the optional pins in ${SIDECAR_RS}`);
+  if (!ocr) throw new Error(`could not find the optional pins in ${SIDECAR_RS}`);
   const list = (m) => [...m[1].matchAll(/"([^"]+)"/g)].map((p) => p[1]);
   return {
-    tsne: [tsne[1]],
     ocr: list(ocr),
   };
 }
 
+// The wording below is part of every lock's BYTES, and the base lock's hash is each venv's `.ready`
+// marker: reword it (even the stale "scipy for t-SNE") and every installed PM rebuilds its document
+// engine. Leave it until the base lock has to move for another reason.
 function header(lines) {
   return [
     "# PM sidecar dependency lock - GENERATED, DO NOT EDIT BY HAND.",
@@ -141,7 +142,7 @@ function main() {
   const pins = optionalPins(rust);
   const baseInputHash = sha256(read(BASE_INPUT));
   const overrideHash = sha256(read(BASE_OVERRIDE));
-  const optionalLocks = ["ocr", "tsne"].map((n) => `sidecar/requirements-${n}.lock`);
+  const optionalLocks = ["ocr"].map((n) => `sidecar/requirements-${n}.lock`);
   // Read before anything is rewritten: the base lock is about to change under the optional ones.
   const keep = process.env.PM_LOCK_KEEP === "1";
   const committed = Object.fromEntries(
@@ -171,10 +172,7 @@ function main() {
   // numpy that fastembed and onnxruntime are running on, mid-session, to satisfy rapidocr.
   const baseLockHash = sha256(base);
   const optionalInputHash = sha256(read("sidecar/requirements-optional.txt"));
-  for (const [name, list] of [
-    ["ocr", pins.ocr],
-    ["tsne", pins.tsne],
-  ]) {
+  for (const [name, list] of [["ocr", pins.ocr]]) {
     const out = `sidecar/requirements-${name}.lock`;
     const body = compile({
       label: out,

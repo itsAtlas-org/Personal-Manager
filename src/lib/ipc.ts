@@ -1634,7 +1634,7 @@ export const optionalOcrStatus = () => invoke<OcrStatus>("optional_ocr_status");
  *  rides the `ocr://install` event (see `onOcrInstall`); removal is via `removeStorageComponent`. */
 export const installOptionalOcr = () => invoke<void>("install_optional_ocr");
 
-/** Inventory the large on-device components (venv, t-SNE libraries, OCR stack, search model). */
+/** Inventory the large on-device components (venv, OCR stack, search model). */
 export const listStorageComponents = () => invoke<StorageReport>("list_storage_components");
 
 /** Remove an on-device component, enforced by the dependency cascade server-side. */

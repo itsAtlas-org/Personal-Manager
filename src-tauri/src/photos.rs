@@ -13,7 +13,7 @@
 //! This module owns the photo-specific logic; the ingest orchestration lives in [`crate::ingest`] and
 //! the OCR + EXIF extraction is done by the Python sidecar's `analyze_image` (see [`ImageAnalysis`]).
 //! OCR is an OPTIONAL on-demand component (rapidocr + pi-heif) — installable and removable from
-//! Settings, exactly like the t-SNE reducer — so a user who declines it still ingests photos with
+//! Settings — so a user who declines it still ingests photos with
 //! their EXIF metadata chunk (`ocr_text` then stays `None`).
 
 use std::path::Path;

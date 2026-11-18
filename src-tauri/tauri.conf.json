@@ -48,8 +48,7 @@
       "../sidecar/pm_sidecar.py": "sidecar/pm_sidecar.py",
       "../sidecar/requirements.txt": "sidecar/requirements.txt",
       "../sidecar/requirements.lock": "sidecar/requirements.lock",
-      "../sidecar/requirements-ocr.lock": "sidecar/requirements-ocr.lock",
-      "../sidecar/requirements-tsne.lock": "sidecar/requirements-tsne.lock"
+      "../sidecar/requirements-ocr.lock": "sidecar/requirements-ocr.lock"
     },
     "icon": [
       "icons/32x32.png",

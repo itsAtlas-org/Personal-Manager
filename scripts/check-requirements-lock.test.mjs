@@ -8,7 +8,7 @@
 // anything at all: every entry pinned with `==`, and every entry carrying a hash.
 //
 // Two details here bit during development and are locked as regressions:
-//   * uv normalises names (`openTSNE` -> `opentsne`) while the Rust pin keeps the original case, so
+//   * uv normalises names (`Pillow` -> `pillow`) while a Rust pin can keep the original case, so
 //     every comparison has to be PEP 503-normalised;
 //   * a name can appear MORE THAN ONCE under different markers (numpy resolves two ways across
 //     the supported Python range), so "find the entry" is never a single lookup.
@@ -65,8 +65,8 @@ const REQS = "# a comment\nmarkitdown[pdf,docx]==0.1.6\ndefusedxml==0.7.1\n";
 
 describe("normalise", () => {
   it("folds case and separator runs the way PEP 503 does", () => {
-    // The live case: Rust pins `openTSNE==1.0.4`, uv writes `opentsne==1.0.4`.
-    expect(normalise("openTSNE")).toBe("opentsne");
+    // The live case: a pin may say `Pillow`, uv writes `pillow`.
+    expect(normalise("Pillow")).toBe("pillow");
     expect(normalise("pillow_heif")).toBe("pillow-heif");
     expect(normalise("zope..interface")).toBe("zope-interface");
   });
@@ -147,7 +147,6 @@ describe("parseRequirements", () => {
 describe("readRustFacts", () => {
   const rust = [
     "const MIN_PYTHON: (u32, u32) = (3, 12);",
-    'const OPTIONAL_TSNE_PIN: &str = "openTSNE==1.0.4";',
     'const OPTIONAL_OCR_PINS: &[&str] = &["rapidocr==3.9.2", "pi-heif==1.4.0"];',
   ].join("\n");
 
@@ -155,7 +154,6 @@ describe("readRustFacts", () => {
     expect(readRustFacts(rust)).toEqual({
       floor: "3.12",
       pins: {
-        tsne: ["openTSNE==1.0.4"],
         ocr: ["rapidocr==3.9.2", "pi-heif==1.4.0"],
       },
     });
@@ -168,7 +166,7 @@ describe("readRustFacts", () => {
   it("throws rather than guessing when the constants move", () => {
     expect(() => readRustFacts("fn main() {}")).toThrow(/MIN_PYTHON/);
     // A source that lost the OCR pins is the same failure, in both scripts.
-    const noOcr = rust.split("\n").slice(0, 2).join("\n");
+    const noOcr = rust.split("\n").slice(0, 1).join("\n");
     expect(() => readRustFacts(noOcr)).toThrow(/optional pins/);
     expect(() => optionalPins(noOcr)).toThrow(/optional pins/);
   });

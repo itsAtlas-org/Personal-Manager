@@ -32,11 +32,7 @@ import { acceptable } from "./check-npm-licenses.mjs";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const LICENCES_FILE = "sidecar/licences.json";
-export const LOCKS = [
-  "sidecar/requirements.lock",
-  "sidecar/requirements-ocr.lock",
-  "sidecar/requirements-tsne.lock",
-];
+export const LOCKS = ["sidecar/requirements.lock", "sidecar/requirements-ocr.lock"];
 
 /**
  * Licences accepted for the sidecar venv: the permissive base deny.toml and the npm gate share, plus,
@@ -57,7 +53,7 @@ export const LOCKS = [
  *                    is. Accepted knowingly, not by omission.
  *   LGPL-2.1-only, LGPL-2.1-or-later, LGPL-2.0-or-later, LGPL-3.0-only, LGPL-3.0-or-later
  *                    weak copyleft in libraries the wheels bundle: GEOS in shapely (2.1 only),
- *                    libquadmath in numpy and scipy, GNU libiconv linked statically into lxml,
+ *                    libquadmath in numpy, GNU libiconv linked statically into lxml,
  *                    libheif and libde265 in pi-heif, FFmpeg and LAME in OpenCV. All unmodified and
  *                    never conveyed by PM: pip fetches the wheels from PyPI onto the user's machine,
  *                    so the distribution duties (source, licence text, relinking for a static link)
@@ -68,8 +64,8 @@ export const LOCKS = [
  *                    in sidecar.rs). Accepted 2026-11-06 (Bobby: "souds godo for lgpl, you can add
  *                    it. should we use the new version as well? i dont mind").
  *   GPL-3.0-or-later WITH GCC-exception-3.1
- *                    the GCC runtime (libgfortran, libgcc_s, libgomp, libstdc++) that numpy, scipy,
- *                    scikit-learn, openTSNE, onnxruntime and pi-heif ship because they were compiled
+ *                    the GCC runtime (libgfortran, libgcc_s, libgomp, libstdc++) that numpy,
+ *                    onnxruntime and pi-heif ship because they were compiled
  *                    with GCC. The exception exists so that any program, under any licence, may
  *                    use it: it is not GPL's copyleft.
  *   the permissive long tail, in bundled libraries: BSL-1.0 (Boost), Unicode-3.0 and ICU (ICU and
@@ -173,11 +169,11 @@ export const PACKAGE_EXCEPTIONS = {
   ],
 };
 
-/** Fewest packages the three locks can plausibly resolve to; below this the parse broke. */
-const PACKAGE_FLOOR = 60;
+/** Fewest packages the two locks can plausibly resolve to; below this the parse broke. */
+const PACKAGE_FLOOR = 50;
 
 /**
- * The union of the three locks as `{name, versions}`, PEP 503-normalised and sorted.
+ * The union of the two locks as `{name, versions}`, PEP 503-normalised and sorted.
  *
  * A package legitimately has SEVERAL pins. The locks are resolved `--universal`, so one file
  * covers every platform and every CPython from MIN_PYTHON up, and where the resolution forks the
@@ -186,7 +182,7 @@ const PACKAGE_FLOOR = 60;
  * has to be known for all of them, not for whichever the parser happened to see first.
  *
  * The one real cross-lock invariant is the constraint: the optional locks are compiled
- * `--constraint sidecar/requirements.lock` precisely so an on-demand OCR or t-SNE install cannot
+ * `--constraint sidecar/requirements.lock` precisely so an on-demand OCR install cannot
  * move a package the base venv is already running on. So an optional lock may pin FEWER versions
  * than the base (its own markers are narrower), but never a version the base lock does not have.
  */
@@ -208,7 +204,7 @@ export function lockedPackages(root, locks = LOCKS) {
   for (const rel of optionalLocks) {
     for (const [name, versions] of perLock.get(rel)) {
       const inBase = base.get(name);
-      if (!inBase) continue; // OCR/t-SNE-only packages have no base pin to agree with.
+      if (!inBase) continue; // OCR-only packages have no base pin to agree with.
       for (const version of versions) {
         if (!inBase.has(version)) {
           conflicts.push(

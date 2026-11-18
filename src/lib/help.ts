@@ -509,7 +509,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-storage-builtin": {
     title: "Built in",
-    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they download again when you need them, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
+    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. Photo text recognition can be removed to free space. It downloads again when you need it, and it installs from here too. Some rows are shared libraries a feature above them depends on: OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
   },
   "settings-storage-mods": {
     title: "Mods in Storage",

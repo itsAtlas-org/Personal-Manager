@@ -224,9 +224,10 @@ release remain the open post-v1 work.
   (provisioned on first run) speaks newline-JSON over stdio: `convert` (MarkItDown),
   `embed` / `count_tokens` / `rerank` (fastembed ONNX, model-parameterised — English
   `bge-small-en-v1.5` 384-d by default, multilingual e5-large 1024-d), `analyze_image`
-  (OCR), `analyze_spreadsheet`, and `reduce` (PCA / optional t-SNE map layout). Photo OCR
-  and t-SNE are optional components with their own locks (`sidecar.rs` `OptionalComponent`),
-  installed on demand. The venv and downloaded models are runtime artifacts, never committed.
+  (OCR) and `analyze_spreadsheet`. Photo OCR is an optional component with its own lock
+  (`sidecar.rs` `OptionalComponent`), installed on demand. The Document Map mod works out its
+  own layout, so the sidecar no longer projects vectors; `retire_tsne` removes the libraries
+  the old downloadable layout left on a machine. The venv and downloaded models are runtime artifacts, never committed.
 
 ## Design system (V2)
 

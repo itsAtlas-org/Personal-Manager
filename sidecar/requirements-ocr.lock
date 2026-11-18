@@ -21,7 +21,7 @@
 #
 # pm-lock: 1
 # pm-python-floor: 3.12
-# pm-input: sidecar/requirements-optional.txt@sha256:9d643058aba9c41bc8bd37bff812d19cd611f05802a8ea3ff23c73d86fef65b1
+# pm-input: sidecar/requirements-optional.txt@sha256:687fa3d6278b28bd596ae84a9c46fc7a6491fafa6abf969f3f18358a8ddc62fd
 # pm-constraint: sidecar/requirements.lock@sha256:8bc95f5c386ed3265e0416bbd3ff78e89a6f06211054c07b930b1454e02288e1
 # pm-pins: rapidocr==3.10.0 pi-heif==1.4.0
 certifi==2026.10.23 \

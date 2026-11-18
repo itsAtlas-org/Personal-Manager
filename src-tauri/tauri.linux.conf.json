@@ -8,7 +8,6 @@
       "../sidecar/requirements.txt": "sidecar/requirements.txt",
       "../sidecar/requirements.lock": "sidecar/requirements.lock",
       "../sidecar/requirements-ocr.lock": "sidecar/requirements-ocr.lock",
-      "../sidecar/requirements-tsne.lock": "sidecar/requirements-tsne.lock",
       "python": "python"
     }
   }

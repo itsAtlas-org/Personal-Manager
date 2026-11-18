@@ -43,10 +43,9 @@ const OPTIONAL_INPUT = "sidecar/requirements-optional.txt";
 const ENTRY_FLOOR = {
   [BASE_LOCK]: 40,
   "sidecar/requirements-ocr.lock": 5,
-  "sidecar/requirements-tsne.lock": 5,
 };
 
-/** PEP 503 name normalisation — uv writes `opentsne`, Rust pins `openTSNE`. */
+/** PEP 503 name normalisation — uv writes `pi-heif`, a pin may say `pi_heif`. */
 export function normalise(name) {
   return name.replace(/[-_.]+/g, "-").toLowerCase();
 }
@@ -181,14 +180,13 @@ export function parseRequirements(text) {
 /** The MIN_PYTHON floor and the optional pins, read from Rust — the source of truth for both. */
 export function readRustFacts(rustSource) {
   const floor = rustSource.match(/const MIN_PYTHON:\s*\(u32,\s*u32\)\s*=\s*\((\d+),\s*(\d+)\)/);
-  const tsne = rustSource.match(/const OPTIONAL_TSNE_PIN:\s*&str\s*=\s*"([^"]+)"/);
   const ocr = rustSource.match(/const OPTIONAL_OCR_PINS:\s*&\[&str\]\s*=\s*&\[([^\]]+)\]/);
-  if (!floor || !tsne || !ocr)
+  if (!floor || !ocr)
     throw new Error(`could not read MIN_PYTHON / the optional pins from ${SIDECAR_RS}`);
   const list = (m) => [...m[1].matchAll(/"([^"]+)"/g)].map((p) => p[1]);
   return {
     floor: `${floor[1]}.${floor[2]}`,
-    pins: { tsne: [tsne[1]], ocr: list(ocr) },
+    pins: { ocr: list(ocr) },
   };
 }
 
@@ -313,10 +311,7 @@ export function scan(root, read = (rel) => readFileSync(join(root, rel), "utf8")
 
   const optionalPins = parseRequirements(optionalInput);
   let entryCount = parseEntries(baseLock).length;
-  for (const [name, rustPins] of [
-    ["ocr", pins.ocr],
-    ["tsne", pins.tsne],
-  ]) {
+  for (const [name, rustPins] of [["ocr", pins.ocr]]) {
     const path = `sidecar/requirements-${name}.lock`;
     const text = read(path);
     const header = parseHeader(text);
@@ -357,7 +352,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `✓ requirements-lock: ${entryCount} pinned, hashed entries across 3 locks, all stamped for the current ` +
+    `✓ requirements-lock: ${entryCount} pinned, hashed entries across 2 locks, all stamped for the current ` +
       `requirements and MIN_PYTHON floor`,
   );
 }

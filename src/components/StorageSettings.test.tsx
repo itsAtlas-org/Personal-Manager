@@ -59,20 +59,24 @@ const report = (...components: StorageComponent[]): StorageReport => ({
   mods: [],
 });
 
-const tsne = row({
-  id: "openTSNE",
-  label: "Enhanced map layout (openTSNE)",
-  detail: "Sharper, tighter clusters for the semantic Map (t-SNE).",
-  manage: { label: "Turn on/off in Memory map", tab: "general" },
-});
+const ocr = row({});
 
-const sklearnHeld = row({
-  id: "scikit-learn",
-  label: "scikit-learn",
-  detail: "Used by the enhanced layout. Includes joblib and threadpoolctl.",
+const opencvHeld = row({
+  id: "opencv-python",
+  label: "OpenCV (opencv-python-headless)",
+  detail: "Image processing used by photo text recognition.",
   child: true,
   status: "blocked",
-  blockers: [{ label: "Remove the enhanced layout first", anchor: "openTSNE" }],
+  blockers: [{ label: "Remove photo text recognition first", anchor: "ocr" }],
+});
+
+/** A row managed on another tab: the pill beside it switches there. */
+const embedder = row({
+  id: "embedder",
+  label: "Search model (bge-small)",
+  detail: "Powers search and indexing. Always needed.",
+  status: "in_use",
+  manage: { label: "Change under Search → Language", tab: "search" },
 });
 
 /** The row's own box, so a button is found on the row it belongs to. */
@@ -142,24 +146,24 @@ describe("installing photo text recognition", () => {
 
 describe("removing a component", () => {
   it("asks first in the component's own words, and removes only once confirmed", async () => {
-    listStorageComponents.mockResolvedValue(report(tsne));
+    listStorageComponents.mockResolvedValue(report(ocr));
     removeStorageComponent.mockResolvedValue(undefined);
     render(<StorageSettings onNavigate={() => {}} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByText("Remove the enhanced layout?")).toBeTruthy();
-    expect(within(dialog).getByText(/returns to the basic \(PCA\) layout/)).toBeTruthy();
+    expect(within(dialog).getByText("Remove photo text recognition?")).toBeTruthy();
+    expect(within(dialog).getByText(/indexed by their date and location only/)).toBeTruthy();
     expect(removeStorageComponent).not.toHaveBeenCalled();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
-    await waitFor(() => expect(removeStorageComponent).toHaveBeenCalledWith("openTSNE"));
+    await waitFor(() => expect(removeStorageComponent).toHaveBeenCalledWith("ocr"));
     await waitFor(() => expect(listStorageComponents).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("leaves the component alone when the confirm is cancelled", async () => {
-    listStorageComponents.mockResolvedValue(report(tsne));
+    listStorageComponents.mockResolvedValue(report(ocr));
     render(<StorageSettings onNavigate={() => {}} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
@@ -169,45 +173,47 @@ describe("removing a component", () => {
   });
 
   it("shows the backend's reason when it refuses a removal", async () => {
-    listStorageComponents.mockResolvedValue(report(tsne));
-    removeStorageComponent.mockRejectedValue("Remove the enhanced layout first");
+    listStorageComponents.mockResolvedValue(report(ocr));
+    removeStorageComponent.mockRejectedValue("Remove photo text recognition first");
     render(<StorageSettings onNavigate={() => {}} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove" }));
-    expect(await screen.findByText("Remove the enhanced layout first")).toBeTruthy();
+    expect(await screen.findByText("Remove photo text recognition first")).toBeTruthy();
   });
 });
 
 describe("the removal cascade", () => {
   it("greys Remove on a library something still needs, and its pill jumps to that row", async () => {
-    listStorageComponents.mockResolvedValue(report(tsne, sklearnHeld));
+    listStorageComponents.mockResolvedValue(report(ocr, opencvHeld));
     const { container } = render(<StorageSettings onNavigate={() => {}} />);
-    await screen.findByText("scikit-learn");
+    await screen.findByText("OpenCV (opencv-python-headless)");
 
-    const held = rowBox(container, "scikit-learn");
+    const held = rowBox(container, "opencv-python");
     // Installed and held, not missing: the chip says so, or it reads as a download still to come.
     expect(held.getByText("Installed — in use")).toBeTruthy();
     expect((held.getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(true);
 
-    const dependent = container.querySelector<HTMLElement>("#storage-openTSNE")!;
+    const dependent = container.querySelector<HTMLElement>("#storage-ocr")!;
     dependent.scrollIntoView = vi.fn();
-    fireEvent.click(held.getByRole("button", { name: "Remove the enhanced layout first →" }));
+    fireEvent.click(held.getByRole("button", { name: "Remove photo text recognition first →" }));
     expect(dependent.scrollIntoView).toHaveBeenCalledTimes(1);
   });
 
   it("links a row managed elsewhere to the tab that owns it", async () => {
-    listStorageComponents.mockResolvedValue(report(tsne));
+    listStorageComponents.mockResolvedValue(report(embedder));
     const onNavigate = vi.fn();
     render(<StorageSettings onNavigate={onNavigate} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Turn on/off in Memory map →" }));
-    expect(onNavigate).toHaveBeenCalledWith("general");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Change under Search → Language →" }),
+    );
+    expect(onNavigate).toHaveBeenCalledWith("search");
   });
 
   it("draws every pill's edge in --ink4, the one that reaches 3:1; --border2 is about 1.6:1", async () => {
     // A pointer is a control, and its outline is how it reads as one at default Contrast.
-    listStorageComponents.mockResolvedValue(report(tsne, sklearnHeld));
+    listStorageComponents.mockResolvedValue(report(ocr, opencvHeld, embedder));
     getLocalAiSwitch.mockResolvedValue({
       on: false,
       chat_needs_model: false,
@@ -215,11 +221,11 @@ describe("the removal cascade", () => {
       server_saved: false,
     });
     render(<StorageSettings onNavigate={() => {}} />);
-    await screen.findByText("scikit-learn");
+    await screen.findByText("OpenCV (opencv-python-headless)");
     await screen.findByRole("button", { name: "AI & Models →" });
     const pills = [
-      screen.getByRole("button", { name: "Remove the enhanced layout first →" }),
-      screen.getByRole("button", { name: "Turn on/off in Memory map →" }),
+      screen.getByRole("button", { name: "Remove photo text recognition first →" }),
+      screen.getByRole("button", { name: "Change under Search → Language →" }),
       screen.getByRole("button", { name: "AI & Models →" }),
     ];
     for (const pill of pills) {
