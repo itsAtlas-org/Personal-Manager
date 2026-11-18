@@ -349,7 +349,14 @@ export function QuickCreatePopover({
     else if (save && !save.disabled) save.focus();
     else panelRef.current?.focus();
   }, []);
-  const refocusSave = () => setTimeout(() => saveButton.current?.focus(), 0);
+  // Focus goes to Save in the commit that re-enables it. A timer raced that render (Node runs
+  // setImmediate and setTimeout(0) in either order, and a browser's scheduler can lag a timer under
+  // load), so focus could land on a still-disabled Save, which takes none, and stay on <body>.
+  const [saveFocusAsk, setSaveFocusAsk] = useState(0);
+  const refocusSave = () => setSaveFocusAsk((n) => n + 1);
+  useLayoutEffect(() => {
+    if (saveFocusAsk > 0) saveButton.current?.focus();
+  }, [saveFocusAsk]);
   const whereOf = (id: string) => createdWhere(overviewRef.current, hiddenRef.current, id);
 
   // Under the button, clamped to the window, above it only when there's no room below; beside a

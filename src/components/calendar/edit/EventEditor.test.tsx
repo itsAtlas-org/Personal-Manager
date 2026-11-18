@@ -1962,6 +1962,26 @@ describe("EventEditor, a repeating event", () => {
     await waitFor(() => expect(document.activeElement).toBe(editorSave));
   });
 
+  it("puts focus back on Save in the render that frees it, with no timer to wait for", async () => {
+    // Decided on a timer, focus could go to Cancel (Save still held for that render) or nowhere.
+    // Timers are frozen here (React's act still flushes on setImmediate), so a focus left to a
+    // setTimeout never happens.
+    openForEdit.mockResolvedValue(ready(event()));
+    choicesForEdit.mockRejectedValue(new Error("PM couldn't reach the calendar."));
+    await open(vi.fn(), undefined, occurrence);
+    const editorSave = screen.getByRole("button", { name: "Save" });
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Gym" } });
+    fireEvent.click(editorSave);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      for (let i = 0; i < 10; i++) await act(async () => {});
+      expect(screen.getByText("PM couldn't reach the calendar.")).toBeTruthy();
+      expect(document.activeElement).toBe(editorSave);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rebases when the choices are refused because Google changed the event", async () => {
     openForEdit
       .mockResolvedValueOnce(ready(event()))

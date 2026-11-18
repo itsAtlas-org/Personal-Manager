@@ -1899,6 +1899,25 @@ describe("QuickCreatePopover Event | Task", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledWith(true, "task"));
   });
 
+  it("puts focus on Save in the render that re-enables it, with no timer to wait for", async () => {
+    // A timer raced that render, and under load focus stayed on <body> (#1117's CI, then this PR's
+    // gate). Timers are frozen here (React's act still flushes on setImmediate), so a focus left to a
+    // setTimeout never happens.
+    addTask.mockRejectedValueOnce("The task list is locked.");
+    open();
+    fireEvent.change(title(), { target: { value: "Pay rent" } });
+    goTask();
+    fireEvent.keyDown(title(), { key: "Enter" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      for (let i = 0; i < 10; i++) await act(async () => {});
+      expect(screen.getByText("The task list is locked.")).toBeTruthy();
+      expect(document.activeElement).toBe(saveButton());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a task that fails once the box has gone is handed back to reopen on Task", async () => {
     const out = laterTask();
     addTask.mockReturnValueOnce(out.promise);
