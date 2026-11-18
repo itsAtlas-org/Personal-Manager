@@ -266,3 +266,230 @@ export function reduceToUnit(
   }
   return { coords, method: "pca" };
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The top K axes, for the enhanced layout's 50-axis pre-step (tsne.ts). Everything above this line is
+// the two-axis path and is unchanged, so every cached PCA picture stays fresh (ALGO_VERSION stays 1).
+//
+// Randomised subspace iteration (Halko, Martinsson and Tropp): start from a seeded random set of
+// `K + OVERSAMPLE` directions, then a few times multiply by the covariance and re-orthonormalise, so
+// the set drifts onto the top axes; finally take the exact top K inside that set (Rayleigh-Ritz: the
+// eigenvectors of the small projected covariance, by Jacobi rotations). One pass over the vectors per
+// multiplication, no d x d matrix, so 5,000 documents of 1,024 dimensions needs a few seconds of one
+// worker thread and a few hundred kilobytes beyond the vectors. Like the two-axis path it uses only
+// + - * / and sqrt, and a seeded integer generator, so the same documents give the same axes on every
+// machine; a column's sign is fixed by its largest score.
+// ---------------------------------------------------------------------------------------------------
+
+/** A seeded uniform generator in [0, 1) (mulberry32): the same numbers on every run and machine. */
+export function seededRandom(seed: number): () => number {
+  return seeded(seed);
+}
+
+/** Extra directions carried beside the K wanted: they make the iteration converge on the K-th axis. */
+export const OVERSAMPLE = 10;
+/** Multiplications by the covariance. Captured variance is what t-SNE needs, and it converges fast. */
+export const POWER_STEPS = 4;
+
+/** The top axes of a set of vectors, as the projections of every row onto them. */
+export interface PrincipalScores {
+  /** `count x axes`, row-major: row i's coordinates on axis 0, 1, ... (the rows are mean-centred). */
+  scores: Float64Array;
+  /** How many axes: `min(k, dimension, count)`. */
+  axes: number;
+  /** The variance (sum of squared scores) each axis carries, largest first. */
+  variance: Float64Array;
+}
+
+/** Orthonormalise the `rows` rows of `m` (each `width` long) in place, twice for accuracy. A row with
+ *  nothing left of it becomes zero, so a rank-deficient set stays finite. */
+function orthonormaliseRows(m: Float64Array, rows: number, width: number): void {
+  for (let pass = 0; pass < 2; pass++) {
+    for (let r = 0; r < rows; r++) {
+      const at = r * width;
+      for (let s = 0; s < r; s++) {
+        const other = s * width;
+        let along = 0;
+        for (let j = 0; j < width; j++) along += m[at + j] * m[other + j];
+        for (let j = 0; j < width; j++) m[at + j] -= along * m[other + j];
+      }
+      let n2 = 0;
+      for (let j = 0; j < width; j++) n2 += m[at + j] * m[at + j];
+      const len = Math.sqrt(n2);
+      if (len > 1e-12) for (let j = 0; j < width; j++) m[at + j] /= len;
+      else for (let j = 0; j < width; j++) m[at + j] = 0;
+    }
+  }
+}
+
+/** Eigenvalues (descending) and eigenvectors (`vectors[c * p + r]` is component r of eigenvector c) of
+ *  the symmetric p x p matrix `a` (destroyed), by cyclic Jacobi rotations. */
+function jacobiEigen(a: Float64Array, p: number): { values: Float64Array; vectors: Float64Array } {
+  const v = new Float64Array(p * p);
+  for (let i = 0; i < p; i++) v[i * p + i] = 1;
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0;
+    let diag = 0;
+    for (let i = 0; i < p; i++) {
+      diag += a[i * p + i] * a[i * p + i];
+      for (let j = i + 1; j < p; j++) off += a[i * p + j] * a[i * p + j];
+    }
+    if (!(off > 1e-26 * (diag + off))) break;
+    for (let i = 0; i < p - 1; i++) {
+      for (let j = i + 1; j < p; j++) {
+        const apq = a[i * p + j];
+        if (apq === 0) continue;
+        const theta = (a[j * p + j] - a[i * p + i]) / (2 * apq);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+        for (let k = 0; k < p; k++) {
+          const aki = a[k * p + i];
+          const akj = a[k * p + j];
+          a[k * p + i] = c * aki - s * akj;
+          a[k * p + j] = s * aki + c * akj;
+        }
+        for (let k = 0; k < p; k++) {
+          const aik = a[i * p + k];
+          const ajk = a[j * p + k];
+          a[i * p + k] = c * aik - s * ajk;
+          a[j * p + k] = s * aik + c * ajk;
+        }
+        for (let k = 0; k < p; k++) {
+          const vki = v[i * p + k];
+          const vkj = v[j * p + k];
+          v[i * p + k] = c * vki - s * vkj;
+          v[j * p + k] = s * vki + c * vkj;
+        }
+      }
+    }
+  }
+  const order = Array.from({ length: p }, (_, i) => i).sort(
+    (x, y) => a[y * p + y] - a[x * p + x] || x - y,
+  );
+  const values = new Float64Array(p);
+  const vectors = new Float64Array(p * p);
+  order.forEach((from, to) => {
+    values[to] = a[from * p + from];
+    vectors.set(v.subarray(from * p, from * p + p), to * p);
+  });
+  return { values, vectors };
+}
+
+/** `y[i * p + c] = (row i - mean) . q[c]` for every row and axis. */
+function projectRows(
+  data: Float32Array | Float64Array,
+  count: number,
+  dimension: number,
+  mean: Float64Array,
+  q: Float64Array,
+  p: number,
+  y: Float64Array,
+): void {
+  const centre = new Float64Array(p);
+  for (let c = 0; c < p; c++) centre[c] = dot(mean, q.subarray(c * dimension, (c + 1) * dimension));
+  for (let i = 0; i < count; i++) {
+    const row = i * dimension;
+    for (let c = 0; c < p; c++) {
+      const at = c * dimension;
+      let s = 0;
+      for (let j = 0; j < dimension; j++) s += data[row + j] * q[at + j];
+      y[i * p + c] = s - centre[c];
+    }
+  }
+}
+
+/**
+ * The top `k` principal axes of `count` vectors of `dimension` numbers (row after row in `data`) and
+ * every row's projection onto them. Throws on a shape that does not add up or a value that is not a
+ * finite number. `seed` fixes the start directions (the result is a function of the data and seed).
+ */
+export function principalScores(
+  data: Float32Array | Float64Array,
+  count: number,
+  dimension: number,
+  k: number,
+  seed = 0x50434135,
+): PrincipalScores {
+  if (
+    !Number.isSafeInteger(count) ||
+    !Number.isSafeInteger(dimension) ||
+    !Number.isSafeInteger(k) ||
+    count < 0 ||
+    dimension < 0 ||
+    k < 0 ||
+    data.length !== count * dimension
+  ) {
+    throw new Error("the vectors do not match their count and dimension");
+  }
+  const axes = Math.min(k, dimension, count);
+  if (axes === 0) return { scores: new Float64Array(0), axes: 0, variance: new Float64Array(0) };
+  const p = Math.min(axes + OVERSAMPLE, dimension, count);
+
+  const mean = new Float64Array(dimension);
+  for (let i = 0; i < count; i++) {
+    const row = i * dimension;
+    for (let j = 0; j < dimension; j++) mean[j] += data[row + j];
+  }
+  for (let j = 0; j < dimension; j++) mean[j] /= count;
+  if (!mean.every(Number.isFinite))
+    throw new Error("the vectors hold a value that is not a number");
+
+  const rand = seeded(seed);
+  const q = new Float64Array(p * dimension);
+  for (let j = 0; j < q.length; j++) q[j] = rand() - 0.5;
+  orthonormaliseRows(q, p, dimension);
+
+  const y = new Float64Array(count * p);
+  const z = new Float64Array(p * dimension);
+  for (let step = 0; step < POWER_STEPS; step++) {
+    projectRows(data, count, dimension, mean, q, p, y);
+    // z = Xc' y: the sum of y over the rows is zero (the mean's own projection was taken off), so the
+    // rows never need the mean subtracted here.
+    z.fill(0);
+    for (let i = 0; i < count; i++) {
+      const row = i * dimension;
+      for (let c = 0; c < p; c++) {
+        const w = y[i * p + c];
+        const at = c * dimension;
+        for (let j = 0; j < dimension; j++) z[at + j] += w * data[row + j];
+      }
+    }
+    q.set(z);
+    orthonormaliseRows(q, p, dimension);
+  }
+  projectRows(data, count, dimension, mean, q, p, y);
+
+  // Rayleigh-Ritz: the projected covariance's eigenvectors rotate the p directions into the top axes.
+  const small = new Float64Array(p * p);
+  for (let i = 0; i < count; i++) {
+    for (let a = 0; a < p; a++) {
+      const ya = y[i * p + a];
+      for (let b = a; b < p; b++) small[a * p + b] += ya * y[i * p + b];
+    }
+  }
+  for (let a = 0; a < p; a++) for (let b = 0; b < a; b++) small[a * p + b] = small[b * p + a];
+  const eigen = jacobiEigen(small, p);
+
+  const scores = new Float64Array(count * axes);
+  for (let i = 0; i < count; i++) {
+    for (let c = 0; c < axes; c++) {
+      let s = 0;
+      for (let a = 0; a < p; a++) s += y[i * p + a] * eigen.vectors[c * p + a];
+      scores[i * axes + c] = s;
+    }
+  }
+  const variance = new Float64Array(axes);
+  for (let c = 0; c < axes; c++) {
+    // An axis has no sign of its own: its largest score is positive, ties to the lower row.
+    let at = 0;
+    for (let i = 1; i < count; i++) {
+      if (Math.abs(scores[i * axes + c]) > Math.abs(scores[at * axes + c])) at = i;
+    }
+    if (scores[at * axes + c] < 0) for (let i = 0; i < count; i++) scores[i * axes + c] *= -1;
+    let v = 0;
+    for (let i = 0; i < count; i++) v += scores[i * axes + c] * scores[i * axes + c];
+    variance[c] = v;
+  }
+  return { scores, axes, variance };
+}
