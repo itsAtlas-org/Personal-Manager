@@ -42,6 +42,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::error::Result;
+use crate::mods::autoinstall;
 use crate::mods::devmode;
 use crate::mods::ids::ModId;
 use crate::mods::ledger::ServeCheck;
@@ -63,6 +64,11 @@ pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Re
     // believed; the person types the keys again, as the restore card says.
     secrets::purge_all(&tx)?;
     switch_mcp_off(&tx)?;
+    // The mod's files are per computer and a backup carries none. A pilot (the Document Map) whose
+    // catalogue row came with the backup is owed its files here, as it was owed them at the
+    // migration: the marker says so, and the open's pass puts them back (`autoinstall`), so a
+    // restore onto a new computer gets the Map back without a click, as it did when it was built in.
+    autoinstall::mark_restored(&tx)?;
     // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
     // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no
     // write here: the load that follows the store's open reads the record first and pauses each
@@ -454,6 +460,43 @@ mod tests {
         std::fs::create_dir(&file).unwrap();
         assert!(reset_for_adopt(&conn, &dir_of(&_d, A), VAULT).is_err());
         assert_eq!(record(&conn), before, "rolled back");
+    }
+
+    /// A backup carries a mod's row and none of its files, so a restore owes the Document Map its
+    /// files on this computer: the marker is written for a signed catalogue row of the pilot, and
+    /// for nothing else (a mod the person removed, an unsigned file, another mod).
+    #[test]
+    fn adopting_marks_a_restored_signed_map_row_as_owed_its_files_and_nothing_else() {
+        let marker = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT count(*) FROM settings WHERE key = 'mods_autoinstall_map'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                > 0
+        };
+        let (d, conn) = store_conn();
+        add(&conn, "atlas.map", true, "active", None);
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(marker(&conn), "a signed catalogue row of the pilot");
+
+        let (d, conn) = store_conn();
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(
+            !marker(&conn),
+            "no row: the person removed it, or never had it"
+        );
+
+        let (d, conn) = store_conn();
+        add(&conn, "atlas.board", true, "active", None);
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(!marker(&conn), "another mod");
+
+        let (d, conn) = store_conn();
+        add(&conn, "atlas.map", false, "active", None);
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(!marker(&conn), "an unsigned file is not the pilot");
     }
 
     /// A crafted backup can carry a `mod_secrets` row (the strip writes none, but nothing stops a

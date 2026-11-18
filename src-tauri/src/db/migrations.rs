@@ -1886,7 +1886,8 @@ const MIGRATIONS: &[&str] = &[
     // a Map user (the Map showed every non-archived document, chat included), so it is owed the
     // Document Map mod. A fresh store, or one with no documents, is owed nothing. INSERT OR IGNORE
     // keeps a marker that is already there and writes nothing when there is no document. It never
-    // reads doc_layout, so it does not depend on the drop below. Nothing else in PM writes this key.
+    // reads doc_layout, so it does not depend on the drop below. Only a restore writes it again (backup::adopt_mods),
+    // for a store that already holds the mod's row.
     // mods/autoinstall.rs acts only on it, clears it in the same transaction that installs the mod,
     // and hands the core Map's settings rows over then (the guard allows no DELETE on settings, so
     // those three rows go at runtime, verify-then-delete, not here). The Pinboard's markers are NOT

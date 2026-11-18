@@ -61,6 +61,10 @@ pub struct ModDto {
     pub installed_from: String,
     pub signed: bool,
     pub consented: bool,
+    /// PM installed this one itself (a pilot, by the auto-install pass) and the person hasn't turned
+    /// it on yet: the first-open screen may say so. Never true for a mod the person chose, which is
+    /// consented from the moment it lands, or for a pilot's row once it is on.
+    pub auto_installed: bool,
     pub state: Standing,
     pub permissions: Vec<PermissionDto>,
     pub internet_hosts: Vec<String>,
@@ -238,6 +242,7 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
     // The limits and the month's use, by the cap's own rule for the month (`mods::ai::month_use`).
     let month = money::current_month(conn, Utc::now());
     let ledgers = money::read_ledgers(conn, &month)?;
+    let landed = autoinstall::handover_state(conn)?.landed;
     let mut out: Vec<ModDto> = rows
         .iter()
         .map(|row| {
@@ -252,6 +257,7 @@ pub fn list(conn: &Connection, ctx: &Ctx<'_>) -> rusqlite::Result<Vec<ModDto>> {
                     bound: &bound,
                     ledgers: &ledgers,
                     month: &month,
+                    landed: &landed,
                 },
                 ctx,
             )
@@ -297,6 +303,7 @@ fn pending_dto(pilot: &Pilot) -> ModDto {
         installed_from: store::FROM_CATALOGUE.to_owned(),
         signed: true,
         consented: false,
+        auto_installed: false,
         state,
         permissions: Vec::new(),
         internet_hosts: Vec::new(),
@@ -509,6 +516,8 @@ struct Shared<'a> {
     ledgers: &'a BTreeMap<String, (Option<f64>, MonthUse)>,
     /// The month today falls in, for a mod with no ledger row.
     month: &'a str,
+    /// The pilots whose auto-install landed in this vault (`autoinstall::handover_state`).
+    landed: &'a [String],
 }
 
 fn dto(
@@ -524,6 +533,7 @@ fn dto(
         bound,
         ledgers,
         month,
+        landed,
     } = shared;
     let ledger = ledgers.get(&row.id);
     let m = read_manifest(&row.manifest);
@@ -576,6 +586,10 @@ fn dto(
         installed_from: row.installed_from.clone(),
         signed: row.signed,
         consented: row.consented,
+        auto_installed: !row.consented
+            && row.signed
+            && row.installed_from == store::FROM_CATALOGUE
+            && landed.contains(&row.id),
         state,
         permissions,
         internet_hosts: m.internet_hosts.clone(),
@@ -1055,6 +1069,58 @@ mod tests {
         )
         .unwrap();
         assert!(list(&c, &CTX).unwrap().is_empty());
+    }
+
+    /// The first-open screen's "PM downloaded this for you" is told only of a pilot PM itself
+    /// installed (the landed note the install's transaction writes) that hasn't been turned on:
+    /// never of the same mod installed by hand, which is consented, or restored, or one whose
+    /// install left no note.
+    #[test]
+    fn only_a_pilot_pm_installed_and_nobody_turned_on_is_listed_as_auto_installed() {
+        let auto = |row: &Row, landed: bool| {
+            let (_dir, c) = test_store();
+            insert(&c, row);
+            if landed {
+                c.execute(
+                    "INSERT INTO settings(key, value) VALUES ('mods_pilot_landed_map', '1')",
+                    [],
+                )
+                .unwrap();
+            }
+            let listed = list(&c, &CTX).unwrap();
+            let wire = serde_json::to_value(&listed[0]).unwrap();
+            assert_eq!(wire["autoInstalled"], json!(listed[0].auto_installed));
+            listed[0].auto_installed
+        };
+        let waiting = Row {
+            consented: false,
+            ..Row::default()
+        };
+        assert!(auto(&waiting, true), "PM installed it, nobody turned it on");
+        // The same row with no landed note: the person's own install (or a restore), not PM's.
+        assert!(!auto(&waiting, false));
+        // Turned on: the screen is gone, and so is the claim.
+        assert!(!auto(&Row::default(), true));
+        // Another id, a file install, an unsigned row: never a pilot's auto-install.
+        for other in [
+            Row {
+                id: "atlas.board",
+                consented: false,
+                ..Row::default()
+            },
+            Row {
+                installed_from: "file",
+                consented: false,
+                ..Row::default()
+            },
+            Row {
+                signed: false,
+                consented: false,
+                ..Row::default()
+            },
+        ] {
+            assert!(!auto(&other, true), "{}", other.id);
+        }
     }
 
     #[test]

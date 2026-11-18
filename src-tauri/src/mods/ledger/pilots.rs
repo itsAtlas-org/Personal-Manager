@@ -7,9 +7,11 @@
 //! that already has a row. Nothing here downloads, and nothing here is reached with the DB lock held.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
-use super::{Approval, InstallOptions, Installed, Ledger, LedgerError, LedgerStore, Source};
+use super::{
+    Approval, InstallOptions, Installed, Ledger, LedgerError, LedgerStore, RepairTarget, Source,
+};
 use crate::mods::autoinstall::{self, Held, Pilot, Step};
 use crate::mods::index::Index;
 use crate::mods::keys::TrustedKeys;
@@ -27,12 +29,19 @@ pub enum PilotLanded {
     Failed(String),
 }
 
-/// The pilot's row as the decision reads it.
-fn held(conn: &Connection, id: &str) -> rusqlite::Result<Option<(String, bool)>> {
+/// The pilot's row as the decision reads it: where it came from, whether it is signed, and whether
+/// it is parked for want of its files.
+fn held(conn: &Connection, id: &str) -> rusqlite::Result<Option<(String, bool, bool)>> {
     conn.query_row(
-        "SELECT installed_from, signed FROM mods WHERE id = ?1",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        "SELECT installed_from, signed, state = ?2 AND state_reason = ?3 FROM mods WHERE id = ?1",
+        params![id, store::STATE_PARKED, store::REASON_FILES_MISSING],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, Option<bool>>(2)?.unwrap_or(false),
+            ))
+        },
     )
     .optional()
 }
@@ -48,9 +57,10 @@ impl<S: LedgerStore> Ledger<'_, S> {
             let mut out = Vec::new();
             for pilot in autoinstall::pending(c)? {
                 let row = held(c, pilot.id)?;
-                let held = row.as_ref().map(|(from, signed)| Held {
+                let held = row.as_ref().map(|(from, signed, files_missing)| Held {
                     installed_from: from,
                     signed: *signed,
+                    files_missing: *files_missing,
                 });
                 out.push((pilot, autoinstall::decide(pilot, held, index, now)));
             }
@@ -65,7 +75,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         self.with_conn(|c| {
             let tx = c.transaction()?;
             let settles = held(&tx, pilot.id)?
-                .is_some_and(|(from, signed)| from == store::FROM_CATALOGUE && signed);
+                .is_some_and(|(from, signed, _)| from == store::FROM_CATALOGUE && signed);
             if !settles {
                 return Err(Refusal::Changed.into());
             }
@@ -73,6 +83,23 @@ impl<S: LedgerStore> Ledger<'_, S> {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// A pilot whose row is here and whose files aren't (a restore onto another computer): put back
+    /// the pinned version and file downloaded for `target` (the ledger's own repair, which accepts
+    /// nothing else), then settle, which clears the marker. The settle runs only when the repair
+    /// did; a settle that fails leaves the marker, and the next pass settles a row that is whole.
+    pub fn repair_pilot(
+        &self,
+        pilot: &Pilot,
+        target: &RepairTarget,
+        bytes: &[u8],
+        keys: &TrustedKeys,
+        index: Option<&Index>,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        self.install_repair(target, bytes, keys, index, now)?;
+        self.settle_pilot(pilot)
     }
 
     /// Install a package the pass downloaded for `pilot`, as a fresh unconsented install of a

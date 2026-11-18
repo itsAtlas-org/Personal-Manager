@@ -107,6 +107,7 @@ function mod(extra: Partial<ModInfo> = {}): ModInfo {
     installedFrom: "catalogue",
     signed: true,
     consented: true,
+    autoInstalled: false,
     state: RUNNING,
     permissions: [],
     internetHosts: [],

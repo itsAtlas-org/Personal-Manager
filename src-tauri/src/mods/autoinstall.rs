@@ -6,8 +6,10 @@
 //! first time PM can fetch it.
 //!
 //! **A marker starts it.** The pass acts only on a marker row in `settings` (`mods_autoinstall_map`
-//! and its kind), which a migration writes for a store that used the feature. Nothing else in PM
-//! writes a marker, so a store without one is never touched: no download, no row, no listing entry.
+//! and its kind), which a migration writes for a store that used the feature, and which a restore
+//! writes for a store whose backup holds the pilot's catalogue row ([`mark_restored`]: the mod's
+//! files are per computer, so a restore onto another one owes them). Nothing else in PM writes a
+//! marker, so a store without one is never touched: no download, no row, no listing entry.
 //!
 //! **What a pass does**, per marker present (one transaction each, under the ledger lock):
 //! - the mod already has a catalogue row (the user installed it, or an earlier pass did): settle it,
@@ -17,6 +19,9 @@
 //!   sha256-checked fetch) and install it unconsented ([`super::ledger::Ledger::land_pilot`]); the
 //!   marker's removal and the handover run in the same transaction as the row, so they land with it
 //!   or not at all;
+//! - the mod has a catalogue row whose files are missing on this computer (a restore brought the
+//!   row, not the files): put back exactly the pinned version and file, the way the Mods tab's
+//!   repair does ([`super::ledger::Ledger::repair_target`]), then settle;
 //! - otherwise leave the marker, and the Mods tab shows the mod as "Installing" (a synthesized
 //!   entry, never a row: a fake row in a truth-class table would ride in backups and shared vaults
 //!   with an invented hash and version).
@@ -24,7 +29,9 @@
 //! **Only the writer installs** ([`crate::lock_session::this_instance_writes`]): a read-only guest of
 //! a shared vault has its store closed, and a mod installed there would be files the writer's ledger
 //! never heard of. **No download without a usable, current index** ([`decide`]): an expired or missing
-//! index may restrict (the blacklist applies elsewhere), never install.
+//! index may restrict (the blacklist applies elsewhere), never install. The one exception is putting
+//! back the files of a row the person already has: that fetches only the row's own pinned, hash-checked
+//! file, which needs no index, exactly as the Mods tab's repair does.
 //!
 //! **The handover** moves what the core feature kept in the store into the mod's own storage, then
 //! deletes the old rows, verify-then-delete: the mod's `settings` key is read back before any old
@@ -42,6 +49,7 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
 
 use super::fetch::{fetch_package, Endpoints, ReqwestTransport, Transport};
+use super::ids::ModId;
 use super::index::Index;
 use super::index_state;
 use super::keys::TrustedKeys;
@@ -94,6 +102,22 @@ pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<&'static Pilot>> {
     Ok(out)
 }
 
+/// A restore's step ([`crate::backup::adopt_mods::reset_for_adopt`]): a store restored with a
+/// pilot's signed catalogue row is owed that mod's files on this computer, which the backup can't
+/// carry, so the marker is written and the next pass settles the row or puts its files back.
+/// Nothing is written for a store without the row: a mod the person removed stays removed.
+pub fn mark_restored(conn: &Connection) -> rusqlite::Result<()> {
+    for p in &PILOTS {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) \
+             SELECT ?1, '1' WHERE EXISTS ( \
+                 SELECT 1 FROM mods WHERE id = ?2 AND installed_from = ?3 AND signed = 1)",
+            params![p.marker, p.id, store::FROM_CATALOGUE],
+        )?;
+    }
+    Ok(())
+}
+
 fn get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
         r.get(0)
@@ -112,6 +136,8 @@ fn to_ledger(e: crate::error::Error) -> LedgerError {
 pub struct Held<'a> {
     pub installed_from: &'a str,
     pub signed: bool,
+    /// The row is parked because its files aren't on this computer (a restore brought the row).
+    pub files_missing: bool,
 }
 
 /// Why a marker is left for a later pass.
@@ -132,6 +158,8 @@ pub enum Leave {
 pub enum Step {
     /// It is installed: do the handover and clear the marker, download nothing.
     Settle,
+    /// It is installed but its files aren't here: put back the pinned version and file, then settle.
+    Repair,
     Download(Download),
     Leave(Leave),
 }
@@ -145,7 +173,11 @@ pub fn decide(
 ) -> Step {
     if let Some(h) = held {
         return if h.installed_from == store::FROM_CATALOGUE && h.signed {
-            Step::Settle
+            if h.files_missing {
+                Step::Repair
+            } else {
+                Step::Settle
+            }
         } else {
             Step::Leave(Leave::OtherRow)
         };
@@ -197,7 +229,11 @@ pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError
     if !row {
         return Err(LedgerError::NotInstalled);
     }
-    (pilot.handover)(conn, pilot.id)?;
+    // The handover is once per vault: a restore writes the marker again for a vault that landed
+    // before (the files are owed, not the rows), and its core rows and device prefs were dealt with.
+    if get(conn, pilot.landed)?.is_none() {
+        (pilot.handover)(conn, pilot.id)?;
+    }
     // The marker goes after the handover, in the same transaction: a failure above keeps both.
     db::delete_setting(conn, pilot.marker).map_err(to_ledger)?;
     db::set_setting(conn, pilot.landed, "1").map_err(to_ledger)?;
@@ -495,6 +531,69 @@ pub async fn run<T: Transport>(
                     None => {}
                 }
             }
+            Step::Repair => {
+                let app2 = app.clone();
+                let target = blocking(move || {
+                    writer_now(&app2)
+                        .then(|| {
+                            ledger::with_active_ledger(&app2, Mint::Always, |l| {
+                                ModId::parse(pilot.id)
+                                    .map_err(|e| LedgerError::Store(e.to_string()))
+                                    .and_then(|id| l.repair_target(&id))
+                            })
+                        })
+                        .flatten()
+                })
+                .await
+                .flatten();
+                let target = match target {
+                    Some(Ok(t)) => t,
+                    Some(Err(e)) => {
+                        eprintln!("mods: {} can't be put back ({e})", pilot.id);
+                        continue;
+                    }
+                    None => continue,
+                };
+                // The row's own file: its sha256 must match before anything reads it, and the
+                // ledger's repair accepts nothing else.
+                let bytes =
+                    match fetch_package(transport, endpoints, &target.url, &target.sha256).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            if !e.is_quiet() {
+                                eprintln!("mods: {} not downloaded: {e}", pilot.id);
+                            }
+                            continue;
+                        }
+                    };
+                let (app2, index2, keys2) = (app.clone(), index.cloned(), keys.clone());
+                let done = blocking(move || {
+                    writer_now(&app2)
+                        .then(|| {
+                            ledger::with_active_ledger(&app2, Mint::Always, |l| {
+                                l.repair_pilot(
+                                    pilot,
+                                    &target,
+                                    &bytes,
+                                    &keys2,
+                                    index2.as_ref(),
+                                    Utc::now(),
+                                )
+                            })
+                        })
+                        .flatten()
+                })
+                .await
+                .flatten();
+                match done {
+                    Some(Ok(())) => {
+                        eprintln!("mods: {} put back for you", pilot.id);
+                        changed = true;
+                    }
+                    Some(Err(e)) => eprintln!("mods: {} not put back ({e})", pilot.id),
+                    None => {}
+                }
+            }
             Step::Download(download) => {
                 // `decide` only says Download for a current index, so `index` is there.
                 let Some(index) = index else { continue };
@@ -612,6 +711,7 @@ mod tests {
             Some(Held {
                 installed_from: from,
                 signed,
+                files_missing: false,
             })
         };
         // A catalogue row settles, whatever the index says (even none).
@@ -623,6 +723,30 @@ mod tests {
             decide(p, held("catalogue", true), Some(&index), now()),
             Step::Settle
         );
+        // A catalogue row whose files are missing is put back (a repair, from the pinned file),
+        // whatever the index says; any other row with missing files is no business of the pass's.
+        let missing = |from, signed| {
+            Some(Held {
+                installed_from: from,
+                signed,
+                files_missing: true,
+            })
+        };
+        assert_eq!(
+            decide(p, missing("catalogue", true), None, now()),
+            Step::Repair
+        );
+        assert_eq!(
+            decide(p, missing("catalogue", true), Some(&index), now()),
+            Step::Repair
+        );
+        for (from, signed) in [("folder", true), ("file", true), ("catalogue", false)] {
+            assert_eq!(
+                decide(p, missing(from, signed), Some(&index), now()),
+                Step::Leave(Leave::OtherRow),
+                "{from} {signed}"
+            );
+        }
         // Any other row is left: a test folder's rows are dropped at the next start, a file's are
         // unsigned or third party.
         for (from, signed) in [("folder", true), ("file", true), ("catalogue", false)] {
@@ -904,13 +1028,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             run.matches("writer_now(&app2)").count(),
-            2,
-            "settle and install each ask"
+            4,
+            "settle, install, and a repair's two steps each ask"
         );
-        assert_eq!(run.matches("with_active_ledger").count(), 2);
+        assert_eq!(run.matches("with_active_ledger").count(), 4);
         // A download is only started from a plan step, never from here.
-        assert_eq!(run.matches("fetch_package(").count(), 1);
+        assert_eq!(run.matches("fetch_package(").count(), 2);
         assert!(run.contains("Step::Download(download) =>"));
+        assert!(run.contains("Step::Repair =>"));
         // The marker guard is dropped before a ledger is taken (the DB lock isn't re-entrant).
         let any = body
             .split("fn any_marker(")

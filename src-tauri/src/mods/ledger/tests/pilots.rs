@@ -694,6 +694,92 @@ fn the_users_own_enhanced_choice_in_the_mod_wins_over_the_old_t_sne_switch() {
     assert_eq!(w.setting("map"), None, "the old row still goes");
 }
 
+// ---- A restore onto another computer: the row came, the files didn't ----------------------------------
+
+/// A signed catalogue row installed at 1.0.0, then its files gone and the row parked for want of
+/// them, as the open's load leaves a restored row on a computer that never had the files; with the
+/// marker a restore writes. Returns the package the row pins and its keys.
+fn restored_without_files(w: &World) -> (Vec<u8>, PublicKey, RepairTarget) {
+    let (bytes, key) = pkg("1.0.0", |_| {});
+    w.install(&(bytes.clone(), key.clone()), Approval::Approved)
+        .unwrap();
+    fs::remove_dir_all(w.layout.store_dir().join("atlas.map")).unwrap();
+    w.exec(
+        "UPDATE mods SET state = 'parked', state_reason = 'files-missing';
+         INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');",
+    );
+    let target = RepairTarget {
+        url: "https://example.invalid/atlas.map-1.0.0.pmmod".to_owned(),
+        version: "1.0.0".to_owned(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+    };
+    (bytes, key, target)
+}
+
+#[test]
+fn a_restored_row_without_its_files_is_put_back_by_the_pass_and_settled() {
+    let w = world();
+    let (bytes, key, target) = restored_without_files(&w);
+    let keys = TrustedKeys::of_test_keys(&[key]);
+    // No index needed: it is the row's own pinned file, the Mods tab's repair.
+    assert_eq!(w.plan(None), vec![Step::Repair]);
+    assert_eq!(
+        w.ledger().repair_target(&id("atlas.map")).unwrap().version,
+        "1.0.0"
+    );
+    w.ledger()
+        .repair_pilot(pilot(), &target, &bytes, &keys, None, list_now())
+        .unwrap();
+    assert!(w.version_dir("1.0.0").exists(), "the files are back");
+    assert_eq!(w.sql::<String>("SELECT state FROM mods"), "active");
+    assert!(w.served_from().is_some());
+    assert!(
+        w.sql::<bool>("SELECT consented_at IS NOT NULL FROM mods"),
+        "its consent is kept"
+    );
+    assert_eq!(w.setting(MARKER), None, "the marker is spent");
+    assert!(w.setting("mods_pilot_landed_map").is_some());
+    // Whole again, a later pass has nothing to do.
+    assert_eq!(w.plan(None), Vec::<Step>::new());
+}
+
+#[test]
+fn a_repair_with_a_file_that_is_not_the_pinned_one_changes_nothing_and_keeps_the_marker() {
+    let w = world();
+    let (_, key, target) = restored_without_files(&w);
+    let (other, other_key) = pkg("1.0.0", |m| m["description"] = json!("Something else"));
+    let keys = TrustedKeys::of_test_keys(&[key, other_key]);
+    assert!(w
+        .ledger()
+        .repair_pilot(pilot(), &target, &other, &keys, None, list_now())
+        .is_err());
+    assert!(!w.version_dir("1.0.0").exists());
+    assert_eq!(w.sql::<String>("SELECT state FROM mods"), "parked");
+    assert!(w.setting(MARKER).is_some(), "the next pass tries again");
+    assert_eq!(w.setting("mods_pilot_landed_map"), None);
+}
+
+#[test]
+fn a_vault_that_landed_before_is_not_handed_over_again_when_a_restore_re_marks_it() {
+    let w = world();
+    w.have("1.0.0");
+    // The restore's marker, on a vault whose handover already ran (the landed note is kept), and
+    // whose core rows were deleted then: a leftover `map` row now is not the core Map's.
+    w.exec(
+        "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');
+         INSERT INTO settings(key, value) VALUES ('mods_pilot_landed_map', '1');
+         INSERT INTO settings(key, value) VALUES ('map', '{\"nodeCap\":300}');",
+    );
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(w.setting(MARKER), None);
+    assert_eq!(
+        w.setting(ADOPT_FLAG),
+        None,
+        "no second round of device prefs"
+    );
+    assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 0);
+}
+
 // ---- The table ---------------------------------------------------------------------------------
 
 #[test]

@@ -73,8 +73,10 @@ export function ModFirstOpen({
   const [hideNext, setHideNext] = useState(false);
   const hideId = useId();
   // A mod PM downloaded on its own (the Map, for a person who had documents) says so, in PM's words:
-  // the person didn't ask for this install, and nothing runs until they turn it on.
-  const usedFeature = pilotFeature(mod.id);
+  // the person didn't ask for this install, and nothing runs until they turn it on. Only when the
+  // backend says PM did install it (`autoInstalled`, from what the auto-install wrote): the same mod
+  // id installed from the catalogue by the person says nothing.
+  const usedFeature = mod.autoInstalled ? pilotFeature(mod.id) : null;
 
   function turnOn() {
     void runModAction(mod.id, "Turning on", "PM couldn't turn this mod on.", async () => {
