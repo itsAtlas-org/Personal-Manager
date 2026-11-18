@@ -532,6 +532,15 @@ mod tests {
     /// A source vault whose store sits at exactly schema `version` (authentic, from the real
     /// migrations) with one task in it, and its `VACUUM INTO` snapshot taken WITHOUT migrating it.
     fn vault_at_version(root: &Path, version: usize) -> (PackInputs, String) {
+        vault_at_version_holding(root, version, false)
+    }
+
+    /// The same, optionally with one document in the store too (what v61 reads to mark a Map user).
+    fn vault_at_version_holding(
+        root: &Path,
+        version: usize,
+        document: bool,
+    ) -> (PackInputs, String) {
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let meta = vault::ensure_device_meta(&src).unwrap();
@@ -541,6 +550,14 @@ mod tests {
             let conn = db::open_at_version(&src.join("pm.sqlite"), &key_hex, version).unwrap();
             conn.execute("INSERT INTO tasks(title) VALUES ('call Sam')", [])
                 .unwrap();
+            if document {
+                conn.execute(
+                    "INSERT INTO documents(vault_path, title, content_hash) \
+                     VALUES ('a.md', 'A', 'ha')",
+                    [],
+                )
+                .unwrap();
+            }
             let escaped = snap.to_string_lossy().replace('\'', "''");
             conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))
                 .unwrap();
@@ -574,8 +591,8 @@ mod tests {
     }
 
     /// Spec §1.11: every backup made before mods is format 1 around a pre-v60 store. This build
-    /// still restores it, and the restore's open carries the store up through v60 with the user's
-    /// data intact.
+    /// still restores it, and the restore's open carries the store up to this build's schema (v60's
+    /// mod tables, v61's marker and drop) with the user's data intact.
     #[test]
     fn a_pre_mods_format_1_backup_restores_and_migrates_to_this_builds_schema() {
         let root = tempfile::tempdir().unwrap();
@@ -605,6 +622,52 @@ mod tests {
             .query_row("SELECT title FROM tasks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "call Sam", "the user's data came through the ladder");
+    }
+
+    /// A backup taken by the build before v61 (a format-2 archive around a v60 store) restores on
+    /// this one: the open migrates it to v61, drops the Map's cache table, and writes the Document
+    /// Map's marker only when the store holds a document. `FORMAT_VERSION` did not change for v61:
+    /// a format-2 archive may hold a store at v60 or later.
+    #[test]
+    fn a_v60_backup_restores_and_migrates_to_v61() {
+        for (document, marker) in [(false, None), (true, Some("1".to_string()))] {
+            let root = tempfile::tempdir().unwrap();
+            let (inputs, key_hex) = vault_at_version_holding(root.path(), 60, document);
+            assert_eq!(schema_version(&inputs.db_snapshot, &key_hex), 60);
+            let archive = root.path().join("v60.pmbackup");
+            let cancel = AtomicBool::new(false);
+            pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
+
+            let target = root.path().join("restored");
+            restore(&archive, "pw", &target, |_, _| {}, &cancel).unwrap();
+            let restored = target.join("pm.sqlite");
+            assert_eq!(
+                schema_version(&restored, &key_hex),
+                61,
+                "document: {document}"
+            );
+            let conn = db::open_unmigrated(&restored, &key_hex).unwrap();
+            let found: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'mods_autoinstall_map'",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            assert_eq!(found, marker, "document: {document}");
+            let layout: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'doc_layout'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(layout, 0, "the Map's cache table is gone");
+            let title: String = conn
+                .query_row("SELECT title FROM tasks", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(title, "call Sam");
+        }
     }
 
     /// A store a newer PM wrote is refused at restore with its typed fault (I-28): nothing is

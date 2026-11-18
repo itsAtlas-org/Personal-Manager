@@ -63,7 +63,6 @@ describe("SidebarNav", () => {
       "documents",
       "review",
       "teach",
-      "graph",
       "pinboard",
       "mods",
     ]);
@@ -81,20 +80,20 @@ describe("SidebarNav", () => {
   it("navigates to a tab's own view", () => {
     const onNavigate = vi.fn();
     renderNav({ onNavigate });
-    fireEvent.click(screen.getByRole("button", { name: "Map" }));
-    expect(onNavigate).toHaveBeenCalledWith("graph");
+    fireEvent.click(screen.getByRole("button", { name: "Pinboard" }));
+    expect(onNavigate).toHaveBeenCalledWith("pinboard");
   });
 
   it("hides a tab from its right-click menu, and shows it again from another tab's", () => {
     renderNav();
-    rightClick(screen.getByRole("button", { name: "Map" }));
-    const menu = screen.getByRole("menu", { name: "Map tab" });
+    rightClick(screen.getByRole("button", { name: "Pinboard" }));
+    const menu = screen.getByRole("menu", { name: "Pinboard tab" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Hide" }));
-    expect(tabs()).not.toContain("graph");
+    expect(tabs()).not.toContain("pinboard");
 
     rightClick(screen.getByRole("button", { name: "Focus" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Show Map" }));
-    expect(tabs()).toContain("graph");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show Pinboard" }));
+    expect(tabs()).toContain("pinboard");
   });
 
   it("pins a tab to the top, and unpins it", () => {
@@ -128,7 +127,7 @@ describe("SidebarNav", () => {
     expect(within(menu).queryByRole("menuitem", { name: "Hide" })).toBeNull();
   });
 
-  it("on Minimal, leaves the learning tools and Map out until shown, which pins", () => {
+  it("on Minimal, leaves the learning tools out until shown, which pins", () => {
     gates.depth = "min";
     renderNav();
     expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
@@ -150,7 +149,7 @@ describe("SidebarNav", () => {
 
   it("leaves Shift+right-click to the system menu", () => {
     renderNav();
-    rightClick(screen.getByRole("button", { name: "Map" }), { shiftKey: true });
+    rightClick(screen.getByRole("button", { name: "Pinboard" }), { shiftKey: true });
     expect(screen.queryByRole("menu")).toBeNull();
   });
 });
@@ -158,17 +157,7 @@ describe("SidebarNav", () => {
 // The mod tabs: installed mods' own entries, appended after PM's (spec §1.17) from the rows
 // `lib/modRows` shares, reachable from the same right-click menu as every other tab.
 describe("SidebarNav: mod tabs", () => {
-  const CORE = [
-    "focus",
-    "chat",
-    "calendar",
-    "documents",
-    "review",
-    "teach",
-    "graph",
-    "pinboard",
-    "mods",
-  ];
+  const CORE = ["focus", "chat", "calendar", "documents", "review", "teach", "pinboard", "mods"];
   const row = (id: string, navTab: string | null, name = "Acme Tool"): ModInfo =>
     ({ id, name, navTab }) as ModInfo;
 

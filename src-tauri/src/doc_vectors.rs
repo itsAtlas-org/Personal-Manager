@@ -3,10 +3,9 @@
 
 //! One embedding per document: each document's leaf-chunk vectors decoded, averaged and
 //! L2-normalised, the node cap that keeps the most important and most substantial documents, and the
-//! cheap signature that says whether any of it changed. Two consumers read it: the core semantic Map
-//! (`layout.rs`, until the Map becomes a mod) and the mod API's `embeddings.*` calls
-//! (`mods/api/embeddings.rs`), so the two can't drift on which documents are nodes, how a vector is
-//! averaged or which ones a cap keeps.
+//! cheap signature that says whether any of it changed. The mod API's `embeddings.*` calls
+//! (`mods/api/embeddings.rs`) read it, so a mod sees the same documents as nodes, the same averaged
+//! vectors and the same cap, however many mods ask.
 //!
 //! **Which documents.** Archived documents (any source, chat included) are left out of everything
 //! here (`d.importance IS NOT 'archive'` also admits the untriaged NULL): the Map hides what the user
@@ -15,7 +14,7 @@
 //!
 //! **The node cap is applied before the vectors are read.** The cheap [`leaf_stats`] pass (counts and
 //! importance, no blobs) picks the documents the cap keeps ([`apply_cap`]), and only their vectors are
-//! read. Averaging every document first, as the Map once did, holds one `f64` row of the embedding
+//! read. Averaging every document first, as the core Map once did, holds one `f64` row of the embedding
 //! dimension per document in memory (400 MB at 50,000 documents of 1,024 dimensions); a mod can ask
 //! for this whenever it likes, so the read is sized by the cap, not by the library.
 
@@ -196,7 +195,7 @@ fn read_vectors(conn: &Connection, chosen: &[LeafStats]) -> Result<Vec<DocVec>> 
 }
 
 /// The vectors of the documents `cap` keeps (of `ids`, or of every embedded document), in the order
-/// [`apply_cap`] gives. This is what the Map and `embeddings.documentVectors` both read.
+/// [`apply_cap`] gives. This is what `embeddings.documentVectors` reads.
 pub fn capped_document_vectors(
     conn: &Connection,
     ids: Option<&[i64]>,
@@ -204,12 +203,6 @@ pub fn capped_document_vectors(
 ) -> Result<Vec<DocVec>> {
     let kept = apply_cap(leaf_stats(conn, ids)?, cap);
     read_vectors(conn, &kept)
-}
-
-/// Every embedded document's vector, uncapped, by id: the reference the capped read is held to.
-#[cfg(test)]
-pub fn document_vectors(conn: &Connection) -> Result<Vec<DocVec>> {
-    capped_document_vectors(conn, None, usize::MAX)
 }
 
 /// Cheap signature of the document set (ids + leaf-chunk counts + a leaf-identity marker), without
@@ -330,7 +323,7 @@ mod tests {
         doc(&conn, "gone.md", Some("archive"), &[0.9]);
         doc(&conn, "empty.md", Some("high"), &[]);
 
-        let every = document_vectors(&conn).unwrap();
+        let every = capped_document_vectors(&conn, None, usize::MAX).unwrap();
         assert_eq!(
             every.iter().map(|d| d.doc_id).collect::<Vec<_>>(),
             vec![a, b, c, d]

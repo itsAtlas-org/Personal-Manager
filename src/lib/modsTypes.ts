@@ -214,6 +214,10 @@ export interface ModInfo {
   installedFrom: "catalogue" | "file" | "folder";
   signed: boolean;
   consented: boolean;
+  /** PM installed this one itself (a pilot, once the person had documents) and it hasn't been turned
+   *  on yet: the only case the first-open screen says "PM downloaded this for you". Set by the
+   *  backend from what the auto-install wrote, never from the mod's id. */
+  autoInstalled: boolean;
   state: ModStanding;
   permissions: ModPermission[];
   internetHosts: string[];

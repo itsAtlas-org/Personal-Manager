@@ -13,7 +13,7 @@
 //! This module owns the photo-specific logic; the ingest orchestration lives in [`crate::ingest`] and
 //! the OCR + EXIF extraction is done by the Python sidecar's `analyze_image` (see [`ImageAnalysis`]).
 //! OCR is an OPTIONAL on-demand component (rapidocr + pi-heif) — installable and removable from
-//! Settings, exactly like the t-SNE reducer — so a user who declines it still ingests photos with
+//! Settings — so a user who declines it still ingests photos with
 //! their EXIF metadata chunk (`ocr_text` then stays `None`).
 
 use std::path::Path;
@@ -249,9 +249,8 @@ pub struct ImageAnalysis {
 
 // ---- optional OCR component: status + install commands --------------------
 //
-// OCR (rapidocr + pi-heif) is delivered exactly like the t-SNE reducer (see [`crate::layout`]):
-// an OPTIONAL on-demand component the user installs once. These two commands are the install surface
-// (the drop-time prompt and the Storage tab). Removal goes through the Storage manager's guarded
+// OCR (rapidocr + pi-heif) is an OPTIONAL on-demand component the user installs once. These two
+// commands are the install surface (the drop-time prompt and the Storage tab). Removal goes through the Storage manager's guarded
 // cascade ([`crate::components::remove_storage_component`] with id `"ocr"`), which reclaims the heavy
 // image deps in order — so there is deliberately no standalone uninstall command here.
 

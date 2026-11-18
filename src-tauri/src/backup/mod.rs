@@ -79,7 +79,7 @@ impl<R: Read> Read for ProgressReader<'_, R> {
 }
 
 /// Which stage a backup or restore is in — drives the single progress bar in the UI
-/// (rendered in percent mode, like the Python/t-SNE downloads).
+/// (rendered in percent mode, like the Python and OCR downloads).
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupPhase {

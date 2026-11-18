@@ -120,13 +120,12 @@ describe("the Map's device-local prefs", () => {
     expect(adoptMapPrefs).toHaveBeenCalledTimes(2);
   });
 
-  it("are read from the keys the core Map writes (while the core Map exists)", async () => {
-    // pilotHandover keeps its own copies so removing the core Map can't take the handover with it;
-    // until then nothing else ties them to the real keys. B9 deletes this test with mapPrefs.
-    const real = await import("./mapPrefs");
-    expect(MAP_MODE_KEY).toBe(real.MAP_MODE_KEY);
-    expect(MAP_COHESION_KEY).toBe(real.MAP_COHESION_KEY);
-    expect(MAP_LABELS_KEY).toBe(real.MAP_LABELS_KEY);
+  it("are read from the keys the core Map wrote (pinned as text, the core Map being gone)", () => {
+    // The core Map is no longer in PM, so nothing else holds these strings: an edit that renames one
+    // would silently stop handing a person's saved arrangement over.
+    expect(MAP_MODE_KEY).toBe("pm.map.layoutMode");
+    expect(MAP_COHESION_KEY).toBe("pm.map.cohesion");
+    expect(MAP_LABELS_KEY).toBe("pm.map.labels");
   });
 
   it("aren't sent when PM says nothing waits, or when the device has none", async () => {

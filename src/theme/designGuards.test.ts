@@ -318,7 +318,6 @@ describe("form-control edges use --ink4, not --border2", () => {
         ],
       ],
       ["src/components/DocumentReader.tsx", ["text-xs text-ink2 hover:bg-surface"]],
-      ["src/components/GraphView.tsx", ["h-7 w-7 items-center justify-center"]],
       ["src/components/PinboardView.tsx", ["text-[0.6875rem] text-ink3 focus:border-accent-text"]],
       ["src/components/ProjectPicker.tsx", ["bg-surface text-ink3"]],
       ["src/components/TeachTags.tsx", ["group inline-flex items-center gap-1"]],

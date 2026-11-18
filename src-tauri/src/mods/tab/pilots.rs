@@ -6,8 +6,8 @@
 //! - `retry_auto_install`, the "Try now" under an "Installing" tab: fetch the safety list now and let
 //!   its pass run the install (offline, the index already held may still do it);
 //! - `mods_handover_state`, one read: which pilots landed in this vault, and whether the Map's
-//!   device-local view prefs still wait to be handed over (both false in a store with no pilot, which
-//!   is every store until a migration writes a marker);
+//!   device-local view prefs still wait to be handed over (both false in a store with no pilot: one with
+//!   no documents, or a fresh one, since v61 writes the Map's marker only where a document exists);
 //! - `adopt_map_prefs`, which carries those device-local prefs into the mod's storage, once, writer
 //!   only, and only while the handover's flag stands.
 //!

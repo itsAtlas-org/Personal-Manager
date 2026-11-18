@@ -4,23 +4,7 @@
 import { useEffect, useState } from "react";
 
 import { useHelp } from "../../lib/help";
-import {
-  getPref,
-  getSettings,
-  installOptionalTsne,
-  onTsneInstall,
-  optionalTsneStatus,
-  setPref,
-  setTimeZone,
-  startSemanticLayout,
-} from "../../lib/ipc";
-import {
-  MAP_COHESION_KEY,
-  MAP_MODE_KEY,
-  readMapCohesion,
-  readMapMode,
-  type MapLayoutMode,
-} from "../../lib/mapPrefs";
+import { getSettings, setTimeZone } from "../../lib/ipc";
 import { focusViewPrefsAreDefault, resetFocusViewPrefs } from "../../lib/focusPrefs";
 import {
   calendarFiltersAreDefault,
@@ -66,7 +50,6 @@ import {
   MONO_ACCENT,
   useTheme,
 } from "../../theme";
-import { IngestProgress } from "../IngestProgress";
 import {
   Button,
   Callout,
@@ -80,10 +63,9 @@ import {
 } from "../ui";
 import { ResetLink, TabResetSection } from "./ResetControls";
 
-/** The General Settings tab: appearance (system/mode/accent/depth/location), the memory-map defaults,
- *  time zone, and help mode. Everything here already persists immediately — theme axes through the
- *  theme context, the map prefs through setPref/localStorage, the time zone on change — so there is
- *  nothing to batch. Errors surface inline. */
+/** The General Settings tab: appearance (system/mode/accent/depth/location), time zone, and
+ *  help mode. Everything here already persists immediately — theme axes through the theme context,
+ *  the time zone on change — so there is nothing to batch. Errors surface inline. */
 export function GeneralSettings() {
   const {
     system,
@@ -144,37 +126,9 @@ export function GeneralSettings() {
       /* best-effort: the in-app levels don't need it and a failure must not block the setting */
     });
   }
-  // Memory map (the Map tab): the default grouping, cohesion blend, node cap, and the optional t-SNE
-  // component's install/enable state.
-  const [mapGrouping, setMapGrouping] = useState<MapLayoutMode>(readMapMode);
-  const [mapNodeCap, setMapNodeCap] = useState(1000);
-  const [mapCohesion, setMapCohesion] = useState<number>(readMapCohesion);
-  const [tsneInstalled, setTsneInstalled] = useState<boolean | null>(null);
-  const [mapTsneEnabled, setMapTsneEnabled] = useState(true);
-  const [installingTsne, setInstallingTsne] = useState(false);
-  const [tsneInstallFrac, setTsneInstallFrac] = useState(0);
   const [timeZone, setTimeZoneState] = useState("");
   const [tzAuto, setTzAuto] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Load the persisted map prefs + the optional-t-SNE install state.
-  useEffect(() => {
-    getPref("map")
-      .then((v) => {
-        if (!v) return;
-        try {
-          const pref = JSON.parse(v);
-          if (typeof pref?.nodeCap === "number") setMapNodeCap(pref.nodeCap);
-          if (typeof pref?.tsneEnabled === "boolean") setMapTsneEnabled(pref.tsneEnabled);
-        } catch {
-          /* ignore a malformed pref */
-        }
-      })
-      .catch(() => {});
-    optionalTsneStatus()
-      .then((s) => setTsneInstalled(s.installed))
-      .catch(() => setTsneInstalled(false));
-  }, []);
 
   // The stored time zone (always set by the time you reach this tab; onboarding records it first-run).
   useEffect(() => {
@@ -191,66 +145,6 @@ export function GeneralSettings() {
     };
   }, []);
 
-  // Follow the optional-t-SNE download's progress so the row shows a real percentage bar.
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    void onTsneInstall((e) => {
-      if (!cancelled) setTsneInstallFrac(e.fraction);
-    }).then((u) => {
-      unlisten = u;
-      if (cancelled) u();
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  function changeMapGrouping(next: MapLayoutMode) {
-    setMapGrouping(next);
-    localStorage.setItem(MAP_MODE_KEY, next); // shared with the Map header toggle
-  }
-
-  function changeMapCohesion(next: number) {
-    setMapCohesion(next);
-    localStorage.setItem(MAP_COHESION_KEY, String(next)); // shared with the Map's cohesion control
-  }
-
-  // The `map` pref is one blob (`{ nodeCap, tsneEnabled }`), both part of the layout fingerprint —
-  // write it whole (so neither key is lost) and recompute in the background so the change takes hold.
-  function persistMapPref(nodeCap: number, tsneEnabled: boolean) {
-    return setPref("map", JSON.stringify({ nodeCap, tsneEnabled }))
-      .then(() => startSemanticLayout())
-      .catch(() => {});
-  }
-
-  function changeMapNodeCap(next: number) {
-    setMapNodeCap(next);
-    void persistMapPref(next, mapTsneEnabled);
-  }
-
-  function changeTsneEnabled(next: boolean) {
-    setMapTsneEnabled(next);
-    void persistMapPref(mapNodeCap, next);
-  }
-
-  function downloadTsne() {
-    setInstallingTsne(true);
-    setTsneInstallFrac(0);
-    installOptionalTsne()
-      .then(() => optionalTsneStatus())
-      .then((s) => {
-        setTsneInstalled(s.installed);
-        if (s.installed) {
-          setMapTsneEnabled(true); // a fresh install starts enabled
-          void persistMapPref(mapNodeCap, true);
-        }
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setInstallingTsne(false));
-  }
-
   // Time zone saves immediately. Auto persists the device zone; Manual persists the selected zone.
   // The shared time/location context re-reads on the event.
   function changeTz(auto: boolean, zone: string) {
@@ -262,9 +156,6 @@ export function GeneralSettings() {
   }
 
   // --- Reset-to-default (#445) ---
-  // Map view defaults: by-project layout, no cohesion, the 1,000-node cap, enhanced (t-SNE) layout on.
-  const mapIsDefault =
-    mapGrouping === "project" && mapCohesion === 0 && mapNodeCap === 1000 && mapTsneEnabled;
   const confirmDeleteIsDefault = confirmDelete;
   const briefingIsDefault =
     !briefingSidebar && briefingFloat === "off" && briefingPrefsAreDefault();
@@ -313,7 +204,6 @@ export function GeneralSettings() {
   // The whole tab, minus the deliberately-excluded time zone (device-derived, not a preference).
   const generalIsDefault =
     appearanceIsDefault &&
-    mapIsDefault &&
     confirmDeleteIsDefault &&
     focusIsDefault &&
     calendarIsDefault &&
@@ -322,13 +212,6 @@ export function GeneralSettings() {
     !modsNotice.folded &&
     helpIsDefault;
 
-  function resetMap() {
-    changeMapGrouping("project"); // state + shared localStorage key
-    changeMapCohesion(0); // state + shared localStorage key
-    setMapNodeCap(1000);
-    setMapTsneEnabled(true);
-    void persistMapPref(1000, true); // the vault-travelling `map` blob (nodeCap + t-SNE) + relayout
-  }
   function resetConfirmDelete() {
     setConfirmDelete(true);
     writeConfirmDelete(true);
@@ -354,7 +237,6 @@ export function GeneralSettings() {
   }
   function resetGeneral() {
     resetAppearance();
-    resetMap();
     resetConfirmDelete();
     resetFocus();
     resetCalendar();
@@ -730,92 +612,6 @@ export function GeneralSettings() {
       </div>
 
       <div
-        id="sec-general-map"
-        data-settings-section
-        className="mt-5 border-t border-border pt-4"
-        data-help="settings-memory-map"
-      >
-        <SectionLabel action={!mapIsDefault && <ResetLink onReset={resetMap} label="Reset map" />}>
-          Memory map
-        </SectionLabel>
-        <SettingRow label="Default grouping">
-          {(a11y) => (
-            <SegmentedControl
-              {...a11y}
-              value={mapGrouping}
-              onChange={changeMapGrouping}
-              options={[
-                { value: "project", label: "By project" },
-                { value: "semantic", label: "Semantic" },
-              ]}
-            />
-          )}
-        </SettingRow>
-        <SettingRow label="Project cohesion">
-          {(a11y) => (
-            <Select
-              {...a11y}
-              value={String(mapCohesion)}
-              onChange={(e) => changeMapCohesion(Number(e.target.value))}
-            >
-              <option value="0">Off</option>
-              <option value="0.15">Low</option>
-              <option value="0.3">Medium</option>
-              <option value="0.5">High</option>
-            </Select>
-          )}
-        </SettingRow>
-        <SettingRow label="Maximum nodes">
-          {(a11y) => (
-            <Select
-              {...a11y}
-              value={String(mapNodeCap)}
-              onChange={(e) => changeMapNodeCap(Number(e.target.value))}
-            >
-              {[200, 500, 1000, 2000, 3500, 5000].map((n) => (
-                <option key={n} value={n}>
-                  {n.toLocaleString()}
-                </option>
-              ))}
-            </Select>
-          )}
-        </SettingRow>
-        <SettingRow label="Enhanced layout (t-SNE)">
-          {(a11y) =>
-            tsneInstalled === null ? (
-              <span className="text-xs text-ink4">…</span>
-            ) : tsneInstalled ? (
-              <Toggle {...a11y} checked={mapTsneEnabled} onChange={changeTsneEnabled} />
-            ) : (
-              <Button variant="secondary" onClick={downloadTsne} disabled={installingTsne}>
-                {installingTsne ? "Downloading…" : "Download"}
-              </Button>
-            )
-          }
-        </SettingRow>
-        {installingTsne && (
-          <IngestProgress
-            mode="percent"
-            processed={Math.round(tsneInstallFrac * 100)}
-            total={100}
-            label="Downloading the enhanced (t-SNE) layout"
-            className="mt-2"
-          />
-        )}
-        {/* The section's opening blurb and its trailing rationale said one thing between
-            them — how the map is laid out — so they're one disclosure now. */}
-        <SectionInfo title="How the map is arranged">
-          <p>The Map tab — how documents are arranged and how many are plotted.</p>
-          <p>
-            Semantic proximity uses a basic on-device layout by default. Project cohesion gently
-            pulls same-project documents together (Off keeps the layout purely by meaning). The
-            optional t-SNE component (a one-time download) produces tighter clusters of related
-            documents — turn it on or off here, or remove it to free space under Settings → Storage.
-          </p>
-        </SectionInfo>
-      </div>
-
-      <div
         id="sec-general-timezone"
         data-settings-section
         className="mt-5 border-t border-border pt-4"
@@ -911,13 +707,12 @@ export function GeneralSettings() {
         onReset={resetGeneral}
         confirmBody={
           <>
-            Restores appearance (System, Mode, Accent, Depth, Location), the memory-map view, the
-            pinboard delete confirmation, the Focus tab (which panels it shows and where the
-            briefing appears), where the Calendar opens, how far a swipe moves it and its Hide done
-            and All-day filters (off), the Chats sidebar's folds, the chat Thinking button (back to
-            off), the sidebar's tabs (nothing pinned or hidden), the Mods notice (shown in full
-            again on a new mod's first screen), and help mode to their defaults. Your time zone is
-            left as-is.
+            Restores appearance (System, Mode, Accent, Depth, Location), the pinboard delete
+            confirmation, the Focus tab (which panels it shows and where the briefing appears),
+            where the Calendar opens, how far a swipe moves it and its Hide done and All-day filters
+            (off), the Chats sidebar's folds, the chat Thinking button (back to off), the sidebar's
+            tabs (nothing pinned or hidden), the Mods notice (shown in full again on a new mod's
+            first screen), and help mode to their defaults. Your time zone is left as-is.
           </>
         }
       />

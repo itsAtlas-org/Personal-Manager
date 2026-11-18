@@ -104,7 +104,7 @@ export function ProjectPicker({
             key={project}
             title={
               primary
-                ? `${project} — the primary project. Its filing activity and Map position follow this one.`
+                ? `${project} — the primary project. Its filing activity and Document Map position follow this one.`
                 : `${project} — linked. Click the name to make it primary, × to unlink.`
             }
             className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs ${

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The one-shot "just joined a shared vault" flag (issue #337), following the mapPrefs
-// pattern for shared localStorage keys. Set right before the post-join reload; read by
+// The one-shot "just joined a shared vault" flag (issue #337), following the
+// focusPrefs pattern for shared localStorage keys. Set right before the post-join reload; read by
 // onboarding-adjacent surfaces (the Connectors tab banner) to explain, once, what stays
 // personal on this account. localStorage lives in the per-Windows-user webview profile,
 // so the flag can never leak to the vault owner's side. Dismissing clears it for good.

@@ -495,7 +495,7 @@ export function DocumentsView({ onReviewClick }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- subscribe once for the view's life
   }, []);
 
-  // Live progress for the one-time OCR download (mirrors the t-SNE install bar in Settings).
+  // Live progress for the one-time OCR download (mirrors the OCR install bar in Settings → Storage).
   useEffect(() => {
     let cancelled = false;
     const un = onOcrInstall((e) => {

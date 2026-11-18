@@ -59,7 +59,10 @@ negotiable, and "just to make it work" is exactly how each one originally got br
   code path that opens it unencrypted.
 - **Migrations are additive.** Never write a migration that drops or rewrites user data
   — an app update must never wipe someone's store. The version number only goes up; the
-  schema only grows.
+  schema only grows. The one exception is a retired derived cache that nothing reads or
+  refills any more (`doc_layout`, dropped by v61): the migration guard allows exactly that
+  bare `DROP TABLE` at exactly that migration, and the table moves to `SYNC-SET.md`'s
+  "Retired" section. See `AGENTS.md` rule 3.
 - **Don't hold the database lock across an `.await`.** Lock, do quick synchronous work,
   drop the guard, *then* do the network/async work. Holding it across `await` is how you
   deadlock the app.
@@ -168,6 +171,7 @@ So you can trust the green checkmark, here's the full static net (defined in the
 | **Supply chain** | cargo-deny (advisories, licences, bans, sources), pip-audit, npm audit |
 | **Secrets & workflows** | gitleaks over the tree, zizmor over the workflows |
 | **Version & hygiene** | version lockstep + bump-vs-base + changelog presence, files-in-place, SPDX headers, licence integrity |
+| **Mods** | `just mods` (every `mods/<id>/manifest.json` valid, no mod in the installer, nothing in `src/` imports `mods/`; add `--base main` to also require that a changed mod bumped its own version), `just build-mods` (each mod built with Vite, packed and verified) |
 
 Two supply-chain rules contributors hit most often:
 
@@ -206,7 +210,10 @@ A green PR proves the code compiles, is well-formed, and passes unit tests; it d
 ## 7. Versioning & "What's New"
 
 **Every PR bumps the version** — there is no docs-only or chore exemption, and the
-lockstep gate enforces it. The rule:
+lockstep gate enforces it. The one exception is a PR that touches only mod folders
+(`mods/<id>/`): it bumps that mod's own `manifest.json` version instead (and its
+`CHANGELOG.md`), and `just mods --base main` checks it. A shared file directly under
+`mods/` (`vite.config.ts`, `tsconfig.json`) is not a mod folder. The rule:
 
 - **feat → minor**, **fix / docs / chore → patch**. CI only checks the number went
   *up*; choosing the right *kind* is your call.
@@ -255,7 +262,9 @@ sandbox**. A code turns "it didn't work" into a one-line, pinpointable report.
 - [ ] **Ran the app and exercised the change by hand** (no e2e tests cover this).
 - [ ] Dependency/licence change reflected in **both** `deny.toml` and `about.toml`.
 - [ ] Version bumped (feat → minor, fix/docs/chore → patch) across the lockstep files,
-      lockfiles regenerated, and a top "What's New" entry added.
+      lockfiles regenerated, and a top "What's New" entry added. (A mods-only change bumps
+      the mod's own version instead; a changed mod always does.)
+- [ ] Touched `mods/`? `just mods --base main` and `just build-mods` pass.
 - [ ] Conventional-commit message; PR body explains *what and why*.
 - [ ] Opened the PR for review — **left the merge to the maintainer.**
 

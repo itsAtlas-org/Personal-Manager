@@ -335,7 +335,7 @@ pub fn sidecar_status(state: State<'_, AppState>) -> SidecarStatus {
 }
 
 /// Progress for an optional-component download, broadcast on `<component>://install` — i.e.
-/// `python://install` (the macOS interpreter fetch), `tsne://install` and `ocr://install`. None of
+/// `python://install` (the macOS interpreter fetch) and `ocr://install`. None of
 /// these downloads has a file count, so `fraction` (0.0..=1.0, monotonic) renders as a percentage
 /// bar. One shape + one emit helper for all of them (X-D6); the per-component structs it replaced
 /// were byte-identical. The python leg only ever fires on macOS when no system Python was found.
@@ -345,8 +345,8 @@ pub struct InstallProgressEvent {
 }
 
 /// Emit optional-component install progress on the `<component>://install` channel. Fire-and-forget
-/// (a dropped event costs a progress tick, never the install). Shared by `ensure_sidecar` (python),
-/// `install_optional_tsne` and `install_optional_ocr`, so the channel name is built exactly one way.
+/// (a dropped event costs a progress tick, never the install). Shared by `ensure_sidecar` (python)
+/// and `install_optional_ocr`, so the channel name is built exactly one way.
 pub fn emit_install_progress(app: &AppHandle, component: &str, fraction: f32) {
     let _ = app.emit(
         &format!("{component}://install"),

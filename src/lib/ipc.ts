@@ -95,7 +95,6 @@ import type {
   PullProgress,
   PullSnapshot,
   LanguageOptions,
-  LayoutProgressEvent,
   LocalFolder,
   LocalFolderSyncState,
   LocalSubfolder,
@@ -146,7 +145,6 @@ import type {
   TagProposalRow,
   RestoreSummary,
   SwitchOutcome,
-  SemanticLayout,
   Settings,
   SharedDrive,
   SwmRoot,
@@ -155,7 +153,6 @@ import type {
   NetSelftest,
   StorageReport,
   SyncEvent,
-  TsneStatus,
   AdoptOutcome,
   LocalAccount,
   SharedVaultAd,
@@ -1630,33 +1627,6 @@ export const reindexIndexOnly = (docId: number) =>
 export const promoteIndexOnly = (docId: number) =>
   invoke<Document>("promote_index_only", { docId });
 
-// ---- Semantic memory map (UMAP/t-SNE) ----
-
-/** The cached semantic layout — coordinates by meaning, plus whether a recompute is in flight. Always
- *  returns immediately (stale-but-cached); the background job does the recompute. */
-export const semanticLayout = () => invoke<SemanticLayout>("semantic_layout");
-
-/** Kick off the background layout precompute after unlock (idle priority; defers to a Drive sync). */
-export const startSemanticLayout = () => invoke<boolean>("start_semantic_layout");
-
-/** Recompute the layout now if stale, jumping ahead of a Drive sync (called when the Map opens). */
-export const prioritiseSemanticLayout = () => invoke<void>("prioritise_semantic_layout");
-
-/** The cached "by project" map layout as `lib/mapLayout` last wrote it — an opaque JSON string the
- *  backend only stores, never interprets. `null` when nothing is cached yet. */
-export const projectLayout = () => invoke<string | null>("project_layout");
-
-/** Persist the "by project" layout so the next launch repaints instead of re-running the force
- *  simulation. Pass `null` to clear it. */
-export const setProjectLayout = (cache: string | null) =>
-  invoke<void>("set_project_layout", { cache });
-
-/** Whether the optional t-SNE reducer (an on-demand download) is installed. */
-export const optionalTsneStatus = () => invoke<TsneStatus>("optional_tsne_status");
-
-/** Install the optional t-SNE reducer into the managed venv, then recompute the layout with it. */
-export const installOptionalTsne = () => invoke<void>("install_optional_tsne");
-
 /** Whether the optional photo-OCR component (rapidocr + pi-heif) is installed. */
 export const optionalOcrStatus = () => invoke<OcrStatus>("optional_ocr_status");
 
@@ -1664,29 +1634,21 @@ export const optionalOcrStatus = () => invoke<OcrStatus>("optional_ocr_status");
  *  rides the `ocr://install` event (see `onOcrInstall`); removal is via `removeStorageComponent`. */
 export const installOptionalOcr = () => invoke<void>("install_optional_ocr");
 
-/** Inventory the large on-device components (venv, t-SNE libraries, OCR stack, search model). */
+/** Inventory the large on-device components (venv, OCR stack, search model). */
 export const listStorageComponents = () => invoke<StorageReport>("list_storage_components");
 
 /** Remove an on-device component, enforced by the dependency cascade server-side. */
 export const removeStorageComponent = (id: string) =>
   invoke<void>("remove_storage_component", { id });
 
-/** Subscribe to global semantic-layout progress (fires regardless of which view started the job). */
-export const onLayoutProgress = (handler: (e: LayoutProgressEvent) => void): Promise<UnlistenFn> =>
-  listen<LayoutProgressEvent>("layout://progress", (e) => handler(e.payload));
-
 /** Subscribe to an optional component's install-download progress on `<component>://install`. One
- *  channel shape for the optional downloads (t-SNE, OCR, and the macOS Python fetch); the thin
+ *  channel shape for the optional downloads (OCR, and the macOS Python fetch); the thin
  *  `on*Install` aliases below name each channel for their callers. */
 export const onInstallProgress = (
-  component: "python" | "tsne" | "ocr",
+  component: "python" | "ocr",
   handler: (e: InstallProgressEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<InstallProgressEvent>(`${component}://install`, (e) => handler(e.payload));
-
-/** Subscribe to the optional t-SNE download's progress (fires from whichever view triggered it). */
-export const onTsneInstall = (handler: (e: InstallProgressEvent) => void): Promise<UnlistenFn> =>
-  onInstallProgress("tsne", handler);
 
 /** Subscribe to the optional OCR download's progress (fires from whichever view triggered it). */
 export const onOcrInstall = (handler: (e: InstallProgressEvent) => void): Promise<UnlistenFn> =>

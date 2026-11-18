@@ -24,8 +24,6 @@ import { RetrievalExplainPanel } from "./components/RetrievalExplainPanel";
 import { DevView } from "./components/DevView";
 import { DocumentsView } from "./components/DocumentsView";
 import { FocusView } from "./components/FocusView";
-import { GraphView } from "./components/GraphView";
-import { warmMapLayout } from "./lib/mapLayout";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { LockScreen } from "./components/LockScreen";
 import { PinboardView } from "./components/PinboardView";
@@ -105,7 +103,6 @@ import {
   setChatModels,
   setConversationProject,
   setHelpMode,
-  startSemanticLayout,
   syncCalendar,
   vaultLockStatus,
   vaultStatus,
@@ -826,16 +823,6 @@ export default function App() {
     collapsible: true,
   });
 
-  // Pre-compute the Map's layouts in the background after unlock, at idle priority: the by-project
-  // force layout off the main thread (a worker), and the semantic layout in the backend (which defers
-  // to an active Drive sync). Both prime caches so opening the Map is instant and never stutters launch.
-  useEffect(() => {
-    if (aiReady) {
-      warmMapLayout();
-      void startSemanticLayout().catch(() => {});
-    }
-  }, [aiReady]);
-
   // Filing suggestions are paid model calls, so both of the things that trigger them live here, at
   // app scope, where they run whatever tab is open. Triggered in the frontend rather than the backend
   // because the AI-suggestions switch is a localStorage preference with no backend consumer (see
@@ -1270,10 +1257,6 @@ export default function App() {
                 ) : view === "teach" ? (
                   <main className="flex h-full flex-1 flex-col">
                     <TeachView />
-                  </main>
-                ) : view === "graph" ? (
-                  <main className="flex h-full flex-1 flex-col">
-                    <GraphView />
                   </main>
                 ) : view === "pinboard" ? (
                   // min-w-0 lets the oversized pinboard board stay contained in its own

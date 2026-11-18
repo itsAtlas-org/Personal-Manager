@@ -537,14 +537,19 @@ reset gate, restore, re-homing, unlock and the screen; the stale-key branch and 
 store" are held by their code-or-literal gates, which need a keychain or a live app to exercise.
 
 **Why.** Before this, `run` simply skipped a newer store and opened it as if current, which was safe
-only while every migration was additive. Mods v60 is the first that isn't safe to ignore (its later
-drop, the Pinboard move), and from here on a newer store is the user's whole library at a schema this
-build can't name. Opening it would misread it; any recovery that treats it as damaged deletes it.
+only while every migration was additive. Mods v61 is the first that isn't safe to ignore (it drops
+the Map's `doc_layout` cache; the Pinboard move waits for a later migration), and from here on a newer
+store is the user's whole library at a schema this build can't name. Opening it would misread it; any recovery that treats it as damaged deletes it.
 
 **Co-signers.** A new open path goes through `db::open`, never `open_keyed` plus its own migrate. A new
 recovery that deletes, resets, re-keys or overwrites a store after an open failure branches on the
 fault's code and refuses `NewerStore`, and never matches error text to decide. A migration that an
-older build must not survive also bumps the backup `FORMAT_VERSION` (`backup/format.rs`).
+older build must not survive also bumps the backup `FORMAT_VERSION` (`backup/format.rs`), unless
+the format already keeps that build out: v61 did not bump it, because a format-2 archive may hold a
+store at v60 or later and a build that predates this invariant already refuses format 2. A migration
+may drop only a derived cache nothing reads or refills any more, and the guard
+(`RETIRED_DERIVED_CACHES` in `db/migrations.rs`, AGENTS.md rule 3) allows exactly that one drop at
+exactly that one index.
 
 ### I-29 · Everything keyed to a mod cascades from `mods`, and attribution never does — **Held**
 

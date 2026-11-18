@@ -89,7 +89,7 @@ function normalizeQuery(query: string): string {
 /**
  * Global quick-jump (spec §4): one keystroke opens it, type to filter to any
  * project, file, past conversation, calendar event, or navigation destination, Enter jumps there.
- * Composes the existing list commands (mirrors GraphView's reuse); the calendar is searched in Rust
+ * Composes the existing list commands; the calendar is searched in Rust
  * as you type, since PM keeps every event (#1047) and they don't all belong in memory.
  */
 export function CommandPalette({

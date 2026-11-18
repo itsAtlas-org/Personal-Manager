@@ -85,17 +85,6 @@
         "classifiers": []
       }
     },
-    "cloudpickle": {
-      "versions": ["3.1.2"],
-      "licence": "BSD-3-Clause",
-      "stamp": "dd63e7ec2551b24222bf1ac0e9994aa9",
-      "evidence": {
-        "expression": null,
-        "license": "BSD-3-Clause",
-        "classifiers": ["License :: OSI Approved :: BSD License"]
-      },
-      "note": "Declares `license: \"BSD-3-Clause\"` with the BSD classifier; the project's LICENSE is the three-clause text. New in the t-SNE lock: joblib 1.6.0 requires it."
-    },
     "cobble": {
       "versions": ["0.1.4"],
       "licence": "BSD-2-Clause OR BSD-3-Clause",
@@ -262,16 +251,6 @@
         "classifiers": []
       }
     },
-    "joblib": {
-      "versions": ["1.6.0"],
-      "licence": "BSD-3-Clause",
-      "stamp": "4ecdcb658ae410fbceaf847fdc41e114",
-      "evidence": {
-        "expression": "BSD-3-Clause",
-        "license": null,
-        "classifiers": []
-      }
-    },
     "loguru": {
       "versions": ["0.7.3"],
       "licence": "MIT",
@@ -347,16 +326,6 @@
       },
       "note": "`license` is the entire MIT text pasted into the one-line field."
     },
-    "narwhals": {
-      "versions": ["2.28.0"],
-      "licence": "MIT",
-      "stamp": "a80bc4d1e95a4de5db590019b8751f44",
-      "evidence": {
-        "expression": "MIT",
-        "license": null,
-        "classifiers": []
-      }
-    },
     "numpy": {
       "versions": ["2.5.4"],
       "licence": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 AND BSD-3-Clause-Open-MPI AND GPL-3.0-or-later WITH GCC-exception-3.1 AND LGPL-2.1-or-later AND LicenseRef-Microsoft-VC-Redistributable",
@@ -421,17 +390,6 @@
         "license": "MIT",
         "classifiers": ["License :: OSI Approved :: MIT License"]
       }
-    },
-    "opentsne": {
-      "versions": ["1.0.4"],
-      "licence": "BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-3.0-or-later WITH GCC-exception-3.1",
-      "stamp": "2a0f8b257e7ba440a39336de13a2d663",
-      "evidence": {
-        "expression": null,
-        "license": "BSD-3-Clause",
-        "classifiers": ["License :: OSI Approved"]
-      },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). openTSNE is BSD-3-Clause and compiles in Spotify's Annoy (Apache-2.0) and, on Windows, mman-win32 (MIT). The Linux wheel bundles libgomp (GCC runtime exception); the macOS universal2 wheel bundles nothing."
     },
     "packaging": {
       "versions": ["26.3"],
@@ -602,28 +560,6 @@
         "classifiers": ["License :: OSI Approved :: Apache Software License"]
       }
     },
-    "scikit-learn": {
-      "versions": ["1.9.1"],
-      "licence": "BSD-3-Clause AND MIT AND GPL-3.0-or-later WITH GCC-exception-3.1 AND Apache-2.0 WITH LLVM-exception AND NCSA AND LicenseRef-Microsoft-VC-Redistributable",
-      "stamp": "a5c74b6068d3300f31edce34039f9216",
-      "evidence": {
-        "expression": "BSD-3-Clause",
-        "license": null,
-        "classifiers": []
-      },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). scikit-learn is BSD-3-Clause (libsvm and liblinear inside, BSD-3-Clause; vendored array-api code, MIT). Its OpenMP runtime differs by platform: GCC's libgomp on Linux (GCC runtime exception), LLVM's libomp on macOS (Apache-2.0 WITH LLVM-exception AND NCSA), Microsoft's msvcp140 and vcomp140 on Windows."
-    },
-    "scipy": {
-      "versions": ["1.18.1"],
-      "licence": "BSD-3-Clause AND BSD-2-Clause AND MIT AND BSL-1.0 AND Qhull AND BSD-3-Clause-LBNL AND Apache-2.0 WITH LLVM-exception AND BSD-3-Clause-Open-MPI AND GPL-3.0-or-later WITH GCC-exception-3.1 AND LGPL-2.1-or-later",
-      "stamp": "2fc8184a800193c75157dad33d04021d",
-      "evidence": {
-        "expression": null,
-        "license": "Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers. All rights reserved. Redistribution and use in source...",
-        "classifiers": ["License :: OSI Approved :: BSD License"]
-      },
-      "note": "Bundled natives read 2026-11-06 in the win_amd64, macOS and manylinux x86_64 wheels (hashes checked against the locks). SciPy is BSD-3-Clause and compiles in Qhull, Boost.Math and ryu (BSL-1.0), xsf (BSD-3-Clause, MIT, BSD-3-Clause-LBNL, Apache-2.0 WITH LLVM-exception), HiGHS, SuperLU, ARPACK and others (BSD, MIT). The wheels bundle OpenBLAS with LAPACK (BSD-3-Clause, BSD-3-Clause-Open-MPI), libgfortran and libgcc_s (GCC runtime exception) and libquadmath (LGPL-2.1-or-later, not on Windows). The macosx_14_0 wheels link Apple's Accelerate instead of OpenBLAS. Re-checked 2026-11-16 after the Python 3.12 floor dropped the 1.17.1 fork: 1.18.1 was already in the reviewed set and no hash was added to the locks, so the wheels read are the wheels still locked."
-    },
     "shapely": {
       "versions": ["2.2.0"],
       "licence": "BSD-3-Clause AND LGPL-2.1-only AND LicenseRef-Microsoft-VC-Redistributable",
@@ -655,16 +591,6 @@
         "classifiers": ["License :: OSI Approved :: MIT License"]
       },
       "note": "4.1.1's py3 wheel (hash checked against the lock, read 2026-11-16) carries the same MIT LICENSE.md as 3.0.4 and no compiled code. It is the only soupsieve left in the locks since the Python 3.12 floor dropped the 2.10 fork."
-    },
-    "threadpoolctl": {
-      "versions": ["3.7.0"],
-      "licence": "BSD-3-Clause",
-      "stamp": "1ac46f015c4b68520ad35dcae7946e3d",
-      "evidence": {
-        "expression": "BSD-3-Clause",
-        "license": null,
-        "classifiers": []
-      }
     },
     "tokenizers": {
       "versions": ["0.23.3"],

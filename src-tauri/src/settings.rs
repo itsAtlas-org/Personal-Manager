@@ -350,7 +350,6 @@ pub fn set_time_zone(state: State<'_, AppState>, zone: String) -> Result<()> {
 const WEBVIEW_PREFS: &[&str] = &[
     "appearance",
     "pinboard",
-    "map",
     "project_ui",
     "milestone_ui",
     "calendar_ui",
@@ -588,14 +587,13 @@ mod tests {
     #[test]
     fn webview_prefs_allowlist_excludes_sensitive_settings() {
         // I-04: get_pref/set_pref gate on this list, so a compromised webview can read or write ONLY
-        // its own UI blobs. Lock it: the seven UI keys are in, and schema-critical / sensitive rows
+        // its own UI blobs. Lock it: the six UI keys are in, and schema-critical / sensitive rows
         // are out — a future edit that accidentally adds one trips this test. The last three carry
         // user content (project names, calendar ids, backup account ids) that used to sit in the
         // webview's plaintext localStorage, so dropping one of them silently sends it back there.
         for ui in [
             "appearance",
             "pinboard",
-            "map",
             "project_ui",
             "milestone_ui",
             "calendar_ui",

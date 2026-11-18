@@ -7,9 +7,12 @@
 //! that already has a row. Nothing here downloads, and nothing here is reached with the DB lock held.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
-use super::{Approval, InstallOptions, Installed, Ledger, LedgerError, LedgerStore, Source};
+use super::{
+    check_files, read_row, read_rows, Approval, InstallOptions, Installed, Layout, Ledger,
+    LedgerError, LedgerStore, RepairTarget, Source,
+};
 use crate::mods::autoinstall::{self, Held, Pilot, Step};
 use crate::mods::index::Index;
 use crate::mods::keys::TrustedKeys;
@@ -27,14 +30,30 @@ pub enum PilotLanded {
     Failed(String),
 }
 
-/// The pilot's row as the decision reads it.
-fn held(conn: &Connection, id: &str) -> rusqlite::Result<Option<(String, bool)>> {
+/// The pilot's row as the decision reads it: where it came from, whether it is signed, and the
+/// version and file it pins.
+type PilotRow = (String, bool, String, Option<String>);
+
+fn held(conn: &Connection, id: &str) -> rusqlite::Result<Option<PilotRow>> {
     conn.query_row(
-        "SELECT installed_from, signed FROM mods WHERE id = ?1",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        "SELECT installed_from, signed, version, package_sha256 FROM mods WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
     .optional()
+}
+
+/// Whether the row's files are missing on this computer, by looking: a restored row is paused,
+/// installing or active as the backup had it, and only a startup load parks an active one, so the
+/// row's state says nothing. A row the safety list removed has no files to put back, and a test
+/// folder's are the developer's own.
+fn files_missing(layout: &Layout, conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(read_rows(conn)?
+        .iter()
+        .find(|row| row.id == id)
+        .filter(|row| !row.removed() && !row.folder())
+        .and_then(|row| read_row(layout, row).ok())
+        .is_some_and(|ok| check_files(&ok) == Err(store::REASON_FILES_MISSING)))
 }
 
 impl<S: LedgerStore> Ledger<'_, S> {
@@ -48,9 +67,13 @@ impl<S: LedgerStore> Ledger<'_, S> {
             let mut out = Vec::new();
             for pilot in autoinstall::pending(c)? {
                 let row = held(c, pilot.id)?;
-                let held = row.as_ref().map(|(from, signed)| Held {
+                let missing = row.is_some() && files_missing(self.layout, c, pilot.id)?;
+                let held = row.as_ref().map(|(from, signed, version, sha256)| Held {
                     installed_from: from,
                     signed: *signed,
+                    files_missing: missing,
+                    version,
+                    sha256: sha256.as_deref(),
                 });
                 out.push((pilot, autoinstall::decide(pilot, held, index, now)));
             }
@@ -65,7 +88,7 @@ impl<S: LedgerStore> Ledger<'_, S> {
         self.with_conn(|c| {
             let tx = c.transaction()?;
             let settles = held(&tx, pilot.id)?
-                .is_some_and(|(from, signed)| from == store::FROM_CATALOGUE && signed);
+                .is_some_and(|(from, signed, ..)| from == store::FROM_CATALOGUE && signed);
             if !settles {
                 return Err(Refusal::Changed.into());
             }
@@ -73,6 +96,24 @@ impl<S: LedgerStore> Ledger<'_, S> {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// A pilot whose row is here and whose files aren't (a restore onto another computer; the plan
+    /// asks only with a current index that doesn't name the row): put back
+    /// the pinned version and file downloaded for `target` (the ledger's own repair, which accepts
+    /// nothing else), then settle, which clears the marker. The settle runs only when the repair
+    /// did; a settle that fails leaves the marker, and the next pass settles a row that is whole.
+    pub fn repair_pilot(
+        &self,
+        pilot: &Pilot,
+        target: &RepairTarget,
+        bytes: &[u8],
+        keys: &TrustedKeys,
+        index: Option<&Index>,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        self.install_repair(target, bytes, keys, index, now)?;
+        self.settle_pilot(pilot)
     }
 
     /// Install a package the pass downloaded for `pilot`, as a fresh unconsented install of a

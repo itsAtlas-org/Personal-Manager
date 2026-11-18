@@ -55,7 +55,6 @@ mod hardware;
 mod ics;
 mod index_only;
 mod ingest;
-mod layout;
 mod llm_gateway;
 mod local_ai;
 // The Local AI switch (D7): one stored setting that turns the whole Workbench on or off, enforced
@@ -569,11 +568,6 @@ pub struct AppState {
     /// component-local and resets on remount, which made that reachable by simply switching tabs and
     /// clicking again.
     pub ingest_busy: AtomicBool,
-    /// Snapshot of the semantic-map layout precompute (the reducer that ran + the last error), so the
-    /// Map can show what produced the cached coordinates and surface a failure. The single-flight
-    /// claim itself is NOT here — it is [`AppState::layout_busy`], so a panicked or dropped pass
-    /// releases it. See `layout`.
-    pub layout_job: Mutex<layout::LayoutJobState>,
     /// When the user was last active (a chat send / an ingest). The idle chat-indexer (`chat_index`)
     /// reads this so it only runs during a lull and never competes with active use.
     pub last_user_activity: Mutex<Instant>,
@@ -588,16 +582,6 @@ pub struct AppState {
     /// Single-flight guard shared by the chat-preference eager nudge and the launch catch-up
     /// (`chat_prefs`), so a per-conversation extraction and a full reconcile never overlap.
     pub prefs_busy: AtomicBool,
-    /// Single-flight guard for the semantic-layout precompute, shared by the idle launch pass, the
-    /// Map-open prioritise, and the two component-change recomputes (t-SNE installed / a storage
-    /// component removed), so a second request folds into the running one instead of stacking a
-    /// second reducer run. It is also what `semantic_layout` reports as `computing`.
-    ///
-    /// An `AtomicBool` reached through [`BusyGuard`] rather than a `running` field on
-    /// [`layout::LayoutJobState`]: the flag has to survive a panicking or dropped pass (F-43), and a
-    /// bool behind a `Mutex` additionally wedges on poison — reading idle forever while refusing
-    /// forever.
-    pub layout_busy: AtomicBool,
     /// Snapshot of the currently-running encrypted backup / restore, so the Backup settings UI can
     /// resume showing progress after the user navigates away and back (the sibling of `drive_sync`).
     pub backup_state: Mutex<BackupState>,
@@ -685,7 +669,7 @@ pub(crate) fn session_unavailable_message(fault: Option<&error::VaultFault>) -> 
 /// Single-flight guard with RAII release. [`BusyGuard::acquire`] returns `Some` if it flipped the flag
 /// `false → true` (this caller won the single-flight), or `None` if another pass already holds it. The flag
 /// resets to `false` when the guard drops — crucially including an unwinding panic, unlike a trailing
-/// `store(false)`. A background task (title / summary / prefs / index sweep / layout precompute) that panics
+/// `store(false)`. A background task (title / summary / prefs / index sweep) that panics
 /// mid-op therefore can't leave its subsystem's flag stuck `true`, which would otherwise silently wedge that
 /// feature (its eager nudge AND its scheduler both short-circuit on the flag) until the app restarts.
 pub(crate) struct BusyGuard<'a>(&'a AtomicBool);
@@ -736,13 +720,11 @@ impl AppState {
             retag_job: Mutex::new(RetagJobState::default()),
             retag_busy: AtomicBool::new(false),
             ingest_busy: AtomicBool::new(false),
-            layout_job: Mutex::new(layout::LayoutJobState::default()),
             last_user_activity: Mutex::new(Instant::now()),
             chat_index_busy: AtomicBool::new(false),
             summary_busy: AtomicBool::new(false),
             title_busy: AtomicBool::new(false),
             prefs_busy: AtomicBool::new(false),
-            layout_busy: AtomicBool::new(false),
             backup_state: Mutex::new(BackupState::default()),
             backup_cancel: AtomicBool::new(false),
             backup_busy: AtomicBool::new(false),
@@ -1742,7 +1724,12 @@ pub fn run() {
             {
                 let worker = handle.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    worker.state::<AppState>().sidecar.retire_voice();
+                    let sidecar = &worker.state::<AppState>().sidecar;
+                    sidecar.retire_voice();
+                    // The enhanced map layout's libraries (openTSNE, scikit-learn, scipy and
+                    // friends) are no use since the layout moved into the Document Map mod:
+                    // `SidecarManager::retire_tsne`, the same shape, one pip call, never numpy.
+                    sidecar.retire_tsne();
                 });
             }
 
@@ -2072,13 +2059,6 @@ pub fn run() {
             commands::fetch_index_only_body,
             commands::reindex_index_only,
             commands::promote_index_only,
-            layout::semantic_layout,
-            layout::start_semantic_layout,
-            layout::prioritise_semantic_layout,
-            layout::project_layout,
-            layout::set_project_layout,
-            layout::optional_tsne_status,
-            layout::install_optional_tsne,
             photos::optional_ocr_status,
             photos::install_optional_ocr,
             components::list_storage_components,

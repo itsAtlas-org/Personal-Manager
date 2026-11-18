@@ -165,45 +165,6 @@ class EmbedTest(unittest.TestCase):
         self.assertEqual(len(out["vectors"][0]), S.EMBED_DIM)
 
 
-class ReduceTest(unittest.TestCase):
-    """The 2-D reducer for the semantic memory map. The PCA path (the bundled default) needs only
-    numpy, so these run wherever numpy is present and skip otherwise (CI is model-free)."""
-
-    def test_empty_and_tiny_inputs(self):
-        # No numpy needed for the degenerate guards.
-        self.assertEqual(S.do_reduce({"vectors": []}), {"coords": [], "method": "none"})
-        out = S.do_reduce({"vectors": [[1.0, 2.0], [3.0, 4.0]], "method": "pca"})
-        self.assertEqual(out["method"], "trivial")  # n <= 3 short-circuits before any reducer
-        self.assertEqual(len(out["coords"]), 2)
-
-    @unittest.skipUnless(
-        importlib.util.find_spec("numpy") is not None,
-        "numpy not installed (the PCA reducer is a local-only check)",
-    )
-    def test_pca_projects_into_unit_square(self):
-        # Two clusters in 4-d → PCA to 2-d. One point per row; coords must be scaled into [0,1]^2.
-        vectors = [
-            [0.0, 0.0, 0.0, 0.0],
-            [0.1, 0.0, 0.1, 0.0],
-            [0.0, 0.1, 0.0, 0.1],
-            [9.0, 9.0, 9.0, 9.0],
-            [9.1, 9.0, 9.1, 9.0],
-            [9.0, 9.1, 9.0, 9.1],
-        ]
-        out = S.do_reduce({"vectors": vectors, "method": "pca"})
-        self.assertEqual(out["method"], "pca")
-        self.assertEqual(len(out["coords"]), len(vectors))
-        for x, y in out["coords"]:
-            self.assertGreaterEqual(x, 0.0)
-            self.assertLessEqual(x, 1.0)
-            self.assertGreaterEqual(y, 0.0)
-            self.assertLessEqual(y, 1.0)
-        # An unknown/absent t-SNE install falls back to PCA, never an empty map.
-        fallback = S.do_reduce({"vectors": vectors, "method": "tsne"})
-        self.assertEqual(len(fallback["coords"]), len(vectors))
-        self.assertIn(fallback["method"], ("tsne", "pca"))
-
-
 class _OcrResultObj:
     """Mimics rapidocr 3.x's output object: recognised lines on a `.txts` tuple."""
 
@@ -1466,17 +1427,28 @@ class ProtocolTest(unittest.TestCase):
         replies = self._exchange([json.dumps({"id": 7, "method": "ping"})])
         self.assertEqual(replies, [{"id": 7, "ok": True, "result": {"ok": True}}])
 
-    def test_reduce_over_the_wire_returns_a_well_formed_result(self):
-        # `reduce` with <=3 vectors takes its dependency-free "trivial" path (no numpy,
-        # no models), so a real data-returning handler round-trips through the loop even
-        # in a bare environment — the case CI actually runs. (count_tokens/embed need
-        # fastembed and error without it; their math is pinned by CountTokensTest.)
-        req = {"id": 8, "method": "reduce", "params": {"vectors": [[0.1, 0.2], [0.3, 0.4]]}}
-        [reply] = self._exchange([json.dumps(req)])
+    def test_file_properties_over_the_wire_returns_a_well_formed_result(self):
+        # A `.md` path carries no property block, so `file_properties` is a data-returning handler
+        # that round-trips through the loop with no numpy and no models: the case CI actually runs
+        # in a bare environment. (count_tokens/embed need fastembed and error without it; their
+        # math is pinned by CountTokensTest.)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "notes.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# hello\n")
+            req = {"id": 8, "method": "file_properties", "params": {"path": path}}
+            [reply] = self._exchange([json.dumps(req)])
         self.assertEqual(reply["id"], 8)
-        self.assertTrue(reply["ok"])
-        self.assertEqual(reply["result"]["method"], "trivial")
-        self.assertEqual(len(reply["result"]["coords"]), 2)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(
+            reply["result"], {"author": None, "last_modified_by": None, "created": None}
+        )
+
+    def test_the_retired_reduce_method_is_an_unknown_method(self):
+        # The enhanced map layout moved into the Document Map mod; the sidecar no longer projects.
+        [reply] = self._exchange([json.dumps({"id": 10, "method": "reduce", "params": {}})])
+        self.assertFalse(reply["ok"])
+        self.assertIn("unknown method", reply["error"])
 
     def test_unknown_method_is_an_error_envelope_not_a_crash(self):
         [reply] = self._exchange([json.dumps({"id": 9, "method": "nope"})])

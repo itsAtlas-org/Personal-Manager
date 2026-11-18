@@ -6,8 +6,10 @@
 //! first time PM can fetch it.
 //!
 //! **A marker starts it.** The pass acts only on a marker row in `settings` (`mods_autoinstall_map`
-//! and its kind), which a migration writes for a store that used the feature. Nothing else in PM
-//! writes a marker, so a store without one is never touched: no download, no row, no listing entry.
+//! and its kind), which a migration writes for a store that used the feature, and which a restore
+//! writes for a store whose backup holds the pilot's catalogue row ([`mark_restored`]: the mod's
+//! files are per computer, so a restore onto another one owes them). Nothing else in PM writes a
+//! marker, so a store without one is never touched: no download, no row, no listing entry.
 //!
 //! **What a pass does**, per marker present (one transaction each, under the ledger lock):
 //! - the mod already has a catalogue row (the user installed it, or an earlier pass did): settle it,
@@ -17,6 +19,12 @@
 //!   sha256-checked fetch) and install it unconsented ([`super::ledger::Ledger::land_pilot`]); the
 //!   marker's removal and the handover run in the same transaction as the row, so they land with it
 //!   or not at all;
+//! - the mod has a catalogue row whose files are missing on this computer (a restore brought the
+//!   row, not the files; whatever state the row is in, paused included, because the files decide):
+//!   with a current index that doesn't blacklist the row's version or file, put back exactly the
+//!   pinned version and file, the way the Mods tab's repair does
+//!   ([`super::ledger::Ledger::repair_target`]), then settle. It is the same file the person's own
+//!   click on Repair would fetch, signature and sha256 checked, never a newer or unsigned one;
 //! - otherwise leave the marker, and the Mods tab shows the mod as "Installing" (a synthesized
 //!   entry, never a row: a fake row in a truth-class table would ride in backups and shared vaults
 //!   with an invented hash and version).
@@ -24,7 +32,10 @@
 //! **Only the writer installs** ([`crate::lock_session::this_instance_writes`]): a read-only guest of
 //! a shared vault has its store closed, and a mod installed there would be files the writer's ledger
 //! never heard of. **No download without a usable, current index** ([`decide`]): an expired or missing
-//! index may restrict (the blacklist applies elsewhere), never install.
+//! index may restrict (the blacklist applies elsewhere), never install. Putting back the files of a
+//! row the person already has is no exception: it fetches the row's own pinned, hash-checked file,
+//! but the row came from a restore (a backup is data a person may have been handed), so it too waits
+//! for a current index and is left when that index's blacklist names the row's version or file.
 //!
 //! **The handover** moves what the core feature kept in the store into the mod's own storage, then
 //! deletes the old rows, verify-then-delete: the mod's `settings` key is read back before any old
@@ -42,6 +53,7 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
 
 use super::fetch::{fetch_package, Endpoints, ReqwestTransport, Transport};
+use super::ids::ModId;
 use super::index::Index;
 use super::index_state;
 use super::keys::TrustedKeys;
@@ -94,6 +106,22 @@ pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<&'static Pilot>> {
     Ok(out)
 }
 
+/// A restore's step ([`crate::backup::adopt_mods::reset_for_adopt`]): a store restored with a
+/// pilot's signed catalogue row is owed that mod's files on this computer, which the backup can't
+/// carry, so the marker is written and the next pass settles the row or puts its files back.
+/// Nothing is written for a store without the row: a mod the person removed stays removed.
+pub fn mark_restored(conn: &Connection) -> rusqlite::Result<()> {
+    for p in &PILOTS {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) \
+             SELECT ?1, '1' WHERE EXISTS ( \
+                 SELECT 1 FROM mods WHERE id = ?2 AND installed_from = ?3 AND signed = 1)",
+            params![p.marker, p.id, store::FROM_CATALOGUE],
+        )?;
+    }
+    Ok(())
+}
+
 fn get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
         r.get(0)
@@ -112,6 +140,12 @@ fn to_ledger(e: crate::error::Error) -> LedgerError {
 pub struct Held<'a> {
     pub installed_from: &'a str,
     pub signed: bool,
+    /// The row's files aren't on this computer (a restore brought the row), whatever its state.
+    pub files_missing: bool,
+    /// The row's pinned version and file, which a repair would fetch: the blacklist is read against
+    /// them before it does.
+    pub version: &'a str,
+    pub sha256: Option<&'a str>,
 }
 
 /// Why a marker is left for a later pass.
@@ -132,6 +166,8 @@ pub enum Leave {
 pub enum Step {
     /// It is installed: do the handover and clear the marker, download nothing.
     Settle,
+    /// It is installed but its files aren't here: put back the pinned version and file, then settle.
+    Repair,
     Download(Download),
     Leave(Leave),
 }
@@ -144,10 +180,21 @@ pub fn decide(
     now: DateTime<Utc>,
 ) -> Step {
     if let Some(h) = held {
-        return if h.installed_from == store::FROM_CATALOGUE && h.signed {
-            Step::Settle
+        if h.installed_from != store::FROM_CATALOGUE || !h.signed {
+            return Step::Leave(Leave::OtherRow);
+        }
+        if !h.files_missing {
+            return Step::Settle;
+        }
+        // The version and file come from the row, which a restore may have brought from anywhere:
+        // like a download, a repair waits for a current index and for the blacklist to clear them.
+        let Some(index) = index.filter(|i| i.current_at(now)) else {
+            return Step::Leave(Leave::NoCurrentIndex);
+        };
+        return if index.blacklisted(pilot.id, h.version, h.sha256).is_some() {
+            Step::Leave(Leave::Blacklisted)
         } else {
-            Step::Leave(Leave::OtherRow)
+            Step::Repair
         };
     }
     let Some(index) = index.filter(|i| i.current_at(now)) else {
@@ -197,7 +244,11 @@ pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError
     if !row {
         return Err(LedgerError::NotInstalled);
     }
-    (pilot.handover)(conn, pilot.id)?;
+    // The handover is once per vault: a restore writes the marker again for a vault that landed
+    // before (the files are owed, not the rows), and its core rows and device prefs were dealt with.
+    if get(conn, pilot.landed)?.is_none() {
+        (pilot.handover)(conn, pilot.id)?;
+    }
     // The marker goes after the handover, in the same transaction: a failure above keeps both.
     db::delete_setting(conn, pilot.marker).map_err(to_ledger)?;
     db::set_setting(conn, pilot.landed, "1").map_err(to_ledger)?;
@@ -205,7 +256,7 @@ pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError
 }
 
 /// The core Map's rows in `settings`, dead once the Map is a mod. The first is the webview-written
-/// pref blob (`{nodeCap?, tsneEnabled?}`); the others are the layout caches.
+/// pref blob (`{nodeCap?, tsneEnabled?}`, both carried: see [`hand_over_map`]); the others are the layout caches.
 const MAP_PREF: &str = "map";
 const MAP_DEAD_KEYS: [&str; 3] = [MAP_PREF, "doc_layout_meta", "project_layout_cache"];
 /// Set by the Map's handover: this vault's device-local view prefs are still on the device that did
@@ -214,23 +265,42 @@ pub const ADOPT_FLAG: &str = "mods_adopt_map_prefs";
 /// The Map mod's one content key (`mods/atlas.map/src/settings.ts`).
 const MAP_KV_KEY: &str = "settings";
 
-/// The Map's handover: `settings.map`'s `nodeCap` (the one field a mod can keep; `tsneEnabled` has no
-/// meaning without t-SNE) becomes the mod's `settings` key, content class, revision 1, unless the mod
-/// already has one (the user's data in the mod wins); the mod's key is read back; then the dead rows
-/// go. A pref blob that doesn't parse, or has no valid `nodeCap`, carries nothing over and is still
-/// deleted: the core reader treated it as the default too.
+/// The Map's handover: what a mod can keep of `settings.map` becomes the mod's `settings` key,
+/// content class, revision 1, unless the mod already has one (the user's data in the mod wins); the
+/// mod's key is read back; then the dead rows go. Two fields carry:
+/// - `nodeCap`, clamped as the core clamped it;
+/// - `tsneEnabled: false`, as `enhanced: false` (the user turned the core's t-SNE off, so the mod's
+///   Enhanced layout starts off for them too). A `true` or an absent `tsneEnabled` carries nothing:
+///   the core read absent as on, and its Settings wrote both fields on every save, so a stored
+///   `true` says nothing about who had openTSNE. Anything that is not a JSON boolean carries nothing.
+///
+/// It does not read the venv or the `.pm-tsne` marker: the venv is per machine and this runs per
+/// vault. A pref blob that doesn't parse, or has nothing valid in it, carries nothing over and is
+/// still deleted: the core reader treated it as the default too.
 fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
     let old = get(conn, MAP_PREF)?;
-    let cap = old
+    let old = old
         .as_deref()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let mut carried = Map::new();
+    if let Some(cap) = old
+        .as_ref()
         .and_then(|v| v.get("nodeCap").and_then(Value::as_u64))
-        .map(|n| n.clamp(NODE_CAP_MIN as u64, NODE_CAP_MAX as u64));
-    if let Some(cap) = cap {
+        .map(|n| n.clamp(NODE_CAP_MIN as u64, NODE_CAP_MAX as u64))
+    {
+        carried.insert("nodeCap".to_owned(), json!(cap));
+    }
+    if old
+        .as_ref()
+        .is_some_and(|v| v.get("tsneEnabled") == Some(&Value::Bool(false)))
+    {
+        carried.insert("enhanced".to_owned(), json!(false));
+    }
+    if !carried.is_empty() {
         conn.execute(
             "INSERT OR IGNORE INTO mod_kv(mod_id, key, class, value, revision) \
              VALUES (?1, ?2, 'content', ?3, 1)",
-            params![mod_id, MAP_KV_KEY, json!({ "nodeCap": cap }).to_string()],
+            params![mod_id, MAP_KV_KEY, Value::Object(carried).to_string()],
         )?;
         // Verify before anything is deleted: the mod's key is there and says an object.
         let stored = conn
@@ -476,6 +546,69 @@ pub async fn run<T: Transport>(
                     None => {}
                 }
             }
+            Step::Repair => {
+                let app2 = app.clone();
+                let target = blocking(move || {
+                    writer_now(&app2)
+                        .then(|| {
+                            ledger::with_active_ledger(&app2, Mint::Always, |l| {
+                                ModId::parse(pilot.id)
+                                    .map_err(|e| LedgerError::Store(e.to_string()))
+                                    .and_then(|id| l.repair_target(&id))
+                            })
+                        })
+                        .flatten()
+                })
+                .await
+                .flatten();
+                let target = match target {
+                    Some(Ok(t)) => t,
+                    Some(Err(e)) => {
+                        eprintln!("mods: {} can't be put back ({e})", pilot.id);
+                        continue;
+                    }
+                    None => continue,
+                };
+                // The row's own file: its sha256 must match before anything reads it, and the
+                // ledger's repair accepts nothing else.
+                let bytes =
+                    match fetch_package(transport, endpoints, &target.url, &target.sha256).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            if !e.is_quiet() {
+                                eprintln!("mods: {} not downloaded: {e}", pilot.id);
+                            }
+                            continue;
+                        }
+                    };
+                let (app2, index2, keys2) = (app.clone(), index.cloned(), keys.clone());
+                let done = blocking(move || {
+                    writer_now(&app2)
+                        .then(|| {
+                            ledger::with_active_ledger(&app2, Mint::Always, |l| {
+                                l.repair_pilot(
+                                    pilot,
+                                    &target,
+                                    &bytes,
+                                    &keys2,
+                                    index2.as_ref(),
+                                    Utc::now(),
+                                )
+                            })
+                        })
+                        .flatten()
+                })
+                .await
+                .flatten();
+                match done {
+                    Some(Ok(())) => {
+                        eprintln!("mods: {} put back for you", pilot.id);
+                        changed = true;
+                    }
+                    Some(Err(e)) => eprintln!("mods: {} not put back ({e})", pilot.id),
+                    None => {}
+                }
+            }
             Step::Download(download) => {
                 // `decide` only says Download for a current index, so `index` is there.
                 let Some(index) = index else { continue };
@@ -593,6 +726,9 @@ mod tests {
             Some(Held {
                 installed_from: from,
                 signed,
+                files_missing: false,
+                version: "1.0.0",
+                sha256: Some("aa"),
             })
         };
         // A catalogue row settles, whatever the index says (even none).
@@ -604,6 +740,42 @@ mod tests {
             decide(p, held("catalogue", true), Some(&index), now()),
             Step::Settle
         );
+        // A catalogue row whose files are missing is put back (a repair, from the pinned file) once
+        // a current index doesn't blacklist it; any other row with missing files is no business of
+        // the pass's.
+        let missing = |from, signed| {
+            Some(Held {
+                installed_from: from,
+                signed,
+                files_missing: true,
+                version: "1.0.0",
+                sha256: Some("aa"),
+            })
+        };
+        assert_eq!(
+            decide(p, missing("catalogue", true), None, now()),
+            Step::Leave(Leave::NoCurrentIndex)
+        );
+        assert_eq!(
+            decide(
+                p,
+                missing("catalogue", true),
+                Some(&index),
+                now() + chrono::Duration::days(90)
+            ),
+            Step::Leave(Leave::NoCurrentIndex)
+        );
+        assert_eq!(
+            decide(p, missing("catalogue", true), Some(&index), now()),
+            Step::Repair
+        );
+        for (from, signed) in [("folder", true), ("file", true), ("catalogue", false)] {
+            assert_eq!(
+                decide(p, missing(from, signed), Some(&index), now()),
+                Step::Leave(Leave::OtherRow),
+                "{from} {signed}"
+            );
+        }
         // Any other row is left: a test folder's rows are dropped at the next start, a file's are
         // unsigned or third party.
         for (from, signed) in [("folder", true), ("file", true), ("catalogue", false)] {
@@ -708,6 +880,55 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn adopting_after_a_handover_that_wrote_enhanced_false_leaves_it_untouched() {
+        let (_dir, mut conn) = store();
+        mod_row(&conn, "catalogue", true);
+        put(&conn, MAP_PREF, r#"{"nodeCap":900,"tsneEnabled":false}"#);
+        hand_over_map(&conn, "atlas.map").unwrap();
+        assert!(get(&conn, MAP_PREF).unwrap().is_none());
+        let stored = |conn: &Connection| -> Value {
+            let text: String = conn
+                .query_row("SELECT value FROM mod_kv WHERE key = 'settings'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        assert_eq!(stored(&conn), json!({"nodeCap": 900, "enhanced": false}));
+        // The page's device prefs add only what is missing; `enhanced` and `nodeCap` stay.
+        assert!(adopt_map_prefs(&mut conn, "semantic", 0.25, true).unwrap());
+        assert_eq!(
+            stored(&conn),
+            json!({
+                "nodeCap": 900, "enhanced": false,
+                "layoutMode": "semantic", "cohesion": 0.25, "labels": true
+            })
+        );
+    }
+
+    #[test]
+    fn a_settings_key_that_does_not_read_back_as_an_object_keeps_the_old_rows() {
+        // Verify-then-delete, with no transaction round it so the order shows: the mod's key is
+        // something else (INSERT OR IGNORE leaves it), the read-back refuses, and nothing is deleted.
+        let (_dir, conn) = store();
+        mod_row(&conn, "catalogue", true);
+        conn.execute(
+            "INSERT INTO mod_kv(mod_id, key, class, value, revision) \
+             VALUES ('atlas.map', 'settings', 'content', '[1]', 2)",
+            [],
+        )
+        .unwrap();
+        for pref in [r#"{"nodeCap":900}"#, r#"{"tsneEnabled":false}"#] {
+            put(&conn, MAP_PREF, pref);
+            put(&conn, "doc_layout_meta", "{}");
+            assert!(hand_over_map(&conn, "atlas.map").is_err(), "{pref}");
+            assert_eq!(get(&conn, MAP_PREF).unwrap().as_deref(), Some(pref));
+            assert!(get(&conn, "doc_layout_meta").unwrap().is_some(), "{pref}");
+            assert!(get(&conn, ADOPT_FLAG).unwrap().is_none(), "{pref}");
+        }
     }
 
     #[test]
@@ -836,13 +1057,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             run.matches("writer_now(&app2)").count(),
-            2,
-            "settle and install each ask"
+            4,
+            "settle, install, and a repair's two steps each ask"
         );
-        assert_eq!(run.matches("with_active_ledger").count(), 2);
+        assert_eq!(run.matches("with_active_ledger").count(), 4);
         // A download is only started from a plan step, never from here.
-        assert_eq!(run.matches("fetch_package(").count(), 1);
+        assert_eq!(run.matches("fetch_package(").count(), 2);
         assert!(run.contains("Step::Download(download) =>"));
+        assert!(run.contains("Step::Repair =>"));
         // The marker guard is dropped before a ledger is taken (the DB lock isn't re-entrant).
         let any = body
             .split("fn any_marker(")
@@ -875,11 +1097,12 @@ mod tests {
         );
     }
 
-    /// The pass is dormant until a migration writes a marker (PR B's B9, v61): no code in this crate
-    /// names a marker key outside this file and its tests. B9 changes this test on purpose, in the
-    /// commit that adds the migration, so that it can't happen by accident.
+    /// The pass is awake since v61, which writes the Map's marker for a store that has documents
+    /// (`db/migrations.rs`, the one writer). No other code in this crate names a marker key outside
+    /// this file, that migration and the tests: a second writer would start downloads nobody asked
+    /// for, so it can't happen by accident.
     #[test]
-    fn no_code_but_this_file_names_a_marker_key() {
+    fn only_this_file_and_the_migration_name_a_marker_key() {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
@@ -890,6 +1113,7 @@ mod tests {
                     // Test code may seed a marker; production code may not (this file defines them).
                     let production = text.split("#[cfg(test)]\nmod tests").next().unwrap();
                     let own = path.ends_with("mods/autoinstall.rs")
+                        || path.ends_with("db/migrations.rs")
                         || path.components().any(|c| c.as_os_str() == "tests");
                     // Built so this file doesn't match its own search.
                     if !own && production.contains(concat!("mods_auto", "install_")) {
@@ -904,5 +1128,13 @@ mod tests {
             &mut found,
         );
         assert!(found.is_empty(), "{found:?}");
+        // And the migration really writes the one marker this file reads (the pass is not dormant).
+        let migrations = include_str!("../db/migrations.rs");
+        let production = migrations.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            production.contains(&format!("SELECT '{}', '1'", PILOTS[0].marker)),
+            "v61 must write {}",
+            PILOTS[0].marker
+        );
     }
 }

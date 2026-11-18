@@ -40,10 +40,6 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Teach",
     body: "Where you teach PM how your projects are named. Merge a name variant into the real project so it stops reappearing, rename a project everywhere at once, or add a name you know means the same thing — the same thing correcting a project in Review does, just directly. On for the Standard and Power presets; right-click it in the sidebar to hide it (Review goes with it) or pin it to the top.",
   },
-  "nav-graph": {
-    title: "Map",
-    body: "A visual graph of your documents grouped by project. Each project is a hub; the documents around it are its files. Hover any document node to see its details.",
-  },
   "nav-pinboard": {
     title: "Pinboard",
     body: "A free-form planning board: pin sticky notes and simple timelines, drag them around, and resize them. It's a scratch space for thinking — saved on this device, separate from your documents.",
@@ -208,7 +204,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-sidebar-placement": {
     title: "Sidebar tabs",
-    body: "Right-click a tab in the sidebar to arrange it. 'Pin to the top' moves it above the rest, in the order you pin them; 'Hide' takes it out of the sidebar, and it's still a search away: press Ctrl K (⌘K on a Mac) and type its name. To bring one back, right-click any tab and choose 'Show'. Review and Teach move together, and hiding them also hides the filing controls in Documents and in a project's files; nothing is lost: new items still index and file themselves, and PM keeps applying what you've taught it. On the Minimal preset Review, Teach and the Map start out of the sidebar, and 'Show' brings them back pinned to the top. Focus always stays, and Dev comes and goes with Developer mode. It's remembered on this device; 'Reset sidebar placement' puts every tab back where it started.",
+    body: "Right-click a tab in the sidebar to arrange it. 'Pin to the top' moves it above the rest, in the order you pin them; 'Hide' takes it out of the sidebar, and it's still a search away: press Ctrl K (⌘K on a Mac) and type its name. To bring one back, right-click any tab and choose 'Show'. Review and Teach move together, and hiding them also hides the filing controls in Documents and in a project's files; nothing is lost: new items still index and file themselves, and PM keeps applying what you've taught it. On the Minimal preset Review and Teach start out of the sidebar, and 'Show' brings them back pinned to the top. Focus always stays, and Dev comes and goes with Developer mode. It's remembered on this device; 'Reset sidebar placement' puts every tab back where it started.",
   },
   "focus-panels": {
     title: "Panels",
@@ -267,7 +263,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-a11y-color": {
     title: "Colour-blind-safe palette",
-    body: "Swaps the colours PM uses to TELL THINGS APART — the project status badges (Due soon, Blocked, Quick win…), Map nodes, and the per-calendar colours on the Calendar and Upcoming grids — for an Okabe–Ito set chosen to stay distinguishable under the common types of colour vision. It deliberately leaves your theme alone: System, Mode and Accent under Appearance are taste rather than meaning, so the look you picked stays, and only the colours that carry information change. If you switch this on and the app looks much the same, that's the point — look at a status badge or the Map to see it. Text labels and icons are unaffected either way, so nothing is ever carried by colour alone.",
+    body: "Swaps the colours PM uses to TELL THINGS APART — the project status badges (Due soon, Blocked, Quick win…), Document Map nodes, and the per-calendar colours on the Calendar and Upcoming grids — for an Okabe–Ito set chosen to stay distinguishable under the common types of colour vision. It deliberately leaves your theme alone: System, Mode and Accent under Appearance are taste rather than meaning, so the look you picked stays, and only the colours that carry information change. If you switch this on and the app looks much the same, that's the point — look at a status badge or the Map to see it. Text labels and icons are unaffected either way, so nothing is ever carried by colour alone.",
   },
   "settings-a11y-keys": {
     title: "Single-key shortcuts",
@@ -322,11 +318,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "review-project": {
     title: "Project",
-    body: "Which body of work this document belongs to — the bucket it's filed and found under. Start typing to reuse an existing project; a new name creates one. The first project is the PRIMARY one: it owns the document's filing activity and where it sits on the Map. Add more to link the same document into other projects, so each of their chats can draw on it. Projects are what the Focus and Map views group by, so consistent names matter more than perfect ones.",
+    body: "Which body of work this document belongs to — the bucket it's filed and found under. Start typing to reuse an existing project; a new name creates one. The first project is the PRIMARY one: it owns the document's filing activity and where it sits on the Document Map. Add more to link the same document into other projects, so each of their chats can draw on it. Projects are what the Focus view and the Document Map group by, so consistent names matter more than perfect ones.",
   },
   "review-importance": {
     title: "Importance",
-    body: "How much this document matters to you — NOT how new it is or how often you open it. High: a core reference you'd be set back without; it can surface in Focus and nudge a project toward 'due soon'. Medium: useful, you'll want it sometimes. Low: keep-but-peripheral — it's auto-filed out of the review queue so it never becomes a chore, and stays fully searchable. Archive: deliberately shelve it — hidden from the Map and sorted to the bottom of lists, but still findable by search (especially exact keywords); pick it for things you want out of the way without deleting. Rules of thumb for the tricky cases: an active project but an outdated/unused file → Low (the project being live doesn't make the file significant); something you open often but that isn't significant → Medium is fine; something you rarely touch but would be stuck without → High. When unsure, Medium is the safe middle — you can change it anytime.",
+    body: "How much this document matters to you — NOT how new it is or how often you open it. High: a core reference you'd be set back without; it can surface in Focus and nudge a project toward 'due soon'. Medium: useful, you'll want it sometimes. Low: keep-but-peripheral — it's auto-filed out of the review queue so it never becomes a chore, and stays fully searchable. Archive: deliberately shelve it — hidden from the Document Map and sorted to the bottom of lists, but still findable by search (especially exact keywords); pick it for things you want out of the way without deleting. Rules of thumb for the tricky cases: an active project but an outdated/unused file → Low (the project being live doesn't make the file significant); something you open often but that isn't significant → Medium is fine; something you rarely touch but would be stuck without → High. When unsure, Medium is the safe middle — you can change it anytime.",
   },
   "review-tags": {
     title: "Tags",
@@ -513,7 +509,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-storage-builtin": {
     title: "Built in",
-    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. The enhanced map layout (t-SNE) and photo text recognition can be removed to free space — they download again when you need them, and photo text recognition installs from here too. Some rows are shared libraries a feature above them depends on: scikit-learn and scipy under the enhanced layout, OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
+    body: "Everything PM has downloaded to this device, with sizes. The document engine and the active search model are always needed. Photo text recognition can be removed to free space. It downloads again when you need it, and it installs from here too. Some rows are shared libraries a feature above them depends on: OpenCV, shapely and pyclipper under photo text recognition. Those read 'Installed — in use' with a greyed Remove button and a pill pointing at what to remove first — they're already on your device, just still needed by something. numpy is never offered because the search model shares it. Models you run yourself with Local AI aren't counted here; the Local AI tab lists what is on this computer.",
   },
   "settings-storage-mods": {
     title: "Mods in Storage",
@@ -522,10 +518,6 @@ export const HELP: Record<string, HelpEntry> = {
   "settings-storage-mods-remove-all": {
     title: "Remove all mods",
     body: "Uninstalls every mod in the list, one after another, the way 'Uninstall' does for one. Everything they saved goes and can't be brought back. The tasks, milestones and notes they made stay in PM; to delete those too, uninstall the mod on its own and choose 'Also delete what it made'. If one mod can't be removed, it says why and the rest still go.",
-  },
-  "settings-memory-map": {
-    title: "Memory map",
-    body: "Settings for the Map tab. Default grouping picks how the Map opens — Semantic proximity (similar documents sit together) or By project (each project a hub with its documents around it). Project cohesion (Off by default) gently pulls same-project documents together in the semantic view without abandoning the meaning-driven layout. Maximum nodes caps how many documents are individually plotted; above it, the rest are gathered at their project's spot — raise it for a fuller picture, lower it on a slower machine. Enhanced layout (t-SNE) is a one-time, on-device download that gives the semantic view tighter, clearer clusters than the built-in basic layout; once installed you can switch it on or off, or remove it to free space.",
   },
   "settings-timezone": {
     title: "Time zone",
@@ -648,7 +640,7 @@ export const HELP: Record<string, HelpEntry> = {
   // — the one place where "what does this actually do?" most deserves an answer.
   "settings-remove-data": {
     title: "Remove PM data",
-    body: "Erases what PM has put on this machine, in the classes you tick. 'Downloaded components' is safe — the Python engine, the OCR and map add-ons, and the downloaded search and OCR models all re-download on next use. Two of the others are not: your vault and database ARE your documents, chats, and projects, and removing your keychain secrets takes the key to the encrypted store along with your API key and every sign-in, so the vault becomes unopenable without them. Tick everything and PM removes itself entirely. Nothing here is recoverable afterwards — take a backup first if you're unsure. Your existing backups are never touched; remove those at their source.",
+    body: "Erases what PM has put on this machine, in the classes you tick. 'Downloaded components' is safe — the Python engine, the OCR add-on, and the downloaded search and OCR models all re-download on next use. Two of the others are not: your vault and database ARE your documents, chats, and projects, and removing your keychain secrets takes the key to the encrypted store along with your API key and every sign-in, so the vault becomes unopenable without them. Tick everything and PM removes itself entirely. Nothing here is recoverable afterwards — take a backup first if you're unsure. Your existing backups are never touched; remove those at their source.",
   },
   "settings-vault": {
     title: "Vault mode",
@@ -731,32 +723,6 @@ export const HELP: Record<string, HelpEntry> = {
   "dev-calendar": {
     title: "Calendar sync state",
     body: "Developer-mode read-out of the calendar connector's state: how many feeds/calendars are connected, whether Google OAuth is configured and connected, the sync window, and when it last synced. Tokens and feed URLs live in your keychain and are never shown here.",
-  },
-
-  // Graph
-  "graph-canvas": {
-    title: "Document map",
-    body: "Each node is a document — its size is how much content it holds (its number of chunks) and its colour is its project, matching the legend. A dashed ring means a document is still awaiting review, or is index-only (it lives in a connected source like Drive rather than on this device). There are two arrangements: in By project (the default), each project becomes a hub with its documents gathered around it and linked to it, so you see how your library is organised; in Semantic proximity, documents that sit close together are about similar things — their position comes from their meaning, not their project. Scroll to zoom (or sideways to pan left/right), drag to pan, and double-click (or the Fit button) to reset the view. Hover a node for its details, or click it to open its project.",
-  },
-  "map-layout-toggle": {
-    title: "How the map is arranged",
-    body: "Switch how documents are laid out. By project (the default) groups documents by where you've filed them: each project is a hub with its documents gathered around it and linked to it, so the map shows how your library is organised. Semantic proximity instead places documents so that similar ones sit close together, worked out from their meaning (a basic layout, computed on your device) — here projects only colour the nodes, they don't decide where a node goes. An optional enhanced layout — t-SNE, which finds tighter, clearer clusters of related documents — can be downloaded from the bar below the header (or Settings → Memory map); it's a one-time download that then runs fully on your device.",
-  },
-  "map-layout-toggle-tsne": {
-    title: "How the map is arranged",
-    body: "Switch how documents are laid out. By project (the default) groups documents by where you've filed them: each project is a hub with its documents gathered around it and linked to it, so the map shows how your library is organised. Semantic proximity places similar documents close together — it's using t-SNE, the enhanced layout you installed, which arranges documents by learned neighbourhoods so related ones form tighter, clearer clusters (projects only colour the nodes here). You can turn t-SNE off, or remove it, in Settings → Memory map. The semantic layout is computed in the background and cached, so the first run after big changes can take a moment.",
-  },
-  "map-cohesion": {
-    title: "Project cohesion",
-    body: "How strongly the semantic layout pulls documents in the same project together. Off (the default) lays everything out purely by meaning. Low, Medium, or High nudge same-project documents a little closer, so each project reads as a looser cluster while meaning still drives the overall shape — a middle ground between Semantic proximity and By project. It applies instantly and changes nothing about how the layout is computed or stored.",
-  },
-  "map-navigate": {
-    title: "Move around the map",
-    body: "Zoom in or out, or fit the whole map back into view. You can also scroll to zoom (scroll sideways to pan left/right), drag anywhere to pan, and double-click to reset the framing.",
-  },
-  "map-labels": {
-    title: "Show file names",
-    body: "Write each document's file name inside its node, so you can tell nodes apart without hovering. The text is sized to the node — small when you're zoomed out, larger as you zoom in — and a long name is shortened to fit, showing the start; zoom into a bigger node to read more of it. Off by default to keep a busy map uncluttered; your choice is remembered on this device.",
   },
 
   // Focus view & projects (Step 5)

@@ -144,12 +144,15 @@ fn a_marker_with_a_current_index_installs_unconsented_and_hands_over_in_the_rows
     assert!(!w.sql::<bool>("SELECT consented_at IS NOT NULL FROM mods"));
     assert_eq!(w.served_from(), None, "it doesn't run before 'Turn on'");
     assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_grants"), 0);
-    // The marker is gone, the Map's one key is the mod's (content, revision 1, nodeCap only), and
-    // the core Map's rows are deleted.
+    // The marker is gone, the Map's one key is the mod's (content, revision 1, the cap and the
+    // switched-off Enhanced layout), and the core Map's rows are deleted.
     assert_eq!(w.setting(MARKER), None);
     assert_eq!(
-        w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'"),
-        r#"{"nodeCap":2500}"#
+        serde_json::from_str::<Value>(
+            &w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'")
+        )
+        .unwrap(),
+        json!({"nodeCap": 2500, "enhanced": false})
     );
     assert_eq!(
         w.sql::<String>("SELECT class FROM mod_kv WHERE key = 'settings'"),
@@ -544,6 +547,11 @@ fn the_users_own_settings_in_the_mod_win_and_a_bad_pref_blob_carries_nothing() {
         "not json",
         r#"{"tsneEnabled":true}"#,
         r#"{"nodeCap":"big"}"#,
+        // Not a JSON boolean: nothing carries (the core read these as the default too).
+        r#"{"tsneEnabled":"false"}"#,
+        r#"{"tsneEnabled":0}"#,
+        r#"{"tsneEnabled":null}"#,
+        r#"{"tsneEnabled":[]}"#,
     ]
     .iter()
     .enumerate()
@@ -602,6 +610,227 @@ fn an_unsigned_row_with_the_pilots_id_is_not_a_settled_pilot() {
     assert_eq!(w.plan(None), vec![Step::Leave(Leave::OtherRow)]);
     assert!(w.ledger().settle_pilot(pilot()).is_err());
     assert!(w.setting(MARKER).is_some());
+}
+
+/// What the handover wrote for one stored pref blob (None: it wrote no `settings` key at all).
+fn handed_over(blob: &str) -> Option<Value> {
+    let w = world();
+    w.have("1.0.0");
+    w.seed_core_map(blob);
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(w.setting("map"), None, "{blob}: the old row always goes");
+    assert_eq!(w.setting(MARKER), None, "{blob}");
+    assert!(w.setting(ADOPT_FLAG).is_some(), "{blob}");
+    w.read(|c| {
+        c.query_row(
+            "SELECT value FROM mod_kv WHERE mod_id = 'atlas.map' AND key = 'settings'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+    })
+    .map(|t| serde_json::from_str(&t).unwrap())
+}
+
+#[test]
+fn a_switched_off_enhanced_layout_is_handed_over_and_nothing_else_about_t_sne_is() {
+    // The cap alone: as before.
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900}"#),
+        Some(json!({"nodeCap": 900}))
+    );
+    // t-SNE off alone: the old handover wrote nothing; now the Enhanced layout starts off.
+    assert_eq!(
+        handed_over(r#"{"tsneEnabled":false}"#),
+        Some(json!({"enhanced": false}))
+    );
+    // Both.
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900,"tsneEnabled":false}"#),
+        Some(json!({"nodeCap": 900, "enhanced": false}))
+    );
+    // Neither, or a `true` (the core's Settings wrote both fields on every save, so a stored
+    // `true` says nothing about who had openTSNE): nothing carries.
+    assert_eq!(handed_over(r#"{}"#), None);
+    assert_eq!(handed_over(r#"{"tsneEnabled":true}"#), None);
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900,"tsneEnabled":true}"#),
+        Some(json!({"nodeCap": 900}))
+    );
+    // A value that is not a JSON boolean carries nothing, and a valid cap beside it still does.
+    for junk in [r#""false""#, "0", "null", "[]", r#""""#, "{}"] {
+        assert_eq!(
+            handed_over(&format!(r#"{{"tsneEnabled":{junk}}}"#)),
+            None,
+            "{junk}"
+        );
+        assert_eq!(
+            handed_over(&format!(r#"{{"nodeCap":900,"tsneEnabled":{junk}}}"#)),
+            Some(json!({"nodeCap": 900})),
+            "{junk}"
+        );
+    }
+}
+
+#[test]
+fn the_users_own_enhanced_choice_in_the_mod_wins_over_the_old_t_sne_switch() {
+    let w = world();
+    w.have("1.0.0");
+    w.exec(
+        "INSERT INTO mod_kv(mod_id, key, class, value, revision) \
+         VALUES ('atlas.map', 'settings', 'content', '{\"enhanced\":true}', 3)",
+    );
+    w.seed_core_map(r#"{"tsneEnabled":false}"#);
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(
+        w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'"),
+        r#"{"enhanced":true}"#
+    );
+    assert_eq!(
+        w.sql::<i64>("SELECT revision FROM mod_kv WHERE key = 'settings'"),
+        3
+    );
+    assert_eq!(w.setting("map"), None, "the old row still goes");
+}
+
+// ---- A restore onto another computer: the row came, the files didn't ----------------------------------
+
+/// A signed catalogue row installed at 1.0.0, then its files gone and the row parked for want of
+/// them, as the open's load leaves a restored row on a computer that never had the files; with the
+/// marker a restore writes. Returns the package the row pins and its keys.
+fn restored_without_files(w: &World) -> (Vec<u8>, PublicKey, RepairTarget) {
+    let (bytes, key) = pkg("1.0.0", |_| {});
+    w.install(&(bytes.clone(), key.clone()), Approval::Approved)
+        .unwrap();
+    fs::remove_dir_all(w.layout.store_dir().join("atlas.map")).unwrap();
+    w.exec(
+        "UPDATE mods SET state = 'parked', state_reason = 'files-missing';
+         INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');",
+    );
+    let target = RepairTarget {
+        url: "https://example.invalid/atlas.map-1.0.0.pmmod".to_owned(),
+        version: "1.0.0".to_owned(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+    };
+    (bytes, key, target)
+}
+
+#[test]
+fn a_restored_row_without_its_files_is_put_back_by_the_pass_and_settled() {
+    let w = world();
+    let (bytes, key, target) = restored_without_files(&w);
+    let keys = TrustedKeys::of_test_keys(&[key]);
+    // The row's own pinned file, the Mods tab's repair, but never without a current index: the row
+    // came from a backup.
+    assert_eq!(w.plan(None), vec![Step::Leave(Leave::NoCurrentIndex)]);
+    let index = built("1.0.0", |_| {}).index();
+    assert_eq!(w.plan(Some(&index)), vec![Step::Repair]);
+    assert_eq!(
+        w.ledger().repair_target(&id("atlas.map")).unwrap().version,
+        "1.0.0"
+    );
+    w.ledger()
+        .repair_pilot(pilot(), &target, &bytes, &keys, None, list_now())
+        .unwrap();
+    assert!(w.version_dir("1.0.0").exists(), "the files are back");
+    assert_eq!(w.sql::<String>("SELECT state FROM mods"), "active");
+    assert!(w.served_from().is_some());
+    assert!(
+        w.sql::<bool>("SELECT consented_at IS NOT NULL FROM mods"),
+        "its consent is kept"
+    );
+    assert_eq!(w.setting(MARKER), None, "the marker is spent");
+    assert!(w.setting("mods_pilot_landed_map").is_some());
+    // Whole again, a later pass has nothing to do.
+    assert_eq!(w.plan(None), Vec::<Step>::new());
+}
+
+#[test]
+fn a_restored_row_without_its_files_is_put_back_whatever_state_the_backup_had_it_in() {
+    let index = built("1.0.0", |_| {}).index();
+    for state in ["paused", "installing", "active", "parked"] {
+        let w = world();
+        restored_without_files(&w);
+        w.exec(&format!(
+            "UPDATE mods SET state = '{state}', state_reason = NULL"
+        ));
+        assert_eq!(w.plan(Some(&index)), vec![Step::Repair], "{state}");
+    }
+    // A row with its files is settled, not repaired, in any state.
+    let w = world();
+    w.have("1.0.0");
+    w.exec(
+        "UPDATE mods SET state = 'paused', state_reason = NULL;
+         INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');",
+    );
+    assert_eq!(w.plan(Some(&index)), vec![Step::Settle]);
+}
+
+#[test]
+fn a_restored_row_the_safety_list_names_is_not_put_back_by_the_pass() {
+    let w = world();
+    let (_, _, target) = restored_without_files(&w);
+    let b = built("1.0.0", |_| {});
+    let blacklisted = |action: &str| {
+        index_listing(
+            b.entry(),
+            json!([{"id": "atlas.map", "versions": "<=1.0.0", "action": action,
+                    "reason": "It loses notes."}]),
+        )
+    };
+    assert_eq!(
+        w.plan(Some(&blacklisted("paused"))),
+        vec![Step::Leave(Leave::Blacklisted)]
+    );
+    // Named by its file rather than its version.
+    let by_file = index_listing(
+        b.entry(),
+        json!([{"sha256": target.sha256, "action": "paused",
+                "reason": "It loses notes."}]),
+    );
+    assert_eq!(
+        w.plan(Some(&by_file)),
+        vec![Step::Leave(Leave::Blacklisted)]
+    );
+    assert_eq!(w.plan(Some(&b.index())), vec![Step::Repair]);
+}
+
+#[test]
+fn a_repair_with_a_file_that_is_not_the_pinned_one_changes_nothing_and_keeps_the_marker() {
+    let w = world();
+    let (_, key, target) = restored_without_files(&w);
+    let (other, other_key) = pkg("1.0.0", |m| m["description"] = json!("Something else"));
+    let keys = TrustedKeys::of_test_keys(&[key, other_key]);
+    assert!(w
+        .ledger()
+        .repair_pilot(pilot(), &target, &other, &keys, None, list_now())
+        .is_err());
+    assert!(!w.version_dir("1.0.0").exists());
+    assert_eq!(w.sql::<String>("SELECT state FROM mods"), "parked");
+    assert!(w.setting(MARKER).is_some(), "the next pass tries again");
+    assert_eq!(w.setting("mods_pilot_landed_map"), None);
+}
+
+#[test]
+fn a_vault_that_landed_before_is_not_handed_over_again_when_a_restore_re_marks_it() {
+    let w = world();
+    w.have("1.0.0");
+    // The restore's marker, on a vault whose handover already ran (the landed note is kept), and
+    // whose core rows were deleted then: a leftover `map` row now is not the core Map's.
+    w.exec(
+        "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');
+         INSERT INTO settings(key, value) VALUES ('mods_pilot_landed_map', '1');
+         INSERT INTO settings(key, value) VALUES ('map', '{\"nodeCap\":300}');",
+    );
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(w.setting(MARKER), None);
+    assert_eq!(
+        w.setting(ADOPT_FLAG),
+        None,
+        "no second round of device prefs"
+    );
+    assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_kv"), 0);
 }
 
 // ---- The table ---------------------------------------------------------------------------------

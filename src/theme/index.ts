@@ -69,8 +69,6 @@ export type { DepthState } from "./depth";
 
 export { prefersReducedMotion, scrollBehavior } from "./motion";
 
-export { graphColor } from "./graphPalette";
-
 export {
   sourcePalette,
   sourceColors,

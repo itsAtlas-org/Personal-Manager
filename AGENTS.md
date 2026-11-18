@@ -61,7 +61,8 @@ chunked, embedded, indexed and retrievable, with bounded context cost); **index-
 connectors** for Google Drive, OneDrive and local folders (pointer + embedding, bytes
 fetched live — never imported); a **multi-provider calendar** (Google events editable, #884) with a unified
 **Calendar** view tab; **project milestones** and a **structured flag layer**; **encrypted
-portable backups** (Proton Drive / Google Drive); a **semantic memory map**; **spreadsheet**
+portable backups** (Proton Drive / Google Drive); the **Document Map**, a mod
+PM downloads once for people who had documents; **spreadsheet**
 and **photo/OCR** ingestion; a **document reader**; a **pinboard**; runtime **developer
 mode**; and the **V2 design system** (below). The deliberate cuts still stand (Google Tasks;
 everything in spec §10); design/polish, a pre-release security pass, and the public-repo
@@ -78,13 +79,13 @@ release remain the open post-v1 work.
     everywhere but this file, and the `frontend` CI job (pr.yml) runs it.
   - `src/lib/types.ts` — shared types mirroring the Rust structs.
   - `src/components/` — the nav surfaces (`Sidebar` → Focus / Chats / Documents / Review /
-    Map / Calendar / Pinboard, plus the capability-gated Teach + Dev; the list itself, its gating
+    Calendar / Pinboard, any installed mod's tab (the Document Map is one), plus the capability-gated Teach + Dev; the list itself, its gating
     and the user's pin and hide live in `src/lib/nav.ts`, which the sidebar, the command palette
     and App's fallback all read): `FocusView` (status
     cards + triage + milestones + the calendar agenda + the daily briefing), `ProjectView`
     (per-project files + scoped chat), `ChatView` / `Composer` (+ `ContextMeter`,
-    `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`, `GraphView`
-    (the canvas memory map), `calendar/` (the unified calendar view, incl. a Terminal fork),
+    `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`,
+    `calendar/` (the unified calendar view, incl. a Terminal fork),
     `PinboardView`, `TeachView` / `TeachPreferences` (entities + preferences), `DevView`
     (read-only inspectors), `ConnectorsSettings` + per-provider connection components,
     `SettingsView` (tabbed: keys/model, appearance, storage, backup, security, developer…),
@@ -117,7 +118,7 @@ release remain the open post-v1 work.
     `spreadsheets.rs` (dedicated processors), `review.rs` (sorting-review proposal +
     corrections), `projects.rs` (triage + the pure `derive_status`, spec §4.1), `entities.rs`,
     `preferences.rs`, `milestones.rs`, `flags.rs`, `project_activity.rs`,
-    `briefing.rs`, `layout.rs` (semantic-map dimensionality reduction).
+    `briefing.rs`.
   - **Chat pipeline** — `chat.rs` (turn model, vault-as-truth), `chat_index.rs` (append-only
     indexing), `chat_summary.rs` (rolling summary), `chat_title.rs`, `chat_prefs.rs`,
     `context_budget.rs`.
@@ -175,8 +176,8 @@ release remain the open post-v1 work.
     `secrets.rs` is where a mod's user-typed keys live (`mod_secrets` in the encrypted database, not
     the keychain; bound to one host and header, never handed to the frame, stripped from backups and
     exports); and
-    `src-tauri/src/doc_vectors.rs` is the document-vector assembly the core Map and
-    `embeddings.documentVectors` share. `keys.rs` embeds the two
+    `src-tauri/src/doc_vectors.rs` is the document-vector assembly
+    `embeddings.documentVectors` (the Document Map's input) reads. `keys.rs` embeds the two
     Atlas mod keys and builds the trusted set (less the revoked ids) every mod signature is checked
     against; `index.rs` is the signed index's format, verification and acceptance rules, and
     `index_state.rs` its per-machine record, `data_dir/mods-index.json` (INVARIANTS.md I-31).
@@ -224,9 +225,10 @@ release remain the open post-v1 work.
   (provisioned on first run) speaks newline-JSON over stdio: `convert` (MarkItDown),
   `embed` / `count_tokens` / `rerank` (fastembed ONNX, model-parameterised — English
   `bge-small-en-v1.5` 384-d by default, multilingual e5-large 1024-d), `analyze_image`
-  (OCR), `analyze_spreadsheet`, and `reduce` (PCA / optional t-SNE map layout). Photo OCR
-  and t-SNE are optional components with their own locks (`sidecar.rs` `OptionalComponent`),
-  installed on demand. The venv and downloaded models are runtime artifacts, never committed.
+  (OCR) and `analyze_spreadsheet`. Photo OCR is an optional component with its own lock
+  (`sidecar.rs` `OptionalComponent`), installed on demand. The Document Map mod works out its
+  own layout, so the sidecar no longer projects vectors; `retire_tsne` removes the libraries
+  the old downloadable layout left on a machine. The venv and downloaded models are runtime artifacts, never committed.
 
 ## Design system (V2)
 
@@ -263,7 +265,8 @@ Contrast level lifts it, so the text ramp stops at `ink4` and a guard test enfor
 `--accent --accent-text --accent-ink
 --accent-soft`; status `--st-due --st-blocked --st-quick --st-look --st-part --st-track`; type
 `--head --ui --mono`; corners `--radius --radius-sm`. The only documented hex exceptions are the
-GraphView categorical node palette (`src/theme/graphPalette.ts`), the calendar's per-calendar
+Document Map mod's categorical node palette (`mods/atlas.map/src/palette.ts`; categorical hues the token
+system can't express), the calendar's per-calendar
 colours (`src/theme/sourcePalette.ts`), the colours Google lets you give one event
 and the text colour each carries (`src/theme/eventPalette.ts`), and the fixed modal scrim tint.
 
@@ -285,7 +288,11 @@ otherwise). Implemented in `src/lib/format.ts`.
 2. **Encryption stays on.** The store is opened with `PRAGMA key`; don't add code
    paths that open it unencrypted.
 3. **Migrations are additive.** Never write a migration that drops or rewrites
-   user data — app updates must never wipe the store. A re-key of index-only rows
+   user data — app updates must never wipe the store. The one exception is a
+   retired derived cache nothing reads or refills any more (`doc_layout`, v61): its bare
+   `DROP TABLE` is allowed by `RETIRED_DERIVED_CACHES` in the migration guard
+   (`db/migrations.rs`), keyed to that table and that one migration index, and the table
+   moves to the "Retired" section of `SYNC-SET.md`. A re-key of index-only rows
    (e.g. connector row IDs) must ship an old→new mapping so user classifications
    survive.
    - **`writable_schema` + a later `ALTER` gotcha.** Several migrations relax a

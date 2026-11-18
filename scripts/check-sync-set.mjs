@@ -9,10 +9,15 @@
 //   1. Every table the schema creates has a row in the register.
 //   2. Every row in the register names a table the schema still creates.
 //   3. Every class is one of the four documented ones.
+//   4. A table a migration drops leaves the register for the "## Retired" section, whose
+//      rows must be class `derived` (only a rebuildable cache may be dropped: the migration
+//      guard in migrations.rs enforces the same) and must name a table some migration
+//      really drops, so the history never claims a drop that did not happen.
 //
-// The schema side is parsed from the `CREATE TABLE` statements in migrations.rs —
-// the same text that runs — with comments stripped and the test module cut off, so a
-// `CREATE TABLE` mentioned in prose or built by a test helper can't count as real.
+// The schema side is parsed from the `CREATE TABLE` and `DROP TABLE` statements in
+// migrations.rs — the same text that runs, in order, so the last one to name a table wins —
+// with comments stripped and the test module cut off, so a statement mentioned in prose or
+// built by a test helper can't count as real.
 //
 // Pure Node built-ins, ESM, no dependencies.
 
@@ -40,11 +45,28 @@ if (testMod > 0) sql = sql.slice(0, testMod);
 // "the stored CREATE TABLE text", which would otherwise parse as a table named `text`.
 sql = sql.replace(/^[ \t]*\/\/.*$/gm, "").replace(/--[^\n]*/g, "");
 
-const schemaTables = new Set(
-  [
+// Every CREATE and DROP in text order. A table exists at the end when its last statement is a
+// CREATE; one a later migration drops is subtracted, and remembered as dropped.
+const events = [
+  ...[
     ...sql.matchAll(/CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)/g),
-  ].map((m) => m[1]),
-);
+  ].map((m) => ({ at: m.index, table: m[1], drop: false })),
+  ...[...sql.matchAll(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)/g)].map((m) => ({
+    at: m.index,
+    table: m[1],
+    drop: true,
+  })),
+].sort((a, b) => a.at - b.at);
+const schemaTables = new Set();
+const droppedTables = new Set();
+for (const e of events) {
+  if (e.drop) {
+    schemaTables.delete(e.table);
+    droppedTables.add(e.table);
+  } else {
+    schemaTables.add(e.table);
+  }
+}
 
 if (schemaTables.size === 0) {
   console.error(
@@ -71,6 +93,7 @@ const section = end < 0 ? rest : rest.slice(0, end);
 
 const problems = [];
 const registered = new Map();
+const CLASS_CELL = (cell) => cell.replace(/\*/g, "").trim();
 
 for (const line of section.split("\n")) {
   if (!line.trimStart().startsWith("|")) continue;
@@ -81,12 +104,48 @@ for (const line of section.split("\n")) {
   if (cells.length < 2) continue;
   const table = cells[0].match(/^`([a-zA-Z_][\w]*)`$/)?.[1];
   if (!table) continue; // the header row and its `---` separator
-  const cls = cells[1].replace(/\*/g, "").trim();
+  const cls = CLASS_CELL(cells[1]);
   if (registered.has(table)) problems.push(`duplicate register row for \`${table}\``);
   if (!CLASSES.has(cls)) {
     problems.push(`\`${table}\` has class "${cls}" — must be one of: ${[...CLASSES].join(", ")}`);
   }
   registered.set(table, cls);
+}
+
+// The "## Retired" section: tables a migration dropped. Each row is a derived cache a migration
+// really drops, and is no longer in the register or the schema.
+const retired = new Map();
+const retiredAt = doc.indexOf("\n## Retired");
+if (retiredAt >= 0) {
+  const after = doc.slice(retiredAt + 1);
+  const next = after.slice(1).indexOf("\n## ");
+  const retiredSection = next < 0 ? after : after.slice(0, next + 1);
+  for (const line of retiredSection.split("\n")) {
+    if (!line.trimStart().startsWith("|")) continue;
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (cells.length < 2) continue;
+    const table = cells[0].match(/^`([a-zA-Z_][\w]*)`$/)?.[1];
+    if (!table) continue;
+    const cls = CLASS_CELL(cells[1]);
+    if (retired.has(table)) problems.push(`duplicate Retired row for \`${table}\``);
+    if (cls !== "derived") {
+      problems.push(
+        `Retired \`${table}\` has class "${cls}" — only a derived cache may be dropped by a migration`,
+      );
+    }
+    if (!droppedTables.has(table)) {
+      problems.push(
+        `${REGISTER} lists \`${table}\` as Retired, but no migration drops it  — remove the row or fix the name`,
+      );
+    }
+    if (registered.has(table)) {
+      problems.push(`\`${table}\` is both in the register and Retired  — keep it in one`);
+    }
+    retired.set(table, cls);
+  }
 }
 
 // --- 3. the two must agree -------------------------------------------------
@@ -95,6 +154,13 @@ for (const t of [...schemaTables].sort()) {
   if (!registered.has(t)) {
     problems.push(
       `table \`${t}\` is created by the schema but has no row in ${REGISTER}  — add one (see its "Checklist for a PR that adds a table")`,
+    );
+  }
+}
+for (const t of [...droppedTables].sort()) {
+  if (!schemaTables.has(t) && !retired.has(t)) {
+    problems.push(
+      `a migration drops \`${t}\` but ${REGISTER} has no row for it in "## Retired"  — move its row there`,
     );
   }
 }
@@ -115,4 +181,7 @@ if (problems.length) {
   process.exit(1);
 }
 
-console.log(`✓ sync-set: all ${schemaTables.size} tables classified in ${REGISTER}`);
+console.log(
+  `✓ sync-set: all ${schemaTables.size} tables classified in ${REGISTER}` +
+    (retired.size ? `, ${retired.size} retired` : ""),
+);

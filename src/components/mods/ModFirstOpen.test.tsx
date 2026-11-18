@@ -341,6 +341,41 @@ describe("when what is stored can't be trusted", () => {
   });
 });
 
+describe("a mod PM installed on its own", () => {
+  const SENTENCE =
+    "PM downloaded this for you because you used the Map. It does nothing until you turn it on.";
+  const MOD_WORDS = "Does a thing.";
+  const map = { ...waiting, id: "atlas.map", name: "Document Map" };
+
+  it("says plainly that PM downloaded it, and that it does nothing until turned on", async () => {
+    render(<ModFirstOpen mod={{ ...map, autoInstalled: true }} onTurnedOn={onTurnedOn} />);
+    expect(await screen.findByText(SENTENCE)).toBeTruthy();
+    // After the mod's own description, never in place of it or of what it asks.
+    expect(screen.getByText(MOD_WORDS)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Turn on" })).toBeTruthy();
+    expect(screen.getByText("What this mod asks to do")).toBeTruthy();
+  });
+
+  it("says nothing of the kind for a mod the person chose", async () => {
+    open();
+    await screen.findByRole("button", { name: "Turn on" });
+    expect(screen.queryByText(/PM downloaded this for you/)).toBeNull();
+  });
+
+  it("says nothing of the kind for the Document Map the person installed themselves", async () => {
+    // The same id as the one PM downloads, but the backend says PM didn't install this one.
+    render(<ModFirstOpen mod={{ ...map, autoInstalled: false }} onTurnedOn={onTurnedOn} />);
+    await screen.findByRole("button", { name: "Turn on" });
+    expect(screen.queryByText(/PM downloaded this for you/)).toBeNull();
+  });
+
+  it("names no feature for an auto-installed mod that is not a pilot", async () => {
+    render(<ModFirstOpen mod={{ ...waiting, autoInstalled: true }} onTurnedOn={onTurnedOn} />);
+    await screen.findByRole("button", { name: "Turn on" });
+    expect(screen.queryByText(/PM downloaded this for you/)).toBeNull();
+  });
+});
+
 describe("help", () => {
   it("has an entry for each new surface", () => {
     for (const id of ["mod-first-open-notice", "mod-first-open-hide", "mod-first-open-about"]) {

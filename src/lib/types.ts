@@ -80,7 +80,7 @@ export interface AppLockStatus {
 /** Which classes of PM's on-machine data to remove. Browser local storage is cleared in the
  *  webview (not part of the backend command), so it isn't represented here. */
 export interface WipeSelection {
-  /** The regenerable runtime (Python engine, t-SNE/OCR) — re-downloads on next use. */
+  /** The regenerable runtime (Python engine, OCR) — re-downloads on next use. */
   regenerable: boolean;
   /** The Markdown vault + encrypted database (the real user data). Irreversible. */
   vaultAndDb: boolean;
@@ -1596,29 +1596,9 @@ export interface LocalFolderSyncState {
   stopping: boolean;
 }
 
-/** One document's 2-D position on the semantic memory map (coords are in [0,1]²). */
-export interface SemanticCoord {
-  id: number;
-  x: number;
-  y: number;
-}
-
-/** The cached semantic layout: which reducer produced it (`pca`|`tsne`|`none`), the coordinates, and
- *  whether a recompute is currently in flight. */
-export interface SemanticLayout {
-  method: string;
-  coords: SemanticCoord[];
-  computing: boolean;
-}
-
-/** Whether the optional t-SNE reducer (an on-demand download) is installed. */
-export interface TsneStatus {
-  installed: boolean;
-}
-
-/** Progress for an optional component's install-download — t-SNE, photo-OCR, or the macOS Python fetch
+/** Progress for an optional component's install-download — photo-OCR, or the macOS Python fetch
  *  (0..1, monotonic). Rendered as a percentage — a download has no file count — tiered by Depth (bar at
- *  minimal, bar + % at standard and power). One shape for all three channels (X-D6). */
+ *  minimal, bar + % at standard and power). One shape for both channels (X-D6). */
 export interface InstallProgressEvent {
   fraction: number;
 }
@@ -1628,7 +1608,7 @@ export interface OcrStatus {
   installed: boolean;
 }
 
-/** One on-device component in the Storage manager (the venv, the t-SNE libraries, the photo-OCR
+/** One on-device component in the Storage manager (the venv, the photo-OCR
  *  stack and the active search model). `status` drives the action: removable now, blocked behind a
  *  dependent, required, in-use (managed elsewhere), installable (an optional component not yet
  *  downloaded — the photo-OCR stack, whose `size_bytes` is then an estimate), or stale (on disk but
@@ -1652,7 +1632,7 @@ export interface StorageComponent {
   size_bytes: number;
   /** The size is an estimate, not a real on-disk measurement (the embedder's shared cache). */
   approximate: boolean;
-  /** Indented under the component above it (the t-SNE libraries under the enhanced layout). */
+  /** Indented under the component above it (the image libraries under photo OCR). */
   child: boolean;
   status: StorageStatus;
   blockers: StorageBlocker[];
@@ -1675,14 +1655,6 @@ export interface StorageReport {
   components: StorageComponent[];
   mods: StorageMod[];
 }
-
-/** Global progress for the semantic-layout precompute (fires regardless of which view started it). */
-export type LayoutProgressEvent =
-  | { state: "preparing" }
-  | { state: "reducing"; count: number; method: string }
-  | { state: "deferred" }
-  | { state: "done"; method: string }
-  | { state: "error"; message: string };
 
 /** One attendee on an event, as surfaced in the detail popup. */
 export interface Attendee {

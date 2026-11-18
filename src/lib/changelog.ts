@@ -24,6 +24,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.186.0-alpha",
+    date: "2026-11-18",
+    highlights: [
+      "The Map is now a mod called Document Map, so it isn't mistaken for a geographical map. If you have documents, PM downloads it for you once, from Atlas's own catalogue, the next time it's online, and the Map's place in the sidebar shows “Installing” until then. It opens on its own first screen and does nothing until you turn it on. Your Map settings come with it, including whether the enhanced layout was off.",
+      "The enhanced layout is built into the Document Map, so the separate download for it is gone, and so is the Memory map section in Settings. On its next launch PM removes the libraries that download added to its document engine. Text recognition (OCR) is not affected.",
+      "If you restore a backup on a new computer, PM fetches the Document Map's files again.",
+    ],
+  },
+  {
     version: "3.185.0-alpha",
     date: "2026-11-18",
     highlights: [

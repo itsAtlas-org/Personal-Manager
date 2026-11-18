@@ -3,8 +3,7 @@
 
 // The app-level document reader mount. The reader (a docked, read-only view onto an already-indexed
 // document) is opened from several surfaces — the Documents tab, a project's file list, a clickable
-// source citation in chat, and a memory-map node — so it can't live inside any one of them. This
-// provider holds
+// source citation in chat — so it can't live inside any one of them. This provider holds
 // the one open document, mounts the single `<DocumentReader>` at app scope (it is `position: fixed`,
 // so it floats over whatever view is active), and hands every surface an `openReader`/`openReaderById`
 // via context — mirroring the app's other root contexts (Help/Theme/Capability) rather than threading

@@ -38,14 +38,13 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** A throwaway tree holding the three locks and a licences file. */
-function fixture({ base, ocr = [], tsne = [], packages }) {
+/** A throwaway tree holding the two locks and a licences file. */
+function fixture({ base, ocr = [], packages }) {
   const root = mkdtempSync(join(tmpdir(), "pm-licences-"));
   roots.push(root);
   mkdirSync(join(root, "sidecar"));
   writeFileSync(join(root, LOCKS[0]), lock(base));
   writeFileSync(join(root, LOCKS[1]), lock(ocr));
-  writeFileSync(join(root, LOCKS[2]), lock(tsne));
   writeFileSync(join(root, LICENCES_FILE), JSON.stringify({ version: 1, packages }));
   return root;
 }
@@ -79,7 +78,6 @@ describe("lockedPackages", () => {
     const root = fixture({
       base: [["numpy", "2.4.6"]],
       ocr: [["numpy", "2.4.6"]],
-      tsne: [["numpy", "2.4.6"]],
       packages: {},
     });
     const packages = lockedPackages(root);
@@ -132,8 +130,9 @@ describe("scan", () => {
     const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
     const { problems, count } = scan(root);
     expect(problems).toEqual([]);
-    // Nearly seventy across the three locks. A collapse to a handful means the parser broke.
-    expect(count).toBeGreaterThan(60);
+    // 61 across the two locks (the floor is 50, so one package leaving is not a failure). A collapse
+    // to a handful means the parser broke.
+    expect(count).toBeGreaterThan(50);
   });
 
   it("fails a package that is locked but absent from the licence file", () => {

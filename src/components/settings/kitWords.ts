@@ -10,6 +10,11 @@ import type { KitLimits } from "../../lib/modsTypes";
 /** What a kit section says while developer mode is off (the backend refuses the read then). */
 export const OFF_HINT = "Turn developer mode on above to see this.";
 
+/** What a developer must know about a mod page's scripts, said whether or not developer mode is on:
+ *  the sealed frame's scheme sends no cross-origin headers, so only classic scripts load. */
+export const CLASSIC_SCRIPT_NOTE =
+  "A mod's page runs in a sealed frame that loads classic scripts only. A module script (type=\"module\") or a crossorigin attribute will not load there, so build the page as one classic bundle (an IIFE), as PM's own mods are.";
+
 const count = (n: number) => String(n);
 
 /** A figure the backend gives in milliseconds, said in whole seconds when it is one ("30 s"). */
