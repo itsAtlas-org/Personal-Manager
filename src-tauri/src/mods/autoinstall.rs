@@ -205,7 +205,7 @@ pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError
 }
 
 /// The core Map's rows in `settings`, dead once the Map is a mod. The first is the webview-written
-/// pref blob (`{nodeCap?, tsneEnabled?}`); the others are the layout caches.
+/// pref blob (`{nodeCap?, tsneEnabled?}`, both carried: see [`hand_over_map`]); the others are the layout caches.
 const MAP_PREF: &str = "map";
 const MAP_DEAD_KEYS: [&str; 3] = [MAP_PREF, "doc_layout_meta", "project_layout_cache"];
 /// Set by the Map's handover: this vault's device-local view prefs are still on the device that did
@@ -214,23 +214,42 @@ pub const ADOPT_FLAG: &str = "mods_adopt_map_prefs";
 /// The Map mod's one content key (`mods/atlas.map/src/settings.ts`).
 const MAP_KV_KEY: &str = "settings";
 
-/// The Map's handover: `settings.map`'s `nodeCap` (the one field a mod can keep; `tsneEnabled` has no
-/// meaning without t-SNE) becomes the mod's `settings` key, content class, revision 1, unless the mod
-/// already has one (the user's data in the mod wins); the mod's key is read back; then the dead rows
-/// go. A pref blob that doesn't parse, or has no valid `nodeCap`, carries nothing over and is still
-/// deleted: the core reader treated it as the default too.
+/// The Map's handover: what a mod can keep of `settings.map` becomes the mod's `settings` key,
+/// content class, revision 1, unless the mod already has one (the user's data in the mod wins); the
+/// mod's key is read back; then the dead rows go. Two fields carry:
+/// - `nodeCap`, clamped as the core clamped it;
+/// - `tsneEnabled: false`, as `enhanced: false` (the user turned the core's t-SNE off, so the mod's
+///   Enhanced layout starts off for them too). A `true` or an absent `tsneEnabled` carries nothing:
+///   the core read absent as on, and its Settings wrote both fields on every save, so a stored
+///   `true` says nothing about who had openTSNE. Anything that is not a JSON boolean carries nothing.
+///
+/// It does not read the venv or the `.pm-tsne` marker: the venv is per machine and this runs per
+/// vault. A pref blob that doesn't parse, or has nothing valid in it, carries nothing over and is
+/// still deleted: the core reader treated it as the default too.
 fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
     let old = get(conn, MAP_PREF)?;
-    let cap = old
+    let old = old
         .as_deref()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let mut carried = Map::new();
+    if let Some(cap) = old
+        .as_ref()
         .and_then(|v| v.get("nodeCap").and_then(Value::as_u64))
-        .map(|n| n.clamp(NODE_CAP_MIN as u64, NODE_CAP_MAX as u64));
-    if let Some(cap) = cap {
+        .map(|n| n.clamp(NODE_CAP_MIN as u64, NODE_CAP_MAX as u64))
+    {
+        carried.insert("nodeCap".to_owned(), json!(cap));
+    }
+    if old
+        .as_ref()
+        .is_some_and(|v| v.get("tsneEnabled") == Some(&Value::Bool(false)))
+    {
+        carried.insert("enhanced".to_owned(), json!(false));
+    }
+    if !carried.is_empty() {
         conn.execute(
             "INSERT OR IGNORE INTO mod_kv(mod_id, key, class, value, revision) \
              VALUES (?1, ?2, 'content', ?3, 1)",
-            params![mod_id, MAP_KV_KEY, json!({ "nodeCap": cap }).to_string()],
+            params![mod_id, MAP_KV_KEY, Value::Object(carried).to_string()],
         )?;
         // Verify before anything is deleted: the mod's key is there and says an object.
         let stored = conn
@@ -708,6 +727,55 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn adopting_after_a_handover_that_wrote_enhanced_false_leaves_it_untouched() {
+        let (_dir, mut conn) = store();
+        mod_row(&conn, "catalogue", true);
+        put(&conn, MAP_PREF, r#"{"nodeCap":900,"tsneEnabled":false}"#);
+        hand_over_map(&conn, "atlas.map").unwrap();
+        assert!(get(&conn, MAP_PREF).unwrap().is_none());
+        let stored = |conn: &Connection| -> Value {
+            let text: String = conn
+                .query_row("SELECT value FROM mod_kv WHERE key = 'settings'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        assert_eq!(stored(&conn), json!({"nodeCap": 900, "enhanced": false}));
+        // The page's device prefs add only what is missing; `enhanced` and `nodeCap` stay.
+        assert!(adopt_map_prefs(&mut conn, "semantic", 0.25, true).unwrap());
+        assert_eq!(
+            stored(&conn),
+            json!({
+                "nodeCap": 900, "enhanced": false,
+                "layoutMode": "semantic", "cohesion": 0.25, "labels": true
+            })
+        );
+    }
+
+    #[test]
+    fn a_settings_key_that_does_not_read_back_as_an_object_keeps_the_old_rows() {
+        // Verify-then-delete, with no transaction round it so the order shows: the mod's key is
+        // something else (INSERT OR IGNORE leaves it), the read-back refuses, and nothing is deleted.
+        let (_dir, conn) = store();
+        mod_row(&conn, "catalogue", true);
+        conn.execute(
+            "INSERT INTO mod_kv(mod_id, key, class, value, revision) \
+             VALUES ('atlas.map', 'settings', 'content', '[1]', 2)",
+            [],
+        )
+        .unwrap();
+        for pref in [r#"{"nodeCap":900}"#, r#"{"tsneEnabled":false}"#] {
+            put(&conn, MAP_PREF, pref);
+            put(&conn, "doc_layout_meta", "{}");
+            assert!(hand_over_map(&conn, "atlas.map").is_err(), "{pref}");
+            assert_eq!(get(&conn, MAP_PREF).unwrap().as_deref(), Some(pref));
+            assert!(get(&conn, "doc_layout_meta").unwrap().is_some(), "{pref}");
+            assert!(get(&conn, ADOPT_FLAG).unwrap().is_none(), "{pref}");
+        }
     }
 
     #[test]

@@ -144,12 +144,15 @@ fn a_marker_with_a_current_index_installs_unconsented_and_hands_over_in_the_rows
     assert!(!w.sql::<bool>("SELECT consented_at IS NOT NULL FROM mods"));
     assert_eq!(w.served_from(), None, "it doesn't run before 'Turn on'");
     assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_grants"), 0);
-    // The marker is gone, the Map's one key is the mod's (content, revision 1, nodeCap only), and
-    // the core Map's rows are deleted.
+    // The marker is gone, the Map's one key is the mod's (content, revision 1, the cap and the
+    // switched-off Enhanced layout), and the core Map's rows are deleted.
     assert_eq!(w.setting(MARKER), None);
     assert_eq!(
-        w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'"),
-        r#"{"nodeCap":2500}"#
+        serde_json::from_str::<Value>(
+            &w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'")
+        )
+        .unwrap(),
+        json!({"nodeCap": 2500, "enhanced": false})
     );
     assert_eq!(
         w.sql::<String>("SELECT class FROM mod_kv WHERE key = 'settings'"),
@@ -544,6 +547,11 @@ fn the_users_own_settings_in_the_mod_win_and_a_bad_pref_blob_carries_nothing() {
         "not json",
         r#"{"tsneEnabled":true}"#,
         r#"{"nodeCap":"big"}"#,
+        // Not a JSON boolean: nothing carries (the core read these as the default too).
+        r#"{"tsneEnabled":"false"}"#,
+        r#"{"tsneEnabled":0}"#,
+        r#"{"tsneEnabled":null}"#,
+        r#"{"tsneEnabled":[]}"#,
     ]
     .iter()
     .enumerate()
@@ -602,6 +610,88 @@ fn an_unsigned_row_with_the_pilots_id_is_not_a_settled_pilot() {
     assert_eq!(w.plan(None), vec![Step::Leave(Leave::OtherRow)]);
     assert!(w.ledger().settle_pilot(pilot()).is_err());
     assert!(w.setting(MARKER).is_some());
+}
+
+/// What the handover wrote for one stored pref blob (None: it wrote no `settings` key at all).
+fn handed_over(blob: &str) -> Option<Value> {
+    let w = world();
+    w.have("1.0.0");
+    w.seed_core_map(blob);
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(w.setting("map"), None, "{blob}: the old row always goes");
+    assert_eq!(w.setting(MARKER), None, "{blob}");
+    assert!(w.setting(ADOPT_FLAG).is_some(), "{blob}");
+    w.read(|c| {
+        c.query_row(
+            "SELECT value FROM mod_kv WHERE mod_id = 'atlas.map' AND key = 'settings'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+    })
+    .map(|t| serde_json::from_str(&t).unwrap())
+}
+
+#[test]
+fn a_switched_off_enhanced_layout_is_handed_over_and_nothing_else_about_t_sne_is() {
+    // The cap alone: as before.
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900}"#),
+        Some(json!({"nodeCap": 900}))
+    );
+    // t-SNE off alone: the old handover wrote nothing; now the Enhanced layout starts off.
+    assert_eq!(
+        handed_over(r#"{"tsneEnabled":false}"#),
+        Some(json!({"enhanced": false}))
+    );
+    // Both.
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900,"tsneEnabled":false}"#),
+        Some(json!({"nodeCap": 900, "enhanced": false}))
+    );
+    // Neither, or a `true` (the core's Settings wrote both fields on every save, so a stored
+    // `true` says nothing about who had openTSNE): nothing carries.
+    assert_eq!(handed_over(r#"{}"#), None);
+    assert_eq!(handed_over(r#"{"tsneEnabled":true}"#), None);
+    assert_eq!(
+        handed_over(r#"{"nodeCap":900,"tsneEnabled":true}"#),
+        Some(json!({"nodeCap": 900}))
+    );
+    // A value that is not a JSON boolean carries nothing, and a valid cap beside it still does.
+    for junk in [r#""false""#, "0", "null", "[]", r#""""#, "{}"] {
+        assert_eq!(
+            handed_over(&format!(r#"{{"tsneEnabled":{junk}}}"#)),
+            None,
+            "{junk}"
+        );
+        assert_eq!(
+            handed_over(&format!(r#"{{"nodeCap":900,"tsneEnabled":{junk}}}"#)),
+            Some(json!({"nodeCap": 900})),
+            "{junk}"
+        );
+    }
+}
+
+#[test]
+fn the_users_own_enhanced_choice_in_the_mod_wins_over_the_old_t_sne_switch() {
+    let w = world();
+    w.have("1.0.0");
+    w.exec(
+        "INSERT INTO mod_kv(mod_id, key, class, value, revision) \
+         VALUES ('atlas.map', 'settings', 'content', '{\"enhanced\":true}', 3)",
+    );
+    w.seed_core_map(r#"{"tsneEnabled":false}"#);
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(
+        w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'"),
+        r#"{"enhanced":true}"#
+    );
+    assert_eq!(
+        w.sql::<i64>("SELECT revision FROM mod_kv WHERE key = 'settings'"),
+        3
+    );
+    assert_eq!(w.setting("map"), None, "the old row still goes");
 }
 
 // ---- The table ---------------------------------------------------------------------------------
