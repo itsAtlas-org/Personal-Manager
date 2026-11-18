@@ -2103,6 +2103,8 @@ mod tests {
             "backup/restore.rs", // test fixtures
             // A test that copies a store holding a real folder row, to hand it to the strip.
             "mods/ledger/tests/test_folder.rs",
+            // A test of the new key's class: it makes the backup's copy to hand it to the strip.
+            "mods/ledger/tests/enhanced_keys.rs",
         ];
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {

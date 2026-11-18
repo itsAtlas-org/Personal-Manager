@@ -166,7 +166,9 @@ impl crate::mods::ledger::LedgerStore for OverHost<'_> {
 pub type Hook = Arc<dyn Fn(&TestHost, Point) + Send + Sync>;
 
 pub struct Parts {
-    dir: tempfile::TempDir,
+    /// The host's folder. It is owned by the one `TestHost` that made it (see [`TestHost`]), not by
+    /// this struct, so a cycle through the scripted hooks can never keep it on disk.
+    dir: std::path::PathBuf,
     pub state: AppState,
     pub runtime: ModRuntime,
     pub calls: Calls,
@@ -183,8 +185,24 @@ pub struct Parts {
 
 /// The app, as far as the dispatcher can tell: a real `AppState` over a real store, a real runtime,
 /// real limits; the engine's seal and the app lock set by the test.
-#[derive(Clone)]
-pub struct TestHost(pub Arc<Parts>);
+///
+/// The folder belongs to the host a test made (`new`, `with_interval`), not to its clones: the
+/// scripted hooks and the hub's timers keep clones alive (a hook that captures the host is a cycle
+/// through its own `Parts`; a timer waiting out an hour holds its host until the process ends), and
+/// a folder that waited for the last clone would stay in `/tmp` after the run. So the folder is
+/// removed when the test's own host drops, and a clone can still be used until then.
+pub struct TestHost(
+    pub Arc<Parts>,
+    /// Set on the host a test made, `None` on every clone. Never read: it is held for its drop.
+    #[allow(dead_code)]
+    Option<tempfile::TempDir>,
+);
+
+impl Clone for TestHost {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0), None)
+    }
+}
 
 impl TestHost {
     /// A host whose events wait an hour for their interval, so a test drives each flush itself and
@@ -200,23 +218,26 @@ impl TestHost {
             source_dir: dir.path().join("sidecar"),
             venv_dir: dir.path().join("runtime").join("venv"),
         });
-        Self(Arc::new(Parts {
-            state: AppState::new(Some(conn), None, sidecar, None, None),
-            runtime: ModRuntime::new(Platform::Linux, vec!["tauri://localhost".into()]),
-            calls: Calls::default(),
-            hub: Hub::with_delay(interval),
-            sealed: AtomicBool::new(true),
-            locked: AtomicBool::new(false),
-            hops: ScriptedHops::new(),
-            model: FakeModel::default(),
-            hook: Mutex::new(None),
-            dir,
-        }))
+        Self(
+            Arc::new(Parts {
+                state: AppState::new(Some(conn), None, sidecar, None, None),
+                runtime: ModRuntime::new(Platform::Linux, vec!["tauri://localhost".into()]),
+                calls: Calls::default(),
+                hub: Hub::with_delay(interval),
+                sealed: AtomicBool::new(true),
+                locked: AtomicBool::new(false),
+                hops: ScriptedHops::new(),
+                model: FakeModel::default(),
+                hook: Mutex::new(None),
+                dir: dir.path().to_path_buf(),
+            }),
+            Some(dir),
+        )
     }
 
     /// A folder of this host's own, for the mods' files.
     pub fn dir(&self) -> &std::path::Path {
-        self.0.dir.path()
+        &self.0.dir
     }
 
     /// Run `f` on the store, the way a writer outside the dispatcher would (the guard dropped after).
@@ -578,5 +599,46 @@ impl ModelEdge for FakeModel {
             }
             Answer::Hang | Answer::HangBeforeWire => std::future::pending().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The leak this guards: a hook that captures its own host (an `Arc` cycle through the scripted
+    /// model) and a clone parked in another thread (as a hub timer parks one) kept the folder, with
+    /// its store, in `/tmp` after every run. It goes with the host the test made.
+    #[test]
+    fn the_folder_goes_with_the_host_a_test_made_though_clones_outlive_it() {
+        let host = TestHost::new();
+        let dir = host.dir().to_path_buf();
+        assert!(dir.join("pm.sqlite").exists());
+
+        let cycle = host.clone();
+        *host.model().on_complete.lock().unwrap() = Some(Arc::new(move || {
+            let _ = cycle.dir();
+        }));
+        let (release, parked_until) = std::sync::mpsc::channel::<()>();
+        let parked = host.clone();
+        let thread = std::thread::spawn(move || {
+            let _ = parked_until.recv();
+            drop(parked);
+        });
+
+        drop(host);
+        let gone = !dir.exists();
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(gone, "the folder outlived the host the test made");
+    }
+
+    /// A clone is a view of the same host: dropping one must not take the folder from the test.
+    #[test]
+    fn dropping_a_clone_leaves_the_folder_for_the_test() {
+        let host = TestHost::new();
+        let clone = host.clone();
+        drop(clone);
+        assert!(host.dir().join("pm.sqlite").exists());
     }
 }
