@@ -20,8 +20,11 @@
 //!   marker's removal and the handover run in the same transaction as the row, so they land with it
 //!   or not at all;
 //! - the mod has a catalogue row whose files are missing on this computer (a restore brought the
-//!   row, not the files): put back exactly the pinned version and file, the way the Mods tab's
-//!   repair does ([`super::ledger::Ledger::repair_target`]), then settle;
+//!   row, not the files; whatever state the row is in, paused included, because the files decide):
+//!   with a current index that doesn't blacklist the row's version or file, put back exactly the
+//!   pinned version and file, the way the Mods tab's repair does
+//!   ([`super::ledger::Ledger::repair_target`]), then settle. It is the same file the person's own
+//!   click on Repair would fetch, signature and sha256 checked, never a newer or unsigned one;
 //! - otherwise leave the marker, and the Mods tab shows the mod as "Installing" (a synthesized
 //!   entry, never a row: a fake row in a truth-class table would ride in backups and shared vaults
 //!   with an invented hash and version).
@@ -29,9 +32,10 @@
 //! **Only the writer installs** ([`crate::lock_session::this_instance_writes`]): a read-only guest of
 //! a shared vault has its store closed, and a mod installed there would be files the writer's ledger
 //! never heard of. **No download without a usable, current index** ([`decide`]): an expired or missing
-//! index may restrict (the blacklist applies elsewhere), never install. The one exception is putting
-//! back the files of a row the person already has: that fetches only the row's own pinned, hash-checked
-//! file, which needs no index, exactly as the Mods tab's repair does.
+//! index may restrict (the blacklist applies elsewhere), never install. Putting back the files of a
+//! row the person already has is no exception: it fetches the row's own pinned, hash-checked file,
+//! but the row came from a restore (a backup is data a person may have been handed), so it too waits
+//! for a current index and is left when that index's blacklist names the row's version or file.
 //!
 //! **The handover** moves what the core feature kept in the store into the mod's own storage, then
 //! deletes the old rows, verify-then-delete: the mod's `settings` key is read back before any old
@@ -136,8 +140,12 @@ fn to_ledger(e: crate::error::Error) -> LedgerError {
 pub struct Held<'a> {
     pub installed_from: &'a str,
     pub signed: bool,
-    /// The row is parked because its files aren't on this computer (a restore brought the row).
+    /// The row's files aren't on this computer (a restore brought the row), whatever its state.
     pub files_missing: bool,
+    /// The row's pinned version and file, which a repair would fetch: the blacklist is read against
+    /// them before it does.
+    pub version: &'a str,
+    pub sha256: Option<&'a str>,
 }
 
 /// Why a marker is left for a later pass.
@@ -172,14 +180,21 @@ pub fn decide(
     now: DateTime<Utc>,
 ) -> Step {
     if let Some(h) = held {
-        return if h.installed_from == store::FROM_CATALOGUE && h.signed {
-            if h.files_missing {
-                Step::Repair
-            } else {
-                Step::Settle
-            }
+        if h.installed_from != store::FROM_CATALOGUE || !h.signed {
+            return Step::Leave(Leave::OtherRow);
+        }
+        if !h.files_missing {
+            return Step::Settle;
+        }
+        // The version and file come from the row, which a restore may have brought from anywhere:
+        // like a download, a repair waits for a current index and for the blacklist to clear them.
+        let Some(index) = index.filter(|i| i.current_at(now)) else {
+            return Step::Leave(Leave::NoCurrentIndex);
+        };
+        return if index.blacklisted(pilot.id, h.version, h.sha256).is_some() {
+            Step::Leave(Leave::Blacklisted)
         } else {
-            Step::Leave(Leave::OtherRow)
+            Step::Repair
         };
     }
     let Some(index) = index.filter(|i| i.current_at(now)) else {
@@ -712,6 +727,8 @@ mod tests {
                 installed_from: from,
                 signed,
                 files_missing: false,
+                version: "1.0.0",
+                sha256: Some("aa"),
             })
         };
         // A catalogue row settles, whatever the index says (even none).
@@ -723,18 +740,30 @@ mod tests {
             decide(p, held("catalogue", true), Some(&index), now()),
             Step::Settle
         );
-        // A catalogue row whose files are missing is put back (a repair, from the pinned file),
-        // whatever the index says; any other row with missing files is no business of the pass's.
+        // A catalogue row whose files are missing is put back (a repair, from the pinned file) once
+        // a current index doesn't blacklist it; any other row with missing files is no business of
+        // the pass's.
         let missing = |from, signed| {
             Some(Held {
                 installed_from: from,
                 signed,
                 files_missing: true,
+                version: "1.0.0",
+                sha256: Some("aa"),
             })
         };
         assert_eq!(
             decide(p, missing("catalogue", true), None, now()),
-            Step::Repair
+            Step::Leave(Leave::NoCurrentIndex)
+        );
+        assert_eq!(
+            decide(
+                p,
+                missing("catalogue", true),
+                Some(&index),
+                now() + chrono::Duration::days(90)
+            ),
+            Step::Leave(Leave::NoCurrentIndex)
         );
         assert_eq!(
             decide(p, missing("catalogue", true), Some(&index), now()),

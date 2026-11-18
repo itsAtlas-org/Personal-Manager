@@ -721,8 +721,11 @@ fn a_restored_row_without_its_files_is_put_back_by_the_pass_and_settled() {
     let w = world();
     let (bytes, key, target) = restored_without_files(&w);
     let keys = TrustedKeys::of_test_keys(&[key]);
-    // No index needed: it is the row's own pinned file, the Mods tab's repair.
-    assert_eq!(w.plan(None), vec![Step::Repair]);
+    // The row's own pinned file, the Mods tab's repair, but never without a current index: the row
+    // came from a backup.
+    assert_eq!(w.plan(None), vec![Step::Leave(Leave::NoCurrentIndex)]);
+    let index = built("1.0.0", |_| {}).index();
+    assert_eq!(w.plan(Some(&index)), vec![Step::Repair]);
     assert_eq!(
         w.ledger().repair_target(&id("atlas.map")).unwrap().version,
         "1.0.0"
@@ -741,6 +744,56 @@ fn a_restored_row_without_its_files_is_put_back_by_the_pass_and_settled() {
     assert!(w.setting("mods_pilot_landed_map").is_some());
     // Whole again, a later pass has nothing to do.
     assert_eq!(w.plan(None), Vec::<Step>::new());
+}
+
+#[test]
+fn a_restored_row_without_its_files_is_put_back_whatever_state_the_backup_had_it_in() {
+    let index = built("1.0.0", |_| {}).index();
+    for state in ["paused", "installing", "active", "parked"] {
+        let w = world();
+        restored_without_files(&w);
+        w.exec(&format!(
+            "UPDATE mods SET state = '{state}', state_reason = NULL"
+        ));
+        assert_eq!(w.plan(Some(&index)), vec![Step::Repair], "{state}");
+    }
+    // A row with its files is settled, not repaired, in any state.
+    let w = world();
+    w.have("1.0.0");
+    w.exec(
+        "UPDATE mods SET state = 'paused', state_reason = NULL;
+         INSERT INTO settings(key, value) VALUES ('mods_autoinstall_map', '1');",
+    );
+    assert_eq!(w.plan(Some(&index)), vec![Step::Settle]);
+}
+
+#[test]
+fn a_restored_row_the_safety_list_names_is_not_put_back_by_the_pass() {
+    let w = world();
+    let (_, _, target) = restored_without_files(&w);
+    let b = built("1.0.0", |_| {});
+    let blacklisted = |action: &str| {
+        index_listing(
+            b.entry(),
+            json!([{"id": "atlas.map", "versions": "<=1.0.0", "action": action,
+                    "reason": "It loses notes."}]),
+        )
+    };
+    assert_eq!(
+        w.plan(Some(&blacklisted("paused"))),
+        vec![Step::Leave(Leave::Blacklisted)]
+    );
+    // Named by its file rather than its version.
+    let by_file = index_listing(
+        b.entry(),
+        json!([{"sha256": target.sha256, "action": "paused",
+                "reason": "It loses notes."}]),
+    );
+    assert_eq!(
+        w.plan(Some(&by_file)),
+        vec![Step::Leave(Leave::Blacklisted)]
+    );
+    assert_eq!(w.plan(Some(&b.index())), vec![Step::Repair]);
 }
 
 #[test]
