@@ -586,7 +586,7 @@ describe("the two arrangements", () => {
     const compute: Compute = {
       ...real,
       mode: "worker",
-      reduce: real.reduce,
+      semantic: real.semantic,
       force: (request) =>
         broken ? Promise.reject(new Error("The layout worker failed.")) : real.force(request),
       close: () => real.close(),

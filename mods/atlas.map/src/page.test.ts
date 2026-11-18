@@ -82,6 +82,25 @@ describe("what ships in the page", () => {
     }
   });
 
+  it("keeps what the layout workers run inside what the frame's CSP allows", () => {
+    // The Map starts two blob workers (one for the by-project layout, one for PCA and t-SNE). The frame
+    // allows `worker-src blob:` (any number of them) and nothing a worker could add: no WebAssembly, no
+    // shared memory, no code built from text, no network. The files a worker runs are in `shipped`, so
+    // the walls above already read them; this names them, so a rename cannot drop them from that check.
+    const headers: string = readFileSync(
+      new URL("../../../src-tauri/src/mods/headers.rs", import.meta.url),
+      "utf8",
+    );
+    expect(headers).toMatch(/connect-src 'none';[\s\S]*?worker-src blob:/);
+    for (const name of ["tsne.ts", "pca.ts", "workerProtocol.ts", "forceLayout.ts"]) {
+      const text = code(named(name));
+      expect(/\bWebAssembly\b|\bSharedArrayBuffer\b|\bAtomics\b/.test(text), name).toBe(false);
+      expect(/\bnew\s+Function\b|\beval\s*\(|\bimportScripts\b|\bfetch\s*\(/.test(text), name).toBe(
+        false,
+      );
+    }
+  });
+
   it("makes a Blob and a Worker nowhere (the kit's spawnWorker is the one place)", () => {
     for (const [path, source] of shipped) {
       expect(/\bnew\s+(Blob|Worker|SharedWorker)\b/.test(code(source)), path).toBe(false);

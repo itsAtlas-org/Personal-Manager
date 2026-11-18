@@ -278,7 +278,10 @@ export async function loadSemanticCoords(
   }
 
   onPhase?.("reducing");
-  const reduction = await compute.reduce(vectors.vectors, vectors.count, vectors.dimension);
+  const reduction = await compute.semantic(vectors.vectors, vectors.count, vectors.dimension, {
+    pca: true,
+    tsne: false,
+  }).result;
   const coords: SemanticCoord[] = ids.map((id, i) => ({
     id,
     x: reduction.coords[2 * i],
