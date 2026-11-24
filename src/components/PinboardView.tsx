@@ -43,7 +43,7 @@ import {
   type ChecklistLine,
   type TextEdit,
 } from "../lib/pinboard/notesMarkdown";
-import { TaskList } from "./tasks/TaskList";
+import { CoreTaskList } from "./tasks/CoreTaskList";
 import { readTaskSort } from "../lib/tasks";
 import { insertTable, moveCell, tableEnter } from "../lib/pinboard/noteTables";
 import { NoteTablePicker } from "./NoteTablePicker";
@@ -1785,7 +1785,7 @@ interface TaskListBodyProps {
 /**
  * A Task list card (PA-1): a live view of the global task list, not a copy of it. The card keeps only
  * its filter (`widget.project`: unset → every task, a name → that project's); the list is the shared
- * `TaskList`, which reads the tasks table and re-reads on every `tasks://changed`, so a tick here is a
+ * `TaskList` (through `CoreTaskList`), which reads the tasks table and re-reads on every `tasks://changed`, so a tick here is a
  * tick on the project page and the Runway, and the other way round. Task edits go straight to the
  * backend and never through the board's history — Ctrl+Z on the board can't un-tick a task.
  *
@@ -1878,7 +1878,7 @@ const TaskListBody = memo(function TaskListBody({
             </div>
           </div>
         ) : (
-          <TaskList
+          <CoreTaskList
             project={project}
             compact
             showProject={project === undefined}

@@ -49,6 +49,17 @@ export { DateField } from "./ui/DateField";
 export { MonthPicker } from "./ui/MonthPicker";
 export { ContextMenuHost } from "./ui/ContextMenuHost";
 
+// --- tasks (src/kit/tasks, src/kit/taskData.ts): the list reads and writes through a TaskData ---
+export { TaskList, type TaskListProps } from "./tasks/TaskList";
+export { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "./tasks/TaskBits";
+export {
+  TaskDataProvider,
+  useTaskData,
+  type NewTask,
+  type TaskData,
+  type TaskEditTarget,
+} from "./taskData";
+
 // --- theme (src/kit/theme.tsx, src/kit/design) ---
 export { ThemeProvider, useTheme, type FontScale, type ThemeState, type ThemeStore } from "./theme";
 export { useDepth, type DepthState } from "./design/depth";

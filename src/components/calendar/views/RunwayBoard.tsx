@@ -35,7 +35,12 @@ import {
 } from "../../../lib/runway";
 import type { CalendarEvent, Milestone, Task, TaskLane, TaskStack } from "../../../lib/types";
 import { useDepth } from "../../../theme";
-import { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "../../tasks/TaskBits";
+import {
+  DeadlineChip,
+  ProjectChip,
+  StackChip,
+  TaskStatusButton,
+} from "../../../kit/tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
 import { Button, Callout, SectionLabel, cn } from "../../ui";
 import {

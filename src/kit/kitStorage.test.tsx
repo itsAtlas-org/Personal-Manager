@@ -11,6 +11,7 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
+import type { Task, TaskStack } from "../lib/types";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as kit from "./index";
 import {
@@ -22,6 +23,7 @@ import {
   ConfirmDialog,
   ContextMenuHost,
   DateField,
+  DeadlineChip,
   Dialog,
   Input,
   LinkIcon,
@@ -29,8 +31,13 @@ import {
   MonthPicker,
   NumberIcon,
   Popover,
+  ProjectChip,
   SegmentedControl,
   Select,
+  StackChip,
+  TaskDataProvider,
+  TaskList,
+  TaskStatusButton,
   ThemeProvider,
   Tooltip,
   VisuallyHidden,
@@ -39,6 +46,7 @@ import {
   useContextMenu,
   useDepth,
   useTheme,
+  type TaskData,
   type ThemeStore,
 } from "./index";
 
@@ -75,6 +83,50 @@ function throwingStorage() {
 
 // No stored theme anywhere: what a frame's store answers before the host's theme is known.
 const emptyStore: ThemeStore = { get: async () => null, set: async () => {} };
+
+const aTask = {
+  id: 1,
+  title: "task title one",
+  why: null,
+  project_name: "Atlas",
+  project_archived: false,
+  milestone_id: null,
+  event_uid: null,
+  do_start: null,
+  do_end: null,
+  deadline: "2026-11-30",
+  deadline_kind: "hard",
+  deadline_from: "date",
+  effective_deadline: "2026-11-30",
+  deadline_missing: false,
+  milestone_label: null,
+  event_title: null,
+  status: "todo",
+  completed_at: null,
+  lane: "foreground",
+  stack_id: null,
+  parked: false,
+  ordinal: 0,
+  source: "user",
+  created_at: "",
+  updated_at: "",
+} as Task;
+const aStack: TaskStack = {
+  id: 3,
+  title: "stack title",
+  kind: "waiting_on",
+  note: null,
+  created_at: "",
+  updated_at: "",
+};
+const taskData: TaskData = {
+  list: async () => ({ tasks: [aTask], stacks: [aStack] }),
+  add: async () => 1,
+  setStatus: async () => {},
+  reorder: async () => {},
+  onChanged: async () => () => {},
+  edit: () => {},
+};
 
 /** The hooks, read the way a component reads them. */
 function Probe() {
@@ -167,6 +219,22 @@ const COMPONENTS: Record<string, [ReactElement, string | RegExp]> = {
     /./,
   ],
   ContextMenuHost: [<ContextMenuHost key="cm" />, /./],
+  TaskDataProvider: [
+    <TaskDataProvider key="tp" data={taskData}>
+      provider child
+    </TaskDataProvider>,
+    "provider child",
+  ],
+  TaskList: [
+    <TaskDataProvider key="tl" data={taskData}>
+      <TaskList project="Atlas" />
+    </TaskDataProvider>,
+    /./,
+  ],
+  TaskStatusButton: [<TaskStatusButton key="ts" status="todo" onCycle={() => {}} />, /./],
+  DeadlineChip: [<DeadlineChip key="dc" task={aTask} today={new Date(2026, 10, 24)} />, /./],
+  StackChip: [<StackChip key="sk" stack={aStack} />, /stack title/],
+  ProjectChip: [<ProjectChip key="pc" project="Atlas" />, "Atlas"],
   Probe: [<Probe key="pr" />, "probe:slate:dark:standard:true:null:string:boolean"],
 };
 

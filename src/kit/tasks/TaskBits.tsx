@@ -14,10 +14,10 @@ import {
   stackTooltip,
   TASK_STATUS_LABEL,
   TONE_CLASS,
-} from "../../lib/tasks";
+} from "../lib/tasks";
 import type { Task, TaskStack, TaskStatus } from "../../lib/types";
-import { useTheme } from "../../theme";
-import { cn } from "../ui";
+import { useTheme } from "../theme";
+import { cn } from "../ui/cn";
 
 /** The tick that cycles a task's status: an empty box (to do), a half-filled box (doing), a ticked
  *  box (done), drawn in CSS from tokens. Terminal draws `[ ]` / `[~]` / `[x]` instead. Its name

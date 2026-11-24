@@ -13,36 +13,32 @@
 // milestones panel is.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  addTask,
-  changeTaskStatus,
-  listTasks,
-  listTaskStacks,
-  onTasksChanged,
-  reorderTasks,
-} from "../../lib/ipc";
-import { startOfDay } from "../../lib/calendar-layout";
-import { runMutation } from "../../lib/runMutation";
-import { subscribeUntilCleanup } from "../../lib/subscribe";
+import type { Task, TaskStack } from "../../lib/types";
+import { useDepth } from "../design/depth";
+import { startOfDay } from "../lib/calendar-layout";
+import { runMutation } from "../lib/runMutation";
+import { subscribeUntilCleanup } from "../lib/subscribe";
 import {
   compareTasks,
   deadlineInfo,
   deadlineKindOf,
   DEFAULT_TASK_SORT,
-  emptyTaskInput,
   isOpen,
   sortTasks,
   TASK_SORTS,
   type TaskSort,
   type TaskSortKey,
-} from "../../lib/tasks";
-import type { Task, TaskInput, TaskStack } from "../../lib/types";
-import { useNowTick } from "../../lib/useNowTick";
-import { useDepth } from "../../theme";
-import { DateField } from "../DateField";
-import { Button, Callout, Collapsible, Input, Select, cn } from "../ui";
+} from "../lib/tasks";
+import { useNowTick } from "../lib/useNowTick";
+import { type NewTask, type TaskEditTarget, useTaskData } from "../taskData";
+import { Button } from "../ui/Button";
+import { Callout } from "../ui/Callout";
+import { Collapsible } from "../ui/Collapsible";
+import { cn } from "../ui/cn";
+import { DateField } from "../ui/DateField";
+import { Input } from "../ui/Input";
+import { Select } from "../ui/Select";
 import { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "./TaskBits";
-import { TaskEditor } from "./TaskEditor";
 
 export interface TaskListProps {
   /** One project's tasks; undefined lists every task. */
@@ -61,8 +57,6 @@ export interface TaskListProps {
   onSortChange?: (sort: TaskSort) => void;
 }
 
-type Editing = { task: Task } | { defaults: Partial<TaskInput> } | null;
-
 /** Done tasks, most recently finished first. */
 function byCompleted(a: Task, b: Task): number {
   return (b.completed_at ?? "").localeCompare(a.completed_at ?? "") || compareTasks(a, b);
@@ -77,10 +71,10 @@ export function TaskList({
   sort = DEFAULT_TASK_SORT,
   onSortChange,
 }: TaskListProps) {
+  const data = useTaskData();
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [stacks, setStacks] = useState<TaskStack[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Editing>(null);
   // Bumped when a task made from the quick-add row's "More…" is saved, which remounts the row so
   // what was typed there doesn't linger once it has become a task.
   const [addRowKey, setAddRowKey] = useState(0);
@@ -92,29 +86,27 @@ export function TaskList({
   const seq = useRef(0);
   const reload = useCallback(() => {
     const n = ++seq.current;
-    listTasks(project ?? null)
-      .then((t) => {
-        if (n === seq.current) setTasks(t);
+    data
+      .list(project ?? null)
+      .then((r) => {
+        if (n !== seq.current) return;
+        setTasks(r.tasks);
+        setStacks(r.stacks);
       })
       .catch((e) => {
         if (n === seq.current) setError(String(e));
       });
-    listTaskStacks()
-      .then((s) => {
-        if (n === seq.current) setStacks(s);
-      })
-      .catch(() => {});
-  }, [project]);
+  }, [data, project]);
 
   useEffect(() => {
     reload();
     window.addEventListener("focus", reload);
-    const off = subscribeUntilCleanup(() => onTasksChanged(reload));
+    const off = subscribeUntilCleanup(() => data.onChanged(reload));
     return () => {
       window.removeEventListener("focus", reload);
       off();
     };
-  }, [reload]);
+  }, [data, reload]);
 
   const visible = (tasks ?? []).filter(
     (t) => includeArchived || project !== undefined || !t.project_archived,
@@ -142,6 +134,12 @@ export function TaskList({
       reload();
     }, setError);
 
+  const edit = (target: TaskEditTarget) =>
+    data.edit(target, () => {
+      if ("defaults" in target) setAddRowKey((k) => k + 1);
+      reload();
+    });
+
   const row = (t: Task, i: number, list: Task[], reorderable: boolean) => (
     <TaskRow
       key={t.id}
@@ -150,8 +148,8 @@ export function TaskList({
       showProject={showProject}
       compact={compact}
       today={today}
-      onCycle={(next) => mutate(() => changeTaskStatus(t.id, next))}
-      onEdit={() => setEditing({ task: t })}
+      onCycle={(next) => mutate(() => data.setStatus(t.id, next))}
+      onEdit={() => edit({ task: t })}
       isFirst={i === 0}
       isLast={i === list.length - 1}
       onMove={
@@ -164,7 +162,7 @@ export function TaskList({
               // Shown upside down, the list is the global order reversed: send it back the right
               // way up.
               if (sort.desc) ids.reverse();
-              mutate(() => reorderTasks(ids));
+              mutate(() => data.reorder(ids));
             }
           : undefined
       }
@@ -192,11 +190,11 @@ export function TaskList({
         compact={compact}
         onAdd={(input) =>
           runMutation(async () => {
-            await addTask(input);
+            await data.add(input);
             reload();
           }, setError)
         }
-        onMore={(defaults) => setEditing({ defaults })}
+        onMore={(defaults) => edit({ defaults })}
       />
       {error && <Callout as="p">{error}</Callout>}
       {parked.length > 0 && (
@@ -213,17 +211,6 @@ export function TaskList({
           </div>
         </Collapsible>
       )}
-      <TaskEditor
-        open={editing !== null}
-        task={editing && "task" in editing ? editing.task : null}
-        defaults={editing && "defaults" in editing ? editing.defaults : undefined}
-        onClose={() => setEditing(null)}
-        onSaved={() => {
-          if (editing && "defaults" in editing) setAddRowKey((k) => k + 1);
-          reload();
-        }}
-        onDeleted={reload}
-      />
     </div>
   );
 }
@@ -444,13 +431,13 @@ function AddTaskRow({
 }: {
   project?: string;
   compact: boolean;
-  onAdd: (input: TaskInput) => Promise<boolean>;
-  onMore: (defaults: Partial<TaskInput>) => void;
+  onAdd: (input: NewTask) => Promise<boolean>;
+  onMore: (defaults: NewTask) => void;
 }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState("");
   const [busy, setBusy] = useState(false);
-  const defaults = (): Partial<TaskInput> => ({
+  const defaults = (): NewTask => ({
     project: project ?? null,
     title: title.trim(),
     deadline: date || null,
@@ -459,7 +446,7 @@ function AddTaskRow({
   async function add() {
     if (!title.trim() || busy) return;
     setBusy(true);
-    const ok = await onAdd(emptyTaskInput(defaults()));
+    const ok = await onAdd(defaults());
     if (ok) {
       setTitle("");
       setDate("");

@@ -31,7 +31,7 @@ import { Button, Callout } from "./ui";
 import { ImportancePicker } from "./ImportancePicker";
 import { LinkedBadge, ProjectPicker, projectsOf } from "./ProjectPicker";
 import { MilestoneList } from "./MilestoneList";
-import { TaskList } from "./tasks/TaskList";
+import { CoreTaskList } from "./tasks/CoreTaskList";
 import { subscribeUntilCleanup } from "../lib/subscribe";
 import { TagEditor } from "./TagEditor";
 import { ChatBadge } from "./ChatBadge";
@@ -546,7 +546,7 @@ export function ProjectView({
     <div className="px-4 pb-3 pt-3" data-help="project-tasks">
       <span className="font-mono text-xs uppercase tracking-wide text-ink4">Tasks</span>
       <div className="mt-2">
-        <TaskList project={project} />
+        <CoreTaskList project={project} />
       </div>
     </div>
   );

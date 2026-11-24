@@ -23,7 +23,7 @@ import {
 import { deadlineInfo, STACK_KIND_LABEL, TONE_CLASS } from "../../../lib/tasks";
 import type { CalendarEvent, Task, TaskLane } from "../../../lib/types";
 import { useDepth } from "../../../theme";
-import { DeadlineChip, TaskStatusButton } from "../../tasks/TaskBits";
+import { DeadlineChip, TaskStatusButton } from "../../../kit/tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
 import { Button, Callout, cn } from "../../ui";
 import {
