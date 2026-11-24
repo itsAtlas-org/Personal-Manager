@@ -22,16 +22,10 @@
 //
 // Pure Node built-ins, no dependencies (I-18).
 
+// Empty since 2026-11-24: picomatch's GHSA-fc5q-39xc-vjpf (Bobby's exception of 2026-11-17, #1121) was withdrawn by
+// GitHub on 2026-11-18, so npm audit no longer reports it and the stale-entry warning asked for its removal.
 /** Advisories accepted for now. Adding one is the decision; state why, who, and until when. */
-export const ACCEPTED = [
-  {
-    id: "GHSA-fc5q-39xc-vjpf",
-    package: "picomatch",
-    until: "2026-12-31",
-    decided: "Bobby, 2026-11-17: a narrow exception, in Mods PR B1 (#1121)",
-    why: "A ReDoS in picomatch's extglob parsing, in every version through 4.0.7, with no patched release (the advisory was widened on 2026-11-17). picomatch is only in the build and test tools (vite, vitest, typescript-eslint), which match PM's own glob patterns, never text from users or the network, and it is not in the shipped app.",
-  },
-];
+export const ACCEPTED = [];
 
 const LEVELS = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
 const FLOOR = LEVELS.moderate;

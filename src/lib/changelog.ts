@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.186.2-alpha",
+    date: "2026-11-24",
+    highlights: [
+      "A calendar feed's server, or a website a mod is allowed to reach, can no longer make PM close by answering with a specially crafted redirect. The flaw was in the library PM uses to read web addresses, and PM now also checks a redirect's address type before anything else looks at it.",
+      "Under-the-hood tidying: routine updates to the building blocks underneath PM, bundled together. The framework PM's windows are built on fixes a rare case where an update sent to PM's windows could leave the app stuck, and on Linux, resizing PM's window by touch can no longer upset the desktop. In notes, dragging and dropping finds a place to land more often. The rest are small fixes in the parts that write your exports and read your computer's hardware, and in the tools PM is built and tested with. Nothing changes in how you use PM.",
+    ],
+  },
+  {
     version: "3.186.1-alpha",
     date: "2026-11-18",
     highlights: [
