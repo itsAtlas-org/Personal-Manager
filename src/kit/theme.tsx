@@ -1,0 +1,562 @@
+// SPDX-FileCopyrightText: 2026 Bobby Yu
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The theme context, in the mod kit: the same context, hooks and token reads for PM's page and for a
+// mod's sealed frame, with no `ipc` and no Tauri API in it. The one thing that reaches out, the
+// mirror of the theme blob into PM's settings table, is a `ThemeStore` the provider is given: core's
+// `ThemeProvider` (src/theme/ThemeContext.tsx) wraps this one with the `ipc` store, and a frame wraps
+// it with a store of its own (it reads the host's theme and writes nothing). There is ONE context
+// object, here, so a kit component and a core component under either provider read the same theme.
+//
+// The only state the design layer owns: { system, modePref, accent, depth } (+ an optional manual
+// location for the sunrise/sunset mode). Persisted two ways: localStorage stays the fast-path so
+// the very first paint is already themed (a synchronous read, no IPC round-trip → no flash), and
+// it is *also* mirrored into the encrypted settings table via `set_pref` so the theme travels with
+// the data folder when it's backed up or moved to another machine. On a fresh machine (localStorage
+// empty at boot) we hydrate from the stored blob; on the same machine localStorage already holds
+// the values, so nothing flashes and the store is simply refreshed.
+//
+// Mode has a preference/resolved split: the user picks `light | dark | system | auto` (what we
+// persist and show in Settings), and resolveMode.ts collapses that to the concrete `light | dark`
+// that tokens and every component actually read. `system` follows the OS; `auto` follows sunrise/
+// sunset at the user's (timezone-derived or manually set) location — recomputed here on a timer and
+// whenever the app regains focus, so the app quietly flips itself day↔night.
+
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { applyTheme } from "./design/tokens";
+import {
+  ACCENTS,
+  SYSTEMS,
+  MODE_PREFS,
+  DEPTHS,
+  DENSITIES,
+  CONTRASTS,
+  type System,
+  type Mode,
+  type ModePref,
+  type Depth,
+  type Density,
+  type Contrast,
+} from "./design/profiles";
+import { resolveMode, type ModeResolution, type ModeSource } from "./design/resolveMode";
+import type { Coords } from "./design/timezones";
+import { isTearingDown } from "./lib/teardown";
+
+/** Where the provider mirrors the full theme blob (a JSON string): core's is the `appearance` row of
+ *  the settings table through `ipc`, a frame's is the host's theme. `get` answers null when nothing
+ *  is stored. Pass one STABLE object (a module constant or a memo): the hydration effect reads it. */
+export interface ThemeStore {
+  get: () => Promise<string | null>;
+  set: (blob: string) => Promise<void>;
+}
+
+export interface ThemeState {
+  system: System;
+  /** The resolved Mode that tokens/components render (never `system`/`auto`). */
+  mode: Mode;
+  /** What the user picked for Mode — persisted and shown in Settings. */
+  modePref: ModePref;
+  /** How `mode` was resolved from `modePref` (for the Settings hint). */
+  modeSource: ModeSource;
+  /** The location driving the `auto` (sunrise/sunset) mode, when one is available. */
+  modeCoords?: Coords;
+  /** Instant of the next scheduled day↔night flip under `auto`, if known. */
+  modeNextChange?: Date;
+  accent: string;
+  depth: Depth;
+  /** Optional user-entered "lat, lon" override for the `auto` mode ("" = use the device timezone). */
+  autoLocation: string;
+  setSystem: (s: System) => void;
+  setModePref: (m: ModePref) => void;
+  setAccent: (a: string) => void;
+  setDepth: (d: Depth) => void;
+  setAutoLocation: (v: string) => void;
+  // Which sidebar TABS show (the learning tools, the Map) is lib/nav's: a Depth default plus the
+  // user's pin and hide, set by right-clicking the tab itself.
+  /** Whether the sidebar footer's **"Models in use"** block is shown. A Depth-keyed reveal with a
+   *  user override; hiding it changes nothing about which model actually runs. */
+  modelsVisible: boolean;
+  setModelsVisible: (v: boolean) => void;
+  /** True when every appearance axis (System, Mode, Accent, Depth, Location, the models footer) is
+   *  at its out-of-the-box default — drives whether Settings offers an appearance "Reset". */
+  appearanceIsDefault: boolean;
+  /** Restore every appearance axis to its default and forget the per-System accent memory (#445). */
+  resetAppearance: () => void;
+
+  // Accessibility axes (opt-in; see the FontScale block above).
+  /** Whole-UI text size. Surfaced in both the Appearance section and the Accessibility tab. */
+  fontScale: FontScale;
+  setFontScale: (v: FontScale) => void;
+  /** Force reduced motion regardless of the OS setting (false = follow the OS). */
+  reduceMotion: boolean;
+  setReduceMotion: (v: boolean) => void;
+  /** Use Atkinson Hyperlegible for UI + heading text. */
+  legibleFont: boolean;
+  setLegibleFont: (v: boolean) => void;
+  /** Control density / touch-target size. `standard` (WCAG 2.5.8's 24px target) is the default. */
+  density: Density;
+  setDensity: (v: Density) => void;
+  /** Swap the categorical palettes (graph nodes, calendar sources) and semantic status colours for a
+   *  colour-blind-safe (Okabe–Ito) set. Off by default (= today), so it needs no migration. */
+  colorblind: boolean;
+  setColorblind: (v: boolean) => void;
+  /** Contrast level. `aa` (WCAG 1.4.3's 4.5:1 body text) is the default; `high` reaches AAA. */
+  contrast: Contrast;
+  setContrast: (v: Contrast) => void;
+  /** True when every accessibility axis is at its default — drives the Accessibility tab's "Reset". */
+  accessibilityIsDefault: boolean;
+  /** Restore every accessibility axis (text size, contrast, density, motion, legible font, colour-
+   *  blind palette) to its default. */
+  resetAccessibility: () => void;
+}
+
+// App defaults. Slate + Dark + its default accent (the Eigengrau monochrome — ACCENTS.slate[0])
+// is the out-of-the-box look; existing installs keep whatever they've persisted.
+const DEFAULT_SYSTEM: System = "slate";
+const DEFAULT_MODE_PREF: ModePref = "dark";
+const DEFAULT_DEPTH: Depth = "standard";
+
+// Accessibility axes (opt-in). Their defaults equal today's behaviour — font size at 100%, motion
+// following the OS, the theme's own fonts — so existing users see no change and no migration is
+// needed. Persisted alongside the visual theme (localStorage + the mirrored `appearance` blob).
+export type FontScale = "small" | "default" | "large" | "xlarge";
+const FONT_SCALE_VALUES: Record<FontScale, number> = {
+  small: 0.9,
+  default: 1,
+  large: 1.15,
+  xlarge: 1.3,
+};
+const FONT_SCALES: readonly FontScale[] = ["small", "default", "large", "xlarge"];
+const DEFAULT_FONT_SCALE: FontScale = "default";
+
+// Density and contrast are the two accessibility axes with no "leave it alone" value — every install
+// is at some density and some contrast, so their defaults ARE the compliant baseline: `standard`
+// (WCAG 2.5.8's 24px target) and `aa` (WCAG 1.4.3's 4.5:1 body text).
+//
+// Both briefly offered a below-baseline third level (`compact` / `legacy`) holding PM's original
+// sizing and ramps, pinned onto existing installs by a one-time migration so the accessibility epic
+// wouldn't change anyone's look under them. Those levels are gone, and with them the pin: an install
+// carrying a stored `compact`/`legacy` lands on the compliant default at its next read, because
+// `oneOf` falls back whenever the stored string isn't in the current allow-list. No dedicated
+// migration — deleting the value from DENSITIES/CONTRASTS *is* the migration.
+const DEFAULT_DENSITY: Density = "standard";
+const DEFAULT_CONTRAST: Contrast = "aa";
+
+/** The density a mount starts at: the stored value when it is still an offered level, else the
+ *  compliant default. Pure + exported so the migration off `compact` is unit-testable without
+ *  mounting the provider. */
+// eslint-disable-next-line react-refresh/only-export-components -- the context's hook and its pure readers live beside the provider, as they did in core's ThemeContext
+export function storedDensity(stored: string | null): Density {
+  return oneOf(stored, DENSITIES, DEFAULT_DENSITY);
+}
+
+/** The contrast a mount starts at — the same rule, applied to the contrast axis (`legacy` → `aa`). */
+// eslint-disable-next-line react-refresh/only-export-components -- the context's hook and its pure readers live beside the provider, as they did in core's ThemeContext
+export function storedContrast(stored: string | null): Contrast {
+  return oneOf(stored, CONTRASTS, DEFAULT_CONTRAST);
+}
+
+// The sidebar "Models in use" block: "auto" follows the Depth preset, "show"/"hide" are explicit
+// Settings choices. (The Teach and Map tabs had overrides of this shape too. Tabs are lib/nav's now,
+// pinned and hidden from a right-click on the tab, and it adopted those two stored values once.)
+//
+// It was governed by the Depth preset alone, with no way to say otherwise: hidden on `min` even if
+// you specifically want to see which model is answering, and always on at standard/power even if you
+// find it noise. "auto" keeps today's behaviour, so nothing moves for anyone who doesn't touch it.
+//
+// A tri-state, NOT a boolean: a plain on/off cannot express "keep following the preset", which is
+// what the default has to be. And once a value is in this list it can never be REMOVED — `oneOf`
+// coerces an unrecognised stored string to the default, so deleting an arm silently rewrites the
+// choice of everyone who picked it.
+type ModelsPref = "auto" | "show" | "hide";
+const MODELS_PREFS: readonly ModelsPref[] = ["auto", "show", "hide"];
+const DEFAULT_MODELS: ModelsPref = "auto";
+
+const KEY = {
+  system: "pm:theme:system",
+  mode: "pm:theme:mode", // legacy (pre-2.84): held "dark"|"light"; still read once for migration
+  modePref: "pm:theme:modePref",
+  autoLocation: "pm:theme:autoLocation",
+  accent: "pm:theme:accent",
+  depth: "pm:theme:depth",
+  accentBySystem: "pm:theme:accentBySystem",
+  // "pm:theme:teach" and "pm:theme:map" were here; lib/nav adopts and removes them.
+  models: "pm:theme:models",
+  fontScale: "pm:a11y:fontScale",
+  reduceMotion: "pm:a11y:reduceMotion",
+  legibleFont: "pm:a11y:legibleFont",
+  density: "pm:a11y:density",
+  colorblind: "pm:a11y:colorblind",
+  contrast: "pm:a11y:contrast",
+};
+
+// localStorage can throw (locked-down webviews); never let a theme read/write crash the app.
+function read(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function write(key: string, value: string): void {
+  // Once "Remove PM data" has cleared the store, nothing may put anything back into it. The persist
+  // effect below runs on every axis change AND on the resolved mode, whose driver listens to
+  // `matchMedia("(prefers-color-scheme: dark)")` and `visibilitychange` — so switching away from the
+  // window after the clear was enough to restore all eleven keys into a folder the backend was
+  // about to delete, or had already deleted.
+  if (isTearingDown()) return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* ignore — theme just won't persist */
+  }
+}
+
+function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
+  return value !== null && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+// The stored Mode preference, migrating a pre-2.84 raw "dark"/"light" value (which is a valid
+// preference) when the new key isn't set yet.
+function readModePref(): ModePref {
+  const p = read(KEY.modePref);
+  if (p !== null) return oneOf(p, MODE_PREFS, DEFAULT_MODE_PREF);
+  return oneOf(read(KEY.mode), MODE_PREFS, DEFAULT_MODE_PREF);
+}
+
+function readAccentBySystem(): Partial<Record<System, string>> {
+  try {
+    const raw = read(KEY.accentBySystem);
+    return raw ? (JSON.parse(raw) as Partial<Record<System, string>>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function defaultAccentFor(system: System): string {
+  return ACCENTS[system][0];
+}
+
+const ThemeContext = createContext<ThemeState | null>(null);
+
+export function ThemeProvider({ store, children }: { store: ThemeStore; children: ReactNode }) {
+  const initialSystem = oneOf(read(KEY.system), SYSTEMS, DEFAULT_SYSTEM);
+
+  const [system, setSystemState] = useState<System>(initialSystem);
+  const [modePref, setModePrefState] = useState<ModePref>(readModePref);
+  const [autoLocation, setAutoLocationState] = useState<string>(() => read(KEY.autoLocation) ?? "");
+  const [depth, setDepthState] = useState<Depth>(() =>
+    oneOf(read(KEY.depth), DEPTHS, DEFAULT_DEPTH),
+  );
+  const [accent, setAccentState] = useState<string>(() => {
+    const stored = read(KEY.accent);
+    return stored && ACCENTS[initialSystem].includes(stored)
+      ? stored
+      : defaultAccentFor(initialSystem);
+  });
+  const [modelsPref, setModelsPrefState] = useState<ModelsPref>(() =>
+    oneOf(read(KEY.models), MODELS_PREFS, DEFAULT_MODELS),
+  );
+  const [fontScale, setFontScale] = useState<FontScale>(() =>
+    oneOf(read(KEY.fontScale), FONT_SCALES, DEFAULT_FONT_SCALE),
+  );
+  const [reduceMotion, setReduceMotion] = useState<boolean>(
+    () => read(KEY.reduceMotion) === "true",
+  );
+  const [legibleFont, setLegibleFont] = useState<boolean>(() => read(KEY.legibleFont) === "true");
+  // A stored `compact`/`legacy` from the withdrawn below-baseline levels isn't in DENSITIES/CONTRASTS
+  // any more, so oneOf lands it on the compliant default — see the DEFAULT_* block above.
+  const [density, setDensity] = useState<Density>(() => storedDensity(read(KEY.density)));
+  const [colorblind, setColorblind] = useState<boolean>(() => read(KEY.colorblind) === "true");
+  const [contrast, setContrast] = useState<Contrast>(() => storedContrast(read(KEY.contrast)));
+
+  // The resolved Mode (+ how/where it was resolved). Computed synchronously for a themed first
+  // paint, then kept live by the effect below (OS changes, sunrise/sunset, focus).
+  const [resolution, setResolution] = useState<ModeResolution>(() =>
+    resolveMode(readModePref(), new Date(), read(KEY.autoLocation)),
+  );
+  const mode = resolution.mode;
+
+  // Was localStorage empty at boot? If so this is likely a fresh machine (or a
+  // restored data folder), so the stored blob should win on hydration. Computed once,
+  // before the persist effect writes anything back.
+  const [bootEmpty] = useState(() => read(KEY.system) === null);
+  // Gate the store-mirror until the one-shot hydration has run, so the default theme
+  // can't overwrite a stored blob before we've read it (a fresh-machine race).
+  const [hydrated, setHydrated] = useState(false);
+
+  // Apply a blob read back from the store (theme axes + the per-System accent memory).
+  function applyAppearance(blob: unknown): void {
+    if (!blob || typeof blob !== "object") return;
+    const b = blob as Record<string, unknown>;
+    const sys = oneOf(typeof b.system === "string" ? b.system : null, SYSTEMS, DEFAULT_SYSTEM);
+    if (b.accentBySystem && typeof b.accentBySystem === "object") {
+      write(KEY.accentBySystem, JSON.stringify(b.accentBySystem));
+    }
+    setSystemState(sys);
+    // Prefer the new `modePref`; fall back to a legacy raw `mode` from an older blob.
+    const pref =
+      typeof b.modePref === "string" ? b.modePref : typeof b.mode === "string" ? b.mode : null;
+    setModePrefState(oneOf(pref, MODE_PREFS, DEFAULT_MODE_PREF));
+    setAutoLocationState(typeof b.autoLocation === "string" ? b.autoLocation : "");
+    setDepthState(oneOf(typeof b.depth === "string" ? b.depth : null, DEPTHS, DEFAULT_DEPTH));
+    setAccentState(
+      typeof b.accent === "string" && ACCENTS[sys].includes(b.accent)
+        ? b.accent
+        : defaultAccentFor(sys),
+    );
+    // Accessibility axes — absent from an older blob, which correctly hydrates them to their
+    // (behaviour-preserving) defaults.
+    setFontScale(
+      oneOf(typeof b.fontScale === "string" ? b.fontScale : null, FONT_SCALES, DEFAULT_FONT_SCALE),
+    );
+    setReduceMotion(b.reduceMotion === true);
+    setLegibleFont(b.legibleFont === true);
+    // A blob predating these axes — or carrying a withdrawn `compact`/`legacy` — lands on the
+    // compliant default, exactly as the localStorage read above does.
+    setDensity(storedDensity(typeof b.density === "string" ? b.density : null));
+    setColorblind(b.colorblind === true);
+    setContrast(storedContrast(typeof b.contrast === "string" ? b.contrast : null));
+  }
+
+  // One-shot hydration from the store. On a fresh machine (localStorage empty) the
+  // stored blob is applied; either way we then unlock the store-mirror below.
+  useEffect(() => {
+    let cancelled = false;
+    store
+      .get()
+      .then((raw) => {
+        if (cancelled || !raw || !bootEmpty) return;
+        try {
+          applyAppearance(JSON.parse(raw));
+        } catch {
+          /* ignore a corrupt blob — keep the localStorage/default theme */
+        }
+      })
+      .catch(() => {
+        /* store not ready / no value — keep localStorage */
+      })
+      .finally(() => {
+        if (!cancelled) setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bootEmpty, store]);
+
+  // Keep the resolved Mode live. Explicit light/dark need no watchers; `system` follows the OS
+  // light/dark query; `auto` re-resolves at each sunrise/sunset (a self-rescheduling timer) and,
+  // as a safety net for sleep/resume where timers can be skipped, whenever the app regains focus.
+  useEffect(() => {
+    const apply = () => setResolution(resolveMode(modePref, new Date(), autoLocation));
+
+    if (modePref === "light" || modePref === "dark") {
+      apply();
+      return;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let mql: MediaQueryList | undefined;
+    const onChange = () => apply();
+
+    // OS light/dark — drives `system`, and the fallback path of `auto` when we have no location.
+    try {
+      mql = window.matchMedia("(prefers-color-scheme: dark)");
+      mql.addEventListener("change", onChange);
+    } catch {
+      /* matchMedia unavailable — explicit choices still work */
+    }
+
+    if (modePref === "system") {
+      apply();
+    } else {
+      // auto: resolve now and schedule the next flip at the coming sunrise/sunset.
+      const tick = () => {
+        const res = resolveMode("auto", new Date(), autoLocation);
+        setResolution(res);
+        const ms = res.nextChange
+          ? Math.max(1000, res.nextChange.getTime() - Date.now()) + 1000 // +1s so we're past it
+          : 3_600_000; // polar day/night or no location → re-check hourly
+        timer = setTimeout(tick, ms);
+      };
+      tick();
+    }
+
+    document.addEventListener("visibilitychange", onChange);
+    window.addEventListener("focus", onChange);
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+      mql?.removeEventListener("change", onChange);
+      document.removeEventListener("visibilitychange", onChange);
+      window.removeEventListener("focus", onChange);
+    };
+  }, [modePref, autoLocation]);
+
+  // Switching System recalls the accent last chosen for it, else that System's default (§3).
+  function setSystem(next: System): void {
+    setSystemState(next);
+    const remembered = readAccentBySystem()[next];
+    setAccentState(
+      remembered && ACCENTS[next].includes(remembered) ? remembered : defaultAccentFor(next),
+    );
+  }
+  function setAccent(next: string): void {
+    setAccentState(next);
+    const map = readAccentBySystem();
+    map[system] = next;
+    write(KEY.accentBySystem, JSON.stringify(map));
+  }
+
+  // The sidebar's "Models in use" block: a Depth-keyed reveal until the user chooses (see ModelsPref).
+  const modelsVisible = modelsPref === "auto" ? depth !== "min" : modelsPref === "show";
+  function setModelsVisible(visible: boolean): void {
+    const pref: ModelsPref = visible ? "show" : "hide";
+    setModelsPrefState(pref);
+    write(KEY.models, pref);
+  }
+
+  // Whether the appearance is untouched from the defaults (the accent default is System-relative, so
+  // it's compared against the default System's default accent). Drives the Settings "Reset" affordance.
+  const appearanceIsDefault =
+    system === DEFAULT_SYSTEM &&
+    modePref === DEFAULT_MODE_PREF &&
+    depth === DEFAULT_DEPTH &&
+    accent === defaultAccentFor(DEFAULT_SYSTEM) &&
+    autoLocation === "" &&
+    modelsPref === DEFAULT_MODELS;
+
+  const accessibilityIsDefault =
+    fontScale === DEFAULT_FONT_SCALE &&
+    !reduceMotion &&
+    !legibleFont &&
+    density === DEFAULT_DENSITY &&
+    !colorblind &&
+    contrast === DEFAULT_CONTRAST;
+
+  function resetAccessibility(): void {
+    setFontScale(DEFAULT_FONT_SCALE);
+    setReduceMotion(false);
+    setLegibleFont(false);
+    setDensity(DEFAULT_DENSITY);
+    setColorblind(false);
+    setContrast(DEFAULT_CONTRAST);
+  }
+
+  // Restore every axis to its default in one go. The persist effect below mirrors the axis changes to
+  // localStorage + the stored `appearance` blob; the models footer and the per-System accent memory
+  // aren't in that effect, so they're written here directly. `setSystemState` (not the public
+  // `setSystem`) avoids re-recording a per-System accent while we're clearing that memory.
+  function resetAppearance(): void {
+    write(KEY.accentBySystem, "{}");
+    write(KEY.models, DEFAULT_MODELS);
+    setSystemState(DEFAULT_SYSTEM);
+    setModePrefState(DEFAULT_MODE_PREF);
+    setDepthState(DEFAULT_DEPTH);
+    setAccentState(defaultAccentFor(DEFAULT_SYSTEM));
+    setAutoLocationState("");
+    setModelsPrefState(DEFAULT_MODELS);
+  }
+
+  // Apply + persist whenever an axis (or the resolved Mode) changes (also runs on mount → themed
+  // first paint). localStorage is the fast path; the store is mirrored once hydration has run so the
+  // theme survives a folder backup/transfer. We persist the *preference*, not the resolved Mode.
+  useEffect(() => {
+    applyTheme(document.documentElement, system, mode, accent, depth, {
+      fontScale: FONT_SCALE_VALUES[fontScale],
+      reduceMotion,
+      legibleFont,
+      density,
+      colorblind,
+      contrast,
+    });
+    write(KEY.system, system);
+    write(KEY.modePref, modePref);
+    write(KEY.autoLocation, autoLocation);
+    write(KEY.accent, accent);
+    write(KEY.depth, depth);
+    write(KEY.fontScale, fontScale);
+    write(KEY.reduceMotion, String(reduceMotion));
+    write(KEY.legibleFont, String(legibleFont));
+    write(KEY.density, density);
+    write(KEY.colorblind, String(colorblind));
+    write(KEY.contrast, contrast);
+    if (hydrated) {
+      const blob = {
+        system,
+        modePref,
+        autoLocation,
+        accent,
+        depth,
+        accentBySystem: readAccentBySystem(),
+        fontScale,
+        reduceMotion,
+        legibleFont,
+        density,
+        colorblind,
+        contrast,
+      };
+      store.set(JSON.stringify(blob)).catch(() => {
+        /* fire-and-forget — localStorage already holds the value */
+      });
+    }
+  }, [
+    system,
+    mode,
+    modePref,
+    autoLocation,
+    accent,
+    depth,
+    fontScale,
+    reduceMotion,
+    legibleFont,
+    density,
+    colorblind,
+    contrast,
+    hydrated,
+    store,
+  ]);
+
+  const value: ThemeState = {
+    system,
+    mode,
+    modePref,
+    modeSource: resolution.source,
+    modeCoords: resolution.coords,
+    modeNextChange: resolution.nextChange,
+    accent,
+    depth,
+    autoLocation,
+    setSystem,
+    setModePref: setModePrefState,
+    setAccent,
+    setDepth: setDepthState,
+    setAutoLocation: setAutoLocationState,
+    modelsVisible,
+    setModelsVisible,
+    appearanceIsDefault,
+    resetAppearance,
+    fontScale,
+    setFontScale,
+    reduceMotion,
+    setReduceMotion,
+    legibleFont,
+    setLegibleFont,
+    density,
+    setDensity,
+    colorblind,
+    setColorblind,
+    contrast,
+    setContrast,
+    accessibilityIsDefault,
+    resetAccessibility,
+  };
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- the context's hook and its pure readers live beside the provider, as they did in core's ThemeContext
+export function useTheme(): ThemeState {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error("useTheme must be used within <ThemeProvider>");
+  return ctx;
+}

@@ -32,7 +32,7 @@ vi.mock("../lib/ipc", () => ({
   uninstallPreview: (id: string) => uninstallPreview(id),
   uninstallMod: (id: string, also: boolean) => uninstallMod(id, also),
 }));
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

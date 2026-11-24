@@ -22,7 +22,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 // `useTheme` is stubbed so the primitives render without the ThemeProvider (which pulls in IPC).
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({
     system: "slate",

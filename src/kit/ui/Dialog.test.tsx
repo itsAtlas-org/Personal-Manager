@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Dialog's bar chrome renders a <Button>, which reaches for `useTheme`; the real provider pulls in
 // IPC. Same stub the other component tests use.
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

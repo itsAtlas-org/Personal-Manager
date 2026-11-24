@@ -40,7 +40,7 @@ vi.mock("../../lib/ipc", () => ({
   modPermissionDecide: (id: string, p: string, g: boolean) => modPermissionDecide(id, p, g),
   modIcon: (id: string) => modIcon(id),
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

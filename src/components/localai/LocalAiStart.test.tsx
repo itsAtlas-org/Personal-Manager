@@ -103,7 +103,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 // Depth is a variable here: one test reads the card at "min", where nothing that justifies the pick
 // may disappear.
 const theme = vi.hoisted(() => ({ depth: "standard" }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

@@ -21,7 +21,7 @@ import { render, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const theme = vi.hoisted(() => ({ system: "slate" as "slate" | "editorial" | "terminal" }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: theme.system, mode: "dark", accent: "mono", depth: "standard" }),
 }));

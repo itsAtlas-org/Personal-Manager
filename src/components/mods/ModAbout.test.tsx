@@ -15,7 +15,7 @@ import { hasAbout } from "./modText";
 
 // Button reads the theme (the real provider pulls in IPC), so the same stub the other component
 // tests use.
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

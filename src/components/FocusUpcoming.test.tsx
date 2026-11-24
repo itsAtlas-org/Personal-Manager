@@ -20,7 +20,7 @@ const ipc = vi.hoisted(() => ({
 }));
 vi.mock("../lib/ipc", () => ipc);
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard", accent: "mono", colorblind: false }),
 }));

@@ -26,8 +26,11 @@
 //       built output (no inline script or style, no module script, no `crossorigin`, no script or
 //       link that loads from off-folder). Those are an author's lint, read broadly off the raw text
 //       (a comment that mentions `<script` is refused too): the frame's CSP is the guard that holds
-//       at run time. It cannot check the signature itself: the trusted keys are embedded
-//       in PM, and only PM verifies against them.
+//       at run time. It also refuses a bundle that holds PM's Tauri bridge (`__TAURI_INTERNALS__`) and
+//       a NOTICE that lists an `@tauri-apps/*` package: a mod's frame has no Tauri API, so either
+//       means the kit (src/kit) pulled a core module that reaches `ipc` into the bundle. The same
+//       package rule applies to `<mod>/.build/modules.json` when the mod is packed. It cannot check
+//       the signature itself: the trusted keys are embedded in PM, and only PM verifies against them.
 //
 // TWO IMPLEMENTATIONS OF ONE FORMAT. package.rs is the verifier that counts; the checks here are a
 // mirror so a bad file fails in the build, not at install. They can drift, so the constants are
@@ -1141,6 +1144,13 @@ function checkBuiltHtml(html, where) {
   }
 }
 
+/** The Tauri API's package scope. A mod's frame has none of it, so no mod bundles a package from it. */
+const TAURI_SCOPE = "@tauri-apps/";
+/** Where Tauri's page-side bridge keeps `invoke`: a bundle that names it has the IPC layer in it. */
+const TAURI_BRIDGE = "__TAURI_INTERNALS__";
+const TAURI_WHY =
+  "a mod's frame has no Tauri API, so the kit pulled a core module that reaches `ipc` or a Tauri API into the bundle (src/kit may import only the kit)";
+
 /**
  * An AUTHOR'S LINT for built output, not a security boundary. package.rs does not look at HTML (a
  * package is data to it), and what stops inline script and style in every engine is the frame's CSP
@@ -1163,6 +1173,7 @@ export function checkBuiltFile(path, bytes) {
   } catch {
     where("isn't UTF-8 text");
   }
+  if (text.includes(TAURI_BRIDGE)) where(`holds ${TAURI_BRIDGE}: ${TAURI_WHY}`);
   if (isHtml) checkBuiltHtml(text, where);
   else if (isCss) {
     if (/url\(\s*["']?\s*data:/i.test(text)) {
@@ -1176,6 +1187,25 @@ export function checkBuiltFile(path, bytes) {
       where(`isn't a classic script (${String(e.message).split("\n").pop()})`);
     }
   }
+}
+
+/**
+ * A NOTICE.txt that lists an `@tauri-apps/*` package (its block header is `<name> <version>` on a line
+ * of its own) is the build record's `modules.json` showing in the package: `bundledPackages` refuses
+ * the record when the mod is packed, and this refuses the file it made, in case the record was not
+ * the one read.
+ */
+function checkNoTauriPackage(files) {
+  const notice = files.get(NOTICE_FILE);
+  if (notice === undefined) return;
+  let text;
+  try {
+    text = utf8(notice);
+  } catch {
+    return; // checkLicenceText has the say on a NOTICE that isn't text
+  }
+  const hit = text.match(/^(@tauri-apps\/\S+) \S+$/m);
+  if (hit) refuse(`${NOTICE_FILE} lists ${quote(hit[1])}: ${TAURI_WHY}`);
 }
 
 /**
@@ -1225,6 +1255,7 @@ export function verifyArchive(bytes) {
   checkTier(manifest.id, manifest.tier);
   if (signed) checkSignatureFile(entries.get(SIGNATURE), manifest);
   checkLicenceText(files);
+  checkNoTauriPackage(files);
   for (const [name, data] of files) {
     if (name.startsWith(APP_DIR)) checkBuiltFile(name, data);
   }
@@ -1303,6 +1334,12 @@ export function bundledPackages(modDir, root) {
     );
   }
   const dirs = [...new Set(record.modules.map(packageDirOf))].sort(cmp);
+  for (const dir of dirs) {
+    const name = dir.slice(dir.lastIndexOf("node_modules/") + "node_modules/".length);
+    if (name.startsWith(TAURI_SCOPE)) {
+      refuse(`${recordPath} lists ${quote(name)}: ${TAURI_WHY}`);
+    }
+  }
   const packages = [];
   for (const dir of dirs) {
     const packageJson = join(root, dir, "package.json");

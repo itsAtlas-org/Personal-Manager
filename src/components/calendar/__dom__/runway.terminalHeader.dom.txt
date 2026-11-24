@@ -1,0 +1,27 @@
+<div
+  data-testid="header-slot"
+>
+  <div
+    class="flex items-center gap-1"
+    data-help="calendar-runway"
+  >
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs font-mono bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+      title="Hide the events and pinboard entries at the top of each column"
+    >
+      [ 
+      Hide events
+       ]
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs font-mono bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+      title="Name a stretch of days"
+    >
+      [ 
+      + Window
+       ]
+    </button>
+  </div>
+</div>

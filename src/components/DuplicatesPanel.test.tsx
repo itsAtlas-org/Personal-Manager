@@ -39,7 +39,7 @@ vi.mock("../lib/reader", () => ({
   useReader: () => ({ openReader, current: null }),
 }));
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

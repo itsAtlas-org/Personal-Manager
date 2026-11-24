@@ -89,6 +89,15 @@ describe("fallbackItems", () => {
     (items[0] as { onSelect: () => void }).onSelect();
     expect(a.openUrl).toHaveBeenCalledWith("https://example.com/x");
   });
+  it("offers a link's Copy alone where nothing can open a link (a mod's frame gives none)", () => {
+    const copy = vi.fn();
+    const items = fallbackItems(el('<a href="https://example.com/x"><b data-t>x</b></a>'), "", {
+      copy,
+    });
+    expect(labels(items)).toEqual(["Copy link"]);
+    (items[0] as { onSelect: () => void }).onSelect();
+    expect(copy).toHaveBeenCalledWith("https://example.com/x");
+  });
   it("offers nothing for a click on nothing in particular, or for a link that isn't a web address", () => {
     expect(fallbackItems(el("<p data-t>hi</p>"), "  ", actions())).toEqual([]);
     expect(fallbackItems(el('<a data-t href="javascript:void 0">x</a>'), "", actions())).toEqual(

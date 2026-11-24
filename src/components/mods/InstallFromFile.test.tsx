@@ -28,7 +28,7 @@ vi.mock("../../lib/ipc", () => ({
   devModeState: () => devModeState(),
   installModConsented: (...a: unknown[]) => installModConsented(...a),
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

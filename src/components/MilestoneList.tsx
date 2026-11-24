@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useState, type Ref } from "react";
 import type { Milestone, MilestoneStatus } from "../lib/types";
+import { MILESTONE_STATUSES, milestoneStatus } from "../kit/lib/milestoneStatus";
 import {
   addMilestone,
   deleteMilestone,
@@ -16,19 +17,8 @@ import { runMutation } from "../lib/runMutation";
 import { DateField } from "./DateField";
 import { Button, Callout, Input, Select } from "./ui";
 
-/** Display order + labels for the progress control, coarsest-first (mirrors `milestones::STATUSES`). */
-export const MILESTONE_STATUSES: readonly { value: MilestoneStatus; label: string }[] = [
-  { value: "not_started", label: "Not started" },
-  { value: "in_progress", label: "In progress" },
-  { value: "almost_done", label: "Almost done" },
-  { value: "done", label: "Done" },
-];
-
-/** A milestone's effective status: its stored value, or — for a row predating the status column —
- *  the one implied by whether it's been ticked off, so an old row never renders blank. */
-export function milestoneStatus(m: Milestone): MilestoneStatus {
-  return m.status ?? (m.state === "met" ? "done" : "not_started");
-}
+// Still named here for PinboardView, which imports them from this file.
+export { MILESTONE_STATUSES, milestoneStatus };
 
 interface Props {
   project: string;

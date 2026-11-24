@@ -34,7 +34,7 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 let depth = "standard";
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({
     system: "slate",

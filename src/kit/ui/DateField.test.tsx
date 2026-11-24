@@ -12,7 +12,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DateField } from "./DateField";
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate" }),
 }));

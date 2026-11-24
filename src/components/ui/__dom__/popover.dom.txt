@@ -1,0 +1,41 @@
+<body>
+  <div>
+    <div>
+      <div
+        class="relative"
+      >
+        <button>
+          Inline trigger
+        </button>
+        <div
+          aria-label="Inline"
+          class="min-w-[15rem] rounded-[var(--radius-sm)] border border-border2 bg-panel p-1 shadow-lg absolute z-30 mt-1 left-0"
+          data-popover-panel=""
+          role="group"
+        >
+          <p>
+            Inline panel
+          </p>
+        </div>
+      </div>
+      <div
+        class="relative"
+      >
+        <button>
+          Escaped trigger
+        </button>
+      </div>
+    </div>
+  </div>
+  <div
+    aria-label="Escaped"
+    class="min-w-[15rem] rounded-[var(--radius-sm)] border border-border2 bg-panel p-1 shadow-lg fixed z-[60]"
+    data-popover-panel=""
+    role="group"
+    style="left: 8px; top: 6px;"
+  >
+    <p>
+      Escaped panel
+    </p>
+  </div>
+</body>

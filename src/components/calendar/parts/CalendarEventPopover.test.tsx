@@ -36,7 +36,7 @@ vi.mock("../../../lib/markdown", async (importOriginal) => ({
   Markdown: (props: { children: string }) => markdownView(props),
 }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

@@ -13,7 +13,7 @@ import type { CalendarEvent, EditLoad, EventForEdit, GuestForEdit } from "../../
 const openForEdit = vi.hoisted(() => vi.fn<(id: string) => Promise<EditLoad>>());
 vi.mock("./useEventWrites", () => ({ openForEdit: (id: string) => openForEdit(id) }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

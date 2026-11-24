@@ -13,7 +13,7 @@ import { closeContextMenu } from "../lib/contextMenu";
 const gates = vi.hoisted(() => ({ depth: "standard", devMode: false }));
 
 vi.mock("../lib/ipc", () => ({ openUrl: vi.fn(() => Promise.resolve()) }));
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: gates.depth }),
 }));

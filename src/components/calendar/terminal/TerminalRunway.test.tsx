@@ -28,7 +28,7 @@ vi.mock("../../../lib/ipc", () => ({
   listTaskStacks: vi.fn(async () => []),
 }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "terminal", depth: "standard", accent: "mono", colorblind: false }),
 }));

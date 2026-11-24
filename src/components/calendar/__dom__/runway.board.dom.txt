@@ -1,0 +1,1049 @@
+<div>
+  <div
+    class="flex min-h-0 flex-1 flex-col overflow-y-auto"
+    data-help="calendar-runway"
+  >
+    <div
+      class="flex gap-3 p-3 flex-wrap items-start"
+    >
+      <section
+        aria-label="Before today"
+        class="flex rounded-[var(--radius-sm)] border bg-panel w-9 flex-none self-stretch border-rule"
+      >
+        <button
+          aria-expanded="false"
+          aria-label="Show Before today"
+          class="flex flex-1 items-center gap-2 px-2 py-2 text-xs hover:bg-surface text-ink3"
+          style="writing-mode: vertical-rl;"
+          title="Before today · last 14 days"
+          type="button"
+        >
+          <span
+            class="font-head"
+          >
+            Before today
+          </span>
+        </button>
+      </section>
+      <section
+        aria-labelledby="_r_1_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-accent"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-accent-text"
+              id="_r_1_"
+            >
+              Today
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              Wed 04
+            </p>
+          </div>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Today"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          aria-label="Events, Today"
+          class="flex flex-col gap-0.5 border-b border-rule px-2 pb-1.5 pt-1"
+          data-runway-events=""
+          role="group"
+        >
+          <p
+            class="text-ink4 font-mono text-[0.625rem] uppercase tracking-wide"
+          >
+            Events
+          </p>
+          <ul
+            class="flex flex-col gap-0.5"
+          >
+            <li
+              class="min-w-0"
+            >
+              <button
+                class="flex w-full min-w-0 items-baseline gap-1.5 text-left text-xs text-ink2 hover:text-ink"
+                data-piece-of="e1"
+                title="Standup"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="inline-block h-2 w-2 shrink-0 self-center rounded-full bg-ink4"
+                />
+                <span
+                  class="shrink-0 font-mono text-[0.6875rem] text-ink3"
+                >
+                  all-day
+                </span>
+                <span
+                  class="min-w-0 truncate"
+                >
+                  Standup
+                </span>
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="today"
+          data-runway-lane="foreground"
+          data-runway-zone="today:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <ul
+            class="flex flex-col gap-1"
+          >
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="today:foreground"
+              data-runway-key="task:1"
+            >
+              <button
+                aria-label="To do: mark as doing"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="To do: mark as doing"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                />
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Draft the deck
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                >
+                  <span
+                    class="shrink-0 whitespace-nowrap font-mono text-[0.6875rem] text-st-look"
+                    title="Deadline"
+                  >
+                    2d · 06-11
+                  </span>
+                  <span
+                    class="max-w-[9rem] shrink-0 truncate rounded-[var(--radius-sm)] bg-surface px-1 text-[0.6875rem] text-ink3"
+                    title="Atlas"
+                  >
+                    Atlas
+                  </span>
+                </div>
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Draft the deck"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Draft the deck"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="today:foreground"
+              data-runway-key="task:7"
+            >
+              <button
+                aria-label="Done: mark as to do"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="Done: mark as to do"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-accent bg-accent"
+                >
+                  <span
+                    class="mb-0.5 h-2 w-1 rotate-45 border-b-2 border-r-2 border-accent-ink"
+                  />
+                </span>
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink line-through opacity-60"
+                >
+                  Done already
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                />
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Done already"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Done already"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="today:foreground"
+              data-runway-key="task:8"
+            >
+              <button
+                aria-label="To do: mark as doing"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="To do: mark as doing"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                />
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Passport photo
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                >
+                  <span
+                    class="max-w-[8rem] shrink-0 truncate rounded-[var(--radius-sm)] border border-border px-1 text-[0.6875rem] text-ink3"
+                    title="Visa · In sequence"
+                  >
+                    ≡ 
+                    Visa
+                  </span>
+                </div>
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Passport photo"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Passport photo"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="today"
+          data-runway-lane="background"
+          data-runway-zone="today:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+      </section>
+      <section
+        aria-labelledby="_r_2_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-rule"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-ink"
+              id="_r_2_"
+            >
+              Tomorrow
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              Thu 05
+            </p>
+          </div>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Tomorrow"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="tomorrow"
+          data-runway-lane="foreground"
+          data-runway-zone="tomorrow:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <ul
+            class="flex flex-col gap-1"
+          >
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="tomorrow:foreground"
+              data-runway-key="task:9"
+            >
+              <button
+                aria-label="To do: mark as doing"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="To do: mark as doing"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                />
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Visa form
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                >
+                  <span
+                    class="max-w-[8rem] shrink-0 truncate rounded-[var(--radius-sm)] border border-border px-1 text-[0.6875rem] text-ink3"
+                    title="Visa · In sequence"
+                  >
+                    ≡ 
+                    Visa
+                  </span>
+                </div>
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Visa form"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Visa form"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+            <li
+              class="flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-dashed border-border px-1.5 py-1"
+              data-runway-card="tomorrow:foreground"
+              data-runway-key="milestone:1"
+            >
+              <button
+                class="min-w-0 flex-1 break-words text-left text-xs text-ink2 hover:text-ink"
+                title="Open Atlas"
+                type="button"
+              >
+                ◆ Pitch · Atlas
+              </button>
+              <span
+                class="shrink-0 font-mono text-[0.6875rem] text-st-look"
+              >
+                tomorrow
+              </span>
+            </li>
+          </ul>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="tomorrow"
+          data-runway-lane="background"
+          data-runway-zone="tomorrow:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <ul
+            class="flex flex-col gap-1"
+          >
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="tomorrow:background"
+              data-runway-key="task:2"
+            >
+              <button
+                aria-label="To do: mark as doing"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="To do: mark as doing"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                />
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Call the bank
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                />
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Call the bank"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Call the bank"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </section>
+      <section
+        aria-labelledby="_r_3_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-rule"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-ink"
+              id="_r_3_"
+            >
+              Rest of this week
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              Fri 06 – Sun 08
+            </p>
+          </div>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Rest of this week"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="rest"
+          data-runway-lane="foreground"
+          data-runway-zone="rest:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <ul
+            class="flex flex-col gap-1"
+          >
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="rest:foreground"
+              data-runway-key="task:6"
+            >
+              <button
+                aria-label="Doing: mark as done"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="Doing: mark as done"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                >
+                  <span
+                    class="absolute inset-y-0 left-0 w-1/2 bg-accent"
+                  />
+                </span>
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Doing it
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                >
+                  <span
+                    class="shrink-0 font-mono text-[0.6875rem] text-accent-text"
+                  >
+                    doing
+                  </span>
+                </div>
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Doing it"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Doing it"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="rest"
+          data-runway-lane="background"
+          data-runway-zone="rest:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+      </section>
+      <section
+        aria-labelledby="_r_4_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-rule"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-ink"
+              id="_r_4_"
+            >
+              Lisbon trip
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              Mon 09 – Thu 12
+            </p>
+          </div>
+          <button
+            aria-label="Edit the window Lisbon trip"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Rename, change its days or delete it"
+          >
+            ✎
+          </button>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Lisbon trip"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="window:w1"
+          data-runway-lane="foreground"
+          data-runway-zone="window:w1:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="window:w1"
+          data-runway-lane="background"
+          data-runway-zone="window:w1:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+      </section>
+      <section
+        aria-labelledby="_r_5_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-rule"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-ink"
+              id="_r_5_"
+            >
+              Next week
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              Fri 13 – Sun 15
+            </p>
+          </div>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Next week"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="next"
+          data-runway-lane="foreground"
+          data-runway-zone="next:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="next"
+          data-runway-lane="background"
+          data-runway-zone="next:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+      </section>
+      <section
+        aria-labelledby="_r_6_"
+        class="flex min-w-0 flex-col rounded-[var(--radius-sm)] border bg-panel min-w-[15rem] flex-1 basis-60 border-rule"
+      >
+        <div
+          class="flex items-start gap-1 border-b border-rule px-2 py-1.5"
+        >
+          <div
+            class="min-w-0 flex-1"
+          >
+            <h3
+              class="truncate font-head text-sm text-ink"
+              id="_r_6_"
+            >
+              Later
+            </h3>
+            <p
+              class="font-mono text-[0.6875rem] text-ink4"
+            >
+              from 16-11
+            </p>
+          </div>
+          <button
+            aria-expanded="true"
+            aria-label="Fold Later"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Fold this column"
+          >
+            ‹
+          </button>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1"
+          data-runway-col="later"
+          data-runway-lane="foreground"
+          data-runway-zone="later:foreground"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Foreground
+          </p>
+          <ul
+            class="flex flex-col gap-1"
+          >
+            <li
+              class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+              data-runway-card="later:foreground"
+              data-runway-key="task:5"
+            >
+              <button
+                aria-label="To do: mark as doing"
+                class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                title="To do: mark as doing"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                />
+              </button>
+              <div
+                class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+              >
+                <span
+                  class="min-w-0 break-words text-left text-xs text-ink"
+                >
+                  Far off
+                </span>
+                <div
+                  class="flex min-w-0 flex-wrap items-center gap-1"
+                />
+              </div>
+              <div
+                class="flex shrink-0 items-center"
+              >
+                <button
+                  aria-label="Edit Far off"
+                  class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                  data-variant="tertiary"
+                  title="Edit task"
+                >
+                  ✎
+                </button>
+                <div
+                  class="relative"
+                >
+                  <button
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-label="Move Far off"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Move to another day, lane or the parked shelf"
+                  >
+                    Move…
+                  </button>
+                </div>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div
+          class="flex flex-col gap-1 px-2 pb-2 pt-1 border-t border-dashed border-rule"
+          data-runway-col="later"
+          data-runway-lane="background"
+          data-runway-zone="later:background"
+        >
+          <p
+            class="font-mono text-[0.625rem] uppercase tracking-wide text-ink4"
+          >
+            Background
+          </p>
+          <p
+            class="text-xs text-ink4"
+          >
+            empty
+          </p>
+        </div>
+      </section>
+    </div>
+    <section
+      aria-label="Parked"
+      class="mx-3 mb-3 flex flex-col gap-2 rounded-[var(--radius-sm)] border border-dashed border-rule p-2"
+      data-runway-grid=""
+      data-runway-parked=""
+      data-runway-zone="parked"
+    >
+      <h3
+        class="block font-mono text-xs font-medium uppercase tracking-wide text-ink3"
+      >
+        Parked
+      </h3>
+      <ul
+        class="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-2"
+      >
+        <li
+          class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+          data-runway-card="parked"
+          data-runway-key="task:3"
+        >
+          <button
+            aria-label="To do: mark as doing"
+            class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+            title="To do: mark as doing"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+            />
+          </button>
+          <div
+            class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+          >
+            <span
+              class="min-w-0 break-words text-left text-xs text-ink"
+            >
+              Someday
+            </span>
+            <div
+              class="flex min-w-0 flex-wrap items-center gap-1"
+            />
+          </div>
+          <div
+            class="flex shrink-0 items-center"
+          >
+            <button
+              aria-label="Edit Someday"
+              class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+              data-variant="tertiary"
+              title="Edit task"
+            >
+              ✎
+            </button>
+            <div
+              class="relative"
+            >
+              <button
+                aria-expanded="false"
+                aria-haspopup="true"
+                aria-label="Move Someday"
+                class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                data-variant="tertiary"
+                title="Move to another day, lane or the parked shelf"
+              >
+                Move…
+              </button>
+            </div>
+          </div>
+        </li>
+        <li
+          class="flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1"
+          data-runway-card="parked"
+          data-runway-key="task:4"
+        >
+          <button
+            aria-label="To do: mark as doing"
+            class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+            title="To do: mark as doing"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+            />
+          </button>
+          <div
+            class="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5"
+          >
+            <span
+              class="min-w-0 break-words text-left text-xs text-ink"
+            >
+              On the shelf
+            </span>
+            <div
+              class="flex min-w-0 flex-wrap items-center gap-1"
+            />
+          </div>
+          <div
+            class="flex shrink-0 items-center"
+          >
+            <button
+              aria-label="Edit On the shelf"
+              class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+              data-variant="tertiary"
+              title="Edit task"
+            >
+              ✎
+            </button>
+            <div
+              class="relative"
+            >
+              <button
+                aria-expanded="false"
+                aria-haspopup="true"
+                aria-label="Move On the shelf"
+                class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                data-variant="tertiary"
+                title="Move to another day, lane or the parked shelf"
+              >
+                Move…
+              </button>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </section>
+  </div>
+</div>

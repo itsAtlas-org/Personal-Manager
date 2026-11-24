@@ -28,7 +28,7 @@ vi.mock("../../lib/ipc", () => ({
   setLocalLlmRouting: (...a: unknown[]) => setLocalLlmRouting(...a),
 }));
 
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({ depth: "standard" }),
 }));

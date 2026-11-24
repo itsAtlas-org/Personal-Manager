@@ -21,7 +21,7 @@ vi.mock("../../lib/ipc", () => ({
   modSecretSave: (id: string, name: string, value: string) => modSecretSave(id, name, value),
   modSecretClear: (id: string, name: string) => modSecretClear(id, name),
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

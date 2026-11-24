@@ -111,7 +111,7 @@ vi.mock("../../../theme/timezones", async (importOriginal) => ({
 
 // Standard depth unless a test says Power.
 let depth = "standard";
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth }),
 }));

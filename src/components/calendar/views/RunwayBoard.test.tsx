@@ -33,7 +33,7 @@ vi.mock("../../../lib/ipc", () => ({
 }));
 
 const env = vi.hoisted(() => ({ depth: "standard" }));
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: env.depth, accent: "mono", colorblind: false }),
 }));

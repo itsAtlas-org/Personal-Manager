@@ -22,7 +22,7 @@ import type { Widget } from "../lib/pinboard/types";
 
 // The same stub the other component tests use: the game's <Button>s reach for `useTheme`, and the
 // real ThemeProvider pulls in IPC.
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

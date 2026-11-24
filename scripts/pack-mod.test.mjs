@@ -2166,6 +2166,127 @@ describe("built-output rules", () => {
   });
 });
 
+// ---- The Tauri belt (the kit's second fence, K6b) -------------------------------------------------
+//
+// The kit's lint fence keeps a kit file from importing a core module that reaches `ipc`; this is the
+// check on what was built. A mod's frame has no Tauri API, so a bundle that holds PM's bridge, or a
+// build record that lists an `@tauri-apps/*` package, means something got through.
+
+describe("the Tauri belt", () => {
+  const BRIDGE_JS = "(function(){window.__TAURI_INTERNALS__.invoke('open_url',{url:'x'})})();";
+
+  /** An archive with `tweak` applied to its files and the checksums made again, so only the tweak is wrong. */
+  const archiveWith = (tweak) => {
+    const mod = makeMod();
+    const files = pack.assemble({ modDir: mod.modDir, root: mod.root, commit: COMMIT });
+    tweak(files);
+    files.set("pmmod/checksums.json", pack.checksumsFor(files));
+    return pack.writeZip(files);
+  };
+
+  it("refuses a built script that names the Tauri bridge, however it is written", () => {
+    for (const text of [
+      BRIDGE_JS,
+      "var a = window['__TAURI_INTERNALS__'];",
+      "var s = '__TAURI_INTERNALS__';",
+      "/* __TAURI_INTERNALS__ */ (function(){})();",
+    ]) {
+      refused(
+        () => pack.checkBuiltFile("app/assets/app.js", Buffer.from(text)),
+        "__TAURI_INTERNALS__",
+      );
+    }
+    // The belt is the bridge's name, not the word Tauri: a mod may say it in its own text.
+    for (const text of [
+      "var s = 'Tauri is the shell';",
+      "var a = window.__TAURI__;",
+      "var b = '__TAURI_INTERNAL__';",
+    ]) {
+      expect(() => pack.checkBuiltFile("app/assets/app.js", Buffer.from(text)), text).not.toThrow();
+    }
+  });
+
+  it("refuses it in a stylesheet or a page too, and says why", () => {
+    refused(
+      () => pack.checkBuiltFile("app/a.css", Buffer.from("/* __TAURI_INTERNALS__ */a{}")),
+      "pulled a core module",
+    );
+    refused(
+      () => pack.checkBuiltFile("app/a.html", Buffer.from("<!-- __TAURI_INTERNALS__ -->")),
+      "__TAURI_INTERNALS__",
+    );
+  });
+
+  it("refuses to pack a mod whose bundle holds the bridge, and to verify such a file", () => {
+    refused(
+      () => packed(makeMod({ app: { ...APP, "assets/app.js": BRIDGE_JS } })),
+      "__TAURI_INTERNALS__",
+    );
+    const bytes = archiveWith((files) => files.set("app/assets/app.js", Buffer.from(BRIDGE_JS)));
+    refused(() => pack.verifyArchive(bytes), "__TAURI_INTERNALS__");
+    // and on the command line, `--verify <file>`
+    const file = join(tempDir(), "bad.pmmod");
+    writeFileSync(file, bytes);
+    refused(() => pack.run(["--verify", file]), "__TAURI_INTERNALS__");
+  });
+
+  it("refuses a build record that lists an @tauri-apps package, from any depth", () => {
+    for (const name of ["@tauri-apps/api", "@tauri-apps/plugin-shell"]) {
+      const mod = makeMod({ packages: [pkg(name, "MIT")] });
+      refused(() => pack.bundledPackages(mod.modDir, mod.root), `lists ${JSON.stringify(name)}`);
+      refused(() => packed(mod), "pulled a core module");
+    }
+    const nested = makeMod({
+      packages: [
+        pkg("a", "MIT"),
+        pkg("b", "MIT", {
+          dir: "node_modules/a/node_modules/@tauri-apps/api",
+          name: "@tauri-apps/api",
+        }),
+      ],
+    });
+    refused(() => pack.bundledPackages(nested.modDir, nested.root), "@tauri-apps/api");
+  });
+
+  it("names only the scope: a package that merely looks like it is bundled as ever", () => {
+    const mod = makeMod({
+      packages: [
+        pkg("tauri-apps", "MIT"),
+        pkg("@tauri-apps-like/x", "MIT"),
+        pkg("d3-force", "ISC"),
+      ],
+    });
+    expect(pack.bundledPackages(mod.modDir, mod.root).map((p) => p.name)).toEqual([
+      "@tauri-apps-like/x",
+      "d3-force",
+      "tauri-apps",
+    ]);
+  });
+
+  it("refuses a file whose NOTICE lists an @tauri-apps package, as `--verify` meets it", () => {
+    const notice = pack.noticeText([
+      { name: "@tauri-apps/api", version: "2.9.0", license: "MIT", text: "Copyright (c) Tauri" },
+    ]);
+    const bytes = archiveWith((files) => files.set("NOTICE.txt", notice));
+    refused(() => pack.verifyArchive(bytes), "NOTICE.txt lists");
+    // The same file with an ordinary package is a good package.
+    const fine = archiveWith((files) =>
+      files.set(
+        "NOTICE.txt",
+        pack.noticeText([
+          {
+            name: "d3-force",
+            version: "3.0.0",
+            license: "ISC",
+            text: "Copyright (c) Mike Bostock",
+          },
+        ]),
+      ),
+    );
+    expect(pack.verifyArchive(fine).kind).toBe("pre-sign");
+  });
+});
+
 // ---- The command line ---------------------------------------------------------------------------
 
 describe("run (the command line)", () => {

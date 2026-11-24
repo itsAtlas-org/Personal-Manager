@@ -1,0 +1,68 @@
+<div
+  class="px-4 pb-3 pt-3"
+  data-help="project-tasks"
+>
+  <span
+    class="font-mono text-xs uppercase tracking-wide text-ink4"
+  >
+    Tasks
+  </span>
+  <div
+    class="mt-2"
+  >
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <p
+        class="rounded-[var(--radius-sm)] border border-dashed border-border px-3 py-2 text-xs text-ink4"
+      >
+        No tasks for this project yet. Add one below.
+      </p>
+      <div
+        class="flex flex-wrap items-center gap-1.5"
+      >
+        <input
+          aria-label="New task"
+          class="w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 min-w-0 flex-1 basis-28 text-xs h-7"
+          maxlength="500"
+          placeholder="New task"
+          value=""
+        />
+        <div
+          class="relative flex min-w-0 items-center min-w-0 flex-1 basis-24"
+        >
+          <input
+            aria-expanded="false"
+            aria-label="New task deadline"
+            autocomplete="off"
+            class="min-w-0 flex-1 rounded-[var(--radius-sm)] border bg-surface outline-none transition placeholder:text-ink4 focus:border-accent-text border-ink4 px-1.5 text-xs h-7"
+            inputmode="numeric"
+            placeholder="dd-mm-yyyy"
+            role="combobox"
+            title="Deadline (optional)"
+            type="text"
+            value=""
+          />
+        </div>
+        <div
+          class="flex shrink-0 items-center gap-1"
+        >
+          <button
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+            data-variant="secondary"
+            disabled=""
+          >
+            Add
+          </button>
+          <button
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Add with links, a plan and more"
+          >
+            More…
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

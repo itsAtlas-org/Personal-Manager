@@ -238,6 +238,47 @@ const modsNoCoreImports = {
     };
   },
 };
+// The mod kit is CLOSED under its own imports (Mods spec D14, PR C1 K6b). The `ipc` and Tauri bans on
+// src/kit/** catch only a kit file that names them itself; a kit file that imports a core module which
+// imports `ipc` would drag `ipc` and Tauri into a mod's bundle with no lint error. So a file under
+// src/kit/ may import only src/kit/**, a package, and `import type` from src/lib/types.ts (which has no
+// imports): every file the kit reaches is then inside the kit, and linted by this same block. Two
+// existing exceptions are named here until their constants move into the kit: host.ts and fakePm.ts
+// import components/mods/modBridge (and host.test.ts, the test of host.ts, the same plus the Rust
+// source it reads, `limits.rs`). `pack-mod --verify` is the second belt, on the built bundle.
+const KIT_CLOSED =
+  "The kit imports only the kit: src/kit/**, packages, and `import type` from src/lib/types.ts. A core module can reach `ipc` and Tauri, which a mod's frame has neither of.";
+const KIT_EXCEPTIONS = [
+  ["src/kit/host.ts", "src/components/mods/modBridge"],
+  ["src/kit/fakePm.ts", "src/components/mods/modBridge"],
+  ["src/kit/host.test.ts", "src/components/mods/modBridge"],
+  ["src/kit/host.test.ts", "src-tauri/src/mods/api/limits.rs?raw"],
+];
+const kitOnlyKit = {
+  meta: { type: "problem", schema: [], messages: { closed: KIT_CLOSED } },
+  create(context) {
+    const file = relative(modsRepoRoot, context.filename).split(sep).join("/");
+    const check = (node) => {
+      const spec = node.source?.type === "Literal" ? node.source.value : null;
+      if (typeof spec !== "string") return;
+      const target = modsLocalTarget(spec, context.filename);
+      if (target === null) return; // a package
+      if (target === "src/kit" || target.startsWith("src/kit/")) return;
+      // `import type` / `export type` from src/lib/types: no code comes with it.
+      const typeOnly = node.importKind === "type" || node.exportKind === "type";
+      if (typeOnly && (target === "src/lib/types" || target === "src/lib/types.ts")) return;
+      const bare = target.replace(/\.[cm]?[jt]sx?(\?raw)?$/, "$1");
+      if (KIT_EXCEPTIONS.some(([f, t]) => f === file && t === bare)) return;
+      context.report({ node, messageId: "closed" });
+    };
+    return {
+      ImportDeclaration: check,
+      ExportAllDeclaration: check,
+      ExportNamedDeclaration: check,
+      ImportExpression: check,
+    };
+  },
+};
 const MODS_TAURI = [
   {
     // Matches the bare `@tauri-apps/api` too (measured: the `**` form also covers its own folder).
@@ -267,6 +308,7 @@ const MODS_RULES = {
   "mods/no-core-imports": "error",
 };
 const MODS_PLUGIN = { mods: { rules: { "no-core-imports": modsNoCoreImports } } };
+const KIT_PLUGIN = { kit: { rules: { "only-kit-imports": kitOnlyKit } } };
 
 export default tseslint.config(
   // src-tauri/python is the fetched standalone interpreter (a build artifact, like
@@ -400,7 +442,9 @@ export default tseslint.config(
   // test block below, like every test in src/.
   {
     files: ["src/kit/**/*.{ts,tsx}"],
+    plugins: KIT_PLUGIN,
     rules: {
+      "kit/only-kit-imports": "error",
       "no-restricted-imports": [
         "error",
         {
@@ -415,7 +459,18 @@ export default tseslint.config(
           ],
         },
       ],
-      "no-restricted-syntax": ["error", ...MODS_SYNTAX],
+      "no-restricted-syntax": [
+        "error",
+        ...MODS_SYNTAX,
+        {
+          // `new Worker(new URL("../lib/ipc.ts", import.meta.url))` makes the bundler build a core file
+          // as a worker bundle: the closure rule above reads only import statements and cannot see it.
+          selector:
+            "NewExpression[callee.name='URL'] > MemberExpression[object.type='MetaProperty'][property.name='url']",
+          message:
+            "The kit reaches no file by `new URL(…, import.meta.url)` (a worker or asset URL would pull a file from outside the kit into a mod's bundle): import it, or take a blob URL (spawnWorker).",
+        },
+      ],
     },
   },
   // A plain JavaScript file in src/ (none exists) would ship just the same, so the page's fences hold

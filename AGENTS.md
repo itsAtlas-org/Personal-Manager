@@ -96,6 +96,12 @@ release remain the open post-v1 work.
     `src/lib/markdown.tsx` boundary; a Google event's formatted description renders only through
     `RichDescription` (`src/lib/calendarEdit/descriptionHtml.ts`), and nothing in `src/` parses
     HTML or writes it into the page (ESLint).
+  - `src/kit/` — the mod kit (Mods spec D14): the shared components, theme context and pure helpers that
+    are bundled into a mod's sealed frame as well as used by the page (`components/ui/Button.tsx` and
+    friends are one-line re-exports of `src/kit/ui/`). It is closed under its own imports: a kit file may
+    import only `src/kit/**`, packages and `import type` from `src/lib/types.ts` (ESLint, `kitFence.test.ts`),
+    so `ipc` and Tauri can never ride in through it; `pack-mod --verify` is the second belt. The theme
+    context is ONE object, here (`src/kit/theme.tsx`); core's `ThemeProvider` gives it the `ipc` store.
   - `src/lib/help.ts` — help-mode registry (`data-help` id → explanation) + context.
 - **Backend** — `src-tauri/src/` (Rust). Grouped by area; the roadmap board + `docs/` carry
   the living detail. Pure decision functions stay DB/network-free and unit-tested.
@@ -257,7 +263,7 @@ presets; shows/hides optional fields, **never** forks layout).
 3. **No secrets / personal data** (this just restates the rules below for the design layer).
 
 **Tokens are the single source of truth.** `themeVars(system, mode, accent)`
-(`src/theme/tokens.ts`, ported from `DESIGN_TOKENS.md`) computes CSS custom properties set on
+(`src/kit/design/tokens.ts`, ported from `DESIGN_TOKENS.md`; `src/theme/tokens.ts` re-exports it) computes CSS custom properties set on
 the document root; **components read only `var(--…)` (or the Tailwind utilities mapped to them),
 never a hex literal.** Role vocabulary: neutrals `--bg --panel --surface --border --border2
 --rule --ink --ink2 --ink3 --ink4` plus `--faint`, which is **decorative/disabled only** — no
@@ -275,7 +281,7 @@ font CDN (privacy + offline + CSP `default-src 'self'`).
 
 **One hard, real design rule (not placeholder):** all user-facing dates render `DD-MM-YYYY`,
 dropping the `-YYYY` when the date is in the current year (`21-06` this year, `21-06-2027`
-otherwise). Implemented in `src/lib/format.ts`.
+otherwise). Implemented in `src/kit/lib/format.ts` (`src/lib/format.ts` re-exports it).
 
 ## Non-negotiable rules (spec §7, §8.7)
 

@@ -25,7 +25,7 @@ vi.mock("../lib/briefing", () => ({
 vi.mock("../lib/markdown", () => ({
   Markdown: ({ children }: { children?: ReactNode }) => <>{children}</>,
 }));
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

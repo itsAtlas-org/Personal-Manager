@@ -1,0 +1,34 @@
+<body>
+  <div>
+    <div>
+      <span
+        class="inline-flex"
+      >
+        <button>
+          One
+        </button>
+      </span>
+      <span
+        class="inline-flex"
+      >
+        <button>
+          Two
+        </button>
+      </span>
+    </div>
+  </div>
+  <span
+    class="fixed z-[60] whitespace-nowrap rounded-[var(--radius-sm)] border border-border2 bg-panel px-1.5 py-0.5 text-[0.625rem] text-ink2 shadow-md "
+    role="tooltip"
+    style="left: 8px; top: 8px;"
+  >
+    Above it
+  </span>
+  <span
+    class="fixed z-[60] whitespace-nowrap rounded-[var(--radius-sm)] border border-border2 bg-panel px-1.5 py-0.5 text-[0.625rem] text-ink2 shadow-md "
+    role="tooltip"
+    style="left: 8px; top: 8px;"
+  >
+    Below it
+  </span>
+</body>

@@ -22,7 +22,7 @@ vi.mock("../../../lib/ipc", () => ({
   recurrencePresets: (day: string) => recurrencePresets(day),
 }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

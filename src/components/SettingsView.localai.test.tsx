@@ -71,7 +71,7 @@ vi.mock("./onboarding/OnboardingLocalConnect", () => ({
 }));
 vi.mock("./ModelListEditor", () => ({ ModelListEditor: () => null }));
 vi.mock("./SignInStrip", () => ({ SignInStrip: () => null }));
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

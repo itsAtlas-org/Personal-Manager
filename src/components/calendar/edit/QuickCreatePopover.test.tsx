@@ -74,7 +74,7 @@ vi.mock("../../../theme/timezones", async (importOriginal) => ({
   deviceTimeZoneOrNull: () => deviceZone,
 }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

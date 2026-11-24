@@ -59,7 +59,7 @@ vi.mock("../../lib/ipc", () => ({
     return Promise.resolve(() => noticeHandlers.delete(h));
   },
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

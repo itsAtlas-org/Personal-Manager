@@ -16,7 +16,7 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Modal } from "./Modal";
-import { isAnyDialogOpen } from "../../lib/useDialogLayer";
+import { isAnyDialogOpen } from "../lib/useDialogLayer";
 
 afterEach(cleanup);
 

@@ -69,7 +69,7 @@ const THEME = {
   depth: "standard",
   autoLocation: "",
 };
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => THEME,
 }));

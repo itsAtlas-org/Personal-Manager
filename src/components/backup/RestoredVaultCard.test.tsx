@@ -19,7 +19,7 @@ vi.mock("../../lib/ipc", () => ({
 
 // The Button primitive reaches for `useTheme`, and the real provider pulls in IPC (the same stub
 // BackupSettings.test.tsx uses).
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

@@ -27,7 +27,7 @@ import {
   taskToInput,
   TONE_CLASS,
 } from "./tasks";
-import type { CalendarEvent, Task } from "./types";
+import type { CalendarEvent, Task } from "../../lib/types";
 
 const TODAY = new Date(2026, 10, 3, 15, 30); // Tue 03-11-2026, mid-afternoon
 const iso = (offset: number) => {
