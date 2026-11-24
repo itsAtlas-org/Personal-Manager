@@ -30,8 +30,6 @@ pub enum Namespace {
     /// last `.`: a note key never holds one and a mod id always does, whereas both may hold `-`, so a
     /// `-` between them let two mods' notes share a file name (`acme.a-b` + `c` and `acme.a` + `b-c`),
     /// and one mod could then keep another's note from ever saving.
-    #[allow(dead_code)]
-    // the `documents.saveNote` handler builds it (PR C1, K2); tests cover it now
     Mod(ModId),
 }
 

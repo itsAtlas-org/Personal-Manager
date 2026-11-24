@@ -37,22 +37,92 @@ pub struct WriteRule {
     /// The read permissions it needs besides its own, in the order they are checked (the first is
     /// the one a mod with none of them is told about).
     pub reads: &'static [&'static str],
+    /// The reads it needs only when the call NAMES the optional target they open (`tasks.add`'s
+    /// `project`): checked by [`require_named`], after `reads`, by a handler that was given one. A
+    /// call that names none needs only `reads`.
+    pub if_named: &'static [&'static str],
     /// The call's arguments as JSON, which its handler parses and which name a target that does not
-    /// exist: the table test sends them, so a refusal that comes before the lookup is the only way to
-    /// answer anything but `NotFound`.
+    /// exist (and every optional target a rule lists in `if_named`): the table test sends them, so a
+    /// refusal that comes before the lookup is the only way to answer anything but `NotFound`.
     pub probe: &'static str,
 }
 
-/// The rules of every write call that names an existing target. K2 adds one with each such row.
-pub const WRITE_RULES: &[WriteRule] = &[
-    // A write call of the dispatcher's own tests, so the table test has a row to run before K2 adds
-    // the first real one; it is in no dispatch table of PM's.
-    #[cfg(test)]
+const fn rule(
+    call: &'static str,
+    reads: &'static [&'static str],
+    if_named: &'static [&'static str],
+    probe: &'static str,
+) -> WriteRule {
     WriteRule {
-        call: PROBE_CALL,
-        reads: &["tasks.read", "projects.read"],
-        probe: r#"{"id": 1}"#,
-    },
+        call,
+        reads,
+        if_named,
+        probe,
+    }
+}
+
+/// The write calls that name nothing which already exists, so a second read would protect nothing:
+/// `documents.saveNote` writes a note under a key in the caller's OWN namespace, and what it answers
+/// (that it saved, and with `documents.meta` the new document's id) is the same whether the key was
+/// new or not. The table test holds this list to real write rows without a rule.
+#[cfg(test)]
+pub const NAMES_NOTHING: &[&str] = &["documents.saveNote"];
+
+/// The rules of every write call that names an existing target.
+pub const WRITE_RULES: &[WriteRule] = &[
+    // A write call of the dispatcher's own tests, so the table test has a row to run whatever the
+    // live table holds; it is in no dispatch table of PM's.
+    #[cfg(test)]
+    rule(
+        PROBE_CALL,
+        &["tasks.read", "projects.read"],
+        &[],
+        r#"{"id": 1}"#,
+    ),
+    // A task's project is a name it was shown (`projects.read`), and a new task's own record is read
+    // back with `tasks.read`.
+    rule(
+        "tasks.add",
+        &["tasks.read"],
+        &["projects.read"],
+        r#"{"title": "x", "project": "Nowhere"}"#,
+    ),
+    rule(
+        "tasks.setStatus",
+        &["tasks.read"],
+        &[],
+        r#"{"id": 1, "status": "done"}"#,
+    ),
+    rule("tasks.reorder", &["tasks.read"], &[], r#"{"ids": [1]}"#),
+    rule(
+        "tasks.importChecklist",
+        &["tasks.read"],
+        &["projects.read"],
+        r#"{"project": "Nowhere", "items": [{"title": "x", "done": false}]}"#,
+    ),
+    // The editor opens on a task by id; a new task's prefilled project is checked by its handler
+    // (it is text for a field, not a lookup).
+    rule("ui.openTaskEditor", &["tasks.read"], &[], r#"{"id": 1}"#),
+    // A milestone belongs to a project, and milestones are read with `projects.read`.
+    rule(
+        "milestones.add",
+        &["projects.read"],
+        &[],
+        r#"{"project": "Nowhere", "label": "x"}"#,
+    ),
+    rule(
+        "milestones.update",
+        &["projects.read"],
+        &[],
+        r#"{"id": 1, "label": "x"}"#,
+    ),
+    rule(
+        "milestones.setStatus",
+        &["projects.read"],
+        &[],
+        r#"{"id": 1, "status": "done"}"#,
+    ),
+    rule("milestones.delete", &["projects.read"], &[], r#"{"id": 1}"#),
 ];
 
 /// The rule for the call named `call`.
@@ -69,16 +139,35 @@ pub(super) fn require<H: Host>(
     facts: &ModFacts,
     auth: &Authorised,
 ) -> Result<(), ModError> {
-    let Some(rule) = rule_for(auth.row.name) else {
-        return Err(ModError::internal(format!(
-            "{} names a target but has no second-read rule",
-            auth.row.name
-        )));
-    };
+    let rule = rule_of(auth)?;
     for read in rule.reads {
         grants::check(conn, facts, read, host.engine_sealed())?;
     }
     Ok(())
+}
+
+/// The reads a call needs only because it names its optional target ([`WriteRule::if_named`]): the
+/// handler calls this when its arguments carry one, right after [`require`].
+pub(super) fn require_named<H: Host>(
+    host: &H,
+    conn: &Connection,
+    facts: &ModFacts,
+    auth: &Authorised,
+) -> Result<(), ModError> {
+    let rule = rule_of(auth)?;
+    for read in rule.if_named {
+        grants::check(conn, facts, read, host.engine_sealed())?;
+    }
+    Ok(())
+}
+
+fn rule_of(auth: &Authorised) -> Result<&'static WriteRule, ModError> {
+    rule_for(auth.row.name).ok_or_else(|| {
+        ModError::internal(format!(
+            "{} names a target but has no second-read rule",
+            auth.row.name
+        ))
+    })
 }
 
 /// The test-only call's name (it has a handler in `handlers.rs` under `cfg(test)`).
@@ -162,21 +251,32 @@ mod tests {
         dispatch_in(host, rows, caller, row.name, rule.probe).await
     }
 
-    /// The table test: every write call row of `rows` has a rule, and is refused `NotGranted` naming
-    /// the read it lacks (never `NotFound`) by a mod holding only its write permission, and by a mod
-    /// holding everything but one read, for each read in turn. With every read it gets as far as the
-    /// lookup.
+    /// The table test: every write call row of `rows` has a rule (or says it names nothing), and is
+    /// refused `NotGranted` naming the read it lacks (never `NotFound`) by a mod holding only its
+    /// write permission, and by a mod holding everything but one read, for each read in turn (the
+    /// reads a call needs only for its optional target included: the probe names it). With every read
+    /// it gets as far as the lookup.
     async fn every_write_row_refuses_before_any_lookup(rows: &'static [Row]) -> usize {
         let mut covered = 0;
         for row in rows
             .iter()
             .filter(|r| r.kind == Kind::Call && r.class == Class::Write)
         {
+            if NAMES_NOTHING.contains(&row.name) {
+                assert!(rule_for(row.name).is_none(), "{} names nothing", row.name);
+                continue;
+            }
             let rule = rule_for(row.name)
                 .unwrap_or_else(|| panic!("{} is a write call with no second-read rule", row.name));
             let write = row.permission.expect("a write row has a permission");
             serde_json::from_str::<Value>(rule.probe).expect("the probe is JSON");
-            for read in rule.reads {
+            let needed: Vec<&'static str> = rule
+                .reads
+                .iter()
+                .chain(rule.if_named.iter())
+                .copied()
+                .collect();
+            for read in &needed {
                 assert_eq!(
                     permissions::policy(read).unwrap().class,
                     Class::Read,
@@ -192,11 +292,11 @@ mod tests {
                 other => panic!("{}: {other:?}", row.name),
             };
             assert_eq!(e.code, Code::NotGranted, "{}", row.name);
-            assert_eq!(e.permission, Some(rule.reads[0]), "{}", row.name);
+            assert_eq!(e.permission, Some(needed[0]), "{}", row.name);
             // Everything but one read, for each read.
-            for missing in rule.reads {
+            for missing in &needed {
                 let mut held = vec![write];
-                held.extend(rule.reads.iter().filter(|r| *r != missing));
+                held.extend(needed.iter().filter(|r| *r != missing));
                 let host = TestHost::new();
                 let s = mod_with(&host, &held);
                 let e = match call(&host, rows, &s, row).await {
@@ -214,7 +314,7 @@ mod tests {
             // Every read: the check passes, and the handler's own lookup is what answers.
             let host = TestHost::new();
             let mut all = vec![write];
-            all.extend(rule.reads.iter().copied());
+            all.extend(needed.iter().copied());
             let s = mod_with(&host, &all);
             let e = match call(&host, rows, &s, row).await {
                 Reply::Error { error } => error,
@@ -226,10 +326,24 @@ mod tests {
         covered
     }
 
-    /// PM's own dispatch table: no write call exists yet, and each one K2 adds is held to the rule.
+    /// PM's own dispatch table: every write call it has is held to the rule.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_write_call_of_the_live_table_refuses_a_write_only_mod_before_any_lookup() {
-        every_write_row_refuses_before_any_lookup(table::ROWS).await;
+        let covered = every_write_row_refuses_before_any_lookup(table::ROWS).await;
+        let writes = table::ROWS
+            .iter()
+            .filter(|r| r.kind == Kind::Call && r.class == Class::Write)
+            .count();
+        assert_eq!(covered + NAMES_NOTHING.len(), writes);
+        // A call that says it names nothing is a real write row.
+        for name in NAMES_NOTHING {
+            assert!(
+                table::ROWS
+                    .iter()
+                    .any(|r| r.name == *name && r.class == Class::Write),
+                "{name} is listed as naming nothing and is no write row"
+            );
+        }
         // A rule that names no row of the live table is a stale one (except the test's own).
         for rule in WRITE_RULES.iter().filter(|r| r.call != PROBE_CALL) {
             assert!(
@@ -281,9 +395,10 @@ mod tests {
         for rule in WRITE_RULES {
             assert!(seen.insert(rule.call), "{} has two rules", rule.call);
             assert!(!rule.reads.is_empty(), "{}", rule.call);
-            let distinct: std::collections::BTreeSet<_> = rule.reads.iter().collect();
-            assert_eq!(distinct.len(), rule.reads.len(), "{}", rule.call);
-            for read in rule.reads {
+            let both: Vec<_> = rule.reads.iter().chain(rule.if_named).collect();
+            let distinct: std::collections::BTreeSet<_> = both.iter().collect();
+            assert_eq!(distinct.len(), both.len(), "{}", rule.call);
+            for read in both {
                 assert_eq!(permissions::policy(read).unwrap().class, Class::Read);
             }
             let probe: Value = serde_json::from_str(rule.probe).unwrap();

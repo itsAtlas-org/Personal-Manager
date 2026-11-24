@@ -425,6 +425,94 @@ describe("ModFrame", () => {
     });
   });
 
+  describe("ui.openTaskEditor", () => {
+    const mountWith = (hooks: ModPageHooks) =>
+      render(
+        <ModPageHooksContext.Provider value={hooks}>
+          <ModFrame modId="acme.tool" name="Acme Tool" tier="second" />
+        </ModPageHooksContext.Provider>,
+      );
+    const SOURCE = { modId: "acme.tool", name: "Acme Tool", tier: "second" };
+
+    it("opens PM's editor on the task the backend found, and answers at once with opened", async () => {
+      const openTaskEditor = vi.fn(() => true);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor", args: { id: 7 } })).toEqual({
+        id: 1,
+        ok: true,
+        result: { opened: true },
+      });
+      // The mod is named by PM's own record, and the request is the backend's, never the frame's.
+      expect(openTaskEditor).toHaveBeenCalledWith(SOURCE, { id: 7 });
+    });
+
+    it("opens it on a new task started from the backend's checked prefill", async () => {
+      const openTaskEditor = vi.fn(() => true);
+      const prefill = { title: "Call Sam", project: "Atlas", deadline: "2026-12-01" };
+      modCall.mockResolvedValue({
+        kind: "page",
+        action: "ui.openTaskEditor",
+        args: { new: prefill },
+      });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      await ask(port, { id: 1, method: "ui.openTaskEditor", args: { new: { title: "x" } } });
+      expect(openTaskEditor).toHaveBeenCalledWith(SOURCE, { new: prefill });
+    });
+
+    it("tells the mod it is asking too fast while an editor is already open (one at a time)", async () => {
+      const openTaskEditor = vi.fn(() => false);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor", args: { id: 7 } })).toEqual({
+        id: 1,
+        ok: false,
+        error: {
+          code: MOD_ERRORS.rateLimited,
+          message: "PM already has a task open for this mod.",
+        },
+      });
+    });
+
+    it("answers PM's own failure, not a success that opened nothing, when nothing draws the editor", async () => {
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mount();
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor" })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+    });
+
+    it.each([
+      null,
+      {},
+      { id: 0 },
+      { id: -3 },
+      { id: 1.5 },
+      { id: "7" },
+      { new: null },
+      { new: { title: 5, project: null, deadline: null } },
+      { new: { title: "x", project: null, deadline: "2026-12-01T10:00" } },
+      { new: { title: "x".repeat(1001), project: null, deadline: null } },
+    ])("opens nothing for the arguments %j", async (args) => {
+      const openTaskEditor = vi.fn(() => true);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor" })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+      expect(openTaskEditor).not.toHaveBeenCalled();
+    });
+  });
+
   it("performs no page action for a session that ended while the backend was answering", async () => {
     // Authorised, and the answer in flight, when the session ends (here the frame is unmounted, as
     // a pause, an uninstall, the lock or a vault switch unmounts it): the reader must not open.

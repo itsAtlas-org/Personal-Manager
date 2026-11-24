@@ -180,7 +180,24 @@ pub struct Parts {
     pub hops: ScriptedHops,
     /// The model, scripted: what `ai.complete` resolves, prices and calls.
     pub model: FakeModel,
+    /// What the writes left for after their guard (`Host::settle`), in order.
+    pub settled: Mutex<Vec<crate::milestones::ops::Aftermath>>,
+    /// Whether the document engine is set up (`Host::engine_ready`). Off until a test says so.
+    pub engine: AtomicBool,
+    /// Every note the host was asked to save (`Host::save_note`), the engine's spy.
+    pub notes: Mutex<Vec<SavedNote>>,
+    /// Every address the host was asked to open (`Host::open_link`), the launcher's spy.
+    pub links: Mutex<Vec<String>>,
     hook: Mutex<Option<Hook>>,
+}
+
+/// One call of `Host::save_note`, as a test sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedNote {
+    pub source_id: String,
+    pub file_name: String,
+    pub title: String,
+    pub body: String,
 }
 
 /// The app, as far as the dispatcher can tell: a real `AppState` over a real store, a real runtime,
@@ -228,6 +245,10 @@ impl TestHost {
                 locked: AtomicBool::new(false),
                 hops: ScriptedHops::new(),
                 model: FakeModel::default(),
+                settled: Mutex::new(Vec::new()),
+                engine: AtomicBool::new(false),
+                notes: Mutex::new(Vec::new()),
+                links: Mutex::new(Vec::new()),
                 hook: Mutex::new(None),
                 dir: dir.path().to_path_buf(),
             }),
@@ -244,6 +265,23 @@ impl TestHost {
     pub fn sql<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
         let conn = self.0.state.conn().unwrap();
         f(&conn)
+    }
+
+    /// Set the document engine up (or not): what `Host::engine_ready` answers.
+    pub fn set_engine_ready(&self, ready: bool) {
+        self.0.engine.store(ready, Ordering::SeqCst);
+    }
+
+    pub fn saved_notes(&self) -> Vec<SavedNote> {
+        self.0.notes.lock().unwrap().clone()
+    }
+
+    pub fn opened_links(&self) -> Vec<String> {
+        self.0.links.lock().unwrap().clone()
+    }
+
+    pub fn settled(&self) -> Vec<crate::milestones::ops::Aftermath> {
+        self.0.settled.lock().unwrap().clone()
     }
 
     pub fn hook(&self, hook: impl Fn(&TestHost, Point) + Send + Sync + 'static) {
@@ -279,6 +317,70 @@ impl Host for TestHost {
         // After the read, before the caller acts on it: where a lock enabled "just now" lands.
         self.at(Point::LockRead);
         Ok(answer)
+    }
+
+    fn settle(&self, aftermath: crate::milestones::ops::Aftermath) {
+        self.0.settled.lock().unwrap().push(aftermath);
+    }
+
+    fn engine_ready(&self) -> bool {
+        let ready = self.0.engine.load(Ordering::SeqCst);
+        self.at(Point::EngineRead);
+        ready
+    }
+
+    /// Records the note, and makes its document row the way the real save does for what the API reads
+    /// back (its `source_id`, title and a vault name from the namespace), so `documents.statusOf` can
+    /// be asked about it. An existing row is updated in place, as an edit is.
+    fn save_note(
+        &self,
+        namespace: &crate::notes::Namespace,
+        key: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<i64, super::ModError> {
+        let source_id = namespace.source_id(key);
+        let file_name = namespace.file_name(key);
+        self.at(Point::Embedding);
+        self.0.notes.lock().unwrap().push(SavedNote {
+            source_id: source_id.clone(),
+            file_name: file_name.clone(),
+            title: title.into(),
+            body: body.into(),
+        });
+        self.sql(|c| {
+            let existing: Option<i64> = c
+                .query_row(
+                    "SELECT id FROM documents WHERE source_id = ?1",
+                    [&source_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            match existing {
+                Some(id) => {
+                    c.execute(
+                        "UPDATE documents SET title = ?2 WHERE id = ?1",
+                        params![id, title],
+                    )
+                    .unwrap();
+                    Ok(id)
+                }
+                None => {
+                    c.execute(
+                        "INSERT INTO documents(vault_path, title, content_hash, source_id) \
+                         VALUES (?1, ?2, ?1, ?3)",
+                        params![file_name, title, source_id],
+                    )
+                    .unwrap();
+                    Ok(c.last_insert_rowid())
+                }
+            }
+        })
+    }
+
+    fn open_link(&self, url: &str) -> bool {
+        self.0.links.lock().unwrap().push(url.into());
+        true
     }
 
     type Hops = ScriptedHops;

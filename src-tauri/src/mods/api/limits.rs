@@ -166,6 +166,40 @@ pub const LINKS_PER_MINUTE: u64 = 6;
 /// `shell.openLink` calls a mod may make at once after a quiet spell.
 pub const LINK_BURST: u64 = 3;
 
+// The caps of PR C's calls (K2), each held by its handler as a refusal, never a trim.
+
+/// Tasks (or milestones) one page of a list returns at most, and ids one `tasks.reorder` names.
+pub const MAX_TASKS_PER_CALL: usize = 5000;
+/// Lines one `tasks.importChecklist` takes.
+pub const MAX_CHECKLIST_ITEMS: usize = 200;
+/// Project names `projects.list` returns before it says it was cut short.
+pub const MAX_PROJECTS_LISTED: usize = 5000;
+/// A note's key, in a mod's own namespace (`mod-<id>.<key>.md` with an id of up to 159 characters
+/// stays under a file name's 255).
+pub const NOTE_KEY_MAX_OWN: usize = 64;
+/// A note's key through the Pinboard's legacy mapping (`note-<key>.md`): no tighter than the board's
+/// own widget ids allow, so a board whose ids are older or imported still saves after the move.
+pub const NOTE_KEY_MAX_LEGACY: usize = 200;
+/// Keys one `documents.statusOf` asks about.
+pub const MAX_NOTE_KEYS_PER_CALL: usize = 500;
+/// A note's title, in characters: one plain line, which lands in the vault file's front matter.
+pub const NOTE_TITLE_MAX_CHARS: usize = 200;
+/// A note's body, in bytes.
+pub const NOTE_BODY_MAX_BYTES: usize = 512 << 10;
+/// An address `shell.openLink` takes, in bytes.
+pub const LINK_MAX_BYTES: usize = 2048;
+/// How much of an address PM's question shows before it says how many characters more there are.
+pub const LINK_SHOWN_CHARS: usize = 300;
+/// Entries one `calendar.overlay.set` publishes: the whole set of the mod.
+pub const OVERLAY_MAX_ENTRIES: usize = 2000;
+/// An overlay entry's id, in characters. The Pinboard's are `<widgetId>:<itemId>`, two random UUIDs
+/// (73), and the Calendar's event ids, hidden sets and Runway key on them, so a mod can't shorten them.
+pub const OVERLAY_ID_MAX_CHARS: usize = 200;
+/// An overlay entry's label, in characters.
+pub const OVERLAY_LABEL_MAX_CHARS: usize = 140;
+/// The first and last year an overlay entry may fall in.
+pub const OVERLAY_YEARS: std::ops::RangeInclusive<i32> = 1900..=2200;
+
 /// How long a question PM asks the person for a mod's call (`mods::confirm`) stays answerable. Past
 /// it the answer does nothing and the call's token is gone.
 pub const CONFIRM_TTL: Duration = Duration::from_secs(60);

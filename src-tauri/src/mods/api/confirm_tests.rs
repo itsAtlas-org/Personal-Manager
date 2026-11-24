@@ -117,7 +117,7 @@ async fn a_request_carries_a_token_and_a_question_built_from_pms_data_and_accept
             .unwrap();
     });
     let again = answer(&host, &question.token, true).await.unwrap_err();
-    assert_eq!(again.code, Code::NotFound);
+    assert_eq!(again.code, Code::Declined);
     assert_eq!(note(&host), "\"before\"", "a used token performed it again");
 }
 
@@ -134,7 +134,7 @@ async fn a_decline_answers_declined_does_nothing_and_spends_the_token() {
     // The no is final: the same token can't be turned into a yes.
     assert_eq!(
         answer(&host, &token, true).await.unwrap_err().code,
-        Code::NotFound
+        Code::Declined
     );
     assert_eq!(note(&host), "\"before\"");
     // And the slot is free for the next question.
@@ -150,7 +150,7 @@ async fn a_forged_or_stale_token_does_nothing() {
     near.replace_range(..1, if near.starts_with('0') { "1" } else { "0" });
     for forged in ["", "0", &"0".repeat(32), &"f".repeat(64), near.as_str()] {
         let e = answer(&host, forged, true).await.unwrap_err();
-        assert_eq!(e.code, Code::NotFound, "{forged:?}");
+        assert_eq!(e.code, Code::Declined, "{forged:?}");
     }
     assert_eq!(note(&host), "\"before\"");
     // The real one is untouched by the forgeries.
@@ -209,7 +209,7 @@ async fn a_token_belongs_to_its_session_and_each_session_has_its_own_place() {
     let _ = a3;
     assert_eq!(
         answer(&host, &ta, true).await.unwrap_err().code,
-        Code::NotFound
+        Code::Declined
     );
     assert_eq!(note(&host), "\"before\"");
     // A's sibling window's own question is still good.
@@ -231,7 +231,7 @@ async fn a_question_whose_target_changed_is_refused_and_nothing_is_done() {
     // The token was spent by the attempt, so it can't be retried against the new state.
     assert_eq!(
         answer(&host, &token, true).await.unwrap_err().code,
-        Code::NotFound
+        Code::Declined
     );
     // A target that is gone is gone, not a yes.
     let token = token_of(&ask(&host, &auth(&host, &s), probe()));
@@ -528,7 +528,7 @@ async fn every_end_of_a_session_revokes_its_question() {
             "{what}: the question survived"
         );
         let e = answer(&host, &token, true).await.unwrap_err();
-        assert_eq!(e.code, Code::NotFound, "{what}");
+        assert_eq!(e.code, Code::Declined, "{what}");
         assert_eq!(note(&host), "\"before\"", "{what}: it was done");
     }
 }
@@ -544,7 +544,7 @@ async fn after_a_lock_the_session_may_ask_again() {
     assert_ne!(old, fresh);
     assert_eq!(
         answer(&host, &old, true).await.unwrap_err().code,
-        Code::NotFound
+        Code::Declined
     );
     assert!(answer(&host, &fresh, true).await.is_ok());
 }
@@ -558,7 +558,7 @@ async fn a_token_minted_over_another_store_is_refused() {
     let conn = host.store().take_conn().unwrap().unwrap();
     *host.store().db.lock().unwrap() = Some(conn);
     let e = answer(&host, &token, true).await.unwrap_err();
-    assert_eq!(e.code, Code::NotFound);
+    assert_eq!(e.code, Code::Declined);
     assert_eq!(note(&host), "\"before\"");
 }
 
@@ -572,7 +572,7 @@ async fn a_suspend_deadline_revokes_the_question() {
     assert!(!host.runtime().confirm_held(&s));
     assert_eq!(
         answer(&host, &token, true).await.unwrap_err().code,
-        Code::NotFound
+        Code::Declined
     );
     assert!(!host.runtime().confirm_revoke("no such session"));
 }

@@ -95,8 +95,7 @@ pub fn add(
 /// [`add`] inside the caller's transaction, for a caller with a row of its own to commit beside the
 /// milestone (a mod's gift ledger row): the touch and the activity row are inside it too, so a gift
 /// is all there or not there at all. Refused outside a transaction. The `milestones.add` handler
-/// (PR C1, K2) is its caller; tests cover it now.
-#[cfg_attr(not(test), allow(dead_code))]
+/// (PR C1, K2) is its caller.
 pub fn add_in(
     conn: &Connection,
     project: &str,
@@ -200,9 +199,18 @@ pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<Aftermath>
 /// Delete a milestone by id. A task linked to it loses the link (the FK nulls it), so the task views
 /// re-read.
 pub fn remove(conn: &Connection, id: i64) -> Result<Aftermath> {
+    let tx = conn.unchecked_transaction()?;
+    let after = remove_in(&tx, id)?;
+    tx.commit()?;
+    Ok(after)
+}
+
+/// [`remove`] inside the caller's transaction, for a caller with something to settle beside the
+/// delete (the mod's confirmed delete). Refused outside a transaction.
+pub fn remove_in(conn: &Connection, id: i64) -> Result<Aftermath> {
     // Resolve the owning project before the row is gone, then bump its activity.
     let project = milestones::project_of(conn, id)?;
-    milestones::remove(conn, id)?;
+    milestones::remove_in(conn, id)?;
     if let Some(project) = project {
         projects::touch(conn, &project)?;
         // The row is gone, but `source_ref` is a plain pointer (not an FK), so the deleted

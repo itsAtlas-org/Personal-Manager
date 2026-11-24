@@ -49,11 +49,24 @@ use sha2::{Digest, Sha256};
 use super::api::limits::CONFIRM_TTL;
 use super::api::table::Row;
 
-/// What the person's yes performs. K2's handlers add a variant each (the foreign milestone delete,
-/// the link, the new project) and extend the three methods in `api::confirm` that read it, describe
-/// it and perform it; a variant holds only the target's own ids, never text the mod chose.
+/// What the person's yes performs. A variant holds what Rust validated and nothing a frame can change
+/// afterwards: the target's own ids, or text the handler already held to its rules (a parsed address,
+/// a project name, a milestone's label and date). Each has its three methods in `api::confirm`: how
+/// to read its target again, how to say it, and how to do it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// `shell.openLink` for a second-party or unsigned mod: the parsed https address, which is the
+    /// only thing shown and the only thing opened.
+    OpenLink { url: String },
+    /// `milestones.delete` of a milestone the mod did not make.
+    DeleteMilestone { id: i64 },
+    /// `milestones.add` naming a project that does not exist yet: "Create project X?". On a yes the
+    /// project and the milestone are made in one transaction, and the project is the person's own.
+    CreateProject {
+        project: String,
+        label: String,
+        due_date: Option<String>,
+    },
     /// A test's action: sets the mod's own `mod_kv` row `key` to `"confirmed"`. The question is built
     /// from that row's current value, so a test can change what the question was about.
     #[cfg(test)]

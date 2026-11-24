@@ -12,9 +12,6 @@
 //! builds the same DTOs from the scopes its client was given ([`Projection::scoped`]), with no mod
 //! and no `mods` row in sight.
 
-// Nothing calls the projection until K2's handlers (and C3's MCP) do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use rusqlite::Connection;
 use serde_json::{Map, Value};
 
@@ -37,7 +34,9 @@ impl Projection {
         calendar: false,
     };
 
-    /// A caller given exactly these scopes (the MCP server's clients).
+    /// A caller given exactly these scopes (the MCP server's clients, PR C3: nothing but tests builds
+    /// one until then).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn scoped(projects: bool, calendar: bool) -> Self {
         Self { projects, calendar }
     }

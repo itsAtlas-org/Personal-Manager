@@ -421,23 +421,21 @@ pub fn add_in(
 }
 
 /// The longest milestone label a mod may write, in characters.
-#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
 pub const MOD_LABEL_MAX: usize = 200;
 
 /// A mod-supplied label and date, checked: [`add`] stores both as given and the IPC path leans on
 /// the date field in the page. A mod has no such field, so the date must be a real `YYYY-MM-DD`
 /// (month and day in range for the year, exactly ten characters, nothing after), and the label
-/// plain text of at most [`MOD_LABEL_MAX`] characters (`mods::package::plain_text_fault`: no control
-/// or hidden characters). Both are trimmed first; a blank label stays blank (`add` names it
+/// one line of the person's words of at most [`MOD_LABEL_MAX`] characters (`mods::package::user_line_fault`:
+/// no control or hidden character but an emoji's joiner and variation selector, no tab or line break). Both are trimmed first; a blank label stays blank (`add` names it
 /// "deadline", as it does for the page) and a blank date is no date. Returns the pair to store. The
 /// words are fixed and never echo what was sent.
-#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
 pub fn validate_label_and_date(
     label: &str,
     due_date: Option<&str>,
 ) -> Result<(String, Option<String>)> {
     let label = label.trim();
-    if crate::mods::package::plain_text_fault(label, MOD_LABEL_MAX, false, true).is_err() {
+    if crate::mods::package::user_line_fault(label, MOD_LABEL_MAX, true).is_err() {
         return Err(Error::Other(format!(
             "A milestone label must be plain text of at most {MOD_LABEL_MAX} characters."
         )));
@@ -618,6 +616,14 @@ pub fn upsert_external(
 /// Delete a milestone by id.
 pub fn remove(conn: &Connection, id: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    remove_in(&tx, id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`remove`] inside the caller's transaction (see [`add_in`]). Refused outside a transaction.
+pub fn remove_in(tx: &Connection, id: i64) -> Result<()> {
+    crate::tasks::require_transaction(tx)?;
     tx.execute("DELETE FROM project_milestones WHERE id = ?1", params![id])?;
     // The milestone id IS the flag anchor, and `flags` has no FK to `project_milestones` (the anchor
     // is a text column spanning two identity spaces — iCal UIDs and milestone ids — so no single FK
@@ -630,7 +636,6 @@ pub fn remove(conn: &Connection, id: i64) -> Result<()> {
         "DELETE FROM flags WHERE anchor_kind = ?1 AND anchor = ?2",
         params![crate::flags::ANCHOR_MILESTONE, id.to_string()],
     )?;
-    tx.commit()?;
     Ok(())
 }
 

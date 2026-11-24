@@ -75,6 +75,7 @@ export const MOD_ERRORS = {
   badArgs: "MOD-1003",
   notGranted: "MOD-2001",
   needsPrompt: "MOD-2002",
+  rateLimited: "MOD-3001",
   tooLarge: "MOD-3002",
   internal: "MOD-9001",
   aiCapReached: "MOD-3004",
@@ -96,7 +97,13 @@ export const MOD_ERRORS = {
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because
  *  only the page holds what they need. A test in handlers.rs pins this list to the backend's. */
-export const PAGE_ACTIONS = ["theme.get", "ui.openDocument", "secrets.set", "notify"] as const;
+export const PAGE_ACTIONS = [
+  "theme.get",
+  "ui.openDocument",
+  "secrets.set",
+  "notify",
+  "ui.openTaskEditor",
+] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 
@@ -240,6 +247,18 @@ export function fitsBytes(text: string, cap: number): boolean {
 /** A refusal the page makes itself. */
 export function refusal(code: keyof typeof MOD_ERRORS, message: string): ModError {
   return { code: MOD_ERRORS[code], message };
+}
+
+/** Thrown by a page action that PM's page, and not the backend, has to refuse (only the page knows
+ *  that an editor is already open): the frame is told this code, never PM's own failure. */
+export class PageRefusal extends Error {
+  constructor(
+    readonly code: keyof typeof MOD_ERRORS,
+    message: string,
+  ) {
+    super(message);
+    this.name = "PageRefusal";
+  }
 }
 
 /** A call's arguments as exactly the JSON text PM will send, measured in bytes. Structured clone

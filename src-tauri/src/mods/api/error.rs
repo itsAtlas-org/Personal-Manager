@@ -350,7 +350,6 @@ impl ModError {
 
 // PR C's errors (K1), each one fixed PM sentence like the experimental calls' above.
 impl ModError {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn engine_not_ready() -> Self {
         Self::new(
             Code::EngineNotReady,
@@ -373,11 +372,13 @@ impl ModError {
         Self::new(Code::Declined, "The person chose not to allow that.")
     }
 
-    /// A confirmation PM no longer holds: answered already, run out, or its window closed.
+    /// A confirmation PM no longer holds: answered already, run out, revoked or never asked. It is
+    /// answered `MOD-2004` like a no, so a token that isn't live does nothing and tells a caller
+    /// nothing more than that the person didn't agree to it.
     pub fn confirmation_gone() -> Self {
         Self::new(
-            Code::NotFound,
-            "That question has already been answered or has run out.",
+            Code::Declined,
+            "That question has already been answered or has run out, so nothing was done.",
         )
     }
 
@@ -488,7 +489,7 @@ mod tests {
                 code.name()
             );
         }
-        assert_eq!(seen, 6 + Code::ALL.len() - SHIPPED_BY_PR_A.len(), "{block}");
+        assert_eq!(seen, 7 + Code::ALL.len() - SHIPPED_BY_PR_A.len(), "{block}");
     }
 
     /// The codes PR A shipped, which a mod may already branch on. A test pins them so a later edit

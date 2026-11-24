@@ -13,7 +13,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    ai, doc_storage, documents, embeddings, limits, net_fetch, storage, surface, Authorised, Host,
+    ai, doc_storage, documents, embeddings, limits, link_calls, milestone_calls, net_fetch,
+    note_calls, overlay_calls, project_calls, storage, surface, task_calls, Authorised, Host,
     ModError, PageAction, Reply,
 };
 
@@ -34,6 +35,22 @@ pub enum Method {
     NetFetch,
     SecretsSet,
     Notify,
+    TasksList,
+    TasksAdd,
+    TasksSetStatus,
+    TasksReorder,
+    TasksImportChecklist,
+    MilestonesList,
+    MilestonesAdd,
+    MilestonesUpdate,
+    MilestonesSetStatus,
+    MilestonesDelete,
+    ProjectsList,
+    DocumentsSaveNote,
+    DocumentsStatusOf,
+    UiOpenTaskEditor,
+    ShellOpenLink,
+    CalendarOverlaySet,
     /// The second-READ table test's own write call (`second_read::probe`): in no `ALL`, no dispatch
     /// table of PM's, and no build but a test's.
     #[cfg(test)]
@@ -41,7 +58,7 @@ pub enum Method {
 }
 
 impl Method {
-    pub const ALL: [Method; 15] = [
+    pub const ALL: [Method; 31] = [
         Self::ThemeGet,
         Self::StorageGet,
         Self::StorageSet,
@@ -57,6 +74,22 @@ impl Method {
         Self::NetFetch,
         Self::SecretsSet,
         Self::Notify,
+        Self::TasksList,
+        Self::TasksAdd,
+        Self::TasksSetStatus,
+        Self::TasksReorder,
+        Self::TasksImportChecklist,
+        Self::MilestonesList,
+        Self::MilestonesAdd,
+        Self::MilestonesUpdate,
+        Self::MilestonesSetStatus,
+        Self::MilestonesDelete,
+        Self::ProjectsList,
+        Self::DocumentsSaveNote,
+        Self::DocumentsStatusOf,
+        Self::UiOpenTaskEditor,
+        Self::ShellOpenLink,
+        Self::CalendarOverlaySet,
     ];
 
     pub fn name(self) -> &'static str {
@@ -76,6 +109,22 @@ impl Method {
             Self::NetFetch => "net.fetch",
             Self::SecretsSet => "secrets.set",
             Self::Notify => "notify",
+            Self::TasksList => "tasks.list",
+            Self::TasksAdd => "tasks.add",
+            Self::TasksSetStatus => "tasks.setStatus",
+            Self::TasksReorder => "tasks.reorder",
+            Self::TasksImportChecklist => "tasks.importChecklist",
+            Self::MilestonesList => "milestones.list",
+            Self::MilestonesAdd => "milestones.add",
+            Self::MilestonesUpdate => "milestones.update",
+            Self::MilestonesSetStatus => "milestones.setStatus",
+            Self::MilestonesDelete => "milestones.delete",
+            Self::ProjectsList => "projects.list",
+            Self::DocumentsSaveNote => "documents.saveNote",
+            Self::DocumentsStatusOf => "documents.statusOf",
+            Self::UiOpenTaskEditor => "ui.openTaskEditor",
+            Self::ShellOpenLink => "shell.openLink",
+            Self::CalendarOverlaySet => "calendar.overlay.set",
             #[cfg(test)]
             Self::SecondReadProbe => super::second_read::PROBE_CALL,
         }
@@ -119,6 +168,22 @@ pub(super) async fn run<H: Host>(
         Method::NetFetch => net_fetch::fetch(host, auth, args).await,
         Method::SecretsSet => surface::secrets_set(host, auth, args).await,
         Method::Notify => surface::notify(host, auth, args).await,
+        Method::TasksList => task_calls::list(host, auth, args).await,
+        Method::TasksAdd => task_calls::add(host, auth, args).await,
+        Method::TasksSetStatus => task_calls::set_status(host, auth, args).await,
+        Method::TasksReorder => task_calls::reorder(host, auth, args).await,
+        Method::TasksImportChecklist => task_calls::import_checklist(host, auth, args).await,
+        Method::MilestonesList => milestone_calls::list(host, auth, args).await,
+        Method::MilestonesAdd => milestone_calls::add(host, auth, args).await,
+        Method::MilestonesUpdate => milestone_calls::update(host, auth, args).await,
+        Method::MilestonesSetStatus => milestone_calls::set_status(host, auth, args).await,
+        Method::MilestonesDelete => milestone_calls::delete(host, auth, args).await,
+        Method::ProjectsList => project_calls::list(host, auth, args).await,
+        Method::DocumentsSaveNote => note_calls::save_note(host, auth, args).await,
+        Method::DocumentsStatusOf => note_calls::status_of(host, auth, args).await,
+        Method::UiOpenTaskEditor => task_calls::open_editor(host, auth, args).await,
+        Method::ShellOpenLink => link_calls::open_link(host, auth, args).await,
+        Method::CalendarOverlaySet => overlay_calls::set(host, auth, args).await,
         #[cfg(test)]
         Method::SecondReadProbe => super::second_read::probe(host, auth, args).await,
     }
@@ -274,10 +339,11 @@ mod tests {
     #[test]
     fn every_page_action_is_one_the_page_performs() {
         let page = include_str!("../../../../src/components/mods/modBridge.ts");
-        let line = page
-            .lines()
-            .find(|l| l.starts_with("export const PAGE_ACTIONS = "))
+        // Prettier wraps the list once it is long, so the declaration is read up to its end.
+        let from = page
+            .find("export const PAGE_ACTIONS = ")
             .expect("modBridge.ts has PAGE_ACTIONS");
+        let line = &page[from..from + page[from..].find("as const;").expect("it ends")];
         for action in PageAction::ALL {
             assert_eq!(
                 serde_json::to_value(action).unwrap(),

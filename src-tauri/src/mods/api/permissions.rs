@@ -140,8 +140,6 @@ pub fn policy(id: &str) -> Option<&'static Policy> {
 /// What PM asks the person about each time it happens, whatever the grants say: a PM-drawn yes/no
 /// (`mods::confirm`) the mod cannot answer for them. A grant says a mod MAY try; these are the acts
 /// whose cost is the person's to weigh every time.
-// K2's handlers ask the policy; until then only its tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfirmKind {
     /// `shell.openLink`: opens an address in the person's browser, and an address can carry data out.
@@ -154,7 +152,7 @@ pub enum ConfirmKind {
 }
 
 impl ConfirmKind {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub const ALL: [ConfirmKind; 3] = [
         Self::Link,
         Self::ForeignMilestoneDelete,
@@ -165,7 +163,6 @@ impl ConfirmKind {
 /// The policy as data, beside [`POLICIES`]: each `(tier, act)` PM asks about every time. A first-party
 /// mod's links are the one cell left out (its grant at install is the whole of it, spec §1.5); the
 /// other two are asked of every tier, the first-party Pinboard included (plan D-10).
-#[cfg_attr(not(test), allow(dead_code))]
 pub const CONFIRM_EACH_TIME: &[(PolicyTier, ConfirmKind)] = &[
     (PolicyTier::Second, ConfirmKind::Link),
     (PolicyTier::Unsigned, ConfirmKind::Link),
@@ -178,7 +175,6 @@ pub const CONFIRM_EACH_TIME: &[(PolicyTier, ConfirmKind)] = &[
 ];
 
 /// Whether a `tier` mod's `act` needs the person's yes each time ([`CONFIRM_EACH_TIME`]).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn confirm_each_time(tier: PolicyTier, act: ConfirmKind) -> bool {
     CONFIRM_EACH_TIME.contains(&(tier, act))
 }

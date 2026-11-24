@@ -209,7 +209,7 @@ pub fn validate_source(source: &str) -> Result<()> {
 }
 
 /// A real calendar day written `YYYY-MM-DD`, cleaned; blank is absent.
-fn validate_date(what: &str, v: Option<String>) -> Result<Option<String>> {
+pub(crate) fn validate_date(what: &str, v: Option<String>) -> Result<Option<String>> {
     let Some(s) = clean(v) else {
         return Ok(None);
     };
@@ -243,7 +243,7 @@ fn validate_plan(
 }
 
 /// A title: trimmed, non-empty, at most [`TITLE_MAX`] characters.
-fn validate_title(title: &str) -> Result<String> {
+pub(crate) fn validate_title(title: &str) -> Result<String> {
     let title = title.trim();
     if title.is_empty() {
         return Err(Error::Other("a task needs a title".into()));
@@ -357,14 +357,22 @@ pub fn canonical_project(conn: &Connection, typed: &str) -> Result<String> {
 /// by, or an error. A mod's write names a project it was shown; typing one that doesn't exist is a
 /// refusal, not a new row ([`ensure_project`] would INSERT it). The words are fixed and never echo
 /// the typed name.
-#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
 pub fn resolve_existing_project(conn: &Connection, typed: &str) -> Result<String> {
-    let found = if typed.trim().is_empty() {
-        None
+    find_existing_project(conn, typed)?.ok_or_else(|| Error::Other(NO_SUCH_PROJECT.into()))
+}
+
+/// What [`resolve_existing_project`] says for a name no project goes by (a caller that must tell it
+/// from a failed read compares against this).
+pub const NO_SUCH_PROJECT: &str = "That project does not exist.";
+
+/// The name a project already goes by, or `None`: [`resolve_existing_project`] for a caller that
+/// answers "no such project" itself (and one that must tell a missing project from a failed read).
+pub fn find_existing_project(conn: &Connection, typed: &str) -> Result<Option<String>> {
+    if typed.trim().is_empty() {
+        Ok(None)
     } else {
-        lookup_project(conn, typed)?
-    };
-    found.ok_or_else(|| Error::Other("That project does not exist.".into()))
+        lookup_project(conn, typed)
+    }
 }
 
 /// The project a typed name means, or `None` when no project goes by it: the one lookup behind
@@ -606,6 +614,15 @@ pub fn project_of(conn: &Connection, id: i64) -> Result<Option<String>> {
         .flatten())
 }
 
+/// Whether a task with this id exists (a mod's write asks before it answers `NotFound`).
+pub fn exists(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+        params![id],
+        |r| r.get(0),
+    )?)
+}
+
 /// How many tasks name `name` as their project (for the delete and merge previews).
 pub fn count_for_project(conn: &Connection, name: &str) -> Result<i64> {
     Ok(conn.query_row(
@@ -765,11 +782,20 @@ pub fn change_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
 /// ordinals, sorted ascending, in the given order, so every task outside the subset keeps its
 /// place. An unknown or repeated id is an error, and nothing changes. One transaction.
 pub fn reorder(conn: &Connection, ordered_ids: &[i64]) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    reorder_in(&tx, ordered_ids)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`reorder`] inside the caller's transaction (see [`add_in`]): a mod's reorder commits only after
+/// its last check. Refused outside a transaction.
+pub fn reorder_in(tx: &Connection, ordered_ids: &[i64]) -> Result<()> {
+    require_transaction(tx)?;
     let mut seen = HashSet::new();
     if !ordered_ids.iter().all(|id| seen.insert(*id)) {
         return Err(Error::Other("a task appears twice in that order".into()));
     }
-    let tx = conn.unchecked_transaction()?;
     let mut slots: Vec<i64> = Vec::with_capacity(ordered_ids.len());
     for id in ordered_ids {
         let ordinal: Option<i64> = tx
@@ -789,7 +815,6 @@ pub fn reorder(conn: &Connection, ordered_ids: &[i64]) -> Result<()> {
             params![id, ordinal],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 

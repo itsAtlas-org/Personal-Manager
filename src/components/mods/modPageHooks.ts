@@ -37,12 +37,22 @@ export interface Notice {
   tone: NoticeTone;
 }
 
+/** What `ui.openTaskEditor` opens: an existing task by id, or a new one starting from text the mod
+ *  prefilled (title, project, date) that the editor shows as the value of its own fields. */
+export type TaskEditorRequest =
+  | { id: number }
+  | { new: { title: string | null; project: string | null; deadline: string | null } };
+
 export interface ModPageHooks {
   /** Show PM's key field for `ask`'s slot of `from`. The key goes from the field to PM's backend
    *  and nowhere else; the hook is given no way to hand it to the frame. */
   askSecret?: (from: ModSource, ask: SecretAsk) => void;
   /** Show `notice` as a strip naming `from`. */
   showNotice?: (from: ModSource, notice: Notice) => void;
+  /** Open PM's own task editor on `request` for `from`. Returns false when an editor is already
+   *  open (one at a time): the frame is then told it is asking too fast. The provider (the app's
+   *  root, beside the reader) draws it; the call does not wait for the editor to close. */
+  openTaskEditor?: (from: ModSource, request: TaskEditorRequest) => boolean;
 }
 
 export const ModPageHooksContext = createContext<ModPageHooks>({});
@@ -74,4 +84,27 @@ export function readNotice(args: unknown): Notice {
     throw new Error("notify: not a notice");
   }
   return { text: a.text, tone };
+}
+
+const isNullableText = (v: unknown, max: number): v is string | null =>
+  v === null || (typeof v === "string" && v.length > 0 && v.length <= max);
+
+/** The backend's `ui.openTaskEditor` arguments, read as untrusted. */
+export function readTaskEditorRequest(args: unknown): TaskEditorRequest {
+  const a = (args ?? {}) as Record<string, unknown>;
+  if (typeof a.id === "number") {
+    if (!Number.isSafeInteger(a.id) || a.id <= 0) throw new Error("ui.openTaskEditor: not a task");
+    return { id: a.id };
+  }
+  const n = (a.new ?? null) as Record<string, unknown> | null;
+  if (
+    n === null ||
+    typeof n !== "object" ||
+    !isNullableText(n.title, 1000) ||
+    !isNullableText(n.project, 1000) ||
+    !isNullableText(n.deadline, 10)
+  ) {
+    throw new Error("ui.openTaskEditor: not a task to start from");
+  }
+  return { new: { title: n.title, project: n.project, deadline: n.deadline } };
 }

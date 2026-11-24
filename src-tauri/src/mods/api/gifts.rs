@@ -11,10 +11,11 @@
 //! cannot both take the last place, and a gift whose transaction rolls back counts for nothing. It
 //! reads `idx_mod_ledger_mod`. Past the quota the call is answered `MOD-3003`.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{limits, Code, ModError};
 use crate::mods::ids::ModId;
+use crate::mods::policy::{self, Maker};
 
 /// Whether `mod_id` may make `adding` more gifts: it has made, plus `adding`, no more than
 /// [`limits::MAX_GIFTS_PER_MOD`]. A batch (a checklist import writes one ledger row per task) passes
@@ -48,6 +49,79 @@ fn ensure_room_under(
         ));
     }
     Ok(())
+}
+
+/// What a mod made: one task or one milestone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gift {
+    Task(i64),
+    Milestone(i64),
+}
+
+/// Attribute `gift` to `mod_id`: its `mod_ledger` row, written through the same connection (the
+/// transaction) as the gift, from the mod's own row as it is now (its name, tier, publisher, whether
+/// it was signed, and its install id, which is how an unsigned maker is told from a later install of
+/// the same id). A mod with no row (uninstalled while the call ran) made nothing: the call ended.
+pub(super) fn record(conn: &Connection, mod_id: &ModId, gift: Gift) -> Result<(), ModError> {
+    let (task, milestone) = match gift {
+        Gift::Task(id) => (Some(id), None),
+        Gift::Milestone(id) => (None, Some(id)),
+    };
+    let wrote = conn
+        .execute(
+            "INSERT INTO mod_ledger(mod_id, mod_name, tier, author, source_repo, signed, \
+                                    install_id, task_id, milestone_id) \
+             SELECT id, name, tier, author, source_repo, signed, install_id, ?2, ?3 \
+             FROM mods WHERE id = ?1",
+            params![mod_id.as_str(), task, milestone],
+        )
+        .map_err(ModError::internal)?;
+    if wrote == 1 {
+        Ok(())
+    } else {
+        Err(ModError::session_ended())
+    }
+}
+
+/// Whether the installed mod `mod_id` made milestone `milestone` itself (`policy::made_it`: a
+/// reinstall of a signed mod may edit its own gifts again; an unsigned one only the same install).
+/// A milestone with no ledger row (the user's own, or one PM made) is nobody's gift.
+pub(super) fn made_milestone(
+    conn: &Connection,
+    mod_id: &ModId,
+    milestone: i64,
+) -> Result<bool, ModError> {
+    let maker = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Maker> {
+        Ok(Maker {
+            mod_id: mod_id.as_str().to_owned(),
+            signed: r.get(0)?,
+            tier: r.get(1)?,
+            author: r.get(2)?,
+            source_repo: r.get(3)?,
+            install_id: r.get(4)?,
+        })
+    };
+    let made: Option<Maker> = conn
+        .query_row(
+            "SELECT signed, tier, author, source_repo, install_id FROM mod_ledger \
+             WHERE milestone_id = ?1 AND mod_id = ?2",
+            params![milestone, mod_id.as_str()],
+            maker,
+        )
+        .optional()
+        .map_err(ModError::internal)?;
+    let Some(made) = made else {
+        return Ok(false);
+    };
+    let current: Option<Maker> = conn
+        .query_row(
+            "SELECT signed, tier, author, source_repo, install_id FROM mods WHERE id = ?1",
+            params![mod_id.as_str()],
+            maker,
+        )
+        .optional()
+        .map_err(ModError::internal)?;
+    Ok(current.is_some_and(|current| policy::made_it(&made, &current)))
 }
 
 #[cfg(test)]

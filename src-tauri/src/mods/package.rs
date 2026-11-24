@@ -1339,6 +1339,81 @@ pub(crate) fn plain_text_fault(
     Ok(())
 }
 
+/// A joiner or selector that only makes sense after the character it follows.
+fn is_emoji_glue(c: char) -> bool {
+    matches!(c, '\u{200d}' | '\u{fe00}'..='\u{fe0f}')
+}
+
+/// A line of the person's own words as PM keeps it: the rule for text a mod passes through that the
+/// person typed or will read as their own (a milestone's label, a note's title, a project's name, an
+/// overlay label), as against text PM draws as its own chrome from a manifest
+/// ([`plain_text_fault`]). A tab or line break becomes a space; a control character or a hidden one
+/// (zero-width, direction marks, fillers, tags) goes, but an emoji's zero-width joiner and its
+/// variation selectors stay; a no-break space or any other space stays inside; whitespace of every
+/// kind is trimmed off both ends; a run of more than [`MAX_STACKED_MARKS`] combining marks is cut to
+/// that; and a line with nothing but joiners and selectors left has nothing to show and is empty.
+pub(crate) fn tidy_user_line(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .filter_map(|c| match c {
+            '\t' | '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' => Some(' '),
+            c if is_emoji_glue(c) => Some(c),
+            c if c.is_control() || is_invisible(c) => None,
+            c => Some(c),
+        })
+        .collect();
+    let kept = kept.trim_matches(char::is_whitespace);
+    if kept.chars().all(is_emoji_glue) {
+        return String::new();
+    }
+    cap_marks(kept)
+}
+
+/// `s` with every run of combining marks cut to [`MAX_STACKED_MARKS`] (pure).
+fn cap_marks(s: &str) -> String {
+    if !has_too_many_marks(s) {
+        return s.to_owned();
+    }
+    static MARK: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"^\p{M}$").expect("a fixed pattern"));
+    let mut run = 0;
+    s.chars()
+        .filter(|c| {
+            let mut buf = [0u8; 4];
+            if MARK.is_match(c.encode_utf8(&mut buf)) {
+                run += 1;
+                run <= MAX_STACKED_MARKS
+            } else {
+                run = 0;
+                true
+            }
+        })
+        .collect()
+}
+
+/// [`tidy_user_line`]'s rule as a refusal: `Err` says what's wrong when `s` is longer than
+/// `max_chars` or tidying would change it (a tab, a control or hidden character, a space of any kind
+/// at an end, too many marks stacked). Never a repair: a mod that sends such text is told. An empty
+/// line passes only when `may_be_empty`. The words are fixed and never echo `s`.
+pub(crate) fn user_line_fault(s: &str, max_chars: usize, may_be_empty: bool) -> Result<(), String> {
+    if s.is_empty() {
+        return if may_be_empty {
+            Ok(())
+        } else {
+            Err("is empty".into())
+        };
+    }
+    if s.chars().count() > max_chars {
+        return Err(format!("is longer than {max_chars} characters"));
+    }
+    if tidy_user_line(s) != s {
+        return Err(
+            "has a control or hidden character, a tab or line break, a space at an end, or too many accent marks stacked".into(),
+        );
+    }
+    Ok(())
+}
+
 /// The most combining marks (Unicode category M: accents, vowel signs, pointing) one letter may
 /// carry. Real scripts stack three or four (Thai, Hebrew pointing with a cantillation mark, a
 /// Vietnamese letter with a dot below); a name of one letter and thirty-nine accents paints tens of
@@ -2609,6 +2684,57 @@ pub(crate) mod tests {
                 m["engines"] = engines.clone()
             });
         }
+    }
+
+    /// The rule for the person's own words (a mod passes them through): an emoji's variation selector
+    /// and joiner, and a no-break space inside, are kept; hidden and control characters, a tab or line
+    /// break, a space of any kind at an end and stacked accents are not. `tidy_user_line` repairs what
+    /// `user_line_fault` refuses, and a repaired line is always accepted.
+    #[test]
+    fn a_line_of_the_persons_words_keeps_emoji_and_inner_spaces_and_drops_the_rest() {
+        for kept in [
+            "\u{26a0}\u{fe0f} Visa",
+            "\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467} family",
+            "two\u{a0}words",
+            "em\u{2003}space",
+            "e\u{301}\u{301}\u{301}\u{301}",
+        ] {
+            assert_eq!(tidy_user_line(kept), kept, "{kept:?}");
+            assert!(user_line_fault(kept, 140, false).is_ok(), "{kept:?}");
+        }
+        for (raw, tidied) in [
+            ("tab\there", "tab here"),
+            ("two\nlines", "two lines"),
+            ("bell\u{7}ring", "bellring"),
+            ("zero\u{200b}width", "zerowidth"),
+            ("flip\u{202e}ed", "fliped"),
+            ("  edges\u{a0}\u{3000}", "edges"),
+            ("\u{200d}\u{fe0f}", ""),
+            ("\u{200d}", ""),
+            (
+                "e\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}",
+                "e\u{301}\u{301}\u{301}\u{301}",
+            ),
+        ] {
+            assert_eq!(tidy_user_line(raw), tidied, "{raw:?}");
+            if raw != tidied {
+                assert!(user_line_fault(raw, 140, true).is_err(), "{raw:?}");
+            }
+            assert_eq!(
+                tidy_user_line(&tidy_user_line(raw)),
+                tidied,
+                "{raw:?}: a tidy line is tidy"
+            );
+        }
+        assert!(user_line_fault("", 5, true).is_ok());
+        assert_eq!(user_line_fault("", 5, false).unwrap_err(), "is empty");
+        assert!(user_line_fault("123456", 5, false)
+            .unwrap_err()
+            .contains("longer than 5"));
+        // The words never echo what was sent.
+        assert!(!user_line_fault("zero\u{200b}width", 50, false)
+            .unwrap_err()
+            .contains("zero"));
     }
 
     #[test]

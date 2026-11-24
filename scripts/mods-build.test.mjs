@@ -274,7 +274,8 @@ describe("the real mods/atlas.map", () => {
     expect(readFileSync(join(MAP, MODULES_RECORD), "utf8")).toBe(withoutRecord);
     // Pinned: the sha256 of each file of the Map's bundle as built just before K6c touched the config
     // (at 1828b037 plus C1's K1, whose three new error codes are in the kit's MOD_ERRORS, which the
-    // Map bundles through src/kit/host.ts). A comparison of two builds of one config cannot see a
+    // Map bundles through src/kit/host.ts, plus K2, which adds `rateLimited` to MOD_ERRORS and
+    // `ui.openTaskEditor` to PAGE_ACTIONS, the list `readReply` checks a page action against). A comparison of two builds of one config cannot see a
     // change both share; this can. The bytes change when the Map's own folder, its build, or kit code
     // it bundles changes. Its own folder needs a Map version (D12, `check-mods --base`); a kit change
     // reaches users in the Map's next version (the published one is rebuilt from its recorded commit),
@@ -289,11 +290,11 @@ describe("the real mods/atlas.map", () => {
       "assets/style.css": sha("assets/style.css"),
     }).toEqual({
       "index.html": "774b8fd43cc22f9685ab10e2b3076e51ac413c9814a3225e364050ff03baa778",
-      "assets/app.js": "39b1edd9711e5dc687c9ce848de7fd952f0bebf1a4a6198cc273eb8a9e2a3156",
+      "assets/app.js": "d58465a38a94db3721211edea4d867397be15a4aa50e87951b4a39ffb47273af",
       "assets/style.css": "d1175700cab84482c2f4bcaf64260fa02f18468f245a10d89b3e57fdfbfa2d20",
     });
     expect(JSON.parse(readFileSync(join(MAP, MODULES_RECORD), "utf8")).bundle).toBe(
-      "563c667c35f18a2a40611bba6feb9a5df330d2b2dcf8696a09c0091415cb76c2",
+      "794e3883d016f5864fa22eb054351bf53515abcefbd0ea0a1be4164785e6282f",
     );
   }, 60_000);
 

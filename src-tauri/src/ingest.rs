@@ -1302,7 +1302,7 @@ struct ExistingNote {
 /// Whether `id` may name a note: non-empty, and only ASCII letters, digits, `-` and `_`. The derived
 /// vault name is then always one ordinary filename inside the vault that can't point anywhere else.
 /// Pinboard ids (a UUID, or the `w-…` fallback) and Chat's `chat-<message id>` all pass.
-fn valid_note_id(id: &str) -> bool {
+pub(crate) fn valid_note_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .bytes()

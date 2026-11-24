@@ -30,8 +30,9 @@
 // - The backend answers each call with a value, a refusal (`MOD-####`), or a page action it has
 //   authorised, which PM performs here from what only the page holds (`theme.get`: PM's live theme;
 //   `ui.openDocument`: PM's own document reader, on a document the backend found readable;
-//   `secrets.set`: PM's key field and `notify`: a notice strip, both drawn by whatever provides
-//   `ModPageHooksContext`, and an answer of PM's own failure when nothing does). The
+//   `secrets.set`: PM's key field, `notify`: a notice strip and `ui.openTaskEditor`: PM's task
+//   editor, all drawn by whatever provides `ModPageHooksContext`, and an answer of PM's own failure
+//   when nothing does). The
 //   action and its arguments come from the backend, never from the frame. The vectors come back as
 //   bytes, which are transferred to the frame, not copied.
 // - Events (spec §1.5): `mod_frame_open` is given a channel, and Rust keeps it with the session and
@@ -81,6 +82,7 @@ import {
   ModPageHooksContext,
   readNotice,
   readSecretAsk,
+  readTaskEditorRequest,
   type ModPageHooks,
   type ModSource,
 } from "./modPageHooks";
@@ -93,6 +95,7 @@ import {
   INTERNAL_MESSAGE,
   MAX_IN_FLIGHT,
   MOD_ERRORS,
+  PageRefusal,
   PORT_MESSAGE,
   callError,
   callResult,
@@ -247,6 +250,18 @@ function performPageAction(action: PageAction, args: unknown, ctx: PageContext):
       ctx.hooks.showNotice(ctx.source, notice);
       return null;
     }
+    case "ui.openTaskEditor": {
+      // PM's own editor, opened at once: the call does not wait for it to close (the frame re-reads on
+      // `tasks.changed`). Only the page knows whether one is already open.
+      const request = readTaskEditorRequest(args);
+      if (!ctx.hooks.openTaskEditor) {
+        throw new Error("ui.openTaskEditor: nothing to open the editor with");
+      }
+      if (!ctx.hooks.openTaskEditor(ctx.source, request)) {
+        throw new PageRefusal("rateLimited", "PM already has a task open for this mod.");
+      }
+      return { opened: true };
+    }
   }
 }
 
@@ -272,8 +287,18 @@ function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageCont
       let result: unknown;
       try {
         result = performPageAction(backend.action, backend.args, ctx);
-      } catch {
-        reply(live, callError(id, refusal("internal", INTERNAL_MESSAGE)));
+      } catch (e) {
+        // A refusal the page itself makes (an editor already open) is the frame's to read; anything
+        // else is PM's own failure.
+        reply(
+          live,
+          callError(
+            id,
+            e instanceof PageRefusal
+              ? refusal(e.code, e.message)
+              : refusal("internal", INTERNAL_MESSAGE),
+          ),
+        );
         return;
       }
       reply(live, callResult(id, result));

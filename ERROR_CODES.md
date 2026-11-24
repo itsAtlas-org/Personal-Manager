@@ -69,7 +69,7 @@ for: only PM's own sentence.
 | `MOD-2001` | The mod doesn't have the permission the call needs: it never asked for it, you turned it off, it wasn't granted at install, or a safety rule refuses it (unsigned mods may read your data or reach the internet, never both; and they can't read your data while PM's web engine isn't sealed). |
 | `MOD-2002` | The call needs a permission PM asks you for the first time it's used, and you haven't been asked yet. An AI request that would cost money asks again when the mod has no monthly AI limit yet (a mod moved from a free model to a paid one is asked at that moment). |
 | `MOD-2003` | The call needs your OK first. PM asks you itself, in its own words, and the mod is only told your answer. |
-| `MOD-2004` | You said no when PM asked, so nothing was done. |
+| `MOD-2004` | You said no when PM asked, or the question was no longer open (already answered, run out, or closed with the window), so nothing was done. |
 | `MOD-3001` | The mod is calling PM too fast, or has too many calls running at once (for an AI request or a web request, the limits are tighter than for other calls). It also answers `notify` once the mod has shown its five notices for today (counted by your local date), and `secrets.set` once a window of the mod has asked to show a key field three times. It also answers a call that needs your OK while PM is already asking you about another one for the same window (PM never queues a second question). |
 | `MOD-3002` | The call's arguments, or its answer, are larger than PM allows. |
 | `MOD-3003` | The mod's private storage is full, or it has already made as many tasks and milestones as PM lets one mod make (10,000). |

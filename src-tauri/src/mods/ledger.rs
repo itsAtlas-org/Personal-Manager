@@ -1762,6 +1762,8 @@ mod tests {
     mod pilots;
     // An update that only adds cache keys: unattended, stored as cache, left out of a backup.
     mod enhanced_keys;
+    // Which namespace the Pinboard's notes get when it is installed and signed by a dev test key.
+    mod pinboard_namespace;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).

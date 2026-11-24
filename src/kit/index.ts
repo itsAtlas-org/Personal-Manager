@@ -77,5 +77,11 @@ export {
 } from "./lib/contextMenu";
 export { MILESTONE_STATUSES, milestoneStatus } from "./lib/milestoneStatus";
 export { runMutation } from "./lib/runMutation";
+export {
+  REDACTED_EVENT_UID,
+  REDACTED_MILESTONE_ID,
+  fromModTask,
+  type ModTaskDto,
+} from "./lib/modTask";
 export { subscribeUntilCleanup, type Unlisten } from "./lib/subscribe";
 export { useDialogLayer } from "./lib/useDialogLayer";

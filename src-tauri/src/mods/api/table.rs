@@ -78,7 +78,6 @@ const fn experimental_call(
 /// A call row under a family of limits that is not experimental: one of PR C's (K2), whose call waits
 /// on something outside the DB (a launcher, an embed) or writes the user's lists (the gifts). Like
 /// [`experimental_call`], it must say which family it lives under.
-#[cfg_attr(not(test), allow(dead_code))]
 const fn family_call(
     name: &'static str,
     permission: &'static str,
@@ -142,6 +141,46 @@ pub const ROWS: &[Row] = &[
     experimental_call("secrets.set", "internet", Class::Egress, Family::General),
     // An in-app notice strip with the mod's name, capped per day.
     experimental_call("notify", "notify", Class::Local, Family::General),
+    // PR C's calls (K2): what the Pinboard uses. Every one is stable (API 1.0). A call that writes the
+    // user's lists names a second read (`second_read::WRITE_RULES`); the ones that wait on something
+    // outside the DB (a launcher, an embed) or add to the lists live under a family of limits.
+    call("tasks.list", "tasks.read", Class::Read),
+    family_call("tasks.add", "tasks.write", Class::Write, Family::Gifts),
+    call("tasks.setStatus", "tasks.write", Class::Write),
+    call("tasks.reorder", "tasks.write", Class::Write),
+    family_call(
+        "tasks.importChecklist",
+        "tasks.write",
+        Class::Write,
+        Family::Gifts,
+    ),
+    // Milestones belong to projects, so reading them is `projects.read` (spec §1.5).
+    call("milestones.list", "projects.read", Class::Read),
+    family_call(
+        "milestones.add",
+        "milestones.write",
+        Class::Write,
+        Family::Gifts,
+    ),
+    call("milestones.update", "milestones.write", Class::Write),
+    call("milestones.setStatus", "milestones.write", Class::Write),
+    // A milestone the caller did not make goes through PM's own question first.
+    call("milestones.delete", "milestones.write", Class::Write),
+    call("projects.list", "projects.read", Class::Read),
+    // Embeds, so the engine must be set up (MOD-5007); family `Embed`.
+    family_call(
+        "documents.saveNote",
+        "documents.write",
+        Class::Write,
+        Family::Embed,
+    ),
+    call("documents.statusOf", "documents.meta", Class::Read),
+    call("ui.openTaskEditor", "tasks.write", Class::Write),
+    // A link in the person's browser: `links` is egress, so D3 judges it like `internet`.
+    family_call("shell.openLink", "links", Class::Egress, Family::Links),
+    // The caller's own calendar overlay, drawn by PM without running its code: `storage`, and the
+    // handler requires the manifest to declare `contributions['calendar.overlay']`.
+    call("calendar.overlay.set", "storage", Class::Local),
     // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
     // A document that landed, as `documents.list`'s DTO with every field.
     event("documents.added", Some("documents.meta"), Class::Read),
@@ -375,8 +414,8 @@ mod tests {
 
     /// The family each of K2's calls must be admitted under, by name. A row left on `General` would
     /// run with no family bucket and no in-flight cap, and nothing else reads this wiring: the family
-    /// tests in `limits.rs` call `admit_family` directly. Rows land with K2; until then the table
-    /// holds none of them and the check passes on what is there (see [`family_wiring_faults`]).
+    /// tests in `limits.rs` call `admit_family` directly (see [`family_wiring_faults`]). `search`
+    /// arrives with the MCP slice and is not in the table yet.
     const FAMILY_OF: &[(&str, Family)] = &[
         ("tasks.add", Family::Gifts),
         ("tasks.importChecklist", Family::Gifts),

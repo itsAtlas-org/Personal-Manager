@@ -17,21 +17,27 @@
 //! held to the hash, the mod's gift quota for what the action will add, and only then
 //! [`Action::perform`], which asks [`still_current`](super::still_current) once more right before it
 //! commits. The action is the one stored with the token: nothing a frame or the page says reaches it.
-//! K2 adds a variant of [`Action`] and a branch to each of the four methods below (a variant that
-//! makes gifts says how many in `gifts`).
+//! Each variant of [`Action`] has a branch in each of its four methods below (a variant that makes
+//! gifts says how many in `gifts`); what it leaves for after the guard (the task views' announcement)
+//! rides back in [`Performed`] and is settled once the guard is gone.
 
 use std::time::Instant;
 
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::milestones::ops::Aftermath;
 use crate::mods::confirm::{snapshot_hash, Action, Ask, Refused};
 use crate::mods::ids::ModId;
 use crate::mods::MAIN_LABEL;
 
+use super::calls::Wrote;
 use super::grants::ModFacts;
 use super::permissions::Class;
-use super::{blocking, gifts, recheck, second_read, Authorised, Code, Host, ModError, Reply};
+use super::{
+    blocking, gifts, link_calls, milestone_calls, recheck, second_read, Authorised, Code, Host,
+    ModError, Reply,
+};
 
 /// What a question is about, as PM reads it now: the facts its text and its snapshot are made from,
 /// and the text.
@@ -44,12 +50,29 @@ pub(super) struct Target {
     pub summary: String,
 }
 
+/// What an action did: the answer for the mod, and what it leaves for after the guard (settled by
+/// [`complete`] once the guard is gone).
+pub(super) struct Performed {
+    pub value: Value,
+    pub aftermath: Aftermath,
+}
+
+impl Performed {
+    fn quiet(value: Value) -> Self {
+        Self {
+            value,
+            aftermath: Aftermath::default(),
+        }
+    }
+}
+
 impl Action {
     /// The action's stable name (the snapshot is bound to it).
     pub(super) fn name(&self) -> &'static str {
-        // `*self`, so that with no variant but a test's (a production build, until K2 adds the first)
-        // the match is over an empty enum and still compiles.
         match *self {
+            Self::OpenLink { .. } => "link.open",
+            Self::DeleteMilestone { .. } => "milestone.delete",
+            Self::CreateProject { .. } => "project.create",
             #[cfg(test)]
             Self::Probe { .. } => "probe",
             #[cfg(test)]
@@ -63,6 +86,8 @@ impl Action {
     /// that makes gifts MUST say so here. (`perform` still writes the ledger rows with the gift.)
     pub(super) fn gifts(&self) -> u64 {
         match *self {
+            Self::OpenLink { .. } | Self::DeleteMilestone { .. } => 0,
+            Self::CreateProject { .. } => 1,
             #[cfg(test)]
             Self::Probe { .. } => 0,
             #[cfg(test)]
@@ -71,10 +96,17 @@ impl Action {
     }
 
     /// Read the target for `mod_id` from the store: `NotFound` when it is gone (or, for a handler's
-    /// own rule, not this mod's to ask about).
+    /// own rule, not this mod's to ask about). What the question says is built here, from PM's data.
     #[cfg_attr(not(test), allow(unused_variables))]
     pub(super) fn read(&self, conn: &Connection, mod_id: &ModId) -> Result<Target, ModError> {
         match *self {
+            Self::OpenLink { ref url } => link_calls::read(url),
+            Self::DeleteMilestone { id } => milestone_calls::read_delete(conn, id),
+            Self::CreateProject {
+                ref project,
+                ref label,
+                ref due_date,
+            } => milestone_calls::read_create(conn, project, label, due_date),
             #[cfg(test)]
             Self::Probe { ref key } | Self::Gifting { ref key, .. } => {
                 let value: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
@@ -92,17 +124,36 @@ impl Action {
         }
     }
 
-    /// Do it, with the guard (`conn`) held and the call just re-checked. Commits only after
-    /// [`super::still_current`], like every writer.
-    #[cfg_attr(not(test), allow(unused_variables))]
+    /// Do it, with the guard (`conn`) held and the call just re-checked. A change to the user's data
+    /// is made in ONE transaction and committed only after [`super::still_current`], like every
+    /// writer; a link is opened after the same check, under the same guard.
     pub(super) fn perform<H: Host>(
         &self,
         host: &H,
         conn: &Connection,
         auth: &Authorised,
         _facts: &ModFacts,
-    ) -> Result<Value, ModError> {
+    ) -> Result<Performed, ModError> {
         match *self {
+            Self::OpenLink { ref url } => {
+                link_calls::perform(host, auth, url).map(Performed::quiet)
+            }
+            Self::DeleteMilestone { id } => {
+                in_one_transaction(host, conn, auth, |tx| milestone_calls::do_delete(tx, id))
+            }
+            Self::CreateProject {
+                ref project,
+                ref label,
+                ref due_date,
+            } => in_one_transaction(host, conn, auth, |tx| {
+                milestone_calls::create_with_milestone(
+                    tx,
+                    &auth.ticket.mod_id,
+                    project,
+                    label,
+                    due_date.clone(),
+                )
+            }),
             #[cfg(test)]
             Self::Probe { ref key } | Self::Gifting { ref key, .. } => {
                 let tx = conn.unchecked_transaction().map_err(ModError::internal)?;
@@ -114,17 +165,37 @@ impl Action {
                 host.at(super::Point::BeforeCommit);
                 super::still_current(host, auth)?;
                 tx.commit().map_err(ModError::internal)?;
-                Ok(serde_json::json!({"done": true}))
+                Ok(Performed::quiet(serde_json::json!({"done": true})))
             }
         }
     }
+}
+
+/// Run `work` in a transaction on the guard's connection and commit it after the call's last check:
+/// what an action that changes the user's data does, so a call that stopped being current in the
+/// meantime (an uninstall, a pause, a lock) commits nothing.
+fn in_one_transaction<H: Host>(
+    host: &H,
+    conn: &Connection,
+    auth: &Authorised,
+    work: impl FnOnce(&Connection) -> Result<Wrote<Value>, ModError>,
+) -> Result<Performed, ModError> {
+    let tx = conn.unchecked_transaction().map_err(ModError::internal)?;
+    let wrote = work(&tx)?;
+    #[cfg(test)]
+    host.at(super::Point::BeforeCommit);
+    super::still_current(host, auth)?;
+    tx.commit().map_err(ModError::internal)?;
+    Ok(Performed {
+        value: wrote.value,
+        aftermath: wrote.aftermath,
+    })
 }
 
 /// End a handler whose call needs the person's yes: read the target, hold the question, and return the
 /// error to answer with (`MOD-2003` carrying `{token, summary}`; or what refused it: the target is
 /// gone, the session ended, or the session is already waiting on another question, `MOD-3001`).
 /// Call it under the DB guard, after every check the call has, and answer `Err(request(..))`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn request<H: Host>(
     host: &H,
     conn: &Connection,
@@ -166,6 +237,18 @@ async fn answer<H: Host>(
     token: &str,
     accept: bool,
 ) -> Result<Value, ModError> {
+    let done = answer_in(host, window, token, accept).await?;
+    // The guard and the transaction are gone: the views may now be told.
+    host.settle(done.aftermath);
+    Ok(done.value)
+}
+
+async fn answer_in<H: Host>(
+    host: &H,
+    window: &str,
+    token: &str,
+    accept: bool,
+) -> Result<Performed, ModError> {
     // The main window only, as every call.
     if window != MAIN_LABEL {
         return Err(ModError::new(
