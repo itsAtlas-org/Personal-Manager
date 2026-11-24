@@ -84,6 +84,7 @@ mod model_gateway;
 mod mods;
 // The public-internet screen: calendar feeds now, a mod's `net.fetch` later.
 mod net_screen;
+mod notes;
 mod oauth_loopback;
 mod onedrive;
 mod openai_compat;

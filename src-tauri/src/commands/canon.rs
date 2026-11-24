@@ -6,7 +6,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::error::{Error, Result};
 use crate::ingest;
@@ -165,7 +165,7 @@ pub async fn rename_entity(app: AppHandle, entity_id: i64, new_name: String) -> 
 /// A rename, merge or delete re-keys or unlinks the project's tasks, so the open task views
 /// re-read. Called once the mutation has committed and released the guard.
 fn tasks_changed(app: &AppHandle) {
-    let _ = app.emit(crate::tasks::TASKS_CHANGED, ());
+    crate::tasks::announce_changed(app);
 }
 
 /// What a project merge will move — the honest, computed preview behind the type-to-confirm

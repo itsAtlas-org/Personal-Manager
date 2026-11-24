@@ -1305,7 +1305,7 @@ fn plain_text(
 
 /// [`plain_text`]'s rule on its own: `Err` says what's wrong ("is empty", …). The signed index's
 /// names and reasons (`index.rs`) are held to it too, since PM draws them the same way.
-pub(super) fn plain_text_fault(
+pub(crate) fn plain_text_fault(
     s: &str,
     max_chars: usize,
     newlines: bool,

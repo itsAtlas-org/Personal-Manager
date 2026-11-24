@@ -13,7 +13,7 @@
 // it says it looked at something. That is deliberately shallow — it is a floor under all of them,
 // not a substitute for a gate's own tests (`check-ipc-commands.test.mjs`, `check-model-licences`,
 // `check-sidecar-licences`, `check-requirements-lock`, `check-action-pins`,
-// `check-calendar-write-fence` each have those).
+// `check-calendar-write-fence`, `check-tasks-emit` each have those).
 //
 // Excluded on purpose: `check-npm-licenses` reads `node_modules`, so it belongs to the frontend job
 // rather than the zero-dependency hygiene set, and the generators/fetchers (`fetch-python`,
@@ -45,6 +45,7 @@ const GATES = [
   "check-sidecar-licences",
   "check-spdx-headers",
   "check-sync-set",
+  "check-tasks-emit",
   "check-version-lockstep",
 ];
 

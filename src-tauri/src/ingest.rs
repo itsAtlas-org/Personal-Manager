@@ -1309,6 +1309,58 @@ fn valid_note_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The largest file `refuse_foreign_note_file` will read to look for a MOD note's own claim: twice a
+/// mod call's 1 MiB of arguments, which covers any note a mod can save, its front matter and the
+/// encryption overhead. A bigger file is treated as somebody else's without being opened. Legacy
+/// notes (the Pinboard's and Chat's, saved over IPC) have no size limit, so they get no cap.
+const MAX_LEFTOVER_NOTE_FILE_BYTES: u64 = 2 << 20;
+
+/// Refuse to write a note over a vault file that is not its own (spec 1.3): a file already at the
+/// name the note would take that this note has no claim to. Before this, the note's file name
+/// (`note-<key>.md`) and its lookup (`source_id`) were two things, so a name shared with another
+/// note's file overwrote it, and did it without the prior-bytes snapshot the failure path restores
+/// from (that snapshot is taken only for a file the note's own row names). A dangling symlink counts
+/// as a file. The words are fixed: no key, title or path.
+///
+/// The note has a claim to the file when its own `documents` row names it (an edit), or when the file
+/// itself carries this note's `source_id` in its front matter: PM's own leftover of an earlier save
+/// that died between the file and the row (the file is written first), which the next save may
+/// replace, as it could before. A file with another note's claim, none, or bytes that don't read,
+/// is somebody else's. `max_leftover` bounds the size of file that is read to look for that claim
+/// (`None` reads any size).
+fn refuse_foreign_note_file(
+    cipher: &MarkdownCipher,
+    vault_file: &Path,
+    vault_name: &str,
+    existing: Option<&ExistingNote>,
+    source_id: &str,
+    max_leftover: Option<u64>,
+) -> Result<()> {
+    if std::fs::symlink_metadata(vault_file).is_err() {
+        return Ok(());
+    }
+    if existing.is_some_and(|e| e.vault_path == vault_name) {
+        return Ok(());
+    }
+    // Only a regular file is read, and for a mod's note only one of a believable size: a file past the
+    // cap can't be PM's own leftover (a mod note's body is at most a mod call's arguments, 1 MiB, plus
+    // front matter), and reading it would decrypt a planted file of any size into memory. The length
+    // comes from the same `symlink_metadata`, so a symlink, FIFO or device is still never opened.
+    let own_leftover = std::fs::symlink_metadata(vault_file)
+        .is_ok_and(|m| m.is_file() && max_leftover.is_none_or(|cap| m.len() <= cap))
+        && cipher.read(vault_file).is_ok_and(|text| {
+            parse_frontmatter(&text).is_some_and(|(fields, _)| {
+                fields.get("source_id").map(String::as_str) == Some(source_id)
+            })
+        });
+    if own_leftover {
+        return Ok(());
+    }
+    Err(Error::Other(
+        "A file with this note's name is already in the vault, so the note was not saved.".into(),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn ingest_note_document(
     state: &AppState,
@@ -1317,17 +1369,23 @@ pub fn ingest_note_document(
     cipher: &MarkdownCipher,
     vault_root: &Path,
     manifest_cipher: &crate::index_only::ManifestCipher,
-    widget_id: &str,
+    namespace: &crate::notes::Namespace,
+    key: &str,
     title: &str,
     body: &str,
 ) -> Result<Document> {
-    // The note is named by its widget id, which arrives over IPC, so the id is checked before
-    // anything else: it used to be checked only after the body had been chunked and embedded, so a
-    // refused id (Chat's old `chat:<id>`) paid for a full embed and then failed.
-    if !valid_note_id(widget_id) {
+    // The note is named by its key (a pinboard widget id, or a mod's own), which arrives over IPC,
+    // so the key is checked before anything else: it used to be checked only after the body had
+    // been chunked and embedded, so a refused id (Chat's old `chat:<id>`) paid for a full embed and
+    // then failed.
+    if !valid_note_id(key) {
         return Err(Error::Other("invalid note id".into()));
     }
-    let source_id = format!("note:{widget_id}");
+    let source_id = namespace.source_id(key);
+    // Name the file by the stable key (checked by `valid_note_id` above) so an edit overwrites the
+    // same file.
+    let vault_name = cipher.on_disk_name(&namespace.file_name(key));
+    let vault_file = vault.join(&vault_name);
     let content_hash = crate::index_only::pointer_content_hash(&source_id, body);
 
     // The existing document for this note, if any — across source types (a fresh `vault` note or a
@@ -1381,6 +1439,19 @@ pub fn ingest_note_document(
         }
     }
 
+    // Never write over a vault file this note doesn't own (spec 1.3). Checked before the embed, which
+    // is the expensive part, and before anything is written.
+    refuse_foreign_note_file(
+        cipher,
+        &vault_file,
+        &vault_name,
+        existing.as_ref(),
+        &source_id,
+        // Only a mod's note is bounded; the legacy IPC path has no body-size limit.
+        matches!(namespace, crate::notes::Namespace::Mod(_))
+            .then_some(MAX_LEFTOVER_NOTE_FILE_BYTES),
+    )?;
+
     // Chunk + embed the full body off the lock, like a fresh ingest.
     let chunks = split_document(gateway, body, title, &content_hash)?;
     let texts = leaf_embed_texts(&chunks);
@@ -1422,10 +1493,6 @@ pub fn ingest_note_document(
         None => Vec::new(),
     };
 
-    // Name the file by the stable widget id (checked by `valid_note_id` above) so an edit overwrites
-    // the same file.
-    let vault_name = cipher.on_disk_name(&format!("note-{widget_id}.md"));
-    let vault_file = vault.join(&vault_name);
     // If we're overwriting an existing note's file in place, snapshot its bytes first so a failed DB
     // half can restore them — the vault file must never diverge from the (rolled-back) DB row it
     // mirrors, or a later Rebuild would bake the divergence in.
@@ -7697,5 +7764,206 @@ mod tests {
         // The forged lines stayed inside the title value; they didn't take effect.
         assert_eq!(fields.get("project").map(String::as_str), Some("Unsorted"));
         assert_eq!(fields.get("reviewed").map(|s| s.trim()), Some("false"));
+    }
+
+    // --- K0: a note never overwrites a file that isn't its own (spec 1.3) ---------------------
+
+    const FOREIGN_WORDS: &str =
+        "A file with this note's name is already in the vault, so the note was not saved.";
+
+    fn refusal(r: Result<()>) -> String {
+        r.unwrap_err().to_string()
+    }
+
+    fn note_row(vault_path: &str) -> ExistingNote {
+        ExistingNote {
+            doc_id: 1,
+            source_type: SOURCE_TYPE_VAULT.into(),
+            content_hash: "h".into(),
+            title: "t".into(),
+            project: "Unsorted".into(),
+            tags: Vec::new(),
+            importance: None,
+            reviewed: false,
+            created_at: None,
+            vault_path: vault_path.into(),
+        }
+    }
+
+    /// A vault file as `ingest_note_document` writes it, claiming `source_id`.
+    fn claimed_file(cipher: &MarkdownCipher, file: &Path, source_id: &str) {
+        let front = Frontmatter {
+            title: "t",
+            source_path: "",
+            ext: Some("md"),
+            content_hash: "h",
+            created_at: "2026-11-24T00:00:00.000Z",
+            ingested_at: "2026-11-24T00:00:00.000Z",
+            project: "Unsorted",
+            linked_projects: &[],
+            tags: &[],
+            importance: None,
+            last_activity: "2026-11-24T00:00:00.000Z",
+            reviewed: false,
+            photo: None,
+            spreadsheet: None,
+            chat: None,
+            source_id: Some(source_id),
+            external_ref: None,
+        };
+        cipher
+            .write_to(file, &render_markdown(&front, "body"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_note_will_not_overwrite_a_vault_file_without_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = MarkdownCipher::plaintext("v");
+        let name = "note-w-1.md";
+        let file = dir.path().join(name);
+        let sid = "note:w-1";
+        let check = |existing: Option<&ExistingNote>| {
+            refuse_foreign_note_file(&cipher, &file, name, existing, sid, None)
+        };
+
+        // Nothing there: fine, with or without a row.
+        check(None).unwrap();
+        check(Some(&note_row(name))).unwrap();
+
+        // A file is there with no claim at all. With no row for this note it is somebody else's:
+        // refused, and untouched.
+        std::fs::write(&file, b"another note").unwrap();
+        assert_eq!(refusal(check(None)), FOREIGN_WORDS);
+        // A row that points somewhere else (a pointer, or another file) doesn't own it either.
+        assert_eq!(refusal(check(Some(&note_row("idx://x")))), FOREIGN_WORDS);
+        assert_eq!(
+            refusal(check(Some(&note_row("note-other.md")))),
+            FOREIGN_WORDS
+        );
+        // Another note's claim is no claim of this one's.
+        claimed_file(&cipher, &file, "note:w-2");
+        assert_eq!(refusal(check(None)), FOREIGN_WORDS);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("note:w-2"));
+
+        // This note's own row naming this very file: an edit, allowed, whatever the file says.
+        check(Some(&note_row(name))).unwrap();
+    }
+
+    /// A save that died between writing the file and indexing it leaves PM's own file with no row:
+    /// the next save of that note may replace it, so the note is not blocked for good.
+    #[test]
+    fn a_note_may_replace_its_own_leftover_file_after_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = MarkdownCipher::plaintext("v");
+        let name = "note-w-1.md";
+        let file = dir.path().join(name);
+        claimed_file(&cipher, &file, "note:w-1");
+        refuse_foreign_note_file(&cipher, &file, name, None, "note:w-1", None).unwrap();
+        // The same bytes under another note's name are not this one's.
+        assert_eq!(
+            refusal(refuse_foreign_note_file(
+                &cipher, &file, name, None, "note:w-3", None
+            )),
+            FOREIGN_WORDS
+        );
+        // A mod's note is told apart from the legacy one by its source_id too.
+        assert_eq!(
+            refusal(refuse_foreign_note_file(
+                &cipher,
+                &file,
+                name,
+                None,
+                "mod:acme.a:w-1",
+                None
+            )),
+            FOREIGN_WORDS
+        );
+    }
+
+    /// A planted file past the cap is refused without being read, even when its front matter carries
+    /// this note's own claim (which only a read could see); one at the cap is still read.
+    #[test]
+    fn a_huge_file_at_a_notes_name_is_refused_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = MarkdownCipher::plaintext("v");
+        let name = "note-w-1.md";
+        let file = dir.path().join(name);
+        claimed_file(&cipher, &file, "note:w-1");
+        let small = std::fs::read(&file).unwrap();
+        let padded = |len: u64| {
+            let mut bytes = small.clone();
+            bytes.resize(len as usize, b' ');
+            std::fs::write(&file, bytes).unwrap();
+        };
+        let capped = |sid: &str| {
+            refuse_foreign_note_file(
+                &cipher,
+                &file,
+                name,
+                None,
+                sid,
+                Some(MAX_LEFTOVER_NOTE_FILE_BYTES),
+            )
+        };
+        padded(MAX_LEFTOVER_NOTE_FILE_BYTES);
+        capped("note:w-1").unwrap();
+        padded(MAX_LEFTOVER_NOTE_FILE_BYTES + 1);
+        assert_eq!(refusal(capped("note:w-1")), FOREIGN_WORDS);
+        // No cap (a legacy note, which has no size limit): its own big leftover is still recognised,
+        // and another note's claim on the same bytes is still refused.
+        refuse_foreign_note_file(&cipher, &file, name, None, "note:w-1", None).unwrap();
+        assert_eq!(
+            refusal(refuse_foreign_note_file(
+                &cipher, &file, name, None, "note:w-3", None
+            )),
+            FOREIGN_WORDS
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_counts_as_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cipher = MarkdownCipher::plaintext("v");
+        let file = dir.path().join("note-w-1.md");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &file).unwrap();
+        assert!(
+            refuse_foreign_note_file(&cipher, &file, "note-w-1.md", None, "note:w-1", None)
+                .is_err()
+        );
+    }
+
+    /// The row's own file is the one the check lets through, so an EDIT of an existing note is never
+    /// refused: the call in `ingest_note_document` passes the row it looked up (a `None` there would
+    /// refuse every edit of a note that exists). The call is held to that by text, since the function
+    /// embeds and no unit test reaches it; the behaviour it relies on is the test above.
+    #[test]
+    fn a_note_is_checked_against_a_foreign_file_before_anything_is_written() {
+        let source = include_str!("ingest.rs");
+        let from = source.find("pub fn ingest_note_document").unwrap();
+        let body = &source[from..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let named = body
+            .find("let vault_file = vault.join(")
+            .expect("the file is named");
+        let checked = body
+            .find("refuse_foreign_note_file(")
+            .expect("the file is checked");
+        let call = &body[checked..checked + body[checked..].find(")?;").unwrap()];
+        assert!(
+            call.contains("existing.as_ref()") && call.contains("&source_id"),
+            "checked against the row looked up, for this note's source_id"
+        );
+        assert!(
+            call.contains("Namespace::Mod(_)") && call.contains("MAX_LEFTOVER_NOTE_FILE_BYTES"),
+            "only a mod's note is size-capped: the legacy IPC path has no body limit"
+        );
+        let embedded = body.find("split_document(").expect("then embedded");
+        let written = body.find("cipher.write_to(").expect("then written");
+        assert!(
+            named < checked && checked < embedded && embedded < written,
+            "named, checked, embedded, written"
+        );
     }
 }

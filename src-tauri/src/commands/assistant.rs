@@ -4,15 +4,18 @@
 //! The personal assistant: project milestones, the tray and briefing windows, the daily
 //! briefing, flag resolution and the focus box.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::calendar;
 use crate::error::{Error, Result};
 use crate::ingest;
 use crate::llm_gateway::{self, Role};
+use crate::milestones::ops::{self, touch_milestone_project};
+// The tests below exercise the relink step by name; the command reaches it through `ops::set_event`.
+#[cfg(test)]
+use crate::milestones::ops::relink;
 use crate::milestones::{self, Milestone};
-use crate::project_activity;
 use crate::projects;
 use crate::tray;
 use crate::{briefing, clock, entities, flags, preferences, AppState};
@@ -26,16 +29,6 @@ use super::spend::log_usage;
 // single status is derived from the nearest unmet one. PM-native milestones have a user-set date;
 // calendar-linked ones (event_uid set) sync their date from the read-only calendar mirror. All quick
 // synchronous DB work — no model calls, so the lock is held only briefly (rule #4).
-
-/// Bump the activity date of the project owning milestone `id` — editing a milestone counts
-/// as engaging with its project. Best-effort: an unknown id is a no-op.
-fn touch_milestone_project(conn: &Connection, id: i64) -> Result<()> {
-    if let Some(project) = milestones::project_of(conn, id)? {
-        projects::touch(conn, &project)?;
-        project_activity::record(conn, &project, project_activity::Kind::Milestone, Some(id));
-    }
-    Ok(())
-}
 
 /// One project's milestones, resolved (calendar-linked dates synced) and date-ordered.
 #[tauri::command]
@@ -55,29 +48,28 @@ pub fn list_all_milestones(state: State<'_, AppState>) -> Result<Vec<Milestone>>
 }
 
 /// Add a milestone to a project (creating the project's metadata row if needed). A non-empty
-/// `event_uid` makes it calendar-linked. Returns the new stable id.
+/// `event_uid` makes it calendar-linked. Returns the new stable id. Every side effect of the
+/// milestone commands lives in [`milestones::ops`], shared with the mod handlers.
 #[tauri::command]
 pub fn add_milestone(
     state: State<'_, AppState>,
+    app: AppHandle,
     project: String,
     label: String,
     due_date: Option<String>,
     event_uid: Option<String>,
 ) -> Result<i64> {
-    let project = project.trim();
-    if project.is_empty() {
-        return Err(Error::Other("project name is empty".into()));
-    }
     let conn = state.conn()?;
-    let id = milestones::add(&conn, project, &label, due_date, event_uid)?;
-    projects::touch(&conn, project)?;
-    briefing::nudge(&state);
-    project_activity::record(&conn, project, project_activity::Kind::Milestone, Some(id));
+    let (id, after) = ops::add(&conn, &project, &label, due_date, event_uid)?;
+    drop(conn);
+    after.finish(&state, &app);
     Ok(id)
 }
 
 /// Edit a milestone's label and (for a PM-native milestone) its date. A calendar-linked
-/// milestone keeps its calendar-owned date regardless.
+/// milestone keeps its calendar-owned date regardless. A task whose deadline follows a milestone
+/// reads that milestone's date, label and existence, so a change to any of them is a change to what
+/// the task views show (PA-1): the aftermath re-reads them, once the guard is dropped.
 #[tauri::command]
 pub fn update_milestone(
     app: AppHandle,
@@ -87,19 +79,10 @@ pub fn update_milestone(
     due_date: Option<String>,
 ) -> Result<()> {
     let conn = state.conn()?;
-    milestones::update(&conn, id, &label, due_date)?;
-    touch_milestone_project(&conn, id)?;
-    briefing::nudge(&state);
+    let after = ops::update(&conn, id, &label, due_date)?;
     drop(conn);
-    milestone_moved_tasks(&app);
+    after.finish(&state, &app);
     Ok(())
-}
-
-/// A task whose deadline follows a milestone reads that milestone's date, label and existence, so a
-/// change to any of them is a change to what the task views show (PA-1). Emitted after the guard
-/// is dropped, like every task write.
-fn milestone_moved_tasks(app: &AppHandle) {
-    let _ = app.emit(crate::tasks::TASKS_CHANGED, ());
 }
 
 /// Link a milestone to a calendar event (`event_uid` Some, `cached_date` seeds the offline cache)
@@ -117,36 +100,16 @@ pub fn set_milestone_event(
     only_if_linked_to: Option<String>,
 ) -> Result<()> {
     let conn = state.conn()?;
-    relink(
+    let after = ops::set_event(
         &conn,
         id,
         event_uid,
         cached_date,
         only_if_linked_to.as_deref(),
     )?;
-    briefing::nudge(&state);
     drop(conn);
-    milestone_moved_tasks(&app);
+    after.finish(&state, &app);
     Ok(())
-}
-
-/// [`set_milestone_event`] but the briefing's nudge: a refusal is in the words the user sees, and
-/// changes nothing.
-fn relink(
-    conn: &Connection,
-    id: i64,
-    event_uid: Option<String>,
-    cached_date: Option<String>,
-    only_if_linked_to: Option<&str>,
-) -> Result<()> {
-    if !milestones::set_event(conn, id, event_uid, cached_date, only_if_linked_to)? {
-        let words = match milestones::project_of(conn, id)? {
-            None => "That milestone no longer exists.",
-            Some(_) => "That milestone changed since; nothing was moved.",
-        };
-        return Err(Error::Other(words.into()));
-    }
-    touch_milestone_project(conn, id)
 }
 
 /// Mark a milestone met or unmet.
@@ -158,27 +121,15 @@ pub fn set_milestone_state(
     met: bool,
 ) -> Result<()> {
     let conn = state.conn()?;
-    milestones::set_state(&conn, id, met)?;
-    // Un-marking a milestone done is the "I made a mistake" undo: clear any flag the user asserted done
-    // on it, so the next briefing refresh's detection can surface the deadline again. A completion vouched
-    // done is otherwise a protected record the re-scan can't re-open. Ticking it done needs no such step —
-    // detection prunes the now-met milestone's active flag on its own.
-    if !met {
-        flags::reopen_milestone(&conn, id)?;
-    }
-    touch_milestone_project(&conn, id)?;
-    briefing::nudge(&state);
+    let after = ops::set_state(&conn, id, met)?;
     drop(conn);
-    milestone_moved_tasks(&app);
+    after.finish(&state, &app);
     Ok(())
 }
 
 /// Set a milestone's progress status (v42) — the four-level counterpart to the met/unmet tick-box.
-/// `milestones::set_status` carries `state` along, so this goes through exactly the same
-/// flag-reopening step `set_milestone_state` does: moving OFF `done` is the same "I made a mistake"
-/// undo as un-ticking the box, and must clear a user-asserted completion so detection can surface
-/// the deadline again. Skipping that here would make the two controls behave differently on the
-/// same transition.
+/// Moving OFF `done` is the same "I made a mistake" undo as un-ticking the box; [`ops::set_status`]
+/// carries that step, shared with `set_milestone_state`.
 #[tauri::command]
 pub fn set_milestone_status(
     app: AppHandle,
@@ -187,14 +138,9 @@ pub fn set_milestone_status(
     status: String,
 ) -> Result<()> {
     let conn = state.conn()?;
-    milestones::set_status(&conn, id, &status)?;
-    if status != milestones::STATUS_DONE {
-        flags::reopen_milestone(&conn, id)?;
-    }
-    touch_milestone_project(&conn, id)?;
-    briefing::nudge(&state);
+    let after = ops::set_status(&conn, id, &status)?;
     drop(conn);
-    milestone_moved_tasks(&app);
+    after.finish(&state, &app);
     Ok(())
 }
 
@@ -203,18 +149,9 @@ pub fn set_milestone_status(
 #[tauri::command]
 pub fn delete_milestone(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
     let conn = state.conn()?;
-    // Resolve the owning project before the row is gone, then bump its activity.
-    let project = milestones::project_of(&conn, id)?;
-    milestones::remove(&conn, id)?;
-    briefing::nudge(&state);
-    if let Some(project) = project {
-        projects::touch(&conn, &project)?;
-        // The row is gone, but `source_ref` is a plain pointer (not an FK), so the deleted
-        // milestone's id is still a valid historical reference for the observation.
-        project_activity::record(&conn, &project, project_activity::Kind::Milestone, Some(id));
-    }
+    let after = ops::remove(&conn, id)?;
     drop(conn);
-    milestone_moved_tasks(&app);
+    after.finish(&state, &app);
     Ok(())
 }
 
@@ -222,15 +159,14 @@ pub fn delete_milestone(app: AppHandle, state: State<'_, AppState>, id: i64) -> 
 #[tauri::command]
 pub fn reorder_milestones(
     state: State<'_, AppState>,
+    app: AppHandle,
     project: String,
     ordered_ids: Vec<i64>,
 ) -> Result<()> {
     let conn = state.conn()?;
-    let project = project.trim();
-    milestones::reorder(&conn, project, &ordered_ids)?;
-    projects::touch(&conn, project)?;
-    // A bulk reorder has no single milestone id, so the observation is project-level (source_ref None).
-    project_activity::record(&conn, project, project_activity::Kind::Milestone, None);
+    let after = ops::reorder(&conn, &project, &ordered_ids)?;
+    drop(conn);
+    after.finish(&state, &app);
     Ok(())
 }
 
@@ -674,10 +610,10 @@ mod tests {
             .expect("the command is defined");
         let body = &source[at..];
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
-        let relinked = body.find("relink(").expect("the command relinks");
+        let relinked = body.find("ops::set_event(").expect("the command relinks");
         let nudged = body[relinked..]
-            .find("briefing::nudge(&state);")
-            .expect("then nudges the briefing");
+            .find(".finish(&state")
+            .expect("then nudges the briefing (the aftermath's `finish`)");
         assert!(
             body[relinked..relinked + nudged].contains(")?;"),
             "only once the relink is done"

@@ -23,6 +23,8 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 
+pub mod ops;
+
 /// The progress values `project_milestones.status` admits (v42), coarsest-first. Deliberately a
 /// small closed set mirrored by the migration's CHECK constraint — a value not in here is rejected
 /// at the setter so the DB constraint is a backstop, not the error surface the user meets.
@@ -376,7 +378,8 @@ fn clean(v: Option<String>) -> Option<String> {
 /// Add a milestone, upserting a bare `projects` row first so the FK holds for a lazy
 /// (never-triaged) project. `sort_order` defaults to the end of the list. A non-empty
 /// `event_uid` makes it calendar-linked; `due_date` is then a cache for offline display.
-/// Returns the new stable id.
+/// Returns the new stable id. Its own transaction: [`add_in`] is the same write for a caller that
+/// has one open.
 pub fn add(
     conn: &Connection,
     project: &str,
@@ -384,23 +387,76 @@ pub fn add(
     due_date: Option<String>,
     event_uid: Option<String>,
 ) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let id = add_in(&tx, project, label, due_date, event_uid)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// [`add`] inside the caller's transaction: it opens none and commits none, so a caller can write
+/// a gift ledger row beside the milestone and have both commit, or neither (see `tasks::add_in`).
+/// Refused outside a transaction.
+pub fn add_in(
+    conn: &Connection,
+    project: &str,
+    label: &str,
+    due_date: Option<String>,
+    event_uid: Option<String>,
+) -> Result<i64> {
+    crate::tasks::require_transaction(conn)?;
     let label = clean(Some(label.to_string())).unwrap_or_else(|| "deadline".to_string());
     let due_date = clean(due_date);
     let event_uid = clean(event_uid);
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
         params![project],
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO project_milestones(project_name, label, due_date, event_uid, sort_order) \
          VALUES (?1, ?2, ?3, ?4, \
                  (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM project_milestones WHERE project_name = ?1))",
         params![project, label, due_date, event_uid],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
-    Ok(id)
+    Ok(conn.last_insert_rowid())
+}
+
+/// The longest milestone label a mod may write, in characters.
+#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
+pub const MOD_LABEL_MAX: usize = 200;
+
+/// A mod-supplied label and date, checked: [`add`] stores both as given and the IPC path leans on
+/// the date field in the page. A mod has no such field, so the date must be a real `YYYY-MM-DD`
+/// (month and day in range for the year, exactly ten characters, nothing after), and the label
+/// plain text of at most [`MOD_LABEL_MAX`] characters (`mods::package::plain_text_fault`: no control
+/// or hidden characters). Both are trimmed first; a blank label stays blank (`add` names it
+/// "deadline", as it does for the page) and a blank date is no date. Returns the pair to store. The
+/// words are fixed and never echo what was sent.
+#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
+pub fn validate_label_and_date(
+    label: &str,
+    due_date: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let label = label.trim();
+    if crate::mods::package::plain_text_fault(label, MOD_LABEL_MAX, false, true).is_err() {
+        return Err(Error::Other(format!(
+            "A milestone label must be plain text of at most {MOD_LABEL_MAX} characters."
+        )));
+    }
+    let date = match due_date.map(str::trim).filter(|d| !d.is_empty()) {
+        None => None,
+        Some(d) => {
+            let real = d.len() == 10
+                && NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == d);
+            if !real {
+                return Err(Error::Other(
+                    "A milestone date must be a real date written YYYY-MM-DD.".into(),
+                ));
+            }
+            Some(d.to_string())
+        }
+    };
+    Ok((label.to_string(), date))
 }
 
 /// Update a milestone's editable fields (label + PM-native date). A calendar-linked
@@ -996,5 +1052,109 @@ mod tests {
         )
         .unwrap();
         assert_eq!(row(&conn, id), (Some("met".into()), Some("done".into())));
+    }
+
+    // --- K0: the seams a mod path needs (PR C) -----------------------------------------------
+
+    fn milestone_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM project_milestones", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// See `tasks::add_in`: a gift's ledger row commits with the milestone or not at all.
+    #[test]
+    fn add_in_rolls_back_with_its_callers_transaction() {
+        let (_dir, conn) = store();
+        let tx = conn.unchecked_transaction().unwrap();
+        let id = add_in(&tx, "Brand New", "Pitch", Some("2026-12-01".into()), None).unwrap();
+        assert!(id > 0);
+        assert_eq!(milestone_rows(&tx), 1);
+        tx.rollback().unwrap();
+        assert_eq!(milestone_rows(&conn), 0);
+        let projects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(projects, 0, "the project row it minted rolled back too");
+
+        let tx = conn.unchecked_transaction().unwrap();
+        add_in(&tx, "Atlas", "Kept", None, None).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(milestone_rows(&conn), 1);
+        // The wrapper is the same write in a transaction of its own.
+        add(&conn, "Atlas", "Second", None, None).unwrap();
+        assert_eq!(milestone_rows(&conn), 2);
+    }
+
+    #[test]
+    fn add_in_refuses_to_run_outside_a_transaction() {
+        let (_dir, conn) = store();
+        assert!(add_in(&conn, "Atlas", "Pitch", None, None).is_err());
+        assert_eq!(milestone_rows(&conn), 0);
+    }
+
+    #[test]
+    fn a_mod_milestone_date_must_be_a_real_ymd() {
+        let ok = |d: &str| validate_label_and_date("Pitch", Some(d)).map(|(_, date)| date);
+        assert_eq!(ok("2026-12-01").unwrap().as_deref(), Some("2026-12-01"));
+        assert_eq!(
+            ok(" 2028-02-29 ").unwrap().as_deref(),
+            Some("2028-02-29"),
+            "a leap day, trimmed"
+        );
+        for bad in [
+            "2026-02-30",       // not a day
+            "2027-02-29",       // not a leap year
+            "2026-13-01",       // not a month
+            "2026-1-5",         // not zero-padded
+            "26-12-01",         // not four digits
+            "2026-12-01T10:00", // a time is not a date
+            "01-12-2026",
+            "2026/12/01",
+            "tomorrow",
+            "２０２６-12-01",
+            "+2026-12-01",
+        ] {
+            let err = validate_label_and_date("Pitch", Some(bad)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "A milestone date must be a real date written YYYY-MM-DD.",
+                "{bad:?}"
+            );
+        }
+        // No date is allowed (a blank is no date); the label is trimmed and a blank one is left for
+        // `add` to name.
+        assert_eq!(
+            validate_label_and_date("  Pitch ", None).unwrap(),
+            ("Pitch".into(), None)
+        );
+        assert_eq!(
+            validate_label_and_date("Pitch", Some("  ")).unwrap().1,
+            None
+        );
+        assert_eq!(validate_label_and_date("  ", None).unwrap().0, "");
+    }
+
+    #[test]
+    fn a_mod_milestone_label_is_short_plain_text() {
+        let longest = "x".repeat(MOD_LABEL_MAX);
+        assert_eq!(validate_label_and_date(&longest, None).unwrap().0, longest);
+        let too_long = "x".repeat(MOD_LABEL_MAX + 1);
+        for bad in [
+            too_long.as_str(),
+            "two\nlines",
+            "tab\there",
+            "bell\u{7}",
+            "hidden\u{200b}space",
+            "flip\u{202e}text",
+        ] {
+            let err = validate_label_and_date(bad, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "A milestone label must be plain text of at most 200 characters.",
+                "{bad:?}"
+            );
+        }
+        // Counted in characters, not bytes.
+        assert!(validate_label_and_date(&"é".repeat(MOD_LABEL_MAX), None).is_ok());
     }
 }

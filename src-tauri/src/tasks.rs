@@ -39,6 +39,15 @@ use crate::error::{Error, Result};
 /// view listens for it, so a change made on one surface shows on all of them.
 pub const TASKS_CHANGED: &str = "tasks://changed";
 
+/// Tell every open view the task list changed (a task, a stack, or anything a task's links read: a
+/// milestone, a project's name, a calendar event). **The one place [`TASKS_CHANGED`] is emitted**:
+/// `scripts/check-tasks-emit.mjs` fails the build on any other emit of it, so a writer can't
+/// announce a change one way here and another way there. Call it once the DB guard is dropped.
+pub fn announce_changed(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit(TASKS_CHANGED, ());
+}
+
 // --- the closed value sets (I-12: one owner per CHECK set; v59 mirrors these) ---------------
 
 /// `tasks.status`.
@@ -341,6 +350,26 @@ fn stack_exists(conn: &Connection, id: i64) -> Result<bool> {
 /// canon.rs resolves a name (`entities::resolve_project`, exact). Otherwise the typed name, trimmed:
 /// a genuinely new project, whose row [`ensure_project`] then mints.
 pub fn canonical_project(conn: &Connection, typed: &str) -> Result<String> {
+    Ok(lookup_project(conn, typed)?.unwrap_or_else(|| typed.trim().to_string()))
+}
+
+/// [`canonical_project`] for a caller that must NOT mint a project: the name a project already goes
+/// by, or an error. A mod's write names a project it was shown; typing one that doesn't exist is a
+/// refusal, not a new row ([`ensure_project`] would INSERT it). The words are fixed and never echo
+/// the typed name.
+#[allow(dead_code)] // K2's mod handlers are the caller (PR C1); tests cover it now
+pub fn resolve_existing_project(conn: &Connection, typed: &str) -> Result<String> {
+    let found = if typed.trim().is_empty() {
+        None
+    } else {
+        lookup_project(conn, typed)?
+    };
+    found.ok_or_else(|| Error::Other("That project does not exist.".into()))
+}
+
+/// The project a typed name means, or `None` when no project goes by it: the one lookup behind
+/// [`canonical_project`] and [`resolve_existing_project`], so the two can never resolve differently.
+fn lookup_project(conn: &Connection, typed: &str) -> Result<Option<String>> {
     let typed = typed.trim();
     let mut stmt = conn.prepare(
         "SELECT p.name, EXISTS(SELECT 1 FROM entities e \
@@ -353,7 +382,7 @@ pub fn canonical_project(conn: &Connection, typed: &str) -> Result<String> {
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     if names.iter().any(|(n, _)| n == typed) {
-        return Ok(typed.to_string());
+        return Ok(Some(typed.to_string()));
     }
     // Rust's case folding, not SQLite's `lower()`, which folds ASCII only.
     let folded = typed.to_lowercase();
@@ -362,11 +391,11 @@ pub fn canonical_project(conn: &Connection, typed: &str) -> Result<String> {
         .filter(|(n, _)| n.to_lowercase() == folded)
         .min_by(|(a, a_entity), (b, b_entity)| b_entity.cmp(a_entity).then_with(|| a.cmp(b)))
     {
-        return Ok(name.clone());
+        return Ok(Some(name.clone()));
     }
     match crate::entities::resolve_project(conn, typed, false)? {
-        Some(id) => crate::entities::canonical_name(conn, id),
-        None => Ok(typed.to_string()),
+        Some(id) => Ok(Some(crate::entities::canonical_name(conn, id)?)),
+        None => Ok(None),
     }
 }
 
@@ -589,14 +618,27 @@ pub fn count_for_project(conn: &Connection, name: &str) -> Result<i64> {
 // --- writing ------------------------------------------------------------------------------
 
 /// Add a task at the end of the global order. A milestone link fills in the project when none is
-/// given. Returns the new id.
+/// given. Returns the new id. Its own transaction: [`add_in`] is the same write for a caller that
+/// has one open.
 pub fn add(conn: &Connection, fields: &TaskFields, source: &str) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let id = add_in(&tx, fields, source)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// [`add`] inside the caller's transaction: it opens none and commits none, so a caller can put
+/// another row beside the task (a mod's gift ledger row) and have both commit, or neither. SQLite
+/// can't nest a BEGIN, which is why this is its own function and not a flag. Refused outside a
+/// transaction, where its several statements would each commit alone and a failure half-way would
+/// leave a stray project row.
+pub fn add_in(conn: &Connection, fields: &TaskFields, source: &str) -> Result<i64> {
+    require_transaction(conn)?;
     validate_source(source)?;
     let mut f = validate_fields(fields)?;
-    let tx = conn.unchecked_transaction()?;
-    resolve_links(&tx, &mut f)?;
-    ensure_project(&tx, f.project.as_deref())?;
-    tx.execute(
+    resolve_links(conn, &mut f)?;
+    ensure_project(conn, f.project.as_deref())?;
+    conn.execute(
         "INSERT INTO tasks(title, why, project_name, milestone_id, event_uid, do_start, do_end, \
                            deadline, deadline_kind, deadline_from, lane, stack_id, parked, \
                            source, ordinal) \
@@ -619,9 +661,18 @@ pub fn add(conn: &Connection, fields: &TaskFields, source: &str) -> Result<i64> 
             source
         ],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
-    Ok(id)
+    Ok(conn.last_insert_rowid())
+}
+
+/// The guard behind every `*_in` function: the caller opened a transaction. A programming error,
+/// never a user's, so the words are a plain internal one.
+pub(crate) fn require_transaction(conn: &Connection) -> Result<()> {
+    if conn.is_autocommit() {
+        return Err(Error::Other(
+            "internal error: this write must run inside a transaction".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Rewrite a task's editable fields. An unknown id is an error.
@@ -759,8 +810,21 @@ pub fn import_checklist(
     items: &[ChecklistItem],
 ) -> Result<ImportResult> {
     let tx = conn.unchecked_transaction()?;
+    let result = import_checklist_in(&tx, project, items)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+/// [`import_checklist`] inside the caller's transaction (see [`add_in`]): a mod's import writes its
+/// gift ledger rows in the same transaction as the tasks.
+pub fn import_checklist_in(
+    tx: &Connection,
+    project: Option<&str>,
+    items: &[ChecklistItem],
+) -> Result<ImportResult> {
+    require_transaction(tx)?;
     let project = match clean(project.map(str::to_string)) {
-        Some(typed) => Some(canonical_project(&tx, &typed)?),
+        Some(typed) => Some(canonical_project(tx, &typed)?),
         None => None,
     };
     let mut known: HashSet<String> = {
@@ -781,7 +845,7 @@ pub fn import_checklist(
             continue;
         }
         if !ensured {
-            ensure_project(&tx, project.as_deref())?;
+            ensure_project(tx, project.as_deref())?;
             ensured = true;
         }
         let status = if item.done { STATUS_DONE } else { STATUS_TODO };
@@ -794,7 +858,6 @@ pub fn import_checklist(
         )?;
         created.push(tx.last_insert_rowid());
     }
-    tx.commit()?;
     Ok(ImportResult { created, skipped })
 }
 
@@ -1801,5 +1864,130 @@ mod tests {
         assert!(!get(&conn, b).project_archived);
         crate::projects::set_archived(&conn, "Old", false).unwrap();
         assert!(!get(&conn, a).project_archived);
+    }
+
+    // --- K0: the seams a mod path needs (PR C) -----------------------------------------------
+
+    fn task_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn project_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A gift's ledger row has to commit with its task or not at all, and SQLite can't nest a BEGIN,
+    /// so `add_in` runs in the caller's transaction. If it committed on its own, the caller's
+    /// rollback would leave the task (and the project row it minted) behind.
+    #[test]
+    fn add_in_rolls_back_with_its_callers_transaction() {
+        let (_dir, conn) = store();
+        let before = project_rows(&conn);
+        let tx = conn.unchecked_transaction().unwrap();
+        let id = add_in(&tx, &in_project("gift", "Brand New"), SOURCE_USER).unwrap();
+        assert_eq!(task_count(&tx), 1, "visible inside the transaction");
+        assert!(id > 0);
+        tx.rollback().unwrap();
+        assert_eq!(task_count(&conn), 0, "the task rolled back with the caller");
+        assert_eq!(
+            project_rows(&conn),
+            before,
+            "and so did the project it minted"
+        );
+
+        let tx = conn.unchecked_transaction().unwrap();
+        add_in(&tx, &fields("kept"), SOURCE_USER).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(task_count(&conn), 1, "the caller's commit is what keeps it");
+    }
+
+    /// Outside a transaction its several statements would each commit alone.
+    #[test]
+    fn the_in_functions_refuse_to_run_outside_a_transaction() {
+        let (_dir, conn) = store();
+        assert!(add_in(&conn, &in_project("x", "Atlas"), SOURCE_USER).is_err());
+        let items = [ChecklistItem {
+            title: "a".into(),
+            done: false,
+        }];
+        assert!(import_checklist_in(&conn, Some("Atlas"), &items).is_err());
+        assert_eq!(task_count(&conn), 0);
+        assert_eq!(project_rows(&conn), 0, "no stray project row either");
+    }
+
+    #[test]
+    fn import_checklist_in_rolls_back_with_its_callers_transaction() {
+        let (_dir, conn) = store();
+        let items = [
+            ChecklistItem {
+                title: "one".into(),
+                done: false,
+            },
+            ChecklistItem {
+                title: "two".into(),
+                done: true,
+            },
+        ];
+        let tx = conn.unchecked_transaction().unwrap();
+        let done = import_checklist_in(&tx, Some("Brand New"), &items).unwrap();
+        assert_eq!(done.created.len(), 2);
+        tx.rollback().unwrap();
+        assert_eq!(task_count(&conn), 0);
+        assert_eq!(project_rows(&conn), 0);
+        // The wrapper is the same write in a transaction of its own.
+        assert_eq!(
+            import_checklist(&conn, Some("Brand New"), &items)
+                .unwrap()
+                .created
+                .len(),
+            2
+        );
+        assert_eq!(task_count(&conn), 2);
+    }
+
+    /// A mod's write names a project it was shown: a name no project goes by is refused, and
+    /// nothing is created. The IPC path's `canonical_project` still returns it as typed.
+    #[test]
+    fn resolve_existing_project_refuses_an_unknown_name() {
+        let (_dir, conn) = store();
+        conn.execute("INSERT INTO projects(name) VALUES ('Atlas')", [])
+            .unwrap();
+        let pm = crate::entities::resolve_project(&conn, "Personal Manager", true)
+            .unwrap()
+            .unwrap();
+        crate::entities::add_alias(&conn, pm, "PM").unwrap();
+        let before = project_rows(&conn);
+
+        for unknown in ["Nowhere", "  ", "", "Atlas 2"] {
+            let err = resolve_existing_project(&conn, unknown).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "That project does not exist.",
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(project_rows(&conn), before, "refusing creates nothing");
+
+        // Every way a project is known resolves, to the same name `canonical_project` gives.
+        for known in ["Atlas", " atlas ", "ATLAS", "PM", "personal manager"] {
+            assert_eq!(
+                resolve_existing_project(&conn, known).unwrap(),
+                canonical_project(&conn, known).unwrap(),
+                "{known:?}"
+            );
+        }
+        assert_eq!(
+            resolve_existing_project(&conn, "PM").unwrap(),
+            "Personal Manager"
+        );
+        // An alias match is exact, as `canonical_project`'s is: a lower-case "pm" is no project.
+        assert!(resolve_existing_project(&conn, "pm").is_err());
+
+        // The IPC behaviour is unchanged: an unknown name comes back as typed (trimmed), to be minted.
+        assert_eq!(canonical_project(&conn, "  Nowhere ").unwrap(), "Nowhere");
+        let id = add(&conn, &in_project("t", "Nowhere"), SOURCE_USER).unwrap();
+        assert_eq!(get(&conn, id).project_name.as_deref(), Some("Nowhere"));
     }
 }

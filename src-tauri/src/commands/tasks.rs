@@ -10,7 +10,7 @@
 //! fence), and no command starts with `set_` (the Settings "Saved" tick).
 
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::error::Result;
 use crate::tasks::{self, ChecklistItem, ImportResult, Task, TaskFields, TaskStack};
@@ -20,7 +20,7 @@ use super::shared::resolve_zone;
 
 /// Tell every open view the task list changed. Called after the guard is dropped.
 fn changed(app: &AppHandle) {
-    let _ = app.emit(tasks::TASKS_CHANGED, ());
+    tasks::announce_changed(app);
 }
 
 /// Bump the activity date of each named project (a task edit counts as engaging with it). The

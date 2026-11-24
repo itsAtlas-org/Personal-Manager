@@ -539,7 +539,7 @@ pub async fn uninstall_mod(
         );
         if let Some(gone) = &done.gifts_deleted {
             if gone.tasks + gone.milestones > 0 {
-                let _ = app.emit(crate::tasks::TASKS_CHANGED, ());
+                crate::tasks::announce_changed(app);
                 crate::briefing::nudge(&app.state::<AppState>());
             }
         }
