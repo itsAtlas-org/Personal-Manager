@@ -329,7 +329,13 @@ where
                 body = None;
                 headers.retain(|(n, _)| !BODY_HEADERS.contains(&n.as_str()));
             }
-            if url.origin() != next.origin() {
+            // The scheme test comes first, and it changes no answer (another scheme is always
+            // another origin): `next` comes from a website's Location header and isn't checked
+            // until the next turn, and url 2.5.8 and older recursed through a nested `blob:`
+            // URL's origin until the stack overflowed (RUSTSEC-2026-0592). `url` passed the
+            // caller's rule, and every caller's is https-only (a mod's `url_allowed`, a calendar
+            // feed's `feed_hop_rule`), so only an https `next` reaches `origin()`.
+            if next.scheme() != url.scheme() || url.origin() != next.origin() {
                 // The fetch standard's rule, so a mod's own bearer token never follows a
                 // redirect to another origin.
                 headers.retain(|(n, _)| n != "authorization");
@@ -928,6 +934,9 @@ mod tests {
             "//evil.example.org/x",
             "https://user@a.example.com/x",
             "ftp://a.example.com/x",
+            // A nested blob: URL, whose origin url 2.5.8 worked out by recursion
+            // (RUSTSEC-2026-0592).
+            "blob:blob:blob:https://a.example.com/x",
         ] {
             let net = net();
             net.dns("evil.example.org", &[WEB]);

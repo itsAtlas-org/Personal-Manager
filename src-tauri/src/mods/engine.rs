@@ -1203,7 +1203,7 @@ impl SharedEnvironment {
 }
 
 /// Create PM's environment for the main window built from `config`: in the user-data folder
-/// Tauri gives every PM window (`app.path().app_local_data_dir()`, as tauri 2.12.5 sets it when a
+/// Tauri gives every PM window (`app.path().app_local_data_dir()`, as tauri 2.12.6 sets it when a
 /// window names none, `manager/webview.rs`), so localStorage and everything else WebView2 keeps
 /// there stays where it is, with [`environment_options`] for `browser_args`. Main thread only, as
 /// `setup()` is: WebView2 objects belong to the thread that created them, and wry builds every
