@@ -21,6 +21,9 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // A mod's page may be React (the Pinboard): the build compiles JSX with the automatic runtime
+    // (mods/vite.config.ts), and the type-check reads it the same way.
+    "jsx": "react-jsx",
     "noEmit": true,
 
     /* Linting */

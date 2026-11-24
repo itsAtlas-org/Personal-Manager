@@ -10,9 +10,11 @@
 //    (the nested worker build is invisible to the outer one);
 //  - two builds give the same bytes, wherever they run, with no absolute path in them;
 //  - what pack-mod then writes passes its own verifier.
-// It builds tests/mod-fixtures/acme.hello (the third-party fixture) and the real mods/atlas.map,
-// in place: both write only into their git-ignored dist/ and .build/.
+// It builds tests/mod-fixtures/acme.hello (the third-party fixture), tests/mod-fixtures/react-tailwind
+// (a React page with Tailwind classes, which has no manifest: only the build is under test) and the
+// real mods/atlas.map, in place: all write only into their git-ignored dist/ and .build/.
 
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -41,6 +43,7 @@ import * as pack from "./pack-mod.mjs";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE = join(repoRoot, "tests/mod-fixtures/acme.hello");
 const MAP = join(repoRoot, "mods/atlas.map");
+const REACT_FIXTURE = join(repoRoot, "tests/mod-fixtures/react-tailwind");
 const COMMIT = "abcdef0123456789abcdef0123456789abcdef01";
 
 const scratch = [];
@@ -244,6 +247,56 @@ describe("the real mods/atlas.map", () => {
     }
   });
 
+  it("builds the same bytes with the React and Tailwind plugins as without them (D12)", async () => {
+    // The Map has no JSX and no Tailwind import, so adding the plugins to the one mod config must
+    // not move one byte of its bundle: a changed Map bundle would force a Map version. The "before"
+    // is the config as it was, the three plugins of the mod build and nothing else.
+    const full = modConfig(MAP);
+    const own = full.plugins.flat(Infinity).filter((p) => p.name.startsWith("mod-"));
+    const before = own.filter((p) => p.name !== "mod-tailwind-scan");
+    // And without the two settings K6c added (production `define`, non-development JSX): the oracle
+    // may not be the config under test.
+    const old = { ...full };
+    delete old.define;
+    delete old.oxc;
+    expect(before.map((p) => p.name).sort()).toEqual([
+      "mod-classic-html",
+      "mod-inline-worker",
+      "mod-module-record",
+    ]);
+    expect(full.plugins.flat(Infinity).length).toBeGreaterThan(own.length);
+    rmSync(join(MAP, "dist"), { recursive: true, force: true });
+    await build({ ...old, plugins: before, configFile: false, logLevel: "silent" });
+    const without = outputDigest(join(MAP, "dist", "app"));
+    const withoutRecord = readFileSync(join(MAP, MODULES_RECORD), "utf8");
+    await buildMod(MAP);
+    expect(outputDigest(join(MAP, "dist", "app"))).toBe(without);
+    expect(readFileSync(join(MAP, MODULES_RECORD), "utf8")).toBe(withoutRecord);
+    // Pinned: the sha256 of each file of the Map's bundle as built just before K6c touched the config
+    // (at 1828b037 plus C1's K1, whose three new error codes are in the kit's MOD_ERRORS, which the
+    // Map bundles through src/kit/host.ts). A comparison of two builds of one config cannot see a
+    // change both share; this can. The bytes change when the Map's own folder, its build, or kit code
+    // it bundles changes. Its own folder needs a Map version (D12, `check-mods --base`); a kit change
+    // reaches users in the Map's next version (the published one is rebuilt from its recorded commit),
+    // and the change that causes it edits these, saying why.
+    const sha = (f) =>
+      createHash("sha256")
+        .update(readFileSync(join(MAP, "dist", "app", f)))
+        .digest("hex");
+    expect({
+      "index.html": sha("index.html"),
+      "assets/app.js": sha("assets/app.js"),
+      "assets/style.css": sha("assets/style.css"),
+    }).toEqual({
+      "index.html": "774b8fd43cc22f9685ab10e2b3076e51ac413c9814a3225e364050ff03baa778",
+      "assets/app.js": "39b1edd9711e5dc687c9ce848de7fd952f0bebf1a4a6198cc273eb8a9e2a3156",
+      "assets/style.css": "d1175700cab84482c2f4bcaf64260fa02f18468f245a10d89b3e57fdfbfa2d20",
+    });
+    expect(JSON.parse(readFileSync(join(MAP, MODULES_RECORD), "utf8")).bundle).toBe(
+      "563c667c35f18a2a40611bba6feb9a5df330d2b2dcf8696a09c0091415cb76c2",
+    );
+  }, 60_000);
+
   it("is refused as an unsigned file: an atlas. mod is never a developer's own", () => {
     expect(() => pack.buildArchive(pack.assemble({ modDir: MAP }), { unsigned: true })).toThrow(
       /third party/,
@@ -259,6 +312,153 @@ describe("the real mods/atlas.map", () => {
     ]);
     expect(files.has("app/index.html")).toBe(true);
   });
+});
+
+describe("the build of a React and Tailwind mod", () => {
+  const css = () => read(REACT_FIXTURE, "assets/style.css");
+  // A class that only src/kit/ui/Button.tsx uses (the fixture's own source never writes it), so it
+  // reaches the stylesheet only if the build scans the kit.
+  const KIT_CLASS = "enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)]";
+
+  beforeAll(async () => {
+    await buildMod(REACT_FIXTURE);
+  }, 60_000);
+
+  it("emits the same shape as any mod: one script, one stylesheet, the page, no data: URL", () => {
+    expect(listFiles(join(REACT_FIXTURE, "dist", "app")).sort()).toEqual([
+      join("assets", "app.js"),
+      join("assets", "style.css"),
+      "index.html",
+    ]);
+    const html = read(REACT_FIXTURE, "index.html");
+    expect(html).toContain('<script defer src="./assets/app.js"></script>');
+    expect(html).not.toMatch(/type\s*=\s*["']?module|crossorigin/i);
+    expect(css()).not.toContain("data:");
+    const js = read(REACT_FIXTURE, "assets/app.js").trim();
+    expect(js.startsWith("(function")).toBe(true);
+    for (const f of listFiles(join(REACT_FIXTURE, "dist", "app"))) {
+      pack.checkBuiltFile(
+        `app/${f.split("\\").join("/")}`,
+        readFileSync(join(REACT_FIXTURE, "dist", "app", f)),
+      );
+    }
+  });
+
+  it("compiles JSX (the page's markup is calls into React's automatic runtime, not tags)", () => {
+    const js = read(REACT_FIXTURE, "assets/app.js");
+    expect(js).toContain("JSX-RENDERED-MARKER");
+    expect(js).not.toContain("<main");
+    expect(js).not.toContain("<h1>");
+    expect(js).not.toContain("React.createElement");
+    const record = JSON.parse(readFileSync(join(REACT_FIXTURE, MODULES_RECORD), "utf8"));
+    expect(record.modules.some((m) => m.endsWith("/react/jsx-runtime.js"))).toBe(true);
+    // The production build of React, though this test runs with NODE_ENV=test: the bundle (and the
+    // record) must not depend on the shell it was built in.
+    expect(record.modules.filter((m) => /development|dev-runtime/.test(m))).toEqual([]);
+    expect(js).not.toContain("process.env.NODE_ENV");
+    expect(js).not.toContain(repoRoot);
+  });
+
+  it("writes the Tailwind classes of the page and of the kit it imports into the stylesheet", () => {
+    expect(css()).toContain("13px"); // p-[13px], written in the fixture's own main.tsx
+    expect(css()).toContain("c0ffee"); // text-[#c0ffee], the same
+    expect(readFileSync(join(repoRoot, "src/kit/ui/Button.tsx"), "utf8")).toContain(KIT_CLASS);
+    expect(css()).toContain("var(--st-due) 24%");
+  });
+
+  it("scans only the kit and the mod's own src/: a class anywhere else never reaches the stylesheet", () => {
+    // decoy/Decoy.tsx sits beside src/ in the fixture folder, outside both scanned folders.
+    expect(readFileSync(join(REACT_FIXTURE, "decoy", "Decoy.tsx"), "utf8")).toContain("p-[17px]");
+    expect(css()).not.toContain("17px");
+    expect(css()).not.toContain("decade");
+  });
+
+  it("does not scan a test file, in the mod's src/ or in the kit", async () => {
+    const test = join(REACT_FIXTURE, "src", "Late.test.tsx");
+    writeFileSync(test, 'export const x = "p-[19px] text-[#facade]";\n');
+    try {
+      await buildMod(REACT_FIXTURE);
+      expect(css()).not.toContain("19px");
+      expect(css()).not.toContain("facade");
+      // The kit's own tests are written with classes of their own that no component uses.
+      expect(readFileSync(join(repoRoot, "src/kit/ui/Button.test.tsx"), "utf8")).toMatch(
+        /className=/,
+      );
+    } finally {
+      rmSync(test, { force: true });
+      await buildMod(REACT_FIXTURE);
+    }
+  }, 60_000);
+
+  it("records react, react-dom and scheduler, and no Tauri API, and the NOTICE credits them", () => {
+    const record = JSON.parse(readFileSync(join(REACT_FIXTURE, MODULES_RECORD), "utf8"));
+    const dirs = [...new Set(record.modules.map(pack.packageDirOf))];
+    for (const name of ["react", "react-dom", "scheduler"]) {
+      expect(dirs, `modules.json lacks ${name}`).toContain(`node_modules/${name}`);
+    }
+    expect(dirs.filter((d) => d.startsWith("node_modules/@tauri-apps"))).toEqual([]);
+    expect(record.bundle).toBe(outputDigest(join(REACT_FIXTURE, "dist", "app")));
+    const notice = pack.noticeText(pack.bundledPackages(REACT_FIXTURE, repoRoot));
+    for (const name of ["react", "react-dom", "scheduler"]) {
+      expect(notice.toString()).toContain(`\n${name} `);
+    }
+  });
+
+  it("refuses a stylesheet that widens the scan or imports Tailwind in another form", async () => {
+    const original = readFileSync(join(REACT_FIXTURE, "src", "style.css"), "utf8");
+    try {
+      for (const [css, message] of [
+        [`${original}\n@source "../../../../src/components";`, /@source/],
+        [original.replace('"tailwindcss"', '"tailwindcss" source("../../../..")'), /one `@import/],
+        [original.replace('"tailwindcss"', '"tailwindcss/utilities"'), /one `@import/],
+        [`${original}\n@import "tailwindcss";`, /one `@import/],
+        // Tailwind loads these files itself, so their content never reaches the plugin: refused by name.
+        [`${original}\n@import "./extra.css";`, /may not use @import/],
+        [`${original}\n@import url("./extra.css");`, /may not use @import/],
+        [`${original}\n@config "./tailwind.config.js";`, /@config/],
+        [`${original}\n@plugin "./plug.js";`, /@plugin/],
+        [`${original}\n@reference "./extra.css";`, /@reference/],
+        [`${original}\n@SOURCE "../../../../src/components";`, /@source/],
+      ]) {
+        writeFileSync(join(REACT_FIXTURE, "src", "style.css"), css);
+        await expect(buildMod(REACT_FIXTURE)).rejects.toThrow(message);
+      }
+      // The reported hole: a nested stylesheet carrying an `@source` onto a folder outside the scan
+      // (decoy/ holds a class no source of the mod writes). It is refused, and its class is not built.
+      writeFileSync(join(REACT_FIXTURE, "src", "extra.css"), '@source "../decoy";\n');
+      writeFileSync(join(REACT_FIXTURE, "src", "style.css"), `${original}\n@import "./extra.css";`);
+      await expect(buildMod(REACT_FIXTURE)).rejects.toThrow(/may not use @import/);
+      rmSync(join(REACT_FIXTURE, "src", "extra.css"), { force: true });
+      // A `/*` inside a string is not a comment: a plain comment-stripping regex would hide the
+      // directive between two such strings, and Tailwind would follow it.
+      writeFileSync(join(REACT_FIXTURE, "src", "extra.css"), '@source "../decoy";\n');
+      for (const [css, message] of [
+        [
+          `${original}\na{content:"/*"} @import "./extra.css"; b{content:"*/"}`,
+          /may not use @import/,
+        ],
+        [`${original}\na{content:'/*'} @source "../decoy"; b{content:'*/'}`, /@source/],
+        [`${original}\na{content:"\\"/*"} @source "../decoy"; b{content:"*/"}`, /@source/],
+        // An escaped slash outside a string opens no comment either.
+        [`${original}\na\\/*{} @source "../decoy"; b\\*/{}`, /@source/],
+        [`${original}\na\\/*{} @import "./extra.css"; b\\*/{}`, /may not use @import/],
+      ]) {
+        writeFileSync(join(REACT_FIXTURE, "src", "style.css"), css);
+        await expect(buildMod(REACT_FIXTURE)).rejects.toThrow(message);
+      }
+      rmSync(join(REACT_FIXTURE, "src", "extra.css"), { force: true });
+      // A comment that only talks about the directives is not a use of them.
+      writeFileSync(
+        join(REACT_FIXTURE, "src", "style.css"),
+        `/* @source is added by the build; @import "tailwindcss/utilities" is refused */\n${original}`,
+      );
+      await buildMod(REACT_FIXTURE);
+    } finally {
+      rmSync(join(REACT_FIXTURE, "src", "extra.css"), { force: true });
+      writeFileSync(join(REACT_FIXTURE, "src", "style.css"), original);
+      await buildMod(REACT_FIXTURE);
+    }
+  }, 60_000);
 });
 
 describe("what the build config does for a mod", () => {
