@@ -36,6 +36,15 @@
 //! authorised; bytes, for the vectors; or an error. The page never performs anything Rust didn't authorise, and never one
 //! a frame names: the action comes from here.
 //!
+//! **Rules every write call shares (PR C, K1).** A write that names an existing target also needs the
+//! matching READ permissions, checked in the handler before any lookup (`second_read`, one table, one
+//! helper, one table-driven test over the dispatch table), so a write-only mod cannot probe ids. A gift
+//! (a task or milestone a mod adds) counts against the mod's quota inside the transaction that adds it
+//! (`gifts`), and its DTOs are built field by field from a [`projection::Projection`] of the caller's
+//! grants. A call that needs the person's yes (a link, a foreign milestone delete, a new project) ends
+//! in [`confirm::request`]: PM asks in its own words and the answer comes back through `mod_confirm`
+//! ([`confirm::complete`]), which checks the call again before it acts (`mods::confirm` is the registry).
+//!
 //! **Events** go the other way ([`events`]): Rust asks the same grant questions per session, builds
 //! the payload from the store (never PM's own event), and sends only into the outbox of a session
 //! that may hear it (`mods::outbox`), bounded by the frame's acknowledgements.
@@ -45,6 +54,9 @@ mod ai;
 mod ai_prompt_tests;
 #[cfg(test)]
 mod ai_tests;
+pub mod confirm;
+#[cfg(test)]
+mod confirm_tests;
 mod doc_storage;
 mod documents;
 mod embeddings;
@@ -52,6 +64,7 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 mod fixture_tests;
+mod gifts;
 pub mod grants;
 mod handlers;
 pub mod limits;
@@ -60,6 +73,8 @@ mod net_fetch;
 #[cfg(test)]
 mod net_fetch_tests;
 pub mod permissions;
+pub mod projection;
+mod second_read;
 mod storage;
 mod surface;
 #[cfg(test)]

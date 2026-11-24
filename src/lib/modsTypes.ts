@@ -410,6 +410,18 @@ export interface KitLimits {
   notifyMaxChars: number;
   notifyPerDay: number;
   secretAsksPerSession: number;
+  // PR C's: the gifts, the embed and the links, the gift quota and the confirm window.
+  giftMaxInFlight: number;
+  giftsPerSecond: number;
+  giftBurst: number;
+  maxGiftsPerMod: number;
+  embedMaxInFlight: number;
+  embedsPerMinute: number;
+  embedBurst: number;
+  linksMaxInFlight: number;
+  linksPerMinute: number;
+  linkBurst: number;
+  confirmTimeoutMs: number;
 }
 
 /** What `devKitInfo` answers: the Developer kit's rail sections. */

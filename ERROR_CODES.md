@@ -68,9 +68,11 @@ for: only PM's own sentence.
 | `MOD-1003` | The call's arguments aren't what it takes (a missing or unknown field, a malformed key). |
 | `MOD-2001` | The mod doesn't have the permission the call needs: it never asked for it, you turned it off, it wasn't granted at install, or a safety rule refuses it (unsigned mods may read your data or reach the internet, never both; and they can't read your data while PM's web engine isn't sealed). |
 | `MOD-2002` | The call needs a permission PM asks you for the first time it's used, and you haven't been asked yet. An AI request that would cost money asks again when the mod has no monthly AI limit yet (a mod moved from a free model to a paid one is asked at that moment). |
-| `MOD-3001` | The mod is calling PM too fast, or has too many calls running at once (for an AI request or a web request, the limits are tighter than for other calls). It also answers `notify` once the mod has shown its five notices for today (counted by your local date), and `secrets.set` once a window of the mod has asked to show a key field three times. |
+| `MOD-2003` | The call needs your OK first. PM asks you itself, in its own words, and the mod is only told your answer. |
+| `MOD-2004` | You said no when PM asked, so nothing was done. |
+| `MOD-3001` | The mod is calling PM too fast, or has too many calls running at once (for an AI request or a web request, the limits are tighter than for other calls). It also answers `notify` once the mod has shown its five notices for today (counted by your local date), and `secrets.set` once a window of the mod has asked to show a key field three times. It also answers a call that needs your OK while PM is already asking you about another one for the same window (PM never queues a second question). |
 | `MOD-3002` | The call's arguments, or its answer, are larger than PM allows. |
-| `MOD-3003` | The mod's private storage is full. |
+| `MOD-3003` | The mod's private storage is full, or it has already made as many tasks and milestones as PM lets one mod make (10,000). |
 | `MOD-3004` | The mod has used up its monthly AI limit (the amount you let it spend on AI models, set in the Mods tab), counting what the requests it has running could still cost. |
 | `MOD-3005` | The call took longer than PM allows and was stopped. Whatever it was waiting for (an AI model, a website) didn't answer in time. |
 | `MOD-4001` | The mod tried to save over a value that changed since it read it (another of its windows saved first); it should read it again. |
@@ -81,6 +83,7 @@ for: only PM's own sentence.
 | `MOD-5004` | PM has no AI model set up to answer with, so an AI request can't run. Choose a model in Settings. |
 | `MOD-5005` | PM can't tell what the AI model costs, so it can't be sure the request is within the mod's limit, and doesn't run it. |
 | `MOD-5006` | The AI model didn't answer (it was unreachable, refused, or failed). PM doesn't pass on why. |
+| `MOD-5007` | The call needs PM's document engine, which isn't set up yet. PM sets nothing up for a mod: set the engine up yourself, then try again. |
 | `MOD-6001` | The web address isn't one the mod may use: it isn't on the list of websites the mod declared, or it isn't a plain secure (https) address. |
 | `MOD-6002` | The website's address isn't on the public internet (it points at this computer or a private network), so PM won't connect. |
 | `MOD-6003` | PM couldn't find the website: its name didn't resolve. |

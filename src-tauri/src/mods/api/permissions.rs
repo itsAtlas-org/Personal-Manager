@@ -137,6 +137,52 @@ pub fn policy(id: &str) -> Option<&'static Policy> {
     POLICIES.iter().find(|p| p.id == id)
 }
 
+/// What PM asks the person about each time it happens, whatever the grants say: a PM-drawn yes/no
+/// (`mods::confirm`) the mod cannot answer for them. A grant says a mod MAY try; these are the acts
+/// whose cost is the person's to weigh every time.
+// K2's handlers ask the policy; until then only its tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConfirmKind {
+    /// `shell.openLink`: opens an address in the person's browser, and an address can carry data out.
+    Link,
+    /// `milestones.delete` of a milestone the mod did not make (spec §1.5: for all tiers).
+    ForeignMilestoneDelete,
+    /// A milestone naming a project that doesn't exist yet: "Create project X?" (Bobby, 2026-11-18,
+    /// Q2: ask first, for all tiers). The project is then the person's own.
+    CreateProject,
+}
+
+impl ConfirmKind {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const ALL: [ConfirmKind; 3] = [
+        Self::Link,
+        Self::ForeignMilestoneDelete,
+        Self::CreateProject,
+    ];
+}
+
+/// The policy as data, beside [`POLICIES`]: each `(tier, act)` PM asks about every time. A first-party
+/// mod's links are the one cell left out (its grant at install is the whole of it, spec §1.5); the
+/// other two are asked of every tier, the first-party Pinboard included (plan D-10).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const CONFIRM_EACH_TIME: &[(PolicyTier, ConfirmKind)] = &[
+    (PolicyTier::Second, ConfirmKind::Link),
+    (PolicyTier::Unsigned, ConfirmKind::Link),
+    (PolicyTier::First, ConfirmKind::ForeignMilestoneDelete),
+    (PolicyTier::Second, ConfirmKind::ForeignMilestoneDelete),
+    (PolicyTier::Unsigned, ConfirmKind::ForeignMilestoneDelete),
+    (PolicyTier::First, ConfirmKind::CreateProject),
+    (PolicyTier::Second, ConfirmKind::CreateProject),
+    (PolicyTier::Unsigned, ConfirmKind::CreateProject),
+];
+
+/// Whether a `tier` mod's `act` needs the person's yes each time ([`CONFIRM_EACH_TIME`]).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn confirm_each_time(tier: PolicyTier, act: ConfirmKind) -> bool {
+    CONFIRM_EACH_TIME.contains(&(tier, act))
+}
+
 /// Two sets of classes no mod of `tier` may hold one each of while any mod of that tier holds the
 /// other, judged across every installed mod of the tier together (D3: two unsigned files from one
 /// author could otherwise split the roles and talk through PM's own database).
@@ -261,6 +307,36 @@ mod tests {
                 Money => assert_eq!(p.unsigned, FirstUse, "{}", p.id),
                 _ => assert_eq!(p.unsigned, AskEach, "{}", p.id),
             }
+        }
+    }
+
+    /// The confirm policy, cell by cell: links are asked of second-party and unsigned mods only; a
+    /// foreign milestone delete and a new project are asked of every tier (the first-party Pinboard
+    /// too); nothing is listed twice.
+    #[test]
+    fn the_confirm_policy_is_each_cell_of_the_plan() {
+        use ConfirmKind::{CreateProject, ForeignMilestoneDelete, Link};
+        use PolicyTier::{First, Second, Unsigned};
+        let cell = |tier, act| confirm_each_time(tier, act);
+        assert!(!cell(First, Link) && cell(Second, Link) && cell(Unsigned, Link));
+        for act in [ForeignMilestoneDelete, CreateProject] {
+            for tier in [First, Second, Unsigned] {
+                assert!(cell(tier, act), "{tier:?} {act:?}");
+            }
+        }
+        let unique: BTreeSet<String> = CONFIRM_EACH_TIME
+            .iter()
+            .map(|(t, a)| format!("{t:?} {a:?}"))
+            .collect();
+        assert_eq!(
+            unique.len(),
+            CONFIRM_EACH_TIME.len(),
+            "a cell is listed twice"
+        );
+        assert_eq!(CONFIRM_EACH_TIME.len(), 8);
+        // Every act is asked of someone, so none is a dead name.
+        for act in ConfirmKind::ALL {
+            assert!(CONFIRM_EACH_TIME.iter().any(|(_, a)| *a == act), "{act:?}");
         }
     }
 

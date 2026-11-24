@@ -34,6 +34,10 @@ pub enum Method {
     NetFetch,
     SecretsSet,
     Notify,
+    /// The second-READ table test's own write call (`second_read::probe`): in no `ALL`, no dispatch
+    /// table of PM's, and no build but a test's.
+    #[cfg(test)]
+    SecondReadProbe,
 }
 
 impl Method {
@@ -72,11 +76,17 @@ impl Method {
             Self::NetFetch => "net.fetch",
             Self::SecretsSet => "secrets.set",
             Self::Notify => "notify",
+            #[cfg(test)]
+            Self::SecondReadProbe => super::second_read::PROBE_CALL,
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.name() == name)
+        let live = Self::ALL.into_iter().find(|m| m.name() == name);
+        #[cfg(test)]
+        let live = live
+            .or_else(|| (name == super::second_read::PROBE_CALL).then_some(Self::SecondReadProbe));
+        live
     }
 }
 
@@ -109,6 +119,8 @@ pub(super) async fn run<H: Host>(
         Method::NetFetch => net_fetch::fetch(host, auth, args).await,
         Method::SecretsSet => surface::secrets_set(host, auth, args).await,
         Method::Notify => surface::notify(host, auth, args).await,
+        #[cfg(test)]
+        Method::SecondReadProbe => super::second_read::probe(host, auth, args).await,
     }
 }
 

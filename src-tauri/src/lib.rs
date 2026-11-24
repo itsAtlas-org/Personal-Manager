@@ -2139,6 +2139,7 @@ pub fn run() {
             mods::mod_frame_open,
             mods::mod_frame_close,
             mods::mod_call,
+            mods::mod_confirm,
             mods::mod_events_ack,
             mods::mod_theme_changed,
             // The Mods tab (spec §1.13): what is installed, installing from a file or the catalogue

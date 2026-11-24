@@ -21,6 +21,9 @@
 //!   the serve decision. This file's three commands are its IPC surface.
 //! - [`api`]: the Host API's dispatcher, every call's check order, the grant model, the limits and
 //!   the handlers; `mod_call` hands it each call.
+//! - [`confirm`]: the questions PM asks the person for a mod's call (a yes/no PM draws itself), the
+//!   single-use tokens that carry the answer, and how they die with the session; `mod_confirm` is
+//!   its IPC surface.
 //! - [`ai`]: what a mod's AI call may cost and the reserve-then-settle ledger that holds it under
 //!   the mod's monthly cap (§1.6); pure, with no dispatch row until `ai.complete`.
 //! - [`netfetch`]: the one HTTPS fetch that follows its redirects itself, every hop checked,
@@ -61,6 +64,7 @@
 pub mod ai;
 pub mod api;
 pub mod autoinstall;
+pub mod confirm;
 pub mod devmode;
 pub mod disk;
 pub mod engine;
@@ -688,6 +692,23 @@ pub async fn mod_call(
         session,
     };
     api::dispatch(webview.app_handle(), caller, &method, &args)
+        .await
+        .into_body()
+}
+
+/// The person's answer to a question PM asked for a mod's call (`confirm`), relayed by PM's page. The
+/// page holds only the token the `MOD-2003` carried: Rust finds the action, the session and the
+/// snapshot it stored with it, so a page (or a frame behind it) can name nothing but a question PM
+/// asked. Accept performs the action after the dispatcher's checks again and the target re-read;
+/// Decline answers `MOD-2004`; a token that is used, run out, revoked or never made does nothing.
+/// Every answer comes back as an `api::Reply`, the main-window check included, as `mod_call`'s do.
+#[tauri::command]
+pub async fn mod_confirm(
+    webview: Webview,
+    token: String,
+    accept: bool,
+) -> tauri::ipc::InvokeResponseBody {
+    api::confirm::complete(webview.app_handle(), webview.label(), &token, accept)
         .await
         .into_body()
 }

@@ -56,6 +56,17 @@ export const LIMIT_ROWS: Record<keyof KitLimits, { label: string; say: (n: numbe
   notifyMaxChars: { label: "Longest notice, in characters", say: count },
   notifyPerDay: { label: "Notices per mod per day", say: count },
   secretAsksPerSession: { label: "Times a mod may ask for a key in one session", say: count },
+  giftMaxInFlight: { label: "Additions to your lists running at the same time", say: count },
+  giftsPerSecond: { label: "Additions to your lists per second, sustained", say: count },
+  giftBurst: { label: "Additions to your lists at once after a quiet spell", say: count },
+  maxGiftsPerMod: { label: "Tasks and milestones one mod may ever make", say: count },
+  embedMaxInFlight: { label: "Document saves running at the same time", say: count },
+  embedsPerMinute: { label: "Document saves per minute, sustained", say: count },
+  embedBurst: { label: "Document saves at once after a quiet spell", say: count },
+  linksMaxInFlight: { label: "Links being opened at the same time", say: count },
+  linksPerMinute: { label: "Links opened per minute, sustained", say: count },
+  linkBurst: { label: "Links opened at once after a quiet spell", say: count },
+  confirmTimeoutMs: { label: "How long PM's question to you stays open", say: seconds },
 };
 
 /** The limits in the order the page lists them. */

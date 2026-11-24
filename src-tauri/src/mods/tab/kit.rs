@@ -116,6 +116,18 @@ pub struct Limits {
     pub notify_max_chars: usize,
     pub notify_per_day: u32,
     pub secret_asks_per_session: u32,
+    // PR C's (K1): the gifts, the embed and the links, the gift quota and the confirm window.
+    pub gift_max_in_flight: usize,
+    pub gifts_per_second: u64,
+    pub gift_burst: u64,
+    pub max_gifts_per_mod: u64,
+    pub embed_max_in_flight: usize,
+    pub embeds_per_minute: u64,
+    pub embed_burst: u64,
+    pub links_max_in_flight: usize,
+    pub links_per_minute: u64,
+    pub link_burst: u64,
+    pub confirm_timeout_ms: u64,
 }
 
 /// A duration in whole milliseconds, held to what a `u64` says (every limit here is seconds).
@@ -214,6 +226,17 @@ pub fn limits_now() -> Limits {
         notify_max_chars: limits::NOTIFY_MAX_CHARS,
         notify_per_day: limits::NOTIFY_PER_DAY,
         secret_asks_per_session: limits::SECRET_ASKS_PER_SESSION,
+        gift_max_in_flight: limits::GIFT_MAX_IN_FLIGHT,
+        gifts_per_second: limits::GIFTS_PER_SECOND,
+        gift_burst: limits::GIFT_BURST,
+        max_gifts_per_mod: limits::MAX_GIFTS_PER_MOD,
+        embed_max_in_flight: limits::EMBED_MAX_IN_FLIGHT,
+        embeds_per_minute: limits::EMBEDS_PER_MINUTE,
+        embed_burst: limits::EMBED_BURST,
+        links_max_in_flight: limits::LINKS_MAX_IN_FLIGHT,
+        links_per_minute: limits::LINKS_PER_MINUTE,
+        link_burst: limits::LINK_BURST,
+        confirm_timeout_ms: millis(limits::CONFIRM_TTL),
     }
 }
 
@@ -392,6 +415,21 @@ mod tests {
         assert_eq!(l.max_fetch_response_bytes, limits::MAX_FETCH_RESPONSE_BYTES);
         assert_eq!(l.max_ai_output_tokens, limits::MAX_AI_OUTPUT_TOKENS);
         assert_eq!(l.notify_per_day, limits::NOTIFY_PER_DAY);
+        // PR C's: the gift, embed and link families, the gift quota and the confirm window.
+        assert_eq!(
+            (l.gift_max_in_flight, l.gifts_per_second, l.gift_burst),
+            (2, 10, 50)
+        );
+        assert_eq!(l.max_gifts_per_mod, 10_000);
+        assert_eq!(
+            (l.embed_max_in_flight, l.embeds_per_minute, l.embed_burst),
+            (1, 6, 10)
+        );
+        assert_eq!(
+            (l.links_max_in_flight, l.links_per_minute, l.link_burst),
+            (1, 6, 3)
+        );
+        assert_eq!(l.confirm_timeout_ms, 60_000);
         // The JSON the page reads is camelCase and carries every limit.
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["limits"]["callTimeoutMs"], 180_000);

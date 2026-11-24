@@ -67,7 +67,9 @@ export const MAX_FRAME_HEIGHT = 4096;
  *  turns into PM's first-use question; `notGranted` is what a mod is told after the person says no
  *  to it. The lines from `aiCapReached` on are the experimental calls' (PR B), listed so a page-side
  *  answer for `ai.complete`, `net.fetch`, `secrets.set` or `notify` names a code by word and the
- *  same test holds it to the backend's; their numbers freeze at the first release after PR C. */
+ *  same test holds it to the backend's; their numbers freeze at the first release after PR C. The
+ *  last three are PR C's: `needsConfirmation` is the one PM's page turns into its own yes/no question
+ *  (answered with `mod_confirm`), and `declined` is what the mod is told after a no. */
 export const MOD_ERRORS = {
   unknownMethod: "MOD-1001",
   badArgs: "MOD-1003",
@@ -87,6 +89,9 @@ export const MOD_ERRORS = {
   tooManyRedirects: "MOD-6005",
   responseTooLarge: "MOD-6006",
   secretNotSet: "MOD-6007",
+  engineNotReady: "MOD-5007",
+  needsConfirmation: "MOD-2003",
+  declined: "MOD-2004",
 } as const;
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because

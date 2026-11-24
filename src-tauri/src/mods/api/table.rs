@@ -75,6 +75,22 @@ const fn experimental_call(
     }
 }
 
+/// A call row under a family of limits that is not experimental: one of PR C's (K2), whose call waits
+/// on something outside the DB (a launcher, an embed) or writes the user's lists (the gifts). Like
+/// [`experimental_call`], it must say which family it lives under.
+#[cfg_attr(not(test), allow(dead_code))]
+const fn family_call(
+    name: &'static str,
+    permission: &'static str,
+    class: Class,
+    family: Family,
+) -> Row {
+    Row {
+        family,
+        ..call(name, permission, class)
+    }
+}
+
 /// An event a frame needs `permission` to be told (or any session, with `None`: PM's word about the
 /// session itself, which carries no data).
 const fn event(name: &'static str, permission: Option<&'static str>, class: Class) -> Row {
@@ -214,12 +230,13 @@ mod tests {
                 "{} arrives after this PM",
                 row.name
             );
-            // A family's limits are for the calls that wait on the outside, which are the
-            // experimental ones; an event is never admitted at all.
+            // A family's limits are for a call that waits on something outside the DB (a model, a
+            // website, a launcher, an embed) or that writes the user's lists; an event is never
+            // admitted at all.
             if row.family != Family::General {
                 assert!(
-                    row.kind == Kind::Call && row.experimental,
-                    "{}: a family is for an experimental call",
+                    row.kind == Kind::Call,
+                    "{}: a family is for a call, and an event is never admitted",
                     row.name
                 );
             }
@@ -331,7 +348,8 @@ mod tests {
     }
 
     /// The only experimental rows the live table may ever carry are PR B's four, each under the
-    /// family its limits are written for; every other row is general.
+    /// family its limits are written for; every other row is general, or (a call only) under one of
+    /// PR C's families, the ones a call that writes the lists or waits on the outside uses.
     #[test]
     fn the_live_tables_experimental_rows_are_held_to_their_families() {
         for row in ROWS {
@@ -345,8 +363,91 @@ mod tests {
                 assert_eq!(row.family, want, "{}", row.name);
                 assert_eq!(row.kind, Kind::Call, "{}", row.name);
             } else {
-                assert_eq!(row.family, Family::General, "{}", row.name);
+                // Never one of the experimental families (`ai`, `net`): those are PR B's four's.
+                assert!(
+                    !matches!(row.family, Family::Ai | Family::Net),
+                    "{}: only an experimental call is under the AI or network family",
+                    row.name
+                );
             }
+        }
+    }
+
+    /// The family each of K2's calls must be admitted under, by name. A row left on `General` would
+    /// run with no family bucket and no in-flight cap, and nothing else reads this wiring: the family
+    /// tests in `limits.rs` call `admit_family` directly. Rows land with K2; until then the table
+    /// holds none of them and the check passes on what is there (see [`family_wiring_faults`]).
+    const FAMILY_OF: &[(&str, Family)] = &[
+        ("tasks.add", Family::Gifts),
+        ("tasks.importChecklist", Family::Gifts),
+        ("milestones.add", Family::Gifts),
+        ("documents.saveNote", Family::Embed),
+        ("search", Family::Embed),
+        ("shell.openLink", Family::Links),
+    ];
+
+    /// What is wrong with `rows`' family wiring: a row named in [`FAMILY_OF`] not under its family, or a
+    /// stable (non-experimental) row under a PR C family that [`FAMILY_OF`] doesn't name.
+    fn family_wiring_faults(rows: &[Row]) -> Vec<String> {
+        let mut faults = Vec::new();
+        for row in rows.iter().filter(|r| r.kind == Kind::Call) {
+            let want = FAMILY_OF.iter().find(|(n, _)| *n == row.name).map(|f| f.1);
+            match (want, row.experimental) {
+                (Some(f), _) if row.family != f => {
+                    faults.push(format!("{} is under {:?}, not {f:?}", row.name, row.family))
+                }
+                (None, false) if row.family != Family::General => faults.push(format!(
+                    "{} is under {:?} but FAMILY_OF doesn't name it",
+                    row.name, row.family
+                )),
+                _ => {}
+            }
+        }
+        faults
+    }
+
+    #[test]
+    fn the_live_tables_gift_embed_and_link_rows_carry_their_family() {
+        assert_eq!(family_wiring_faults(ROWS), Vec::<String>::new());
+    }
+
+    /// The check itself bites: a gift row left on `General`, a link row under the wrong family, and a
+    /// family on an unnamed row are each reported, and a correctly wired set reports nothing.
+    #[test]
+    fn the_family_wiring_check_names_a_row_left_on_general() {
+        let w = Class::Write;
+        let right = [
+            family_call("tasks.add", "tasks.write", w, Family::Gifts),
+            family_call("shell.openLink", "links", Class::Egress, Family::Links),
+        ];
+        assert!(family_wiring_faults(&right).is_empty());
+        let general = [call("tasks.add", "tasks.write", w)];
+        assert_eq!(family_wiring_faults(&general).len(), 1);
+        let wrong = [family_call(
+            "shell.openLink",
+            "links",
+            Class::Egress,
+            Family::Embed,
+        )];
+        assert_eq!(family_wiring_faults(&wrong).len(), 1);
+        let unnamed = [family_call("tasks.other", "tasks.write", w, Family::Gifts)];
+        assert_eq!(family_wiring_faults(&unnamed).len(), 1);
+    }
+
+    /// The helper PR C's rows are made with: a plain call row (stable, API 1.0) under the family it
+    /// is given; it differs from `call` in that one field only.
+    #[test]
+    fn a_family_call_is_a_plain_call_row_under_its_family() {
+        for family in [Family::Gifts, Family::Embed, Family::Links] {
+            let row = family_call("a.b", "tasks.write", Class::Write, family);
+            assert_eq!(
+                row,
+                Row {
+                    family,
+                    ..call("a.b", "tasks.write", Class::Write)
+                }
+            );
+            assert!(!row.experimental && row.kind == Kind::Call);
         }
     }
 

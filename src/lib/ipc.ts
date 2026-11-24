@@ -2234,6 +2234,16 @@ export const modFrameClose = (session: string) => invoke<void>("mod_frame_close"
 export const modCall = (session: string, method: string, args: string) =>
   invoke<unknown>("mod_call", { session, method, args });
 
+/** Answer the question PM asked the person for a mod's call (PR C). A `mod_call` reply carrying
+ *  `MOD-2003` holds `{token, summary}`: PM's own dialog shows the summary, and this sends the person's
+ *  answer with the token, which is good once and for a minute. The backend finds the action it stored
+ *  with the token, checks the call again, and performs it (Accept) or answers `MOD-2004` (Decline); the
+ *  page never performs anything itself and never names an action. The answer is a reply like
+ *  `modCall`'s, and the page relays it as the frame's answer. The token is the page's: it is never
+ *  handed to the frame. */
+export const modConfirm = (token: string, accept: boolean) =>
+  invoke<unknown>("mod_confirm", { token, accept });
+
 // --- Mods: the Mods tab (Mods spec §1.13) -------------------------------------------------------
 // Main window only, and every one refuses while the vault is locked or another PM window is the
 // writer. A refusal rejects with `{code, message}` (`modsErrorOf` in modsTypes.ts reads it): show the
