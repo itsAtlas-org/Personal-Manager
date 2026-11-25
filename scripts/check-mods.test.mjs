@@ -343,6 +343,50 @@ describe("the manifest", () => {
     ).toEqual([]);
   });
 
+  it("holds answersSuspend and a flushed() call in the source together", () => {
+    const answering = {
+      "mods/atlas.map/src/main.ts":
+        "import { host } from './host';\nhost.on('lifecycle.suspend', () => save().then(() => host.flushed()));\n",
+    };
+    expectRefused(goodTree(answering), "would take its frame down without waiting");
+    expectRefused(
+      withMap((m) => (m.answersSuspend = true)),
+      "would wait out its whole deadline",
+    );
+    expect(problemsOf(withMap((m) => (m.answersSuspend = true), answering))).toEqual([]);
+    // Saying no is the same as saying nothing.
+    expectRefused(
+      withMap((m) => (m.answersSuspend = false), answering),
+      "would take its frame down without waiting",
+    );
+    // A fixture is held to it too.
+    expectRefused(
+      goodTree({ "tests/mod-fixtures/acme.hello/src/main.ts": "host.flushed();\n" }),
+      "tests/mod-fixtures/acme.hello: its source answers lifecycle.suspend",
+    );
+  });
+
+  it("counts a flushed() call only in the mod's own code, not in a comment or a test", () => {
+    for (const text of [
+      "// host.flushed() is how a mod answers; this one has nothing to save\nexport {};\n",
+      "/* host.flushed()\n */\nexport {};\n",
+      "const url = 'https://example.org'; // then host.flushed()\nexport {};\n",
+    ]) {
+      expect(problemsOf(goodTree({ "mods/atlas.map/src/main.ts": text })), text).toEqual([]);
+    }
+    for (const test of ["main.test.ts", "main.spec.tsx", "__tests__/fake.ts"]) {
+      expect(
+        problemsOf(goodTree({ [`mods/atlas.map/src/${test}`]: "host.flushed();\n" })),
+        test,
+      ).toEqual([]);
+    }
+    // Handed on rather than called is still answering.
+    expectRefused(
+      goodTree({ "mods/atlas.map/src/main.ts": "save().then(host.flushed);\nexport {};\n" }),
+      "would take its frame down without waiting",
+    );
+  });
+
   it("needs its entry page to be a file of the mod's source", () => {
     expectRefused(goodTree({ "mods/atlas.map/src/index.html": null }), "entry page");
     expectRefused(

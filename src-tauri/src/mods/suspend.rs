@@ -12,6 +12,14 @@
 //! goes on. **PM never waits past [`SUSPEND_DEADLINE`]**: a frame that is mute, frozen or hostile costs
 //! the person that long and no more, and a quit is never held by it.
 //!
+//! **PM waits only for a mod that said it answers.** Its manifest's `answersSuspend: true` is that
+//! promise (`package.rs`). A frame whose mod made no such promise (the Document Map 1.1.0, which has
+//! nothing to save) is taken down at once: before this field, PM waited the whole deadline for an
+//! answer that was never coming, on every tab switch and every quit. It is still told, best effort:
+//! when PM waits for nobody, the tell is not awaited, so a change that commits first (a pause, an
+//! uninstall) can make the emitter refuse it, and the frame hears only its session's end. A mod that
+//! promises and then doesn't answer costs the deadline, as any mute frame does.
+//!
 //! The wait is Rust's, not the page's, so every path that takes frames down asks the same function
 //! ([`suspend`]): the commands that pause, uninstall and update a mod call it before they change the
 //! row, the page asks for it before a tab's frame retires ([`mod_frames_suspend`]) and before the vault
@@ -20,8 +28,9 @@
 //! another frame's answer never releases a different session's wait.
 //!
 //! **A suspend never waits for the person.** A question PM is asking for the frame (`mods::confirm`)
-//! is revoked when the wait ends, whatever the frame answered; the dialog is modal, so a frame is not
-//! normally retired with one open, and a late yes then does nothing.
+//! is revoked when its wait ends (at once, for a frame PM does not wait for), whatever the frame
+//! answered; the dialog is modal, so a frame is not normally retired with one open, and a late yes
+//! then does nothing.
 //!
 //! An emergency stop (the frozen-page watchdog, the safety list's removal) is not a suspend: a mod PM
 //! has just stopped for misbehaving is not given more time to run.
@@ -112,51 +121,66 @@ pub struct Suspended {
     pub timed_out: usize,
     /// Frames PM could not tell (their mod may not hear it: paused, or the app is locked): not waited on.
     pub unreachable: usize,
+    /// Frames whose mod does not say it answers (`answersSuspend`): told, and never waited on.
+    pub not_answering: usize,
 }
 
 /// Tell every live frame of `audience` that PM is about to take it down for `reason`, and wait until
-/// each has answered `flushed` or `deadline` has passed, whichever comes first. Never fails and never
-/// waits longer than `deadline`; with no live frame it returns at once.
+/// each frame whose mod answers suspend (`answersSuspend`) has answered `flushed` or `deadline` has
+/// passed, whichever comes first. Never fails and never waits longer than `deadline`; with no live
+/// frame, or none whose mod answers, it returns at once.
 pub async fn suspend<H: Host>(
     host: &H,
     audience: Audience,
     reason: SuspendReason,
     deadline: Duration,
 ) -> Suspended {
-    let sessions: Vec<String> = host
-        .runtime()
-        .live_recipients(&audience)
-        .into_iter()
-        .map(|r| r.ticket.session)
-        .collect();
-    if sessions.is_empty() {
+    let targets = host.runtime().suspend_targets(&audience);
+    if targets.is_empty() {
         return Suspended::default();
     }
     // The deadline runs from here: telling a frame goes through the DB mutex (`emit_with`), and a
     // guard held for long must not push the end of the wait, or a quit, out with it.
     let end = tokio::time::Instant::now() + deadline;
     // Waiting first, telling second: an answer that races the emission is still caught.
-    let waits: Vec<(String, WaitId, oneshot::Receiver<()>)> = sessions
+    let waits: Vec<(String, WaitId, oneshot::Receiver<()>)> = targets
         .iter()
-        .map(|s| {
+        .filter(|(_, answers)| *answers)
+        .map(|(s, _)| {
             let (id, rx) = host.runtime().flushes().expect(s);
             (s.clone(), id, rx)
         })
         .collect();
-    let told = {
+    let mut out = Suspended {
+        not_answering: targets.len() - waits.len(),
+        ..Suspended::default()
+    };
+    let tell = {
         let host = host.clone();
-        let tell = tokio::task::spawn_blocking(move || {
+        let sessions: Vec<String> = targets.iter().map(|(s, _)| s.clone()).collect();
+        tokio::task::spawn_blocking(move || {
             sessions
                 .iter()
                 .map(|s| (s.clone(), lifecycle_suspend(&host, s, reason).sent > 0))
                 .collect::<HashMap<_, _>>()
-        });
-        // Past the deadline the tell is given up on (the blocking thread finishes whenever the mutex
-        // frees): no frame is known to be unreachable, so each counts as one that did not answer.
-        match tokio::time::timeout_at(end, tell).await {
-            Ok(done) => Some(done.unwrap_or_default()),
-            Err(_) => None,
-        }
+        })
+    };
+    // A frame PM will not wait for: its wait ends now, so its question to the person ends now too
+    // (K1, as for the others below), and nothing of the rest is about it.
+    for (session, _) in targets.iter().filter(|(_, answers)| !answers) {
+        host.runtime().confirm_revoke(session);
+    }
+    if waits.is_empty() {
+        // Nobody to wait for: the frames are told on the blocking thread (an event that comes after
+        // the session has ended is refused, never delivered late), and PM goes on now.
+        drop(tell);
+        return out;
+    }
+    // Past the deadline the tell is given up on (the blocking thread finishes whenever the mutex
+    // frees): no frame is known to be unreachable, so each counts as one that did not answer.
+    let told = match tokio::time::timeout_at(end, tell).await {
+        Ok(done) => Some(done.unwrap_or_default()),
+        Err(_) => None,
     };
     let answered = futures_util::future::join_all(waits.into_iter().map(|(session, id, rx)| {
         let reachable = told
@@ -171,7 +195,6 @@ pub async fn suspend<H: Host>(
         }
     }))
     .await;
-    let mut out = Suspended::default();
     for (session, id, answer) in answered {
         host.runtime().flushes().forget(&session, id);
         // A suspend never waits for a question to the person (K1): whatever one this session holds
@@ -216,7 +239,8 @@ pub fn before_change_blocking(app: &AppHandle, id: &ModId, reason: SuspendReason
 }
 
 /// The page asks PM to tell the frames of `mod_id` (or every frame, with none) that they are about to
-/// retire, and answers when they have flushed or the deadline passed. `reason` is one of the words
+/// retire, and answers when those whose mod answers suspend have flushed or the deadline passed (at
+/// once, when none of them does). `reason` is one of the words
 /// the frame is told (`hidden`, `locked`, `paused`, `uninstalled`, `updated`, `vault`, `quit`).
 #[tauri::command]
 pub async fn mod_frames_suspend(
@@ -260,7 +284,8 @@ static QUITTING: AtomicBool = AtomicBool::new(false);
 pub enum QuitRequest {
     /// No frame was running: PM exited at once.
     Exited,
-    /// Frames are being asked to save; PM exits when they have answered or the deadline passes.
+    /// Frames are being asked to save; PM exits when those whose mod answers suspend have answered
+    /// or the deadline passes (at once, when none of them does).
     Waiting,
     /// A quit is already under way; this request changed nothing.
     AlreadyWaiting,
@@ -300,7 +325,8 @@ fn request_quit<H: Host>(
 }
 
 /// Quit PM, after giving every running frame its chance to save (`quit`), and never longer than
-/// [`SUSPEND_DEADLINE`] for it. Every way PM quits by itself (the tray's Quit, the main window's
+/// [`SUSPEND_DEADLINE`] for it; only a frame whose mod says `answersSuspend` is waited for, so with
+/// none of those running PM exits at once. Every way PM quits by itself (the tray's Quit, the main window's
 /// close, the OS's own quit through [`exit_needs_wait`]) calls this, not `AppHandle::exit`.
 pub fn quit(app: &AppHandle) {
     if app.try_state::<ModRuntime>().is_none() {

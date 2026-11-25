@@ -545,6 +545,7 @@ async fn every_end_of_a_session_revokes_its_question() {
                     &root,
                     "app/index.html",
                     [("app/index.html".into(), file)],
+                    false,
                 )
                 .unwrap(),
             );

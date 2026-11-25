@@ -512,6 +512,7 @@ export function checkManifest(raw, files) {
       "data",
       "requires",
       "engines",
+      "answersSuspend",
     ],
   );
   const id = str(raw.id, "the id");
@@ -680,6 +681,10 @@ export function checkManifest(raw, files) {
   if ("engines" in raw) {
     fields(raw.engines, "engines", ["frame"]);
     if (raw.engines.frame !== true) manifestError('engines must be {"frame": true}');
+  }
+  // Whether the frame answers lifecycle.suspend with {flushed: true}, so PM waits for it (suspend.rs).
+  if ("answersSuspend" in raw && typeof raw.answersSuspend !== "boolean") {
+    manifestError("answersSuspend must be true or false");
   }
   return {
     id,

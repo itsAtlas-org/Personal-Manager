@@ -2261,7 +2261,8 @@ export type ModSuspendReason =
   "hidden" | "locked" | "paused" | "uninstalled" | "updated" | "vault" | "quit";
 
 /** Tell the frames of `modId` (every frame with none) that PM is about to take them down, and wait
- *  until each has saved and answered or PM's own deadline (1.5 s) has passed. The backend holds the
+ *  until each whose mod says `"answersSuspend": true` has saved and answered, or PM's own deadline
+ *  (1.5 s) has passed (at once, when none of them says so). The backend holds the
  *  deadline; the page's is a little longer, so a backend that never answers costs the person this
  *  and no more. */
 export const modFramesSuspend = (reason: ModSuspendReason, modId?: string) =>

@@ -194,6 +194,9 @@ pub struct InstalledMod {
     root: PathBuf,
     entry: String,
     files: BTreeMap<String, ServedFile>,
+    /// The manifest's `answersSuspend`: whether PM waits for this mod's frames to answer
+    /// `lifecycle.suspend` before it takes them down (`suspend.rs`).
+    answers_suspend: bool,
 }
 
 /// A file as verified: served only while the bytes on disk still match.
@@ -218,17 +221,21 @@ impl InstalledMod {
             root,
             &pkg.manifest.entry.page,
             files,
+            pkg.manifest.answers_suspend,
         )
     }
 
     /// A mod rebuilt from its `mods` row at startup (`ledger.rs`), from the row's own file list:
     /// the disk is never asked what to serve, and every serve re-checks the bytes against these
-    /// hashes. Only `app/` files are served.
+    /// hashes. Only `app/` files are served. `answers_suspend` is the row's manifest's
+    /// `answersSuspend`, a required argument so that no way of loading a mod can forget it (one that
+    /// did would take down a frame that has edits to save without waiting for them).
     pub fn from_ledger(
         id: ModId,
         root: &Path,
         entry: &str,
         files: impl IntoIterator<Item = (String, ServedFile)>,
+        answers_suspend: bool,
     ) -> std::io::Result<Self> {
         let files = files
             .into_iter()
@@ -239,6 +246,7 @@ impl InstalledMod {
             root: std::fs::canonicalize(root)?,
             entry: entry.to_owned(),
             files,
+            answers_suspend,
         })
     }
 }
@@ -278,6 +286,10 @@ struct Session {
     /// The one question PM may be asking the person for this session's call (`confirm`). A field of
     /// the session, so it ends with it, whichever way that happens.
     confirm: confirm::Slot,
+    /// Whether this frame's mod said it answers `lifecycle.suspend` (`answersSuspend`), copied from
+    /// the installed mod when the frame was opened (an install ends the sessions of the mod it
+    /// replaces, so the code running in the frame is always the version that said it).
+    answers_suspend: bool,
 }
 
 impl Session {
@@ -287,6 +299,17 @@ impl Session {
             && self.mod_id == ticket.mod_id
             && self.generation == ticket.generation
             && self.store_epoch == ticket.store_epoch
+    }
+
+    /// Whether this session, `id` in the registry, is one `audience` names and its frame has loaded
+    /// (a pending one has nobody to hear anything).
+    fn hears(&self, id: &str, audience: &Audience) -> bool {
+        matches!(self.state, SessionState::Live)
+            && match audience {
+                Audience::Everyone => true,
+                Audience::Mod(mod_id) => &self.mod_id == mod_id,
+                Audience::Session(wanted) => id == wanted,
+            }
     }
 }
 
@@ -563,6 +586,13 @@ impl ModRuntime {
         self.lock().installed.get(id).map(|m| m.root.clone())
     }
 
+    /// Whether an installed mod's frames are waited for on a suspend (`answersSuspend`), for the
+    /// ledger's tests.
+    #[cfg(test)]
+    pub fn installed_answers_suspend(&self, id: &ModId) -> Option<bool> {
+        self.lock().installed.get(id).map(|m| m.answers_suspend)
+    }
+
     /// Whether the registry holds `id`, so its frame is served when it opens: the truth a restore's
     /// "is back" reads (`backup::adopt_mods::settled`), since an `active` row can still be held
     /// back (an unaccepted pilot, the safety list, files that didn't check out).
@@ -625,14 +655,7 @@ impl ModRuntime {
         inner
             .sessions
             .iter()
-            .filter(|(session, s)| {
-                matches!(s.state, SessionState::Live)
-                    && match audience {
-                        Audience::Everyone => true,
-                        Audience::Mod(id) => &s.mod_id == id,
-                        Audience::Session(wanted) => *session == wanted,
-                    }
-            })
+            .filter(|(session, s)| s.hears(session, audience))
             .map(|(session, s)| Recipient {
                 ticket: CallTicket {
                     session: session.clone(),
@@ -642,6 +665,18 @@ impl ModRuntime {
                 },
                 outbox: Arc::clone(&s.outbox),
             })
+            .collect()
+    }
+
+    /// The live sessions `audience` names (as [`Self::live_recipients`] picks them), each with
+    /// whether its mod answers `lifecycle.suspend` (`answersSuspend`): whom a suspend tells, and which
+    /// of them it waits for (`suspend.rs`).
+    pub fn suspend_targets(&self, audience: &Audience) -> Vec<(String, bool)> {
+        self.lock()
+            .sessions
+            .iter()
+            .filter(|(session, s)| s.hears(session, audience))
+            .map(|(session, s)| (session.clone(), s.answers_suspend))
             .collect()
     }
 
@@ -756,12 +791,11 @@ impl ModRuntime {
         let session = random_hex(SESSION_BYTES)?;
         let mut inner = self.lock();
         inner.sweep(now);
-        let entry = inner
+        let (entry, answers_suspend) = inner
             .installed
             .get(id)
-            .ok_or(FrameError::NotInstalled)?
-            .entry
-            .clone();
+            .map(|m| (m.entry.clone(), m.answers_suspend))
+            .ok_or(FrameError::NotInstalled)?;
         if inner.tickets.len() >= MAX_PENDING || inner.sessions.len() >= MAX_SESSIONS {
             return Err(FrameError::TooManyFrames);
         }
@@ -791,6 +825,7 @@ impl ModRuntime {
                 touched: now,
                 secret_asks: 0,
                 confirm: confirm::Slot::default(),
+                answers_suspend,
             },
         );
         Ok(FrameOpened {
@@ -1221,6 +1256,7 @@ mod tests {
                 root: std::fs::canonicalize(&root).unwrap(),
                 entry: "app/index.html".into(),
                 files: served,
+                answers_suspend: false,
             });
         }
         Setup { runtime, _dir: dir }

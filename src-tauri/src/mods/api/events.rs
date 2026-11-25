@@ -14,7 +14,7 @@
 //! | `projects.renamed` | `projects.read` | `{from, to}` | a rename, after its commit |
 //! | `projects.merged` | `projects.read` | `{from, into}` | a merge, after its commit |
 //! | `projects.deleted` | `projects.read` | `{name}` | a project delete, after its commit |
-//! | `lifecycle.suspend` | none | `{reason}` | PM, to one frame, before it takes the frame down ([`lifecycle_suspend`]) |
+//! | `lifecycle.suspend` | none | `{reason}` | PM, to one frame, before it takes the frame down ([`lifecycle_suspend`]); PM waits for the answer only from a mod whose manifest says `answersSuspend: true` |
 //!
 //! **Rust filters before anything is sent.** [`emit_with`] is the one way an event reaches a frame. For
 //! each live session it asks, in one DB guard, the questions a call would be asked: PM isn't locked, the
@@ -779,8 +779,9 @@ pub fn announce_project_change(app: &AppHandle, change: ProjectChange) {
 // ---- lifecycle.suspend ---------------------------------------------------------------------------------
 
 /// Why PM is about to take a frame down, as the frame is told (`{reason}`). A mod that keeps nothing
-/// unsaved can ignore it; one that debounces its saves flushes and answers `{ flushed: true }` on its
-/// port, and PM then waits no longer than its own deadline (`mods::suspend`).
+/// unsaved can ignore it; one that debounces its saves says `"answersSuspend": true` in its manifest,
+/// flushes and answers `{ flushed: true }` on its port, and PM waits for that answer, no longer than
+/// its own deadline (`mods::suspend`). Without the manifest's word PM does not wait at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuspendReason {
     /// The tab was left or the window hidden.

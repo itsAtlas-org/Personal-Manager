@@ -21,7 +21,8 @@
 // THE FRAME'S LIFE. It is mounted only while the row says the mod runs, so a pause, an uninstall or the
 // safety list's stop swaps it for a panel and the unmount ends its session. A tab switch unmounts it
 // too, but not at once: ModTabHost keeps the tab mounted, hidden, while PM tells the frame to save
-// (`lifecycle.suspend`) and waits for its answer or the deadline (K5). The backend's `session.closed` ends the session on its side; a
+// (`lifecycle.suspend`) and waits for its answer or the deadline (K5), the wait only for a mod whose
+// manifest says `"answersSuspend": true`. The backend's `session.closed` ends the session on its side; a
 // `replaced` (an update or repair) reopens the frame, any other reason drops it for a panel that says so,
 // with a button to open it again. A store that closes under a mounted frame sends no goodbye (A's rule:
 // a close says nothing), so the page clears the frame itself: the lock, a curtain and a vault switch

@@ -244,6 +244,11 @@ pub struct Manifest {
     pub data: DataDecl,
     pub entry: Entry,
     pub requires: Vec<Room>,
+    /// `answersSuspend`: the mod's frame answers `lifecycle.suspend` with `{ flushed: true }` once
+    /// what it holds is saved, so PM waits for that answer (never past `SUSPEND_DEADLINE`) before it
+    /// takes the frame down (`suspend.rs`). False when absent: PM still tells the frame, and takes it
+    /// down without waiting, so a mod with nothing to save never holds PM up.
+    pub answers_suspend: bool,
 }
 
 /// `apiVersion`: the API range a mod was built for, as `(major, minor)` pairs, `min <= target`.
@@ -396,6 +401,9 @@ struct RawManifest {
     /// value, never a format break.
     #[serde(default, deserialize_with = "present")]
     engines: Option<RawEngines>,
+    /// `true` or `false` when present (`null` is refused); absent is `false`.
+    #[serde(default, deserialize_with = "present")]
+    answers_suspend: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1287,6 +1295,7 @@ fn parse_manifest(
         data: raw.data,
         entry: raw.entry,
         requires: rooms,
+        answers_suspend: raw.answers_suspend.unwrap_or(false),
     })
 }
 
@@ -2727,6 +2736,35 @@ pub(crate) mod tests {
         ] {
             refused_manifest(&engines.to_string(), Refusal::Manifest, |m| {
                 m["engines"] = engines.clone()
+            });
+        }
+    }
+
+    /// `answersSuspend` is a plain yes or no, and absent means no: PM waits for a frame's `flushed`
+    /// only when its mod said it sends one.
+    #[test]
+    fn answers_suspend_is_a_boolean_and_absent_means_no() {
+        let absent = with_manifest(|m| {
+            m.as_object_mut().unwrap().remove("answersSuspend");
+        });
+        assert!(!absent.verify().unwrap().manifest.answers_suspend);
+        for (value, want) in [(true, true), (false, false)] {
+            let f = with_manifest(|m| m["answersSuspend"] = json!(value));
+            assert_eq!(
+                f.verify().unwrap().manifest.answers_suspend,
+                want,
+                "{value}"
+            );
+        }
+        for wrong in [
+            Value::Null,
+            json!("true"),
+            json!(1),
+            json!({"flushed": true}),
+            json!([true]),
+        ] {
+            refused_manifest(&wrong.to_string(), Refusal::Manifest, |m| {
+                m["answersSuspend"] = wrong.clone()
             });
         }
     }

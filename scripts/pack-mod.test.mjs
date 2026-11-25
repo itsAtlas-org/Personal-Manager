@@ -412,6 +412,7 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
       entry: { page: "app/index.html", workers: ["app/w.js"] },
       requires: ["calendar", "localai"],
       engines: { frame: true },
+      answersSuspend: true,
     });
     expect(summary).toEqual({
       id: "atlas.toy",
@@ -707,6 +708,9 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
     ["a required room listed twice", { requires: ["calendar", "calendar"] }, [], "listed twice"],
     ["engines that are not frame:true", { engines: { frame: false } }, [], "frame"],
     ["a null engines", { engines: null }, [], "must be an object"],
+    ["an answersSuspend that is a word", { answersSuspend: "true" }, [], "true or false"],
+    ["an answersSuspend that is a number", { answersSuspend: 1 }, [], "true or false"],
+    ["a null answersSuspend", { answersSuspend: null }, [], "true or false"],
     ["a permissions value that is not a list", { permissions: "ui.tab" }, [], "must be a list"],
     ["internetHosts that is not a list", { internetHosts: {} }, [], "must be a list"],
     ["a name with a control character", { name: "To\u0007y" }, [], "hidden or control"],

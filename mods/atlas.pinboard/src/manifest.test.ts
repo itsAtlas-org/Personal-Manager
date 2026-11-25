@@ -225,6 +225,14 @@ describe("what the page does is covered by what the manifest asks for", () => {
     ]);
   });
 
+  it("says it answers lifecycle.suspend, which it does (boot.tsx), so PM waits for the last save", () => {
+    // PM waits for a frame's `{flushed: true}` only when its manifest says so (suspend.rs). Without
+    // this line PM closes the board on a tab switch or a quit without waiting for the edit the board
+    // is still holding (it writes 500 ms after you stop typing).
+    expect(namedEvents).toContain("lifecycle.suspend");
+    expect(manifest.answersSuspend).toBe(true);
+  });
+
   /** What each call needs: its row's permission, the reads a write names a target for, and the reads a
    *  call needs only because the page passes the optional target (a project name). */
   function needs(method: string): string[] {

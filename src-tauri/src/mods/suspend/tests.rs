@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The suspend handshake over real sessions and a recording channel: a frame is retired only after its
-//! `flushed` or the deadline, one mute frame never holds the others (or a quit), and an answer nobody
-//! asked for releases nothing.
+//! `flushed` or the deadline, one mute frame never holds the others (or a quit), an answer nobody
+//! asked for releases nothing, and a frame whose mod never said it answers is told and not waited for.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::*;
 use crate::mods::api::events::LIFECYCLE_SUSPEND;
-use crate::mods::api::test_support::{insert_mod, live_session, serve, ModRow, TestHost};
+use crate::mods::api::test_support::{insert_mod, live_session, serve_as, ModRow, TestHost};
 use crate::mods::outbox::testing::Recorder;
 
 /// A frame under test: its live session and what its channel heard.
@@ -21,12 +21,35 @@ struct Frame {
     rec: Recorder,
 }
 
+/// A frame of a mod whose manifest says `answersSuspend: true`: PM waits for it.
 fn open(host: &TestHost, m: &'static str) -> Frame {
+    open_as(host, m, true)
+}
+
+/// A frame of a mod whose manifest says nothing of it (the Document Map 1.1.0): PM tells it and goes on.
+fn open_not_answering(host: &TestHost, m: &'static str) -> Frame {
+    open_as(host, m, false)
+}
+
+fn open_as(host: &TestHost, m: &'static str, answers_suspend: bool) -> Frame {
     host.sql(|c| insert_mod(c, &ModRow::signed(m, "second", &[])));
-    serve(host, m);
+    serve_as(host, m, answers_suspend);
     let rec = Recorder::default();
     let session = live_session(host, m, rec.outbox());
     Frame { session, rec }
+}
+
+/// What `frame` has been told of `lifecycle.suspend`, once the tell PM did not wait for has landed
+/// (it runs on a blocking thread after `suspend` came back), or after two seconds.
+async fn told_eventually(frame: &Frame) -> Vec<serde_json::Value> {
+    for _ in 0..400 {
+        let told = frame.rec.payloads(LIFECYCLE_SUSPEND);
+        if !told.is_empty() {
+            return told;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    frame.rec.payloads(LIFECYCLE_SUSPEND)
 }
 
 fn id(s: &str) -> ModId {
@@ -209,6 +232,111 @@ async fn a_frame_that_cannot_hear_it_is_not_waited_for() {
     );
     assert!(took < Duration::from_secs(2), "{took:?}");
     assert!(a.rec.all().is_empty());
+}
+
+/// The Document Map's case: a mod that never said it answers is told why, and PM goes on at once
+/// instead of waiting out the deadline for an answer that is never coming.
+#[tokio::test]
+async fn a_frame_whose_mod_does_not_answer_is_told_and_not_waited_for() {
+    let host = TestHost::new();
+    let map = open_not_answering(&host, "acme.map");
+    let (done, took) = run(
+        &host,
+        Audience::Mod(id("acme.map")),
+        SuspendReason::Hidden,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        done,
+        Suspended {
+            not_answering: 1,
+            ..Default::default()
+        }
+    );
+    assert!(took < Duration::from_millis(500), "{took:?}");
+    assert_eq!(
+        host.runtime().flushes().waiting_on(),
+        0,
+        "nothing waits on it"
+    );
+    assert_eq!(told_eventually(&map).await, [json!({ "reason": "hidden" })]);
+}
+
+/// A frame that answers is waited for as before when one that doesn't is beside it, and the one that
+/// doesn't neither shortens nor lengthens that wait.
+#[tokio::test]
+async fn one_that_answers_is_waited_for_beside_one_that_does_not() {
+    let host = TestHost::new();
+    let mute = open(&host, "acme.mute");
+    let map = open_not_answering(&host, "acme.map");
+    let (done, took) = run(
+        &host,
+        Audience::Everyone,
+        SuspendReason::Quit,
+        Duration::from_millis(150),
+    )
+    .await;
+    assert_eq!(
+        done,
+        Suspended {
+            timed_out: 1,
+            not_answering: 1,
+            ..Default::default()
+        }
+    );
+    assert!(
+        took >= Duration::from_millis(140) && took < Duration::from_secs(3),
+        "{took:?}"
+    );
+    assert_eq!(mute.rec.payloads(LIFECYCLE_SUSPEND).len(), 1);
+    assert_eq!(map.rec.payloads(LIFECYCLE_SUSPEND).len(), 1, "both told");
+    // An answer from the frame PM never waited on releases nothing and counts for nothing.
+    assert!(!host.runtime().flushes().flushed(&map.session));
+}
+
+/// A frame PM does not wait for has its question to the person revoked at once: its wait is over
+/// before it began, so a late yes cannot act for a frame about to go.
+#[tokio::test]
+async fn a_frame_not_waited_for_loses_its_question_at_once() {
+    use crate::mods::api::limits::Family;
+    use crate::mods::api::permissions::Class;
+    use crate::mods::api::table::{Kind, Row};
+    use crate::mods::confirm::{snapshot_hash, Action, Ask};
+    const ROW: Row = Row {
+        name: "test.confirm",
+        kind: Kind::Call,
+        permission: Some("storage"),
+        class: Class::Local,
+        added: (1, 0),
+        deprecated: None,
+        removed: None,
+        experimental: false,
+        family: Family::General,
+    };
+    let host = TestHost::new();
+    let map = open_not_answering(&host, "acme.map");
+    let ticket = host.runtime().begin_call(&map.session).unwrap();
+    host.runtime()
+        .confirm_mint(
+            &ticket,
+            Ask {
+                row: &ROW,
+                action: Action::Probe { key: "k".into() },
+                snapshot: snapshot_hash("probe", "v"),
+            },
+        )
+        .unwrap();
+    assert!(host.runtime().confirm_held(&map.session));
+    let (done, _) = run(
+        &host,
+        Audience::Everyone,
+        SuspendReason::Vault,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(done.not_answering, 1);
+    assert!(!host.runtime().confirm_held(&map.session));
 }
 
 #[tokio::test]
@@ -453,6 +581,33 @@ async fn a_quit_exits_after_the_wait_and_a_second_request_does_not_exit_early() 
     );
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(exits.load(Ordering::SeqCst), 1, "exactly one exit");
+}
+
+/// With only frames whose mod doesn't answer running (the Document Map), a quit does not wait out
+/// the deadline for them.
+#[tokio::test]
+async fn a_quit_with_only_frames_that_do_not_answer_exits_without_the_wait() {
+    static QUITTING: AtomicBool = AtomicBool::new(false);
+    let host = TestHost::new();
+    let _map = open_not_answering(&host, "acme.map");
+    let (exits, exit) = exits_counter();
+    let started = Instant::now();
+    assert_eq!(
+        request_quit(&host, &QUITTING, Duration::from_secs(5), exit),
+        QuitRequest::Waiting
+    );
+    for _ in 0..200 {
+        if exits.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(exits.load(Ordering::SeqCst), 1);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 /// With nothing running there is nothing to wait for: PM exits at once.
