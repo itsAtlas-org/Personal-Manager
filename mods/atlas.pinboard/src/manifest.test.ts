@@ -89,11 +89,12 @@ const CODE = Object.entries(RAW)
   .filter(([path]) => !/\.test\.tsx?$/.test(path) && path !== "./testing.ts")
   .map(([path, text]) => [path, codeOf(text)]) as ReadonlyArray<readonly [string, string]>;
 
+/** Text as a RegExp source that matches it literally: every metacharacter, backslash included. */
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
 const named = (names: Iterable<string>): string[] =>
   [...names]
-    .filter((n) =>
-      CODE.some(([, text]) => new RegExp(`["'\`]${n.replace(/\./g, "\\.")}["'\`]`).test(text)),
-    )
+    .filter((n) => CODE.some(([, text]) => new RegExp(`["'\`]${escapeRegExp(n)}["'\`]`).test(text)))
     .sort();
 
 const namedCalls = named(callRows.keys());

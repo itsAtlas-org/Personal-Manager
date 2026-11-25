@@ -31,6 +31,9 @@ export const RUST_ROOT = "src-tauri";
 export const OWNER = "src-tauri/src/tasks.rs";
 const CONSTANT = "TASKS_CHANGED";
 const LITERAL = "tasks://changed";
+/** Text as a RegExp source that matches it literally: every metacharacter, backslash included. */
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+const LITERAL_RE = escapeRegExp(LITERAL);
 
 /** Every `.rs` file under `dir` (repo-relative, `/`-separated). */
 function walk(root, dir) {
@@ -136,7 +139,7 @@ export function scan(root) {
           `instead, so "the task list changed" is announced from one place`,
       );
     }
-    for (const m of code.matchAll(new RegExp(LITERAL.replace(/[/]/g, "\\/"), "g"))) {
+    for (const m of code.matchAll(new RegExp(LITERAL_RE, "g"))) {
       problems.push(
         `${path}:${lineOf(code, m.index)} holds the event name "${LITERAL}"; only ${OWNER} may, ` +
           `where \`${CONSTANT}\` is defined`,
@@ -148,7 +151,7 @@ export function scan(root) {
     problems.push(`${OWNER} is missing`);
   } else {
     const define = owner.match(
-      new RegExp(`\\bpub\\s+const\\s+${CONSTANT}\\b[^;]*"${LITERAL}"\\s*;`),
+      new RegExp(`\\bpub\\s+const\\s+${CONSTANT}\\b[^;]*"${LITERAL_RE}"\\s*;`),
     );
     if (!define)
       problems.push(`${OWNER} no longer defines \`pub const ${CONSTANT}\` as "${LITERAL}"`);
@@ -170,7 +173,7 @@ export function scan(root) {
         );
       }
     }
-    const literals = [...owner.matchAll(new RegExp(LITERAL.replace(/[/]/g, "\\/"), "g"))];
+    const literals = [...owner.matchAll(new RegExp(LITERAL_RE, "g"))];
     if (literals.length > 1) {
       problems.push(
         `${OWNER} holds the event name "${LITERAL}" ${literals.length} times; once, in the constant`,

@@ -340,7 +340,7 @@ impl ModError {
         )
     }
 
-    pub fn secret_not_set() -> Self {
+    pub fn key_not_stored() -> Self {
         Self::new(
             Code::SecretNotSet,
             "This mod's key for that website hasn't been set.",
@@ -539,7 +539,7 @@ mod tests {
             ModError::network_unavailable(),
             ModError::too_many_redirects(),
             ModError::response_too_large(),
-            ModError::secret_not_set(),
+            ModError::key_not_stored(),
             // PR C's (K1), in `Code::ALL`'s order.
             ModError::engine_not_ready(),
             ModError::needs_confirmation(String::new(), String::new()),

@@ -38,16 +38,16 @@ use crate::mods::secrets;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SecretsArgs {
+struct KeySlotArgs {
     name: String,
 }
 
-pub(super) async fn secrets_set<H: Host>(
+pub(super) async fn key_slots_set<H: Host>(
     host: &H,
     auth: &Authorised,
     args: &Value,
 ) -> Result<Reply, ModError> {
-    let SecretsArgs { name } = parse(args)?;
+    let KeySlotArgs { name } = parse(args)?;
     let page_args = {
         let (host, auth) = (host.clone(), auth.clone());
         blocking(move || ask_for_key(&host, &auth, &name)).await?

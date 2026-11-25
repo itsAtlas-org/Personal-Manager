@@ -166,7 +166,7 @@ pub(super) async fn run<H: Host>(
         Method::UiOpenDocument => documents::open_document(host, auth, args).await,
         Method::AiComplete => ai::complete(host, auth, args).await,
         Method::NetFetch => net_fetch::fetch(host, auth, args).await,
-        Method::SecretsSet => surface::secrets_set(host, auth, args).await,
+        Method::SecretsSet => surface::key_slots_set(host, auth, args).await,
         Method::Notify => surface::notify(host, auth, args).await,
         Method::TasksList => task_calls::list(host, auth, args).await,
         Method::TasksAdd => task_calls::add(host, auth, args).await,
