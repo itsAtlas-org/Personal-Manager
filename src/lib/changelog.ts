@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.189.0-alpha",
+    date: "2026-11-25",
+    highlights: [
+      "Right-click an event on the Calendar and you get a menu of what you can do with it: open its details, edit it, duplicate it, open it in Google Calendar or Outlook, copy its link, join the call, jump to its project, or delete it. It works the same in every view, and from the keyboard with Shift+F10 (or the Menu key, where your keyboard has one) on a focused event. Choices you can't use are simply left out, and Delete still asks before anything goes.",
+      "The same goes for the chips on the calendar: a task offers Edit and a To do / Doing / Done choice, and a milestone or pinboard entry takes you to its project or the Pinboard.",
+      "On the Runway, right-click a task card to edit it, change its status, move it up, down or to another day, switch its lane, park it, open its project or event, or delete it. Stacks open, close and move as one. The move choices are the very same list as the Move… button, which stays where it is.",
+      "Every button you already had is still there. The menus are shortcuts, so nothing is only a right-click away.",
+    ],
+  },
+  {
     version: "3.188.1-alpha",
     date: "2026-11-25",
     highlights: [

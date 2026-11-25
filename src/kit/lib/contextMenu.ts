@@ -80,6 +80,15 @@ let fromKeyboard = false;
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
 
+/** Copy `text` through the host, so a screen reader hears `spoken` ("Copied" by default) once it has
+ *  worked. A menu's Copy item uses this and not the clipboard directly: the menu has closed by the
+ *  time the copy lands, and nothing else on the page would say it happened. With no host mounted
+ *  (a test, a page that never mounted one) the text is still copied, silently. */
+export function copyViaHost(text: string, spoken?: string): void {
+  if (fallbackActions) fallbackActions.copy(text, spoken);
+  else void navigator.clipboard?.writeText(text).catch(() => {});
+}
+
 /** The host's say-so on how the fallback's items act; `null` takes it back (the host unmounting). */
 export function setFallbackActions(actions: FallbackActions | null): void {
   fallbackActions = actions;

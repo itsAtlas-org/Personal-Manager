@@ -11,18 +11,16 @@ import { createPortal } from "react-dom";
 import type { RunwayWindow } from "../../../lib/calendarPrefs";
 import { dayKey, isEventPast, PAST_EVENT_CLASS } from "../../../lib/calendar-layout";
 import {
-  dropPlan,
-  isDropColumn,
-  orderAfterStep,
   type RunwayCard,
   type RunwayColumn,
   type RunwayEventStrip,
   type TaskPlan,
 } from "../../../lib/runway";
-import type { CalendarEvent, Task, TaskLane } from "../../../lib/types";
+import type { CalendarEvent, Task } from "../../../lib/types";
 import { DateField } from "../../DateField";
+import { DeleteTaskDialog } from "../../tasks/DeleteTaskDialog";
 import { Button, Callout, ConfirmDialog, Dialog, Input, Popover, cn } from "../../ui";
-import { newWindowId, placeName, stripWhen } from "./runwayLogic";
+import { moveChoices, newWindowId, runMoveChoice, stripWhen, type MoveChoice } from "./runwayLogic";
 
 /** A column's events, read-only, at its head (R1): each opens its details (a pinboard entry opens
  *  the Pinboard). Nothing is drawn for a column with none. Later's says how many more the List
@@ -175,9 +173,10 @@ export function RunwayChrome({
   );
 }
 
-/** The Move… menu: up or down within its lane, then the columns a task can go to, then the other
+/** The Move… popover: up or down within its lane, then the columns a task can go to, then the other
  *  lane, then parking. For a stack, it moves all of its tasks. Up and down are the keyboard's (and
- *  the Terminal's) way to reorder, as a drag within a column is the pointer's. */
+ *  the Terminal's) way to reorder, as a drag within a column is the pointer's. What it lists is
+ *  `moveChoices`, which the card's right-click menu draws too. */
 export function MoveMenu({
   name,
   tasks,
@@ -201,16 +200,14 @@ export function MoveMenu({
   onReorder?: (order: number[], said: string) => void;
   terminal?: boolean;
 }) {
-  const first = tasks[0];
-  if (!first) return null;
-  const lane = first.lane;
-  const parked = first.parked;
-  const other: TaskLane = lane === "foreground" ? "background" : "foreground";
-  const from = parked ? null : (columns.find((c) => c.id === here) ?? null);
-  const ids = tasks.map((t) => t.id);
-  const up = laneCards && onReorder ? orderAfterStep(laneCards, ids, -1) : null;
-  const down = laneCards && onReorder ? orderAfterStep(laneCards, ids, 1) : null;
-  const inWords = parked ? "Parked" : from ? placeName(from, lane) : "";
+  const choices = moveChoices({
+    tasks,
+    columns,
+    here,
+    laneCards,
+    canReorder: onReorder !== undefined,
+  });
+  if (choices.length === 0) return null;
   const item =
     "block w-full rounded-[var(--radius-sm)] px-2 py-1 text-left text-xs text-ink2 hover:bg-surface hover:text-ink disabled:cursor-default disabled:text-ink4 disabled:hover:bg-transparent";
   return (
@@ -234,98 +231,69 @@ export function MoveMenu({
       )}
     >
       {({ close }) => {
-        const pick = (planFor: (t: Task) => TaskPlan | null, where: string) => {
-          close();
-          onReplan(planFor, where);
-        };
-        const step = (order: number[] | null, said: string) => {
-          close();
-          if (order && onReorder) onReorder(order, said);
-        };
+        const row = (c: MoveChoice) => (
+          <button
+            key={c.key}
+            type="button"
+            className={item}
+            disabled={c.disabled}
+            aria-current={c.current ? "true" : undefined}
+            onClick={() => {
+              close();
+              runMoveChoice(c, onReplan, onReorder);
+            }}
+          >
+            {c.label}
+            {c.sub && <span className="ml-1 text-ink4">{c.sub}</span>}
+          </button>
+        );
+        const steps = choices.filter((c) => c.part === "step");
         return (
           <div className={cn("flex flex-col", terminal && "font-mono")}>
-            {laneCards && onReorder && (
+            {steps.length > 0 && (
               <>
-                <button
-                  type="button"
-                  className={item}
-                  disabled={up === null}
-                  onClick={() => step(up, `Moved up in ${inWords}`)}
-                >
-                  Move up
-                </button>
-                <button
-                  type="button"
-                  className={item}
-                  disabled={down === null}
-                  onClick={() => step(down, `Moved down in ${inWords}`)}
-                >
-                  Move down
-                </button>
+                {steps.map(row)}
                 <div className="my-1 border-t border-rule" />
               </>
             )}
             <p className="px-2 pb-1 pt-0.5 text-[0.6875rem] text-ink4">Move to</p>
-            {columns.filter(isDropColumn).map((c) => {
-              const current = !parked && c.id === here;
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  className={item}
-                  disabled={current}
-                  aria-current={current ? "true" : undefined}
-                  onClick={() =>
-                    pick(
-                      (t) => dropPlan({ kind: "column", column: c, lane: t.lane }, t, from),
-                      placeName(c, lane),
-                    )
-                  }
-                >
-                  {c.label}
-                  <span className="ml-1 text-ink4">{c.sub}</span>
-                </button>
-              );
-            })}
+            {choices.filter((c) => c.part === "column").map(row)}
             <div className="my-1 border-t border-rule" />
-            <button
-              type="button"
-              className={item}
-              onClick={() =>
-                pick(
-                  (t) => ({
-                    do_start: t.do_start,
-                    do_end: t.do_end,
-                    lane: other,
-                    parked: t.parked,
-                  }),
-                  other === "background" ? "the background lane" : "the foreground lane",
-                )
-              }
-            >
-              {other === "background" ? "Background lane" : "Foreground lane"}
-            </button>
-            <button
-              type="button"
-              className={item}
-              onClick={() =>
-                pick(
-                  (t) => ({
-                    do_start: t.do_start,
-                    do_end: t.do_end,
-                    lane: t.lane,
-                    parked: !parked,
-                  }),
-                  parked ? "the plan" : "Parked",
-                )
-              }
-            >
-              {parked ? "Bring back from Parked" : "Park it"}
-            </button>
+            {choices.filter((c) => c.part === "other").map(row)}
           </div>
         );
       }}
     </Popover>
+  );
+}
+
+/** "Delete this task?" for a card's right-click menu: the editor's own question, asked from the
+ *  board. `task` is the one being asked about (null: closed); `remove` does the delete, once the
+ *  answer is yes, and says whether it went (a failure shows in the board's own error line). */
+export function DeleteTaskAsk({
+  task,
+  remove,
+  onClose,
+}: {
+  task: Task | null;
+  remove: (task: Task) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <DeleteTaskDialog
+      open={task !== null}
+      title={task?.title}
+      busy={busy}
+      onConfirm={async () => {
+        if (!task) return;
+        setBusy(true);
+        await remove(task);
+        setBusy(false);
+        onClose();
+      }}
+      onClose={busy ? () => {} : onClose}
+    />
   );
 }
 

@@ -204,6 +204,7 @@ import { MoveFlow } from "./edit/MoveFlow";
 import { useMoveDrops } from "./edit/useMoveDrops";
 import { undoLatest, useDeleteDialog, useEventWrites, useMirrorReads } from "./edit/useEventWrites";
 import { overlayShown, sayAgain, useCalendarGesture } from "./useCalendarGesture";
+import { useEventMenu } from "./useEventMenu";
 import { AgendaView } from "./views/AgendaView";
 import { RunwayBoard } from "./views/RunwayBoard";
 import { TerminalRunway } from "./terminal/TerminalRunway";
@@ -1520,6 +1521,20 @@ export function CalendarView({
     },
     [quickOpen, milestones, tasks, onOpenProject, onOpenPinboard],
   );
+  // The right-click menu of every event drawn, one handler on the root below (useEventMenu).
+  const onEventMenu = useEventMenu({
+    events: visibleEvents,
+    calendars: overview?.calendars ?? [],
+    milestones,
+    tasks,
+    editing: popoverEditing,
+    openDetails: onEventClick,
+    editTask: (task) => setTaskEditing({ task }),
+    onOpenProject,
+    onOpenPinboard,
+    quickOpen,
+    announce,
+  });
 
   // What the Runway is given: what the calendar shows (hidden calendars already out), less the
   // task and milestone overlays, which are the board's own cards. So its columns' events strips
@@ -2023,6 +2038,7 @@ export function CalendarView({
   return (
     <div
       ref={calendarRootRef}
+      onContextMenu={onEventMenu}
       className="flex h-full min-h-0 flex-1 flex-col"
       data-help="calendar-view"
     >

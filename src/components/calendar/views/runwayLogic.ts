@@ -26,16 +26,20 @@ import {
 import { hideFinished, keepAllDay, type EventKinds } from "../../../lib/calendarFilters";
 import { storedPrefsHydrated } from "../../../lib/storedPrefs";
 import { dayKey, parseLocal, startOfDay } from "../../../lib/calendar-layout";
-import { changeTaskStatus, planTask, reorderTasks } from "../../../lib/ipc";
+import { changeTaskStatus, deleteTask, planTask, reorderTasks } from "../../../lib/ipc";
 import { formatClockIso, formatDateLocal, formatDateOnly } from "../../../lib/format";
 import {
   buildColumns,
+  dropPlan,
   foldKey,
+  isDropColumn,
   keepLiveWindowFolds,
+  orderAfterStep,
   placeCards,
   placeEvents,
   samePlan,
   setFoldKey,
+  type RunwayCard,
   type RunwayColumn,
   type RunwayEventStrip,
   type RunwayModel,
@@ -268,11 +272,139 @@ export function placeName(column: RunwayColumn, lane: TaskLane): string {
   return lane === "background" ? `${column.label}, background` : column.label;
 }
 
+/** One choice of the Move… popover, and of the same card's right-click menu: they draw this list
+ *  and nothing else, so the two can't drift. `part` says which group it sits in (up and down, the
+ *  columns, then the lane and parking); `act` is what choosing it does. */
+export type MoveChoice = {
+  key: string;
+  label: string;
+  /** A column's days, shown after its name. */
+  sub?: string;
+  /** Can't be chosen now: Move up on the first card, the column the card is already in. */
+  disabled: boolean;
+  /** The column the card is in (the popover marks it, the menu leaves it out). */
+  current?: boolean;
+  part: "step" | "column" | "other";
+} & (
+  | { act: "reorder"; order: number[] | null; said: string }
+  | { act: "replan"; planFor: (t: Task) => TaskPlan | null; where: string }
+);
+
+/** Where `tasks` (one card: a task, or a stack's tasks) can go from `here`, in the order both menus
+ *  list them: up, down, each column a task can be dropped on, the other lane, then Park it or
+ *  Bring back. Up and down come only with `canReorder` (a card with its lane's cards to step among). */
+export function moveChoices({
+  tasks,
+  columns,
+  here,
+  laneCards,
+  canReorder,
+}: {
+  tasks: readonly Task[];
+  columns: readonly RunwayColumn[];
+  /** The column the card is in (null when parked). */
+  here: string | null;
+  laneCards?: readonly RunwayCard[];
+  canReorder: boolean;
+}): MoveChoice[] {
+  const first = tasks[0];
+  if (!first) return [];
+  const lane = first.lane;
+  const parked = first.parked;
+  const other: TaskLane = lane === "foreground" ? "background" : "foreground";
+  const from = parked ? null : (columns.find((c) => c.id === here) ?? null);
+  const ids = tasks.map((t) => t.id);
+  const inWords = parked ? "Parked" : from ? placeName(from, lane) : "";
+  const out: MoveChoice[] = [];
+  if (laneCards && canReorder) {
+    const up = orderAfterStep(laneCards, ids, -1);
+    const down = orderAfterStep(laneCards, ids, 1);
+    out.push(
+      {
+        key: "up",
+        label: "Move up",
+        disabled: up === null,
+        part: "step",
+        act: "reorder",
+        order: up,
+        said: `Moved up in ${inWords}`,
+      },
+      {
+        key: "down",
+        label: "Move down",
+        disabled: down === null,
+        part: "step",
+        act: "reorder",
+        order: down,
+        said: `Moved down in ${inWords}`,
+      },
+    );
+  }
+  for (const c of columns.filter(isDropColumn)) {
+    const current = !parked && c.id === here;
+    out.push({
+      key: `column:${c.id}`,
+      label: c.label,
+      sub: c.sub,
+      disabled: current,
+      current,
+      part: "column",
+      act: "replan",
+      planFor: (t) => dropPlan({ kind: "column", column: c, lane: t.lane }, t, from),
+      where: placeName(c, lane),
+    });
+  }
+  out.push(
+    {
+      key: "lane",
+      label: other === "background" ? "Background lane" : "Foreground lane",
+      disabled: false,
+      part: "other",
+      act: "replan",
+      planFor: (t) => ({ do_start: t.do_start, do_end: t.do_end, lane: other, parked: t.parked }),
+      where: other === "background" ? "the background lane" : "the foreground lane",
+    },
+    {
+      key: "park",
+      label: parked ? "Bring back from Parked" : "Park it",
+      disabled: false,
+      part: "other",
+      act: "replan",
+      planFor: (t) => ({ do_start: t.do_start, do_end: t.do_end, lane: t.lane, parked: !parked }),
+      where: parked ? "the plan" : "Parked",
+    },
+  );
+  return out;
+}
+
+/** Do what choosing `choice` means. A step with nowhere to go does nothing. */
+export function runMoveChoice(
+  choice: MoveChoice,
+  onReplan: (planFor: (t: Task) => TaskPlan | null, where: string) => void,
+  onReorder?: (order: number[], said: string) => void,
+): void {
+  if (choice.act === "reorder") {
+    if (choice.order && onReorder) onReorder(choice.order, choice.said);
+  } else {
+    onReplan(choice.planFor, choice.where);
+  }
+}
+
 /** The writes a Runway makes, with their error and their announcement. */
 export function useRunwayActions(announce: (text: string) => void) {
   const [error, setError] = useState<string | null>(null);
 
-  /** Tick a task on to its next status. */
+  /** Delete a task, once its confirm said yes. Resolves whether it went. */
+  const remove = useCallback(
+    async (task: Task) => {
+      const ok = await runMutation(() => deleteTask(task.id), setError);
+      if (ok) announce(`Deleted ${task.title}`);
+      return ok;
+    },
+    [announce],
+  );
+
+  /** Set a task's status: the tick passes the next one, the right-click menu the one picked. */
   const cycle = useCallback(
     (task: Task, next: TaskStatus) =>
       void runMutation(() => changeTaskStatus(task.id, next), setError),
@@ -313,7 +445,7 @@ export function useRunwayActions(announce: (text: string) => void) {
     [announce],
   );
 
-  return { error, setError, cycle, replan, reorder };
+  return { error, setError, cycle, replan, reorder, remove };
 }
 
 /** A linked event's day and time, for a card: "06-11 14:00", or the day alone for an all-day one. */

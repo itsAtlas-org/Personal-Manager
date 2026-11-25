@@ -34,6 +34,7 @@ vi.mock("../../../kit/theme", async (importOriginal) => ({
 }));
 
 import * as ipc from "../../../lib/ipc";
+import { closeContextMenu, currentContextMenu } from "../../../kit/lib/contextMenu";
 import { useRunwayModel, type RunwayProps } from "../views/runwayLogic";
 import { TerminalRunway } from "./TerminalRunway";
 
@@ -452,5 +453,60 @@ describe("TerminalRunway", () => {
     expect(within(trip).getByText("Draft the deck")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit the window Trip" }));
     expect(screen.getByRole("dialog", { name: "Edit window" })).toBeTruthy();
+  });
+});
+
+// The same card menus as the board's (one builder, `runwayMenu`), on the Terminal's text rows.
+describe("TerminalRunway right-click menu", () => {
+  afterEach(() => act(() => closeContextMenu()));
+
+  const rowOf = (title: string) => screen.getByText(title).closest("li")!;
+  const items = () => currentContextMenu()?.items ?? [];
+  const find = (label: string) => {
+    const hit = items().find(
+      (i) => i.kind !== "separator" && i.kind !== "swatches" && i.label === label,
+    );
+    if (!hit || hit.kind === "separator" || hit.kind === "swatches") throw new Error(`no ${label}`);
+    return hit;
+  };
+
+  it("offers a task row its actions, and Delete task… asks first", async () => {
+    runway({ tasks: [task({ project_name: "Atlas" })] });
+    fireEvent.contextMenu(rowOf("Draft the deck"));
+    expect(currentContextMenu()?.label).toBe("Task Draft the deck");
+    expect(find("To do").checked).toBe(true);
+    expect(find("Move to Tomorrow")).toBeTruthy();
+    act(() => find("Delete task…").onSelect());
+    const ask = await screen.findByRole("dialog", { name: "Delete this task?" });
+    expect(mocked.deleteTask).not.toHaveBeenCalled();
+    fireEvent.click(within(ask).getByRole("button", { name: /Delete/ }));
+    await waitFor(() => expect(mocked.deleteTask).toHaveBeenCalledWith(1));
+  });
+
+  it("ticks a status from the menu and moves a task with Move to", async () => {
+    runway();
+    fireEvent.contextMenu(rowOf("Draft the deck"));
+    act(() => find("Done").onSelect());
+    await waitFor(() => expect(mocked.changeTaskStatus).toHaveBeenCalledWith(1, "done"));
+    act(() => find("Move to Tomorrow").onSelect());
+    await waitFor(() =>
+      expect(mocked.planTask).toHaveBeenCalledWith(1, "2026-11-05", null, "foreground", false),
+    );
+  });
+
+  it("gives a stack row Open stack and a milestone row its project", () => {
+    runway({
+      tasks: [
+        task({ id: 1, title: "Book the slot", stack_id: 7 }),
+        task({ id: 2, title: "Fill the form", stack_id: 7 }),
+      ],
+      stacks: [
+        { id: 7, title: "Visa", kind: "sequential", note: null, created_at: "", updated_at: "" },
+      ],
+    });
+    fireEvent.contextMenu(screen.getByRole("button", { name: /≡ Visa/ }).closest("li")!);
+    expect(currentContextMenu()?.label).toBe("Stack Visa");
+    act(() => find("Open stack").onSelect());
+    expect(screen.getByText("Fill the form")).toBeTruthy();
   });
 });

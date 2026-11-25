@@ -144,8 +144,9 @@ export function useRunwayDrag(opts: RunwayDragOptions): RunwayDrag {
   useEffect(() => () => stopRef.current?.(), []);
 
   const press = useCallback((e: ReactPointerEvent, item: RunwayDragItem) => {
-    // The main button of the primary pointer (a second finger never starts a second drag).
-    if (e.button !== 0 || e.isPrimary === false) return;
+    // The main button of the primary pointer (a second finger never starts a second drag). A Mac's
+    // Ctrl-click is a right-click: it opens the menu and starts nothing.
+    if (e.button !== 0 || e.isPrimary === false || e.ctrlKey) return;
     if (e.target instanceof Element && e.target.closest(NO_DRAG)) return;
     stopRef.current?.();
     const startX = e.clientX;

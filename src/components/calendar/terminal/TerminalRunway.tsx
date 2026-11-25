@@ -35,13 +35,26 @@ import {
   useRunwayFolds,
   type RunwayProps,
 } from "../views/runwayLogic";
-import { EventsStrip, MoveMenu, RunwayChrome, WindowDialog } from "../views/runwayParts";
+import {
+  milestoneCardItems,
+  onCardMenu,
+  stackCardItems,
+  taskCardItems,
+  type RunwayMenuCtx,
+} from "../views/runwayMenu";
+import {
+  DeleteTaskAsk,
+  EventsStrip,
+  MoveMenu,
+  RunwayChrome,
+  WindowDialog,
+} from "../views/runwayParts";
 
 /** The task open in the editor from a row's edit. A new task is CalendarView's (+ Task, in the
  *  header). */
 type Editing = { task: Task } | null;
 
-interface RowCtx {
+interface RowCtx extends RunwayMenuCtx {
   today: Date;
   columns: RunwayColumn[];
   events: CalendarEvent[];
@@ -49,6 +62,7 @@ interface RowCtx {
   replan: (tasks: readonly Task[], planFor: (t: Task) => TaskPlan | null, where: string) => void;
   reorder: (order: number[], said: string) => void;
   edit: (task: Task) => void;
+  askDelete: (task: Task) => void;
   onOpenProject?: (project: string) => void;
   onEventClick?: (ev: CalendarEvent, anchor: DOMRect) => void;
 }
@@ -72,8 +86,9 @@ export function TerminalRunway(props: RunwayProps) {
     chrome,
   } = props;
   const { today, columns, model, strips, showEvents, toggleEvents } = props.runway;
-  const { error, cycle, replan, reorder } = useRunwayActions(announce);
+  const { error, cycle, replan, reorder, remove } = useRunwayActions(announce);
   const [editing, setEditing] = useState<Editing>(null);
+  const [deleting, setDeleting] = useState<Task | null>(null);
   const [windowEdit, setWindowEdit] = useState<{ window: RunwayWindow | null } | null>(null);
   // Any column folds, as on the board, and each fold is remembered (one key for both systems).
   const { isFolded, toggle } = useRunwayFolds();
@@ -87,6 +102,7 @@ export function TerminalRunway(props: RunwayProps) {
     replan: (ts, planFor, where) => replan(ts, planFor, where),
     reorder,
     edit: (task) => setEditing({ task }),
+    askDelete: setDeleting,
     onOpenProject,
     onEventClick,
   };
@@ -199,6 +215,7 @@ export function TerminalRunway(props: RunwayProps) {
         task={editing ? editing.task : null}
         onClose={() => setEditing(null)}
       />
+      <DeleteTaskAsk task={deleting} remove={remove} onClose={() => setDeleting(null)} />
       <WindowDialog
         open={windowEdit !== null}
         window={windowEdit?.window}
@@ -236,7 +253,10 @@ function Row({
     // Its deadline in its tone wherever it sits (plain once met), as a task's is.
     const info = m.due_date ? deadlineInfo(m.due_date.slice(0, 10), "hard", ctx.today, met) : null;
     return (
-      <li className="flex items-baseline gap-2 pl-3">
+      <li
+        className="flex items-baseline gap-2 pl-3"
+        onContextMenu={onCardMenu(`Milestone ${m.label}`, () => milestoneCardItems(m, ctx))}
+      >
         <button
           type="button"
           onClick={() => ctx.onOpenProject?.(m.project_name)}
@@ -268,7 +288,12 @@ function StackRow({
   const [open, setOpen] = useState(false);
   const title = card.stack.title || STACK_KIND_LABEL[card.stack.kind];
   return (
-    <li className="flex flex-col pl-3">
+    <li
+      className="flex flex-col pl-3"
+      onContextMenu={onCardMenu(`Stack ${title}`, () =>
+        stackCardItems(card.tasks, column, laneCards, ctx, open, setOpen),
+      )}
+    >
       <div className="flex items-baseline gap-2">
         <button
           type="button"
@@ -346,7 +371,12 @@ function TaskRow({
     t.status === "done" ? "text-ink3 line-through" : "text-ink",
   );
   return (
-    <li className="flex flex-col">
+    <li
+      className="flex flex-col"
+      onContextMenu={onCardMenu(`Task ${t.title}`, (anchor) =>
+        taskCardItems(t, column, laneCards, ctx, anchor),
+      )}
+    >
       <div className="flex flex-wrap items-baseline gap-x-2">
         <TaskStatusButton status={t.status} onCycle={(next) => ctx.cycle(t, next)} />
         {t.why && showMeta ? (

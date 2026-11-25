@@ -3208,3 +3208,130 @@ describe("CalendarView: Event | Task in quick create", () => {
     expect(document.activeElement).not.toBe(newEvent());
   });
 });
+
+// The right-click menu of an event, through the real view: one handler on the Calendar's root, the
+// items the details popover offers, and the keyboard's way to it. A menu item that deletes asks first.
+describe("CalendarView: the event's right-click menu", () => {
+  // The store is a module, and each test loads the view afresh (resetModules), so the menu's store
+  // is read from the same registry the view was.
+  let store: typeof import("../../kit/lib/contextMenu");
+  const currentContextMenu = () => store.currentContextMenu();
+  beforeEach(async () => {
+    store = await import("../../kit/lib/contextMenu");
+  });
+  afterEach(() => act(() => store.closeContextMenu()));
+  const made = (title: string): Task => ({
+    id: 9,
+    title,
+    why: null,
+    project_name: null,
+    project_archived: false,
+    milestone_id: null,
+    event_uid: null,
+    do_start: today,
+    do_end: null,
+    deadline: null,
+    deadline_kind: "hard",
+    deadline_from: "date",
+    effective_deadline: null,
+    deadline_missing: false,
+    milestone_label: null,
+    event_title: null,
+    status: "todo",
+    completed_at: null,
+    lane: "foreground",
+    stack_id: null,
+    parked: false,
+    ordinal: 0,
+    source: "user",
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+    madeBy: null,
+  });
+  const chip = () => screen.getByRole("button", { name: /Standup/ });
+  const items = () => currentContextMenu()?.items ?? [];
+  const labels = () =>
+    items().flatMap((i) => (i.kind === "separator" || i.kind === "swatches" ? [] : [i.label]));
+  const choose = (label: string) => {
+    const hit = items().find(
+      (i) => i.kind !== "separator" && i.kind !== "swatches" && i.label === label,
+    );
+    if (!hit || hit.kind === "separator" || hit.kind === "swatches") throw new Error(`no ${label}`);
+    act(() => hit.onSelect());
+  };
+
+  it("offers Open details, Edit… and Delete… on an event the user may change", async () => {
+    await mount();
+    fireEvent.contextMenu(chip());
+    expect(currentContextMenu()?.label).toBe("Event Standup");
+    expect(labels()).toContain("Open details");
+    expect(labels()).toContain("Edit…");
+    expect(labels()[labels().length - 1]).toBe("Delete…");
+  });
+
+  it("leaves Edit… and Delete… out where editing is off, as the popover does", async () => {
+    ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
+    await mount();
+    fireEvent.contextMenu(chip());
+    expect(labels()).toEqual(["Open details"]);
+  });
+
+  it("Open details opens the popover; Delete… opens the question and deletes nothing", async () => {
+    await mount();
+    fireEvent.contextMenu(chip());
+    choose("Open details");
+    expect(await screen.findByRole("dialog", { name: "Standup" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.contextMenu(chip());
+    choose("Delete…");
+    expect(await screen.findByRole("dialog", { name: "Delete this event?" })).toBeTruthy();
+    expect(ipc.deleteCalendarEvent).not.toHaveBeenCalled();
+  });
+
+  it("opens a milestone chip's project, and a task chip's status as radios", async () => {
+    tasks = [made("Draft the deck")];
+    const { onOpenProject } = await mount();
+    fireEvent.contextMenu(await screen.findByRole("button", { name: /Plant bulbs/ }));
+    expect(labels()).toEqual(["Open project Garden"]);
+    choose("Open project Garden");
+    expect(onOpenProject).toHaveBeenCalledWith("Garden");
+    fireEvent.contextMenu(await screen.findByRole("button", { name: /Draft the deck/ }));
+    expect(currentContextMenu()?.label).toBe("Task Draft the deck");
+    expect(labels()).toContain("Edit task…");
+    expect(
+      items().flatMap((i) => (i.kind === "item" || i.kind === undefined ? [i.checked] : [])),
+    ).toContain(true);
+  });
+
+  it("leaves the ghost of a new event alone", async () => {
+    await mount();
+    quickCreate("Dentist");
+    const g = ghost();
+    // The ghost must be there, or the empty menu below proves nothing.
+    expect(g).toBeTruthy();
+    fireEvent.contextMenu(g!);
+    expect(currentContextMenu()).toBeNull();
+  });
+
+  it("with quick create open, the menu offers only the way back to the box", async () => {
+    await mount();
+    quickCreate("Dentist");
+    fireEvent.contextMenu(chip());
+    expect(labels()).toEqual(["Open details"]);
+    fireEvent.contextMenu(await screen.findByRole("button", { name: /Plant bulbs/ }));
+    expect(labels()).toEqual(["Open details"]);
+    choose("Open details");
+    expect(document.activeElement).toBe(title());
+    expect(screen.getAllByRole("dialog")).toEqual([quick()]);
+  });
+
+  it("opens from the keyboard on the focused event, first item focused", async () => {
+    const { ContextMenuHost } = await import("../../kit/ui/ContextMenuHost");
+    render(<ContextMenuHost />);
+    await mount();
+    chip().focus();
+    fireEvent.keyDown(chip(), { key: "F10", shiftKey: true });
+    const first = await screen.findByRole("menuitem", { name: "Open details" });
+    expect(document.activeElement).toBe(first);
+  });
+});
