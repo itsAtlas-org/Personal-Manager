@@ -111,7 +111,9 @@ export function isKeyForDialogOver(el: Element | null, target: EventTarget | nul
  * with focus on the page beside it the key is the page's. Read at event time.
  */
 export function isKeyForADialog(target: EventTarget | null): boolean {
-  for (const dialog of document.querySelectorAll<HTMLElement>('[role="dialog"]')) {
+  for (const dialog of document.querySelectorAll<HTMLElement>(
+    '[role="dialog"], [role="alertdialog"]',
+  )) {
     if (dialog.getAttribute("aria-modal") === "true") return true;
     if (target instanceof Node && dialog.contains(target)) return true;
     if (!openDialogs.has(dialog)) return true;

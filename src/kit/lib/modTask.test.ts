@@ -98,6 +98,8 @@ describe("a task read through the Host API", () => {
       milestone_label: null,
       event_uid: null,
       event_title: null,
+      // PM's own decoration of what a mod made, never in a mod's answer.
+      madeBy: null,
     });
   });
 });

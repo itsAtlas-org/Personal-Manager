@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::call_fixtures::*;
 use super::confirm::complete;
-use super::milestone_calls::{milestone_dto, CREATE_PROJECT_QUESTION};
+use super::milestone_calls::{milestone_dto, CREATE_PROJECT_QUESTION, DELETE_MILESTONE_QUESTION};
 use super::test_support::TestHost;
 use super::{limits, Code, ModError, Point, Reply};
 use crate::mods::api::projection::Projection;
@@ -131,8 +131,9 @@ fn the_milestone_dto_accounts_for_every_field_of_a_core_milestone() {
         .remove(0);
     let core = keys(&serde_json::to_value(&m).unwrap());
     let dto = keys(&milestone_dto(&m, Projection::scoped(true, true)));
-    // What a mod is never told of a milestone: where a synced one came from.
-    let withheld = set(&["source_type", "external_id"]);
+    // What a mod is never told of a milestone: where a synced one came from, and which mod made it (PM's
+    // own label of the ledger, `madeBy`, never another maker's name in a mod's answer).
+    let withheld = set(&["source_type", "external_id", "madeBy"]);
     assert_eq!(
         core.difference(&dto).cloned().collect::<BTreeSet<_>>(),
         withheld
@@ -429,8 +430,17 @@ async fn a_label_and_a_new_projects_name_take_emoji_and_inner_no_break_spaces_an
         "bell\u{7}",
         "tab\there",
         "\u{200d}",
+        // Every other line break is refused too, so none can reach a summary line (the page draws each
+        // line after the first as the thing asked about).
+        "line\rbreak",
+        "line\u{2028}break",
+        "line\u{2029}break",
+        "line\u{85}break",
+        "line\u{b}break",
+        "line\u{c}break",
     ];
     let rows_before = milestone_rows(&host);
+    let kept = host.sql(|c| seed_milestone(c, "Alpha", "Kept"));
     for label in bad {
         assert_eq!(
             code(
@@ -439,6 +449,20 @@ async fn a_label_and_a_new_projects_name_take_emoji_and_inner_no_break_spaces_an
                     &s,
                     "milestones.add",
                     json!({"project": "Alpha", "label": label})
+                )
+                .await
+            ),
+            Code::BadArgs,
+            "{label:?}"
+        );
+        // The update call refuses it too, and the label stays as it was.
+        assert_eq!(
+            code(
+                call(
+                    &host,
+                    &s,
+                    "milestones.update",
+                    json!({"id": kept, "label": label})
                 )
                 .await
             ),
@@ -463,7 +487,21 @@ async fn a_label_and_a_new_projects_name_take_emoji_and_inner_no_break_spaces_an
             );
         }
     }
-    assert_eq!(milestone_rows(&host), rows_before);
+    assert_eq!(
+        milestone_rows(&host),
+        rows_before + 1,
+        "only the seeded one"
+    );
+    assert_eq!(
+        host.sql(|c| c
+            .query_row(
+                "SELECT label FROM project_milestones WHERE id = ?1",
+                [kept],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()),
+        "Kept"
+    );
     // Spaces of any kind at the ends are trimmed from a label as the call has always trimmed them.
     let v = value(
         call(
@@ -796,7 +834,7 @@ async fn a_milestone_the_mod_made_goes_at_once_and_one_it_did_not_asks_first() {
     let question = e.confirm.clone().unwrap().summary;
     assert_eq!(
         question,
-        "Delete the milestone \"Launch\" from the project \"Alpha\"?"
+        format!("{DELETE_MILESTONE_QUESTION}\nMilestone: Launch\nProject: Alpha")
     );
     assert_eq!(milestone_rows(&host), 1);
     let t = token(&e);
@@ -985,4 +1023,99 @@ async fn a_yes_after_the_session_ended_does_nothing() {
         Code::Declined
     );
     assert_eq!(milestone_rows(&host), 1);
+}
+
+/// A question is built from stored words a shared vault's member (or a mod, which may relabel any
+/// milestone unasked) may have planted. Line 1 is PM's words only, whatever the stored text holds:
+/// the label and the project each sit on a line of their own behind PM's marker, so no stored text
+/// can start a line, close a quote, or pose as the rest of PM's sentence, ASCII quote or look-alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_label_cannot_start_a_line_or_write_the_delete_question() {
+    let (host, s) = miler();
+    let hostile = "x\"\nhttps://evil.example/a\nl2\nl3\nl4\nl5\nl6\nl7\u{202e}\r\u{0007}\" from the project \"Other";
+    let id = host.sql(|c| seed_milestone(c, "Alpha", hostile));
+    let e = error(call(&host, &s, "milestones.delete", json!({"id": id})).await);
+    let summary = e.confirm.unwrap().summary;
+    let lines: Vec<&str> = summary.split('\n').collect();
+    assert_eq!(lines.len(), 3, "{summary:?}");
+    assert_eq!(lines[0], DELETE_MILESTONE_QUESTION);
+    assert!(lines[1].starts_with("Milestone: "), "{summary:?}");
+    assert!(
+        !summary.contains(['\r', '\u{202e}', '\u{0007}']),
+        "{summary:?}"
+    );
+    assert_eq!(
+        lines[2], "Project: Alpha",
+        "the real project is its own line"
+    );
+}
+
+/// The attack the ASCII-quote test missed: look-alike quotes pass the shared text rule, so a mod can
+/// relabel a milestone (`milestones.update` asks nothing) into a sentence that, drawn on line 1 inside
+/// PM's quotes, would read as PM's own. It is still only the text after "Milestone: ".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_look_alike_quote_in_a_relabelled_milestone_cannot_write_the_delete_question() {
+    for q in [
+        '\u{2ba}', '\u{201c}', '\u{201d}', '\u{ff02}', '\u{2033}', '"',
+    ] {
+        // A host of its own each time: a question left unanswered blocks the mod's next one.
+        let (host, s) = miler();
+        let id = host.sql(|c| seed_milestone(c, "Health", "Gym"));
+        let label = format!(
+            "Gym{q} from the project {q}Health{q}? PM has checked this. Delete the milestone {q}x"
+        );
+        value(
+            call(
+                &host,
+                &s,
+                "milestones.update",
+                json!({"id": id, "label": label}),
+            )
+            .await,
+        );
+        let e = error(call(&host, &s, "milestones.delete", json!({"id": id})).await);
+        let _ = token(&e);
+        let summary = e.confirm.unwrap().summary;
+        let lines: Vec<&str> = summary.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{q:?}: {summary:?}");
+        assert_eq!(lines[0], DELETE_MILESTONE_QUESTION, "{q:?}");
+        assert!(lines[1].starts_with("Milestone: Gym"), "{q:?}: {summary:?}");
+        assert_eq!(lines[2], "Project: Health", "{q:?}");
+    }
+}
+
+#[test]
+fn shown_puts_text_on_one_line_and_keeps_a_long_one_short() {
+    use super::milestone_calls::shown_for_test as shown;
+    assert_eq!(shown("a\n b\t\u{2028}c"), "a  b c");
+    let long = shown(&"w ".repeat(200));
+    assert!(long.chars().count() <= 123, "{}", long.chars().count());
+    assert!(long.ends_with("..."));
+}
+
+/// The delete question draws a stored name as stored: an emoji's joiner and variation selector, an
+/// inner no-break space and a quote stay (the dialog keeps them too), a hidden character goes.
+#[test]
+fn shown_draws_a_name_as_stored() {
+    use super::milestone_calls::shown_for_test as shown;
+    let family = "\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467} Family";
+    assert_eq!(shown(family), family);
+    assert_eq!(shown("\u{26a0}\u{fe0f} Visa"), "\u{26a0}\u{fe0f} Visa");
+    assert_eq!(shown("two\u{a0}words"), "two\u{a0}words");
+    assert_eq!(shown("say \"hi\""), "say \"hi\"");
+    assert_eq!(shown("a\u{200b}b\u{202e}c"), "abc");
+}
+
+/// What the delete confirm shows of a milestone and its project is what is stored, ZWJ sequence and all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_delete_question_draws_an_emoji_sequence_as_stored() {
+    let (host, s) = miler();
+    let project = "\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467} Family";
+    let id = host.sql(|c| seed_milestone(c, project, "Visa\u{a0}run\u{26a0}\u{fe0f}"));
+    let e = error(call(&host, &s, "milestones.delete", json!({"id": id})).await);
+    let summary = e.confirm.unwrap().summary;
+    let lines: Vec<&str> = summary.split('\n').collect();
+    assert_eq!(lines.len(), 3, "{summary:?}");
+    assert_eq!(lines[1], "Milestone: Visa\u{a0}run\u{26a0}\u{fe0f}");
+    assert_eq!(lines[2], format!("Project: {project}"));
 }

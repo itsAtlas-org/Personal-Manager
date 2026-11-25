@@ -37,6 +37,7 @@ import type { CalendarEvent, Milestone, Task, TaskLane, TaskStack } from "../../
 import { useDepth } from "../../../theme";
 import {
   DeadlineChip,
+  MadeByChip,
   ProjectChip,
   StackChip,
   TaskStatusButton,
@@ -597,6 +598,7 @@ function TaskCardView({
           )}
           {t.project_name && <ProjectChip project={t.project_name} onOpen={ctx.onOpenProject} />}
           {stack && <StackChip stack={stack} />}
+          <MadeByChip made={t.madeBy} />
           {ev && (
             <button
               type="button"
@@ -666,6 +668,7 @@ function MilestoneCardView({
       >
         {words}
       </button>
+      <MadeByChip made={m.madeBy} />
       {info && (
         <span className={cn("shrink-0 font-mono text-[0.6875rem]", TONE_CLASS[info.tone])}>
           {info.text}

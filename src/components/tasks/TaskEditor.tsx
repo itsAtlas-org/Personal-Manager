@@ -32,6 +32,7 @@ import {
   listTaskStacks,
   updateTask,
 } from "../../lib/ipc";
+import { madeByText } from "../../kit/lib/madeBy";
 import { useRememberedFold } from "../../lib/foldPrefs";
 import { formatDateOnly } from "../../lib/format";
 import { runMutation } from "../../lib/runMutation";
@@ -453,6 +454,10 @@ function TaskEditorBody({
         }
       >
         <div className="mt-4 flex flex-col gap-4">
+          {task?.madeBy && (
+            // Who made it, from the ledger; the tier word always rides with the name.
+            <p className="text-xs text-ink3">Made by {madeByText(task.madeBy)}</p>
+          )}
           <div>
             <label htmlFor={ids.title} className={fieldLabel}>
               Title

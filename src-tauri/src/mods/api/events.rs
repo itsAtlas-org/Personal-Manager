@@ -780,9 +780,8 @@ pub fn announce_project_change(app: &AppHandle, change: ProjectChange) {
 
 /// Why PM is about to take a frame down, as the frame is told (`{reason}`). A mod that keeps nothing
 /// unsaved can ignore it; one that debounces its saves flushes and answers `{ flushed: true }` on its
-/// port, and PM then waits no longer than its own deadline (the page's handshake, K5).
+/// port, and PM then waits no longer than its own deadline (`mods::suspend`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // the page's handshake (K5) is its user
 pub enum SuspendReason {
     /// The tab was left or the window hidden.
     Hidden,
@@ -800,7 +799,6 @@ pub enum SuspendReason {
     Quit,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl SuspendReason {
     pub const ALL: [SuspendReason; 7] = [
         Self::Hidden,
@@ -823,11 +821,15 @@ impl SuspendReason {
             Self::Quit => "quit",
         }
     }
+
+    /// The reason a word names, for the page's request: only the seven PM tells a frame.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.word() == word)
+    }
 }
 
 /// Tell the one session `session` PM is about to take its frame down. No permission: it is PM's word
 /// about the session itself, with nothing of the user's in it, so any running mod's session hears it.
-#[cfg_attr(not(test), allow(dead_code))] // the page's handshake (K5) is its caller
 pub fn lifecycle_suspend<H: Host>(host: &H, session: &str, reason: SuspendReason) -> Emitted {
     emit_with(
         host,

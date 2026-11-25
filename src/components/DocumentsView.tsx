@@ -112,6 +112,7 @@ import { OrphanSweepBanner } from "./OrphanSweepBanner";
 import { DocumentEngineGuide } from "./DocumentEngineGuide";
 import { DuplicatesPanel } from "./DuplicatesPanel";
 import { useReader } from "../lib/reader";
+import { useModRows } from "../lib/modRows";
 
 // Datalist backing the inline-reclassify project field (existing project names for autocomplete).
 const RECLASSIFY_PROJECTS_LIST_ID = "documents-reclassify-projects";
@@ -801,6 +802,22 @@ export function DocumentsView({ onReviewClick }: Props) {
     setFolderPathState(path);
     writeFolderPath(docView, path);
   };
+  // What names a `mod:<id>:` group in the Folders view: the installed mods' rows (a mod no longer
+  // installed is "a removed mod"). The name is the mod's own word, drawn clamped and with its tier.
+  // Until a read of them has succeeded there are no rows to name a group by, and a mod that is
+  // not listed yet is not a removed one (`null`: the groups say so).
+  const { rows: modRows, loaded: modRowsLoaded } = useModRows();
+  const modMakers = useMemo(
+    () =>
+      modRowsLoaded
+        ? new Map(
+            modRows
+              .filter((m) => !m.pending)
+              .map((m) => [m.id, { name: m.name, tier: m.tier, signed: m.signed }] as const),
+          )
+        : null,
+    [modRows, modRowsLoaded],
+  );
   const folderTree = useMemo(
     () =>
       docView === "all"
@@ -811,8 +828,9 @@ export function DocumentsView({ onReviewClick }: Props) {
             // A file shown from an active home can still link to an archived project; that project's
             // folder stays hidden with the rest of it.
             showArchived ? undefined : archivedSet(archivedNames),
+            modMakers,
           ),
-    [docView, sortedDocuments, showArchived, archivedNames],
+    [docView, sortedDocuments, showArchived, archivedNames, modMakers],
   );
   const opened = folderTree ? openFolder(folderTree, folderPath) : null;
   const tableDocuments = opened ? opened.folder.files : sortedDocuments;

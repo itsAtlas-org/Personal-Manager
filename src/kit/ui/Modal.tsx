@@ -60,6 +60,13 @@ export interface ModalBaseProps {
    *  outline that TELLS you there is help here — and an element with no box of its own paints no
    *  outline. The command palette is the one dialog in the tree with a registry entry. */
   helpId?: string;
+  /** `alertdialog` for a question that stops what the person was doing and wants an answer (PM's own
+   *  yes/no for a mod's call): a screen reader announces it as an alert. Everything else is a
+   *  `dialog`, the default. */
+  role?: "dialog" | "alertdialog";
+  /** The id of the element that says what the dialog is about, read after its name (`aria-describedby`).
+   *  An `alertdialog` should have one. */
+  describedBy?: string;
 }
 
 /** How the dialog gets its accessible name — REQUIRED, as an either/or. A `role="dialog"` with
@@ -97,6 +104,8 @@ export function Modal({
   className,
   placement = "center",
   helpId,
+  role = "dialog",
+  describedBy,
   labelledBy,
   label,
 }: ModalProps) {
@@ -147,9 +156,10 @@ export function Modal({
     >
       <div
         ref={dialogRef}
-        role="dialog"
+        role={role}
         aria-modal="true"
         aria-labelledby={labelledBy}
+        aria-describedby={describedBy}
         aria-label={label}
         data-help={helpId}
         tabIndex={-1}

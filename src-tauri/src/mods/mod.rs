@@ -87,6 +87,7 @@ pub mod runtime;
 pub mod safety;
 pub mod secrets;
 pub mod store;
+pub mod suspend;
 pub mod tab;
 pub mod updater;
 pub mod watchdog;

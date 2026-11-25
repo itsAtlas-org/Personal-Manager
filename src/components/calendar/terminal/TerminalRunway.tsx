@@ -23,7 +23,7 @@ import {
 import { deadlineInfo, STACK_KIND_LABEL, TONE_CLASS } from "../../../lib/tasks";
 import type { CalendarEvent, Task, TaskLane } from "../../../lib/types";
 import { useDepth } from "../../../theme";
-import { DeadlineChip, TaskStatusButton } from "../../../kit/tasks/TaskBits";
+import { DeadlineChip, MadeByChip, TaskStatusButton } from "../../../kit/tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
 import { Button, Callout, cn } from "../../ui";
 import {
@@ -245,6 +245,7 @@ function Row({
         >
           ◆ {m.label} · {m.project_name}
         </button>
+        <MadeByChip made={m.madeBy} />
         {info && <span className={TONE_CLASS[info.tone]}>{info.text}</span>}
       </li>
     );
@@ -364,6 +365,7 @@ function TaskRow({
         {place !== undefined && <span className="text-ink3">{place}</span>}
         <DeadlineChip task={t} today={ctx.today} />
         {rolled && <span className="text-st-look">{rolled}</span>}
+        <MadeByChip made={t.madeBy} />
         {t.project_name && (
           <button
             type="button"

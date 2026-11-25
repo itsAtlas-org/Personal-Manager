@@ -364,7 +364,11 @@ export const setHelpMode = (enabled: boolean) => invoke<void>("set_help_mode", {
 export const appLockStatus = () => invoke<AppLockStatus>("app_lock_status");
 
 /** Turn the app-lock on/off. Enabling is rejected by the backend when unavailable. */
-export const setAppLock = (enabled: boolean) => invoke<void>("set_app_lock", { enabled });
+export const setAppLock = async (enabled: boolean) => {
+  // Turning the lock on stops every mod call in flight, so the frames are asked to save first.
+  if (enabled) await suspendModFrames("locked");
+  return invoke<void>("set_app_lock", { enabled });
+};
 
 /** Run the OS verification (Windows Hello / Touch ID) to lift the launch lock.
  *  Resolves true on success, false when the user cancels/fails; rejects when the
@@ -392,11 +396,14 @@ export const createReplacementStore = () => invoke<void>("create_replacement_sto
  *  to also move it to a cross-account-reachable folder in the SAME crash-recoverable
  *  migration — the guided share flow always does, since a shareable vault left in the
  *  per-user profile folder is unreachable by every other account. */
-export const createShareableVault = (passphrase: string, targetLocation?: string) =>
-  invoke<VaultOpOutcome>("create_shareable_vault", {
+export const createShareableVault = async (passphrase: string, targetLocation?: string) => {
+  // The move closes the store the frames save into: let them save first.
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("create_shareable_vault", {
     passphrase,
     targetLocation: targetLocation ?? null,
   });
+};
 
 /** Change a shareable vault's passphrase: re-derive the key and re-encrypt the Markdown.
  *
@@ -416,11 +423,17 @@ export const changeVaultPassphrase = (newPassphrase: string, confirmOwnershipTra
  *  confirmation to override it — when `status.ownership === "joined"`: it would re-key someone
  *  else's vault to THIS account's device key and move it out of the shared folder, with no
  *  passphrase that gets anyone back in. Leave the vault (`detachFromSharedVault`) instead. */
-export const makeVaultPrivate = () => invoke<VaultOpOutcome>("make_vault_private");
+export const makeVaultPrivate = async () => {
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("make_vault_private");
+};
 
 /** Move the vault to another folder (e.g. a shared location), keeping key + policy.
  *  Refuses a folder that already holds a different vault — join that one instead. */
-export const moveVault = (folder: string) => invoke<VaultOpOutcome>("move_vault", { folder });
+export const moveVault = async (folder: string) => {
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("move_vault", { folder });
+};
 
 /** Unlock the current passphrase vault for this session and cache the key on this
  *  profile, so the next launch is silent. */
@@ -453,14 +466,19 @@ export const listSharedVaults = () => invoke<SharedVaultAd[]>("list_shared_vault
 /** Join an existing shared vault: unlock `folder` with the passphrase, cache the key for
  *  silent launches, and point this profile at it. The previous vault is set aside on disk,
  *  never deleted — `detachFromSharedVault` brings it back. */
-export const adoptSharedVault = (folder: string, passphrase: string) =>
-  invoke<AdoptOutcome>("adopt_shared_vault", { folder, passphrase });
+export const adoptSharedVault = async (folder: string, passphrase: string) => {
+  await suspendModFrames("vault");
+  return invoke<AdoptOutcome>("adopt_shared_vault", { folder, passphrase });
+};
 
 /** Leave the shared vault: retire this profile's pointer (kept on record so Settings can
  *  offer a rejoin) and reopen the vault set aside at join time — or a fresh, EMPTY one for
  *  an owner whose vault physically moved into the shared folder. The shared folder itself
  *  is untouched. Callers confirm via DetachConfirm first — this is not a silent switch. */
-export const detachFromSharedVault = () => invoke<void>("detach_from_shared_vault");
+export const detachFromSharedVault = async () => {
+  await suspendModFrames("vault");
+  return invoke<void>("detach_from_shared_vault");
+};
 
 /** Owner-side repair for a vault folder the OS is refusing (`fault.code === "denied"`):
  *  re-grant this account, restore the intended lockdown, and reopen the session. Works
@@ -1869,8 +1887,10 @@ export const restoreLocalBackup = (srcPath: string, passphrase: string) =>
  *  (ignored for a device-mode restore). Resolves with what the reconcile couldn't do cleanly (warnings)
  *  and where each restored mod ended up, read after the same-machine recovery has run. Developer mode
  *  and connected apps are reset on the restored store before it opens (spec §1.11). */
-export const switchToVault = (folder: string, makePrivate: boolean) =>
-  invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+export const switchToVault = async (folder: string, makePrivate: boolean) => {
+  await suspendModFrames("vault");
+  return invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+};
 
 /** Whether backups also carry the mods' own saved data ("Also save mod data in my backups"). On
  *  unless turned off. Mod secrets and connected apps never leave in any backup or export. */
@@ -2230,6 +2250,43 @@ export const modThemeChanged = (session: string, theme: unknown) =>
 /** End a frame's session: on unmount, and when the frame navigates (its second `load`). Closing an
  *  ended session is fine. */
 export const modFrameClose = (session: string) => invoke<void>("mod_frame_close", { session });
+
+/** Why PM is about to take a frame down: the seven words a frame is told (`lifecycle.suspend`'s
+ *  `{reason}`, `SuspendReason` in Rust). */
+export type ModSuspendReason =
+  "hidden" | "locked" | "paused" | "uninstalled" | "updated" | "vault" | "quit";
+
+/** Tell the frames of `modId` (every frame with none) that PM is about to take them down, and wait
+ *  until each has saved and answered or PM's own deadline (1.5 s) has passed. The backend holds the
+ *  deadline; the page's is a little longer, so a backend that never answers costs the person this
+ *  and no more. */
+export const modFramesSuspend = (reason: ModSuspendReason, modId?: string) =>
+  invoke<void>("mod_frames_suspend", { reason, modId: modId ?? null });
+
+/** The frame of `session` answered `{ flushed: true }` on its port: what it held is saved. Counts only
+ *  for a session PM asked, so a frame cannot answer early. */
+export const modFrameFlushed = (session: string) => invoke<void>("mod_frame_flushed", { session });
+
+/** The page's longest wait for [`modFramesSuspend`]: past the backend's deadline, so it is the
+ *  backend's own that normally ends the wait. */
+export const SUSPEND_PAGE_DEADLINE_MS = 2500;
+
+/** [`modFramesSuspend`] that never rejects and never waits past [`SUSPEND_PAGE_DEADLINE_MS`]: what
+ *  every path that retires a frame awaits. A failure or a silence means the frame is taken down
+ *  without waiting. */
+export async function suspendModFrames(reason: ModSuspendReason, modId?: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SUSPEND_PAGE_DEADLINE_MS);
+  });
+  try {
+    await Promise.race([modFramesSuspend(reason, modId).catch(() => {}), deadline]);
+  } catch {
+    // A synchronous throw from a broken bridge: nothing to wait for.
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Relay one bridge call: `args` is the JSON text the bridge measured, so the backend checks its size
  *  before parsing it. The backend resolves the session to its mod (the frame never names one) and

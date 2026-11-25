@@ -89,7 +89,7 @@ const preview = (extra: Partial<UninstallPreview> = {}): UninstallPreview => ({
     navTab: null,
     calendarOverlay: null,
   },
-  stays: { tasks: 0, milestones: 0, documents: 0 },
+  stays: { tasks: 0, milestones: 0, documents: 0, keptDocuments: 0 },
   removedBySafetyList: false,
   ...extra,
 });
@@ -287,7 +287,7 @@ describe("Uninstall", () => {
 
   it("keeps 'also delete what it made' the person's choice, off until they turn it on", async () => {
     uninstallPreview.mockResolvedValue(
-      preview({ stays: { tasks: 2, milestones: 0, documents: 0 } }),
+      preview({ stays: { tasks: 2, milestones: 0, documents: 0, keptDocuments: 0 } }),
     );
     uninstallMod.mockResolvedValue(gone("acme.tool"));
     render(view());

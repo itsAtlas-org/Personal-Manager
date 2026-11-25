@@ -1483,6 +1483,7 @@ mod tests {
             source_type: None,
             external_id: None,
             sort_order: id,
+            made_by: None,
         }
     }
 

@@ -15,7 +15,8 @@ import {
   TASK_STATUS_LABEL,
   TONE_CLASS,
 } from "../lib/tasks";
-import type { Task, TaskStack, TaskStatus } from "../../lib/types";
+import { madeByName, madeByText, tierWord } from "../lib/madeBy";
+import type { MadeBy, Task, TaskStack, TaskStatus } from "../../lib/types";
 import { useTheme } from "../theme";
 import { cn } from "../ui/cn";
 
@@ -146,6 +147,31 @@ export function StackChip({
       <span className="min-w-0 truncate text-[0.6875rem] text-ink4" title={stack.note}>
         {stack.note}
       </span>
+    </span>
+  );
+}
+
+/** A small chip saying a mod made this task or milestone: its name (clamped, as text) and ALWAYS the
+ *  tier word the ledger recorded, so a name can't pass for PM's own or for a reviewed mod. Nothing when
+ *  the user (or PM) made it. */
+export function MadeByChip({
+  made,
+  className,
+}: {
+  made: MadeBy | null | undefined;
+  className?: string;
+}) {
+  if (!made) return null;
+  return (
+    <span
+      title={`Made by ${madeByText(made)}`}
+      className={cn(
+        "inline-flex max-w-[14rem] shrink-0 items-baseline gap-1 rounded-[var(--radius-sm)] border border-border px-1 text-[0.6875rem] text-ink3",
+        className,
+      )}
+    >
+      <span className="min-w-0 truncate">{madeByName(made)}</span>
+      <span className="shrink-0 text-ink4">· {tierWord(made)}</span>
     </span>
   );
 }

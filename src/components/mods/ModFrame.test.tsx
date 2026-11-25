@@ -43,6 +43,8 @@ const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
 const modPermissionDecide = vi.fn();
 const modAiPromptInfo = vi.fn();
+const modFrameFlushed = vi.fn();
+const modConfirm = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
@@ -55,6 +57,8 @@ vi.mock("../../lib/ipc", () => ({
   modCall: (session: string, method: string, args: unknown) => modCall(session, method, args),
   modEventsAck: (session: string, seq: number) => modEventsAck(session, seq),
   modThemeChanged: (session: string, theme: unknown) => modThemeChanged(session, theme),
+  modFrameFlushed: (session: string) => modFrameFlushed(session),
+  modConfirm: (token: string, accept: boolean) => modConfirm(token, accept),
 }));
 
 // The theme a `theme.get` is answered from: the same stub the other component tests use (the real
@@ -97,6 +101,7 @@ beforeEach(() => {
   modEventsAck.mockResolvedValue(undefined);
   modThemeChanged.mockResolvedValue(undefined);
   modsHeartbeat.mockResolvedValue(undefined);
+  modFrameFlushed.mockResolvedValue(undefined);
 });
 
 afterEach(() => {

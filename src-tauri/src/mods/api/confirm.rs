@@ -217,6 +217,10 @@ pub(super) fn request<H: Host>(
             Code::RateLimited,
             "PM is already asking about another call from this mod.",
         ),
+        Err(Refused::Quiet) => ModError::new(
+            Code::RateLimited,
+            "PM was told no to this mod's questions and is not asking again for a while.",
+        ),
         Err(Refused::Ended) => ModError::session_ended(),
         Err(Refused::Random) => ModError::internal("no random bytes for a confirm token"),
     }
@@ -262,6 +266,9 @@ async fn answer_in<H: Host>(
         .runtime()
         .confirm_take(token, host.store().store_epoch())
         .ok_or_else(ModError::confirmation_gone)?;
+    // A treadmill of noes ends the questions for the session (`mods::confirm`, "A mod that keeps asking").
+    host.runtime()
+        .confirm_answered(&redeemed.ticket.session, accept);
     if !accept {
         return Err(ModError::declined());
     }

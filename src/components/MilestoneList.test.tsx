@@ -69,6 +69,7 @@ function milestone(over: Partial<Milestone> = {}): Milestone {
     source_type: null,
     external_id: null,
     sort_order: 0,
+    madeBy: null,
     ...over,
   };
 }
@@ -221,5 +222,36 @@ describe("an empty list", () => {
     expect(
       screen.getByText("1 completed milestone is hidden. Tick Completed to show it."),
     ).toBeTruthy();
+  });
+});
+
+describe("who made a milestone (PR C, K5)", () => {
+  it("shows a chip with the maker's name and ALWAYS its tier word, and nothing for the user's own", () => {
+    const { rerender, container } = renderList(milestone());
+    expect(container.textContent).not.toContain("party");
+    rerender(
+      <MilestoneList
+        project="Atlas"
+        milestones={[milestone({ madeBy: { name: "Pinboard", tier: "first", signed: true } })]}
+        onChanged={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain("Pinboard· first party");
+  });
+
+  it("an unsigned mod named Atlas reads as unsigned, in the editable row and the read-only summary", () => {
+    const made = { name: "Atlas", tier: "first", signed: false } as const;
+    const { container, rerender } = renderList(milestone({ madeBy: made }));
+    expect(container.textContent).toContain("Atlas· unsigned");
+    expect(container.textContent).not.toContain("first party");
+    rerender(
+      <MilestoneList
+        project="Atlas"
+        milestones={[milestone({ madeBy: made })]}
+        onChanged={() => {}}
+        readOnly
+      />,
+    );
+    expect(container.textContent).toContain("made by Atlas (unsigned)");
   });
 });

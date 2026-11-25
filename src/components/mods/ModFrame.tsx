@@ -52,6 +52,19 @@
 //   in a loop gets one question, not one per call. Only the backend's own reply can start a question:
 //   a frame's `refuse` message is a refusal the page sends back to it and never asks anything.
 //
+// - A QUESTION OF PM'S OWN (K1, K5). A call the backend answers MOD-2003 waits for the person's yes: the
+//   reply carries `{token, summary}`, which are the page's and never the frame's. PM asks in
+//   ModConfirmDialog (one at a time per frame; Escape and closing mean Decline), sends the answer to
+//   `mod_confirm` with the token, and relays what Rust answers as the frame's answer. The frame is told
+//   nothing of the question while it is open. Every way the session ends (a pause, a close, a flood
+//   stop, this frame's unmount) takes the dialog down with it and answers nothing: Rust has already
+//   revoked the token.
+// - MOD-5007 (the document engine isn't set up): the frame is told as it is, and PM shows its own strip
+//   with a "Set it up" button that takes the person to the Documents tab. PM provisions nothing for a mod.
+// - SUSPEND (K5). A frame's `{ flushed: true }` answer to `lifecycle.suspend` is relayed to Rust
+//   (`mod_frame_flushed`), which is what a waiting pause, update, uninstall, vault switch, lock, quit or
+//   tab switch is waiting on; Rust holds the deadline. This component only relays it: whoever retires
+//   the frame (ModTabHost for a tab switch) keeps it mounted until the wait is over.
 // - While mounted it keeps the frozen-page watchdog's heartbeat going (`modWatchdog.ts`).
 // - ModTab (the mod's tab) mounts it, and only while the mod's row says it can run. The frame's
 //   session ends when the frame unmounts (a tab switch, the lock, a pause that changes the row) and
@@ -60,11 +73,14 @@
 //   unmounts it (ModTab does, on the vault fault).
 
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   modCall,
+  modConfirm,
   modEventsAck,
   modFrameClose,
+  modFrameFlushed,
   modFrameOpen,
   modPermissionDecide,
   modThemeChanged,
@@ -72,12 +88,14 @@ import {
 import { MOD_TAB_HELP_ID } from "../../lib/nav";
 import { failureText, type ModHelpEntry } from "../../lib/modsTypes";
 import { frameMounted } from "../../lib/modWatchdog";
+import { useTopmostModalDialog } from "../../lib/useDialogLayer";
 import { useReader } from "../../lib/reader";
 import { useTheme } from "../../theme";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { cn } from "../ui/cn";
 import { ModAbout } from "./ModAbout";
+import { ModConfirmDialog } from "./ModConfirmDialog";
 import {
   ModPageHooksContext,
   readNotice,
@@ -108,6 +126,7 @@ import {
   type BackendReply,
   type PageAction,
 } from "./modBridge";
+import { confirmationOf, type Confirmation } from "./modConfirmReply";
 import { themeSnapshot, type ModThemeAxes } from "./modTheme";
 
 /** A mod's trust tier (spec §1.1), as the backend names it. */
@@ -220,6 +239,8 @@ interface PageContext {
   source: ModSource;
   /** What draws `secrets.set`'s field and `notify`'s strip (`modPageHooks.ts`). */
   hooks: ModPageHooks;
+  /** A call was answered MOD-5007: PM shows its own "Set it up". */
+  onEngineMissing: () => void;
 }
 
 /** What the page answers for an action the backend authorised. The arguments are the backend's (it
@@ -277,6 +298,7 @@ function answerCall(live: Live, id: number, backend: BackendReply, ctx: PageCont
       reply(live, callResult(id, backend.value));
       return;
     case "error":
+      if (backend.error.code === MOD_ERRORS.engineNotReady) ctx.onEngineMissing();
       reply(live, callError(id, backend.error));
       return;
     case "binary":
@@ -321,15 +343,37 @@ function permissionToAsk(reply: BackendReply): string | null {
     : null;
 }
 
+/** How PM's own yes/no ended: the person's answer, or `gone` when the session ended while it was open
+ *  (Rust has revoked the token; nothing more is sent), or `busy` when a question is already open. */
+type ConfirmChoice = "accept" | "decline" | "gone" | "busy";
+
+/** What a call may ask the page to put to the person. */
+interface Prompts {
+  /** The first-use question for a permission. */
+  ask: (permission: string) => Promise<Outcome>;
+  /** PM's yes/no for a MOD-2003. The dialog stays up, waiting, until [`Prompts.closeConfirm`]. */
+  confirm: (question: Confirmation) => Promise<ConfirmChoice>;
+  closeConfirm: () => void;
+}
+
 /** One call from the frame, start to answer: the backend's reply, and for a first-use refusal the
- *  question, held until the person answers, then a single retry after a yes. */
+ *  question, held until the person answers, then a single retry after a yes; and for a MOD-2003 PM's
+ *  own yes/no, whose answer Rust acts on. */
 async function runCall(
   live: Live,
   message: { id: number; method: string; args: string },
   page: { current: PageContext },
-  ask: (permission: string) => Promise<Outcome>,
+  prompts: Prompts,
 ): Promise<void> {
-  const call = async () => readReply(await modCall(live.session, message.method, message.args));
+  const { ask } = prompts;
+  // The question a MOD-2003 carries is read from the raw reply (`modConfirmReply.ts`): it is the page's
+  // and is never part of what the frame is answered.
+  let confirm: Confirmation | null = null;
+  const call = async () => {
+    const raw = await modCall(live.session, message.method, message.args);
+    confirm = confirmationOf(raw);
+    return readReply(raw);
+  };
   let backend = await call();
   const permission = permissionToAsk(backend);
   if (permission !== null) {
@@ -344,6 +388,20 @@ async function runCall(
       };
     }
     // "later": the backend's own MOD-2002 stands.
+  }
+  const question: Confirmation | null = confirm;
+  if (backend.kind === "error" && question) {
+    const { token } = question;
+    const choice = await prompts.confirm(question);
+    // The session ended while the question was open: Rust revoked the token with it, and nothing is
+    // sent to a frame PM has stopped.
+    if (choice === "gone" || live.ended || live.over) return;
+    try {
+      // A second question while one is open is never drawn: its token is burnt with a no.
+      backend = readReply(await modConfirm(token, choice === "accept"));
+    } finally {
+      if (choice !== "busy") prompts.closeConfirm();
+    }
   }
   answerCall(live, message.id, backend, page.current);
 }
@@ -398,6 +456,55 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
     for (const release of waiters) release(outcome);
   }, []);
 
+  // PM's own yes/no for a MOD-2003 (see the header): at most one at a time per frame. `confirmRef`
+  // is the call waiting on it; `confirming` is what is on screen.
+  const [confirming, setConfirming] = useState<{
+    summary: string;
+    working: boolean;
+    /** The modal dialog that was topmost when the question came, which it stacks inside (see below). */
+    over: HTMLElement | null;
+  } | null>(null);
+  const confirmRef = useRef<((choice: ConfirmChoice) => void) | null>(null);
+  // With another modal dialog up (Settings, the command palette), the question is drawn INSIDE it, as
+  // the link notice is: the lower dialog then has something nested in it, so it is no longer the
+  // topmost, ignores Escape and Tab, and stays inert until the question is answered. Only read while
+  // no question is open, or PM's own dialog would find itself as the one to go inside.
+  const topmost = useTopmostModalDialog();
+  const topmostBefore = useRef(topmost);
+  if (confirming === null) topmostBefore.current = topmost;
+  const confirm = useCallback(
+    (question: Confirmation) =>
+      new Promise<ConfirmChoice>((resolve) => {
+        // Rust allows one outstanding question per session, so a second is a double dispatch: it is
+        // never drawn, and its token is burnt with a no.
+        if (confirmRef.current) {
+          resolve("busy");
+          return;
+        }
+        confirmRef.current = resolve;
+        setConfirming({ summary: question.summary, working: false, over: topmostBefore.current });
+      }),
+    [],
+  );
+  const closeConfirm = useCallback(() => {
+    confirmRef.current = null;
+    setConfirming(null);
+  }, []);
+  const dropConfirm = useCallback(() => {
+    const waiting = confirmRef.current;
+    confirmRef.current = null;
+    setConfirming(null);
+    waiting?.("gone");
+  }, []);
+  function answerConfirm(accept: boolean) {
+    const waiting = confirmRef.current;
+    if (!waiting || confirming?.working) return;
+    setConfirming((c) => (c ? { ...c, working: true } : c));
+    waiting(accept ? "accept" : "decline");
+  }
+  // A MOD-5007 was answered: PM's own strip offers the way to the engine's setup.
+  const [engineMissing, setEngineMissing] = useState(false);
+
   /** The session is over (or the frame was stopped): every held call is released unanswered and the
    *  question comes down. */
   const dropQuestions = useCallback(() => {
@@ -407,7 +514,8 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
     setDeciding(false);
     setDecideError(null);
     for (const release of held) release("gone");
-  }, []);
+    dropConfirm();
+  }, [dropConfirm]);
   useEffect(() => dropQuestions, [dropQuestions]);
 
   const ask = useCallback((permission: string): Promise<Outcome> => {
@@ -449,9 +557,16 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
   const { openReaderById } = useReader();
   const hooks = useContext(ModPageHooksContext);
   const source: ModSource = { modId, name, tier };
-  const pageRef = useRef<PageContext>({ theme, openDocument: openReaderById, source, hooks });
+  const onEngineMissing = useCallback(() => setEngineMissing(true), []);
+  const pageRef = useRef<PageContext>({
+    theme,
+    openDocument: openReaderById,
+    source,
+    hooks,
+    onEngineMissing,
+  });
   useLayoutEffect(() => {
-    pageRef.current = { theme, openDocument: openReaderById, source, hooks };
+    pageRef.current = { theme, openDocument: openReaderById, source, hooks, onEngineMissing };
   });
 
   // While this frame is mounted the page proves to PM that it is alive (the frozen-page watchdog: a
@@ -532,10 +647,15 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
           modEventsAck(live.session, message.seq).catch(() => {});
           return;
         case "flushed":
-          // The answer to `lifecycle.suspend`. The page's handshake that waits for it (a frame is
-          // retired only after it, or at the deadline) is K5's; until then nothing waits, so the answer
-          // is read and paid for like any message, and there is nothing else to do with it.
-          if (!live.flood.take(performance.now())) stopFlooding(live);
+          // The answer to `lifecycle.suspend`: paid for like any message, then relayed. Rust counts it
+          // only for a session it asked, and holds the deadline whoever is waiting (the page's retire
+          // of a tab, a pause, an uninstall, a quit); a frame that never sends it is waited for until
+          // that deadline and no longer.
+          if (!live.flood.take(performance.now())) {
+            stopFlooding(live);
+            return;
+          }
+          modFrameFlushed(live.session).catch(() => {});
           return;
         case "refuse":
           if (!live.flood.take(performance.now())) {
@@ -550,7 +670,7 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
             return;
           }
           live.inFlight += 1;
-          void runCall(live, message, pageRef, ask)
+          void runCall(live, message, pageRef, { ask, confirm, closeConfirm })
             // The backend answers every refusal as a reply; a rejection is the IPC itself
             // failing, and its text is PM's, not the mod's to read.
             .catch(() => reply(live, callError(message.id, refusal("internal", INTERNAL_MESSAGE))))
@@ -582,7 +702,7 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
 
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [open, ask, dropQuestions]);
+  }, [open, ask, confirm, closeConfirm, dropQuestions]);
 
   // `theme.changed`: whenever PM's theme snapshot differs from the last one this frame was given, post
   // it for this frame's session (Rust decides whether its mod may hear it). The theme provider applies
@@ -659,6 +779,45 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
           onLoad={onLoad}
         />
       )}
+      {phase.kind === "open" && engineMissing && (
+        // PM's own strip, and its own words: the mod's only part is that it called something that
+        // needs the engine. PM sets nothing up for a mod; the person does, where PM sets it up.
+        <Callout variant="strip" size="md" className="flex flex-none items-center gap-3">
+          <span className="min-w-0 flex-1">
+            This mod needs PM&apos;s document engine, which isn&apos;t set up yet.
+          </span>
+          {hooks.openEngineSetup && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setEngineMissing(false);
+                hooks.openEngineSetup?.();
+              }}
+            >
+              Set it up
+            </Button>
+          )}
+          <Button variant="tertiary" size="sm" onClick={() => setEngineMissing(false)}>
+            Dismiss
+          </Button>
+        </Callout>
+      )}
+      {phase.kind === "open" &&
+        confirming &&
+        (() => {
+          const dialog = (
+            <ModConfirmDialog
+              name={name}
+              tier={tier}
+              summary={confirming.summary}
+              working={confirming.working}
+              onAnswer={answerConfirm}
+            />
+          );
+          // The dialog it stacks over may have closed since: then it is simply drawn here.
+          return confirming.over?.isConnected ? createPortal(dialog, confirming.over) : dialog;
+        })()}
       {phase.kind === "open" && asking.length > 0 && (
         <ModPermissionPrompt
           key={asking[0]}

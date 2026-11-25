@@ -17,7 +17,7 @@
 //! not make goes through PM's own question first (all tiers, the first-party Pinboard too).
 //!
 //! **A project is never made by a write that merely names it.** A mod that names a project that does
-//! not exist asks to make one: PM asks the person ("Create project X?", Bobby 2026-11-18), and on a
+//! not exist asks to make one: PM asks the person first (Bobby 2026-11-18: "Create project X?"), and on a
 //! yes the project and the milestone are made in one transaction. The project is then the person's
 //! own: it carries no maker label (the ledger names tasks and milestones only) and an uninstall never
 //! offers to remove it.
@@ -37,7 +37,7 @@ use super::{limits, Authorised, Code, Host, ModError, Reply};
 use crate::milestones::{self, ops, Milestone};
 use crate::mods::confirm::Action;
 use crate::mods::ids::ModId;
-use crate::mods::package::user_line_fault;
+use crate::mods::package::{tidy_user_line, user_line_fault};
 
 /// The longest a project name a mod asks to create is, in characters: PM's question shows all of it.
 const NEW_PROJECT_MAX: usize = 200;
@@ -358,15 +358,42 @@ pub(super) async fn delete<H: Host>(
 
 // --- the person's yes ---------------------------------------------------------------------------
 
-/// `text` as PM's question shows it: at most [`SHOWN_MAX`] characters, then an ellipsis. Stored text
-/// is the user's own (or a shared vault member's), drawn by the page as plain text.
+/// `text` as the delete question shows it: the shared rule for a person's own words
+/// ([`tidy_user_line`]), so it is drawn as stored (an emoji's joiner and variation selectors, a
+/// no-break space and a double quote stay) except that it is on ONE line (a tab or line break becomes
+/// a space, a control or hidden character goes), and at most [`SHOWN_MAX`] characters, then an
+/// ellipsis. Stored text is the user's own (or a shared vault member's): it must not start a new line
+/// (the page draws each line after the first as the thing asked about, behind PM's own marker) or
+/// reorder what follows it. No quote is rewritten: the text is never inside PM's own sentence.
 fn shown(text: &str) -> String {
-    if text.chars().count() <= SHOWN_MAX {
-        text.to_owned()
+    let flat = tidy_user_line(text);
+    if flat.chars().count() <= SHOWN_MAX {
+        flat
     } else {
-        let cut: String = text.chars().take(SHOWN_MAX).collect();
+        let cut: String = flat.chars().take(SHOWN_MAX).collect();
         format!("{cut}...")
     }
+}
+
+#[cfg(test)]
+pub(super) fn shown_for_test(text: &str) -> String {
+    shown(text)
+}
+
+/// The question line PM asks before a mod's call deletes a milestone it did not make. Constant: the
+/// milestone and its project follow on lines of their own ([`delete_question`]).
+pub(super) const DELETE_MILESTONE_QUESTION: &str = "Delete this milestone?";
+
+/// What PM asks about a milestone: its question, then the milestone's label and its project's name,
+/// each on its own line behind a marker (the page draws the lines after the first as the thing asked
+/// about). Both go through [`shown`], so each is one line and clamped, and the marker keeps a line
+/// whose text is empty from being dropped; no stored text is on the question line.
+fn delete_question(label: &str, project: &str) -> String {
+    format!(
+        "{DELETE_MILESTONE_QUESTION}\nMilestone: {}\nProject: {}",
+        shown(label),
+        shown(project)
+    )
 }
 
 /// The milestone a delete question is about, as PM reads it now: everything its words and the
@@ -391,11 +418,11 @@ pub(super) fn read_delete(conn: &Connection, id: i64) -> Result<Target, ModError
     let (project, label, due, status, event) = row.ok_or_else(no_such_milestone)?;
     Ok(Target {
         facts: format!("{id}|{project}|{label}|{due:?}|{status:?}|{event:?}"),
-        summary: format!(
-            "Delete the milestone \"{}\" from the project \"{}\"?",
-            shown(&label),
-            shown(&project)
-        ),
+        // Line 1 is PM's words only. The stored label and project (which a mod may have just relabelled,
+        // or a vault member planted) each sit on a line of their own after it, marked as which is which
+        // by a prefix PM writes: `shown` keeps each to one line, so neither can start a line that
+        // imitates PM's question or the other's marker, and a look-alike quote can't pose as PM's own.
+        summary: delete_question(&label, &project),
     })
 }
 

@@ -460,6 +460,8 @@ pub struct ModRuntime {
     /// The test folders loaded this session (`folder`): memory only, forgotten with the store, the
     /// mod or developer mode. A `folder` row with no session here is never served.
     folders: FolderSessions,
+    /// Who the suspend handshake is waiting on (`suspend`).
+    flushes: super::suspend::Flushes,
 }
 
 impl ModRuntime {
@@ -472,7 +474,13 @@ impl ModRuntime {
             ledger: Mutex::new(()),
             unsigned_allowed: AtomicBool::new(false),
             folders: FolderSessions::default(),
+            flushes: super::suspend::Flushes::default(),
         }
+    }
+
+    /// The suspend handshake's waits (`suspend`).
+    pub fn flushes(&self) -> &super::suspend::Flushes {
+        &self.flushes
     }
 
     /// The loaded test folders (`folder`).
@@ -966,9 +974,16 @@ impl ModRuntime {
         })
     }
 
+    /// The person answered a question `session` held: counts a no towards PM going quiet for it (a
+    /// treadmill of questions), and a yes clears the count. See `mods::confirm`.
+    pub fn confirm_answered(&self, session: &str, accept: bool) {
+        if let Some(s) = self.lock().sessions.get_mut(session) {
+            s.confirm.answered(accept, Instant::now());
+        }
+    }
+
     /// Drop whatever question `session` is waiting on (a suspend's deadline, K5: it never waits for
     /// the person). True when there was one.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn confirm_revoke(&self, session: &str) -> bool {
         self.lock()
             .sessions

@@ -273,6 +273,7 @@ const milestone: Milestone = {
   source_type: null,
   external_id: null,
   sort_order: 0,
+  madeBy: null,
 };
 
 const saved: WriteOutcome = { outcome: "saved", warnings: [], left_behind: [] };
@@ -1738,6 +1739,7 @@ describe("CalendarView: tasks", () => {
     source: "user",
     created_at: "2026-11-01T00:00:00Z",
     updated_at: "2026-11-01T00:00:00Z",
+    madeBy: null,
     ...over,
   });
 
@@ -2430,6 +2432,7 @@ describe("CalendarView: the filters", () => {
     source: "user",
     created_at: "2026-11-01T00:00:00Z",
     updated_at: "2026-11-01T00:00:00Z",
+    madeBy: null,
     ...over,
   });
   /** The Calendar tab, fresh, once its reads have landed: the header is drawn once the calendars
@@ -2835,6 +2838,7 @@ describe("CalendarView: Event | Task in quick create", () => {
     source: "user",
     created_at: "2026-11-01T00:00:00Z",
     updated_at: "2026-11-01T00:00:00Z",
+    madeBy: null,
   });
   // The box's name follows its kind, so these find it on either (they shadow the file's, which are
   // the event's).

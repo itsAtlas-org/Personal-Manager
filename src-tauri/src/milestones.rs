@@ -72,6 +72,10 @@ pub struct Milestone {
     /// The source's own stable row id for an externally-owned milestone; `None` = PM-native (v42).
     pub external_id: Option<String>,
     pub sort_order: i64,
+    /// The mod that made it (the `mod_ledger` row written with it), or `None` for the user's own and
+    /// for everything made before mods. Decoration only: see [`crate::made_by`].
+    #[serde(rename = "madeBy")]
+    pub made_by: Option<crate::made_by::MadeBy>,
 }
 
 impl Milestone {
@@ -127,6 +131,7 @@ struct Row {
     source_type: Option<String>,
     external_id: Option<String>,
     sort_order: i64,
+    made_by: Option<crate::made_by::MadeBy>,
 }
 
 /// Whole days from `today` to `date` (negative = overdue). Both are read as civil
@@ -258,6 +263,7 @@ fn resolve(row: Row, uid_dates: &HashMap<String, String>) -> Milestone {
         source_type: row.source_type,
         external_id: row.external_id,
         sort_order: row.sort_order,
+        made_by: row.made_by,
     }
 }
 
@@ -274,15 +280,20 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
             source_type: r.get(7)?,
             external_id: r.get(8)?,
             sort_order: r.get(9)?,
+            made_by: crate::made_by::read(r, 10)?,
         })
     };
-    let sql_cols = "id, project_name, label, due_date, event_uid, state, \
-                    status, source_type, external_id, sort_order";
+    // The maker rides on a LEFT JOIN (`idx_mod_ledger_milestone` is a unique index, so a milestone
+    // matches at most one row and the list is the same length as without it).
+    let sql_cols = "m.id, m.project_name, m.label, m.due_date, m.event_uid, m.state, \
+                    m.status, m.source_type, m.external_id, m.sort_order, \
+                    l.mod_name, l.tier, l.signed";
+    let from = "project_milestones m LEFT JOIN mod_ledger l ON l.milestone_id = m.id";
     let rows = match project {
         Some(name) => {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM project_milestones WHERE project_name = ?1 \
-                 ORDER BY sort_order, id"
+                "SELECT {sql_cols} FROM {from} WHERE m.project_name = ?1 \
+                 ORDER BY m.sort_order, m.id"
             ))?;
             let out: Vec<Row> = stmt
                 .query_map(params![name], map)?
@@ -291,7 +302,7 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
         }
         None => {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM project_milestones ORDER BY project_name, sort_order, id"
+                "SELECT {sql_cols} FROM {from} ORDER BY m.project_name, m.sort_order, m.id"
             ))?;
             let out: Vec<Row> = stmt
                 .query_map([], map)?
@@ -706,6 +717,7 @@ mod tests {
             source_type: None,
             external_id: None,
             sort_order: id,
+            made_by: None,
         }
     }
 

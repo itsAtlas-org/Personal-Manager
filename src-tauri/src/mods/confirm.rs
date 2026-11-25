@@ -30,6 +30,12 @@
 //! so the page cannot click past it: a second request for the same session is a script or a double
 //! dispatch, and is refused (`MOD-3001`), never queued; the first stays.
 //!
+//! **A mod that keeps asking.** The dialog is modal over the whole app, so a mod that asked again the
+//! moment it was told no would leave the person no way to reach the Mods tab and pause it. The slot
+//! counts the noes ([`Slot::answered`]): after [`DECLINES_BEFORE_QUIET`] in a row (a yes clears the
+//! count) PM asks nothing more for that session for [`QUIET_AFTER_DECLINES`], and the call is answered
+//! `MOD-3001` with no dialog. It is Rust's count, not the page's.
+//!
 //! **The registry dies with the session.** The slot lives inside the session's own record
 //! (`runtime::Session`), so every way a session ends takes its token with it: the lock moves the
 //! session to a new generation and clears the slot ([`ModRuntime::bump_all`]); a vault switch or a
@@ -42,12 +48,21 @@
 //! [`ModRuntime::bump_all`]: super::runtime::ModRuntime::bump_all
 //! [`ModRuntime::clear`]: super::runtime::ModRuntime::clear
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
 use super::api::limits::CONFIRM_TTL;
 use super::api::table::Row;
+
+/// How many noes in a row (none of them followed by a yes) a session may collect inside
+/// [`DECLINE_WINDOW`] before PM stops asking for it, and how long it then stays quiet. A mod that asks
+/// again the moment it is told no would otherwise put a modal dialog over the whole app for good, with
+/// the Mods tab (where the person could pause it) out of reach. The person's own next move, a new
+/// click on a button that asks, is let through for the first noes: this only ends a treadmill.
+pub const DECLINES_BEFORE_QUIET: u8 = 3;
+pub const DECLINE_WINDOW: Duration = Duration::from_secs(120);
+pub const QUIET_AFTER_DECLINES: Duration = Duration::from_secs(120);
 
 /// What the person's yes performs. A variant holds what Rust validated and nothing a frame can change
 /// afterwards: the target's own ids, or text the handler already held to its rules (a parsed address,
@@ -60,8 +75,9 @@ pub enum Action {
     OpenLink { url: String },
     /// `milestones.delete` of a milestone the mod did not make.
     DeleteMilestone { id: i64 },
-    /// `milestones.add` naming a project that does not exist yet: "Create project X?". On a yes the
-    /// project and the milestone are made in one transaction, and the project is the person's own.
+    /// `milestones.add` naming a project that does not exist yet ("Create a new project with this
+    /// name?"). On a yes the project and the milestone are made in one transaction, and the project is
+    /// the person's own.
     CreateProject {
         project: String,
         label: String,
@@ -109,6 +125,9 @@ pub struct Outstanding {
 pub enum Refused {
     /// The session is already waiting for the person's answer to another call.
     Busy,
+    /// The person has said no to this session's questions [`DECLINES_BEFORE_QUIET`] times in a row, so
+    /// PM is not asking again for a while ([`QUIET_AFTER_DECLINES`]).
+    Quiet,
     /// The call's session is no longer the one it began under.
     Ended,
     /// PM couldn't make a random token.
@@ -118,7 +137,14 @@ pub enum Refused {
 /// A session's place for its one outstanding question. It is a field of the session's record, so it
 /// cannot outlive it.
 #[derive(Debug, Default)]
-pub struct Slot(Option<Outstanding>);
+pub struct Slot {
+    held: Option<Outstanding>,
+    /// Noes since the last yes, and when the first of them was said.
+    declines: u8,
+    declines_from: Option<Instant>,
+    /// PM asks nothing for this session until then.
+    quiet_until: Option<Instant>,
+}
 
 impl Slot {
     /// Hold `ask` under a fresh token, unless a question is already waiting. An expired one is gone, and
@@ -127,8 +153,11 @@ impl Slot {
         if self.is_waiting(now) {
             return Err(Refused::Busy);
         }
+        if self.quiet_until.is_some_and(|until| until > now) {
+            return Err(Refused::Quiet);
+        }
         let token = new_token().ok_or(Refused::Random)?;
-        self.0 = Some(Outstanding {
+        self.held = Some(Outstanding {
             token: token.clone(),
             ask,
             bound,
@@ -141,27 +170,51 @@ impl Slot {
     /// next (a token is single use, answered or not). `None` for any other token. The caller checks
     /// the question is still [`Outstanding::answerable`].
     pub fn take(&mut self, token: &str) -> Option<Outstanding> {
-        if self.0.as_ref().is_some_and(|o| o.token == token) {
-            self.0.take()
+        if self.held.as_ref().is_some_and(|o| o.token == token) {
+            self.held.take()
         } else {
             None
         }
     }
 
+    /// The person answered the question this session held (taken by [`Slot::take`], and answerable
+    /// when it was). A yes clears the count of noes; the [`DECLINES_BEFORE_QUIET`]th no inside
+    /// [`DECLINE_WINDOW`] makes PM quiet for this session for [`QUIET_AFTER_DECLINES`].
+    pub fn answered(&mut self, accept: bool, now: Instant) {
+        if accept {
+            self.declines = 0;
+            self.declines_from = None;
+            return;
+        }
+        if self
+            .declines_from
+            .is_none_or(|from| now.duration_since(from) > DECLINE_WINDOW)
+        {
+            self.declines = 0;
+            self.declines_from = Some(now);
+        }
+        self.declines = self.declines.saturating_add(1);
+        if self.declines >= DECLINES_BEFORE_QUIET {
+            self.quiet_until = Some(now + QUIET_AFTER_DECLINES);
+            self.declines = 0;
+            self.declines_from = None;
+        }
+    }
+
     /// Forget the question, if any. True when there was one.
     pub fn revoke(&mut self) -> bool {
-        self.0.take().is_some()
+        self.held.take().is_some()
     }
 
     /// Whether a question that can still be answered is held.
     pub fn is_waiting(&self, now: Instant) -> bool {
-        self.0.as_ref().is_some_and(|o| o.expires > now)
+        self.held.as_ref().is_some_and(|o| o.expires > now)
     }
 
     /// Whether any question, answerable or not, is held (a test's question).
     #[cfg(test)]
     pub fn holds_any(&self) -> bool {
-        self.0.is_some()
+        self.held.is_some()
     }
 }
 
@@ -280,6 +333,60 @@ mod tests {
         assert_ne!(old, fresh);
         assert!(slot.take(&old).is_none());
         assert!(slot.take(&fresh).is_some());
+    }
+
+    /// Asking, then declining, [n] times from `start`, a second apart.
+    fn decline_n(slot: &mut Slot, n: u32, start: Instant) -> Instant {
+        let mut at = start;
+        for _ in 0..n {
+            let token = slot.mint(ask(), BOUND, at).unwrap();
+            slot.take(&token).unwrap();
+            slot.answered(false, at);
+            at += Duration::from_secs(1);
+        }
+        at
+    }
+
+    #[test]
+    fn a_third_no_in_a_row_makes_pm_quiet_for_a_while_and_then_it_asks_again() {
+        let now = Instant::now();
+        let mut slot = Slot::default();
+        let at = decline_n(&mut slot, 2, now);
+        // Two noes are let through: the person may well have clicked twice.
+        let token = slot.mint(ask(), BOUND, at).unwrap();
+        slot.take(&token).unwrap();
+        slot.answered(false, at);
+        assert_eq!(slot.mint(ask(), BOUND, at), Err(Refused::Quiet));
+        assert_eq!(
+            slot.mint(
+                ask(),
+                BOUND,
+                at + QUIET_AFTER_DECLINES - Duration::from_millis(1)
+            ),
+            Err(Refused::Quiet)
+        );
+        assert!(slot.mint(ask(), BOUND, at + QUIET_AFTER_DECLINES).is_ok());
+    }
+
+    #[test]
+    fn a_yes_clears_the_noes_and_old_noes_age_out() {
+        let now = Instant::now();
+        let mut slot = Slot::default();
+        let at = decline_n(&mut slot, 2, now);
+        slot.answered(true, at);
+        let at = decline_n(&mut slot, 2, at);
+        assert!(
+            slot.mint(ask(), BOUND, at).is_ok(),
+            "a yes cleared the count"
+        );
+        let mut slot = Slot::default();
+        let at = decline_n(&mut slot, 2, now);
+        // The third no comes after the window: it is the first of a new count.
+        let late = at + DECLINE_WINDOW;
+        let token = slot.mint(ask(), BOUND, late).unwrap();
+        slot.take(&token).unwrap();
+        slot.answered(false, late);
+        assert!(slot.mint(ask(), BOUND, late).is_ok());
     }
 
     #[test]

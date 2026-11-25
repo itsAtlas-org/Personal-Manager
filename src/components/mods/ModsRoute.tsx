@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Which of the mods' two kinds of view App is on (Mods spec §1.13, §1.17): the Mods tab ("mods"), or
-// one mod's own tab ("mod:<id>"). App hands both here so the routing has a home a test can reach
-// (App itself can't be rendered), and so a `mod:` view can never fall through to a branch that draws
-// something else: every string App sends here gets one of the two.
+// one mod's own tab ("mod:<id>"). App hands the Mods tab here; a mod's own tab is drawn by ModTabHost
+// (K5), which keeps it mounted while its frame saves after a switch, and App draws nothing for a `mod:`
+// view in the router. This still answers both, so a `mod:` string sent here can never fall through to
+// a branch that draws something else.
 
 import type { SettingsTab } from "../settings/registry";
 import { ModTab } from "./ModTab";

@@ -172,9 +172,10 @@ fn the_dto_names_every_field_of_a_core_task_and_nothing_else() {
     let core = keys(&serde_json::to_value(&task).unwrap());
     let dto = keys(&task_dto(&task, Projection::scoped(true, true)));
     let flags = set(&["milestone_linked", "event_linked"]);
+    // What a mod is never told of a task: which mod made it (PM's own label of the ledger, `madeBy`).
     assert_eq!(
-        core.difference(&dto).collect::<Vec<_>>(),
-        Vec::<&String>::new(),
+        core.difference(&dto).cloned().collect::<BTreeSet<_>>(),
+        set(&["madeBy"]),
         "a core task field a mod isn't told about, and isn't named as withheld"
     );
     assert_eq!(

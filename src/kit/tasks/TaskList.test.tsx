@@ -91,6 +91,7 @@ function task(over: Partial<Task> = {}): Task {
     source: "user",
     created_at: "",
     updated_at: "",
+    madeBy: null,
     ...over,
   };
 }
@@ -130,6 +131,20 @@ describe("TaskList", () => {
     expect(screen.queryByText("Because the deck is due")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "First" }));
     expect(screen.getByText("Because the deck is due")).toBeTruthy();
+  });
+
+  it("marks a task a mod made with who and its tier word, and leaves the user's own bare (K5)", async () => {
+    data.list.mockResolvedValue(
+      listing([
+        task({ id: 1, title: "Mine" }),
+        task({ id: 2, title: "Gifted", madeBy: { name: "Pinboard", tier: "first", signed: true } }),
+        task({ id: 3, title: "Forged", madeBy: { name: "Atlas", tier: "first", signed: false } }),
+      ]),
+    );
+    const { container } = render(<List project="Atlas" />);
+    await screen.findByText("Gifted");
+    const chips = [...container.querySelectorAll("[title^='Made by']")].map((c) => c.textContent);
+    expect(chips).toEqual(["Pinboard· first party", "Atlas· unsigned"]);
   });
 
   it("hides archived projects' tasks in an all-tasks list, unless asked", async () => {

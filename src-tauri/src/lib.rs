@@ -77,6 +77,7 @@ mod localfolder;
 // while any of them does.
 mod locations;
 mod lock_session;
+mod made_by;
 mod microsoft;
 mod milestones;
 mod model_gateway;
@@ -2144,6 +2145,10 @@ pub fn run() {
             mods::mod_confirm,
             mods::mod_events_ack,
             mods::mod_theme_changed,
+            // The suspend handshake (K5): the page asks PM to tell frames they are about to retire,
+            // and relays a frame's `flushed`.
+            mods::suspend::mod_frames_suspend,
+            mods::suspend::mod_frame_flushed,
             // The Mods tab (spec §1.13): what is installed, installing from a file or the catalogue
             // with the user's consent, uninstalling, pausing, permissions, the disclaimer and the
             // safety list's status. Main window only.
@@ -2206,6 +2211,18 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| {
+            // The OS asking PM to quit with no code (macOS Cmd+Q and Dock Quit, the last window
+            // gone) is held while a running mod's frame saves (`mods::suspend`, never past its
+            // deadline); `quit` then exits with a code, which passes here.
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &event
+            {
+                if mods::suspend::exit_needs_wait(app) {
+                    api.prevent_exit();
+                    mods::suspend::quit(app);
+                }
+            }
             // The last thing PM runs, and only after a full purge — on macOS and Linux the app
             // stays open on the "what to do next" screen instead of handing off to an uninstaller,
             // so this catches anything written back between the erase and the quit.

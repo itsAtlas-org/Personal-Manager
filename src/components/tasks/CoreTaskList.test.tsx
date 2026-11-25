@@ -87,6 +87,7 @@ function task(over: Partial<Task> = {}): Task {
     source: "user",
     created_at: "",
     updated_at: "",
+    madeBy: null,
     ...over,
   };
 }

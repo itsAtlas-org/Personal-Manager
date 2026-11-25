@@ -193,6 +193,13 @@ export function UninstallDialog({
             </>
           )}
         </div>
+        {stays.keptDocuments > 0 && (
+          // Notes from before the mod existed: the person's own, kept whatever is chosen above.
+          <p className="text-ink3">
+            {plural(stays.keptDocuments, "note", "notes")} you saved before it was a mod stay in PM,
+            and uninstalling never deletes them.
+          </p>
+        )}
         {error && <Callout size="md">{error}</Callout>}
       </div>
     </Dialog>

@@ -38,7 +38,7 @@ import { cn } from "../ui/cn";
 import { DateField } from "../ui/DateField";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
-import { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "./TaskBits";
+import { DeadlineChip, MadeByChip, ProjectChip, StackChip, TaskStatusButton } from "./TaskBits";
 
 export interface TaskListProps {
   /** One project's tasks; undefined lists every task. */
@@ -364,6 +364,7 @@ function TaskRow({
           )}
           {showProject && t.project_name && <ProjectChip project={t.project_name} />}
           {stack && <StackChip stack={stack} />}
+          <MadeByChip made={t.madeBy} />
           {!compact && t.milestone_label && t.deadline_from !== "milestone" && (
             <span
               className="max-w-[9rem] shrink-0 truncate text-[0.6875rem] text-ink4"

@@ -29,6 +29,8 @@ export type ModTaskDto = Omit<
   | "milestone_label"
   | "event_uid"
   | "event_title"
+  // PM's own decoration of what a mod made, never in a mod's answer: filled `null` below.
+  | "madeBy"
 > & {
   milestone_linked: boolean;
   event_linked: boolean;
@@ -51,5 +53,6 @@ export function fromModTask(dto: ModTaskDto): Task {
     milestone_label: dto.milestone_label ?? null,
     event_uid: dto.event_uid ?? (event_linked ? REDACTED_EVENT_UID : null),
     event_title: dto.event_title ?? null,
+    madeBy: null,
   };
 }

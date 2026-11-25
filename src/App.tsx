@@ -47,6 +47,8 @@ import { WhatsNew } from "./components/WhatsNew";
 import { Callout, ErrorBoundary, Skeleton } from "./components/ui";
 import { HelpContext } from "./lib/help";
 import { ReaderProvider } from "./lib/reader";
+import { ModPageHooksHost } from "./components/mods/ModPageHooksHost";
+import { ModTabHost } from "./components/mods/ModTabHost";
 import { BriefingProvider } from "./lib/briefing";
 import { BriefingPanel } from "./components/BriefingPanel";
 import { readBriefingFloat, writeBriefingFloat } from "./lib/briefingPrefs";
@@ -64,7 +66,14 @@ import { useExternalLinks } from "./lib/useExternalLinks";
 import { useFollowSignIns } from "./lib/signInPages";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { isDevBuild } from "./lib/capabilities";
-import { isModsRoute, isReachable, learningToolsShown, useNav, type View } from "./lib/nav";
+import {
+  isModsRoute,
+  isModView,
+  isReachable,
+  learningToolsShown,
+  useNav,
+  type View,
+} from "./lib/nav";
 import { useModRows } from "./lib/modRows";
 import { usePilotHandover } from "./lib/pilotHandover";
 
@@ -1208,10 +1217,11 @@ export default function App() {
                   that crashes ProjectView would poison the next project opened (`view` alone stays
                   "project").
 
-                  A mod's tab (`mod:<id>`) goes through ModTab, which puts the mod's frame in it when
-                  the mod can run and PM's own panel when it can't; the frame dies with the tab (the
-                  `view` key above remounts it). A `mod:` view must never fall through to the last
-                  branch, which is the chat's. */}
+                  A mod's tab (`mod:<id>`) is NOT drawn here: ModTabHost (below) draws it, through ModTab,
+                  which puts the mod's frame in it when the mod can run and PM's own panel when it
+                  can't. It sits outside this keyed boundary so a tab just left can stay mounted,
+                  hidden, while its frame saves (`lifecycle.suspend`). A `mod:` view draws nothing
+                  here, and must never fall through to the last branch, which is the chat's. */}
               <ErrorBoundary key={`${view}:${selectedProject ?? ""}`} what="This view">
                 {view === "focus" ? (
                   <main className="flex h-full flex-1 flex-col">
@@ -1269,9 +1279,8 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <DevView />
                   </main>
-                ) : isModsRoute(view) ? (
-                  // The Mods tab and every mod's own tab. min-w-0 for the frame's sake: its width
-                  // is the mod's to ask for, and must not push the sidebar.
+                ) : isModView(view) ? null : isModsRoute(view) ? (
+                  // The Mods tab.
                   <main className="flex h-full min-w-0 flex-1 flex-col">
                     <ModsRoute
                       view={view}
@@ -1355,6 +1364,18 @@ export default function App() {
                   </main>
                 )}
               </ErrorBoundary>
+
+              {/* The mods' own tabs: the one on screen, and one just left while its frame flushes.
+                  The page hooks beside the reader: PM's own task editor for `ui.openTaskEditor` (one
+                  at a time) and the way to the document engine's setup. Main window only, as every
+                  frame is; the pop-out Calendar keeps the editor CalendarView mounts. */}
+              <ModPageHooksHost onOpenEngineSetup={() => setView("documents")}>
+                <ModTabHost
+                  view={view}
+                  onOpenMods={() => setView("mods")}
+                  onOpenSettings={(tab) => openSettings(tab)}
+                />
+              </ModPageHooksHost>
 
               {showSettings && (
                 // No scrim wrapper: SettingsView is a Modal now and brings its own (kept below the

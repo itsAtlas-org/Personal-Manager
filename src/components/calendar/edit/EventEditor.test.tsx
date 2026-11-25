@@ -2538,6 +2538,7 @@ describe("EventEditor, a linked milestone", () => {
     source_type: null,
     external_id: null,
     sort_order: 0,
+    madeBy: null,
   };
   const editor = (clicked: CalendarEvent) => (
     <EventEditor

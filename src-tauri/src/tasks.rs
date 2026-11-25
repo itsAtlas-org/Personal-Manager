@@ -122,6 +122,10 @@ pub struct Task {
     pub source: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The mod that made it (the `mod_ledger` row written with it), or `None` for the user's own and
+    /// for everything made before mods. Decoration only: see [`crate::made_by`].
+    #[serde(rename = "madeBy")]
+    pub made_by: Option<crate::made_by::MadeBy>,
 }
 
 /// A named group of tasks.
@@ -503,17 +507,7 @@ fn event_occurrence<'a>(
 /// The stored rows, joined with the project's archive flag and the linked event's title, links not
 /// yet resolved.
 fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Task>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, t.why, t.project_name, p.archived_at IS NOT NULL, \
-                t.milestone_id, t.event_uid, t.do_start, t.do_end, t.deadline, \
-                t.deadline_kind, t.deadline_from, t.status, t.completed_at, t.lane, \
-                t.stack_id, t.parked, t.ordinal, t.source, t.created_at, t.updated_at, \
-                (SELECT e.summary FROM calendar_events e \
-                  WHERE e.uid = t.event_uid ORDER BY e.start LIMIT 1) \
-           FROM tasks t LEFT JOIN projects p ON p.name = t.project_name \
-          WHERE ?1 IS NULL OR t.project_name = ?1 \
-          ORDER BY t.ordinal, t.id",
-    )?;
+    let mut stmt = conn.prepare(LOAD_SQL)?;
     let rows = stmt
         .query_map(params![project], |r| {
             Ok(Task {
@@ -542,11 +536,27 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Task>> {
                 created_at: r.get(19)?,
                 updated_at: r.get(20)?,
                 event_title: r.get(21)?,
+                made_by: crate::made_by::read(r, 22)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
+
+/// The list's one query: the stored row, the project's archive flag, the linked event's title and,
+/// from the ledger, who made it (`l.*` are NULL for the user's own, a LEFT JOIN on a unique index, so
+/// the row count is unchanged). A test times it against the same query without the join.
+const LOAD_SQL: &str = "SELECT t.id, t.title, t.why, t.project_name, p.archived_at IS NOT NULL, \
+                t.milestone_id, t.event_uid, t.do_start, t.do_end, t.deadline, \
+                t.deadline_kind, t.deadline_from, t.status, t.completed_at, t.lane, \
+                t.stack_id, t.parked, t.ordinal, t.source, t.created_at, t.updated_at, \
+                (SELECT e.summary FROM calendar_events e \
+                  WHERE e.uid = t.event_uid ORDER BY e.start LIMIT 1), \
+                l.mod_name, l.tier, l.signed \
+           FROM tasks t LEFT JOIN projects p ON p.name = t.project_name \
+                LEFT JOIN mod_ledger l ON l.task_id = t.id \
+          WHERE ?1 IS NULL OR t.project_name = ?1 \
+          ORDER BY t.ordinal, t.id";
 
 /// Every task (`project = None`) or one project's, in the one global order (`ordinal`, then id),
 /// with links resolved. `today` is the user's zone-local civil date (`clock::today_sql_in`). An event
@@ -963,6 +973,9 @@ pub fn remove_stack(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM task_stacks WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+#[cfg(test)]
+mod made_by_tests;
 
 #[cfg(test)]
 mod tests {

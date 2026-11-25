@@ -52,11 +52,14 @@ export function claimFocusReturn(name: string, el: HTMLElement): void {
   if (untouched && el.isConnected) el.focus();
 }
 
+/** A modal dialog or a modal alert dialog (PM's own question for a mod's call). */
+const MODAL_DIALOG = '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]';
+
 /** A modal dialog nested inside `container` currently holds focus, so this trap is not the one in
  *  charge. Matches on the ARIA that makes a dialog modal rather than on a component, so a
  *  hand-rolled overlay that declares the same semantics is honoured too. */
 function deeperDialogHasFocus(container: HTMLElement): boolean {
-  const nested = container.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]');
+  const nested = container.querySelectorAll<HTMLElement>(MODAL_DIALOG);
   return Array.from(nested).some((el) => el.contains(document.activeElement));
 }
 
@@ -95,8 +98,7 @@ export function useFocusTrap(active: boolean, containerRef: RefObject<HTMLElemen
     if (!container) return;
     // The dialog this one was opened over (Modal doesn't portal, so it's an ancestor), where focus
     // goes back to if the opener is gone by the time this one closes (see header).
-    const outer =
-      container.parentElement?.closest<HTMLElement>('[role="dialog"][aria-modal="true"]') ?? null;
+    const outer = container.parentElement?.closest<HTMLElement>(MODAL_DIALOG) ?? null;
 
     // Initial focus — unless a child already grabbed it (React `autoFocus`): honour that.
     if (!container.contains(document.activeElement)) {

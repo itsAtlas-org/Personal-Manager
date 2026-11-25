@@ -42,7 +42,7 @@ const preview = (extra: Partial<UninstallPreview> = {}): UninstallPreview => ({
     navTab: "Acme Tool",
     calendarOverlay: null,
   },
-  stays: { tasks: 0, milestones: 0, documents: 0 },
+  stays: { tasks: 0, milestones: 0, documents: 0, keptDocuments: 0 },
   removedBySafetyList: false,
   ...extra,
 });
@@ -98,7 +98,7 @@ describe("the preview", () => {
 
   it("says what stays, with the count, and 'Also delete what it made' starts off", async () => {
     uninstallPreview.mockResolvedValue(
-      preview({ stays: { tasks: 3, milestones: 1, documents: 2 } }),
+      preview({ stays: { tasks: 3, milestones: 1, documents: 2, keptDocuments: 0 } }),
     );
     open();
     const dialog = await screen.findByRole("dialog");
@@ -224,7 +224,7 @@ describe("the preview", () => {
 describe("uninstalling", () => {
   it("keeps what the mod made unless asked: the flag is false, and nothing is sent before Uninstall", async () => {
     uninstallPreview.mockResolvedValue(
-      preview({ stays: { tasks: 2, milestones: 0, documents: 0 } }),
+      preview({ stays: { tasks: 2, milestones: 0, documents: 0, keptDocuments: 0 } }),
     );
     uninstallMod.mockResolvedValue(done());
     open();
@@ -238,7 +238,7 @@ describe("uninstalling", () => {
 
   it("deletes what it made only when the person ticked the choice", async () => {
     uninstallPreview.mockResolvedValue(
-      preview({ stays: { tasks: 2, milestones: 0, documents: 0 } }),
+      preview({ stays: { tasks: 2, milestones: 0, documents: 0, keptDocuments: 0 } }),
     );
     uninstallMod.mockResolvedValue(
       done({ giftsDeleted: { tasks: 2, milestones: 0, documents: 0, problem: null } }),

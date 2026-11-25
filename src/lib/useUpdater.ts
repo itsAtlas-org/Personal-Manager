@@ -5,7 +5,13 @@ import { useCallback, useEffect, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import { smartAppControlState, packageManagedLinux, macosVersion, showMainWindow } from "./ipc";
+import {
+  smartAppControlState,
+  packageManagedLinux,
+  macosVersion,
+  showMainWindow,
+  suspendModFrames,
+} from "./ipc";
 import type { SmartAppControlState } from "./types";
 import { evaluateAttemptMarker, macosUpdateBlock, type MacosBlock } from "./updateGate";
 
@@ -247,6 +253,10 @@ export function useUpdater(): AppUpdate {
             // Non-fatal — the SAC pre-check is the primary guard.
           }
         }
+        // The restart ends every running mod's frame with the app: let each save first (never past
+        // PM's own deadline; this never rejects). On Windows install() itself launches the
+        // installer and ends the process, so it has to come before.
+        await suspendModFrames("quit");
         await update.install();
         await relaunch();
       } catch {

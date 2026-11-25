@@ -53,6 +53,9 @@ export interface ModPageHooks {
    *  open (one at a time): the frame is then told it is asking too fast. The provider (the app's
    *  root, beside the reader) draws it; the call does not wait for the editor to close. */
   openTaskEditor?: (from: ModSource, request: TaskEditorRequest) => boolean;
+  /** Take the person to where the document engine is set up (the Documents tab). The frame offers it
+   *  as "Set it up" after a call answered `MOD-5007`; PM provisions nothing for a mod. */
+  openEngineSetup?: () => void;
 }
 
 export const ModPageHooksContext = createContext<ModPageHooks>({});

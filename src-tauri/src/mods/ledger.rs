@@ -1764,6 +1764,8 @@ mod tests {
     mod enhanced_keys;
     // Which namespace the Pinboard's notes get when it is installed and signed by a dev test key.
     mod pinboard_namespace;
+    // What uninstalling the Pinboard says about its notes from before it was a mod (PR C, K5).
+    mod legacy_gifts;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).

@@ -801,6 +801,18 @@ export interface Milestone {
   /** The source's own row id for an externally-owned milestone; null = PM-native. */
   external_id: string | null;
   sort_order: number;
+  /** The mod that made it, from the ledger written with it; null for the user's own and for
+   *  everything made before mods. Decoration only: never a decision (`MadeBy`). */
+  madeBy: MadeBy | null;
+}
+
+/** Who made a task or milestone, as the ledger recorded it (`made_by.rs`): the mod's name when it
+ *  was made, its tier and whether the package was signed. Drawn as clamped text and ALWAYS with the
+ *  tier word beside it (`madeByLabel`), so an unsigned mod named "Atlas" reads as unsigned. */
+export interface MadeBy {
+  name: string;
+  tier: "first" | "second" | "third";
+  signed: boolean;
 }
 
 /** The four progress values a milestone's `status` admits, coarsest-first. Mirrors
@@ -862,6 +874,9 @@ export interface Task {
   source: TaskSource;
   created_at: string;
   updated_at: string;
+  /** The mod that made it, from the ledger written with it; null for the user's own and for
+   *  everything made before mods. Decoration only: never a decision (`MadeBy`). */
+  madeBy: MadeBy | null;
 }
 
 /** A named group of tasks (`tasks::TaskStack`). */

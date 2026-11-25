@@ -263,6 +263,38 @@ async fn a_second_request_while_one_waits_is_refused_and_the_first_stays() {
     token_of(&ask(&host, &auth(&host, &s), probe()));
 }
 
+/// A mod that asks again the moment it is told no stops being asked about: the third no in a row ends
+/// the questions for a while, with no dialog (the call is answered rate limited), and a yes in between
+/// keeps them coming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mod_that_is_told_no_three_times_in_a_row_is_not_asked_about_again() {
+    let (host, s) = world();
+    for _ in 0..3 {
+        let token = token_of(&ask(&host, &auth(&host, &s), probe()));
+        assert_eq!(
+            answer(&host, &token, false).await.unwrap_err().code,
+            Code::Declined
+        );
+    }
+    let e = ask(&host, &auth(&host, &s), probe());
+    assert_eq!(e.code, Code::RateLimited, "no fourth question: {e}");
+    assert!(e.confirm.is_none(), "and no token to draw a dialog from");
+    assert_eq!(note(&host), "\"before\"");
+    // Another session of the same mod has its own count.
+    let other = live_session(&host, "atlas.pin", discarding());
+    token_of(&ask(&host, &auth(&host, &other), probe()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_yes_between_the_noes_keeps_the_questions_coming() {
+    let (host, s) = world();
+    for accept in [false, false, true, false, false] {
+        let token = token_of(&ask(&host, &auth(&host, &s), probe()));
+        let _ = answer(&host, &token, accept).await;
+    }
+    token_of(&ask(&host, &auth(&host, &s), probe()));
+}
+
 /// The answer re-runs the dispatcher's checks: a permission turned off while the question was open
 /// stops the action.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

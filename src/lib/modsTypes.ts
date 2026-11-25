@@ -545,8 +545,10 @@ export interface UninstallPreview {
     navTab: string | null;
     calendarOverlay: string | null;
   };
-  /** What stays: the tasks, milestones and documents the mod made. */
-  stays: { tasks: number; milestones: number; documents: number };
+  /** What stays: the tasks, milestones and documents the mod made. `keptDocuments` are notes that are
+   *  its own by an older name (the Pinboard's, from before it was a mod): listed as kept, and never
+   *  part of "also delete what it made". */
+  stays: { tasks: number; milestones: number; documents: number; keptDocuments: number };
   removedBySafetyList: boolean;
 }
 

@@ -42,7 +42,7 @@ use super::stage::{Stage, Staged, Trust};
 use super::status::{self, SafetyStatus};
 use super::uninstall::{self, UninstallPreview, Uninstalled};
 use crate::mods::ai as money;
-use crate::mods::api::events as mod_events;
+use crate::mods::api::events::{self as mod_events, SuspendReason};
 use crate::mods::api::grants;
 use crate::mods::api::{self, Host, PromptInfo};
 use crate::mods::fetch::{Endpoints, ReqwestTransport};
@@ -56,6 +56,7 @@ use crate::mods::refresh::{self, RefreshError};
 use crate::mods::safety::{self, Mode, SafetyCheck};
 use crate::mods::secrets;
 use crate::mods::store;
+use crate::mods::suspend;
 use crate::mods::MAIN_LABEL;
 use crate::AppState;
 
@@ -331,6 +332,10 @@ pub async fn install_mod_consented(
             .ok_or_else(ModsError::consent_expired)?;
         let view = View::read(app)?;
         view.for_install()?;
+        // An install over a mod that is running replaces its frames: each saves first (K5). This
+        // thread is a blocking one, so waiting here holds no async worker, and the frames answer
+        // through the page, which is not waiting on this thread.
+        suspend::before_change_blocking(app, &staged.id, SuspendReason::Updated);
         let finished = match staged.trust {
             Trust::Signed => {
                 let env = view.env(app);
@@ -468,6 +473,9 @@ pub struct Repaired {
 #[tauri::command]
 pub async fn repair_mod(webview: Webview, mod_id: String) -> Result<Repaired> {
     let id = parse_id(&mod_id)?;
+    // The frame is told before the files change under it (K5); the download below is not waited on.
+    check_window(webview.label())?;
+    suspend::before_change(webview.app_handle(), &id, SuspendReason::Updated).await;
     let id2 = id.clone();
     let target = blocking(&webview, move |app| {
         View::read(app)?.for_install()?;
@@ -525,6 +533,9 @@ pub async fn uninstall_mod(
     also_delete_gifts: bool,
 ) -> Result<Uninstalled> {
     let id = parse_id(&mod_id)?;
+    // The frame saves what it holds before the mod's storage goes with it (K5).
+    check_window(webview.label())?;
+    suspend::before_change(webview.app_handle(), &id, SuspendReason::Uninstalled).await;
     blocking(&webview, move |app| {
         let done = with_existing(app, |ledger| uninstall::run(ledger, &id, also_delete_gifts))?;
         // A loaded test folder's session went with the row; its file watches (a hard inotify
@@ -555,6 +566,9 @@ pub async fn uninstall_mod(
 #[tauri::command]
 pub async fn pause_mod(webview: Webview, mod_id: String) -> Result<()> {
     let id = parse_id(&mod_id)?;
+    // The frame saves what it holds before its session ends (K5).
+    check_window(webview.label())?;
+    suspend::before_change(webview.app_handle(), &id, SuspendReason::Paused).await;
     blocking(&webview, move |app| {
         with_existing(app, |ledger| Ok(ledger.pause_by_user(&id, Utc::now())?))?;
         refresh::emit_changed(app, refresh::CHANGED_PAUSED);
