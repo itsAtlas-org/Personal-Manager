@@ -15,8 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePinboard } from "./usePinboard";
 import { BOARD_VERSION, PINBOARD_PREF_KEY, type Board } from "./types";
 
-const ipc = vi.hoisted(() => ({ getPref: vi.fn(), setPref: vi.fn() }));
-vi.mock("../pm", () => ipc);
+const ipc = vi.hoisted(() => ({ getPref: vi.fn(), setPref: vi.fn(), setOverlay: vi.fn() }));
+// The page's own errors and codes are real; only the calls to PM are stood in for.
+vi.mock("../pm", async (original) => ({ ...(await original<object>()), ...ipc }));
 
 /** A stored board with a note in it, so "we wrote the empty default over it" is visible rather than
  *  inferred: any write that doesn't carry this text has destroyed it. */
@@ -40,6 +41,8 @@ beforeEach(() => {
   ipc.getPref.mockReset();
   ipc.setPref.mockReset();
   ipc.setPref.mockResolvedValue(undefined);
+  ipc.setOverlay.mockReset();
+  ipc.setOverlay.mockResolvedValue(undefined);
 });
 afterEach(() => vi.useRealTimers());
 
@@ -82,6 +85,9 @@ describe("usePinboard persistence", () => {
       expect.stringContaining("the user's own note"),
     );
 
+    // The tail of an edit that the debounce has not carried yet goes out with the unmount; an unmount
+    // with nothing unwritten (the load alone, or an edit already saved) writes nothing.
+    act(() => void result.current.addNote());
     unmount();
     await settle();
     expect(ipc.setPref).toHaveBeenCalledTimes(2);

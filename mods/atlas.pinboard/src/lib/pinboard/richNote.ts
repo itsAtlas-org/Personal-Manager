@@ -21,6 +21,7 @@ import { Schema, type Mark, type Node as PMNode } from "prosemirror-model";
 import { tableNodes } from "prosemirror-tables";
 import { fenceBlocks } from "./noteFences";
 import { inlineSpans, type InlineSpan } from "./livePreview";
+import { canOpenLink } from "./links";
 import { isRomanToken, matchMarker, nextMarker } from "./notesMarkdown";
 import {
   escapeCell,
@@ -101,11 +102,13 @@ export const noteSchema = new Schema({
       inclusive: false,
       // A data attribute, not `href`: a click inside the editor must never navigate. The editor
       // opens web addresses itself, on Ctrl/Cmd+click.
-      toDOM: (m) => [
-        "span",
-        { class: "pm-rich-link", "data-href": m.attrs.href, title: m.attrs.href },
-        0,
-      ],
+      // An address PM would not open (`http`, `mailto`, an IP, a name with no dot) is drawn as plain
+      // text: no link style and nothing for a click to find. The mark stays in the note, so its
+      // Markdown is unchanged; the address shows on hover.
+      toDOM: (m) =>
+        canOpenLink(m.attrs.href as string)
+          ? ["span", { class: "pm-rich-link", "data-href": m.attrs.href, title: m.attrs.href }, 0]
+          : ["span", { class: "pm-plain-link", title: m.attrs.href }, 0],
     },
     strong: { attrs: { delim: { default: "**" } }, toDOM: () => ["strong", 0] },
     em: { attrs: { delim: { default: "*" } }, toDOM: () => ["em", 0] },

@@ -9,24 +9,45 @@
 // `edit` asks PM to open ITS task editor (`ui.openTaskEditor`): the editor, with its stacks, its
 // deletes and its calendar links, stays in core. PM answers at once and the editor stays open on its
 // own, so there is no "saved" answer to wait for: the list hears `tasks.changed` when a task is saved or
-// deleted, and the `done` it was given runs then (a quick-add row that became a task starts empty). A
-// cancelled editor changes nothing and never calls it; a later edit replaces a `done` still waiting.
-// `tasks.changed` is a bare signal, so the one thing told apart is this frame's own writes: PM announces
-// those too, and a task ticked or added while the editor is open is not the editor saving.
+// deleted, and the `done` it was given runs then (a quick-add row that became a task starts empty).
+// PM never says when an editor closes, so a cancel cannot be heard; what keeps a cancelled editor from
+// calling `done` is what `done` waits for. `tasks.changed` is a bare signal, so two things are told
+// apart: this frame's own writes (PM announces those too, and a task ticked or added while the editor
+// is open is not the editor saving), and, for a NEW task, whether a task that was not there when the
+// editor opened is there now. A foreign change with no new task (a calendar sync, another window, the
+// editor cancelled and something else ticked) leaves `done` waiting, so it never wipes the quick-add
+// row the person is typing in; nor does a task this frame's own quick-add made after a cancel. A later edit replaces a `done` still waiting; one PM refuses puts the
+// earlier one back.
 
 import type { HostEvent, ModHost } from "../../../../src/kit/host";
 import { fromModTask, type ModTaskDto } from "../../../../src/kit/lib/modTask";
 import type { TaskData } from "../../../../src/kit/taskData";
+import { tidyLine } from "../lib/pinboard/calendarEntries";
 import {
   addTask,
   listTasksPage,
   openTaskEditor,
   reorderTasks,
   setTaskStatus,
+  tidyProjectName,
   type TaskPage,
 } from "../lib/pm";
 
 type Listed = Awaited<ReturnType<TaskData["list"]>>;
+
+/** The most characters of a task title PM takes (`tasks::TITLE_MAX`). */
+const TITLE_MAX = 500;
+
+/** An editor being waited on: what to run when it saved, and, for a new task, the ids that existed
+ *  when it opened (null: not known, or an existing task, whose `done` only reads again). */
+interface Waiting {
+  done: () => void;
+  known: Set<number> | null;
+  /** True for a new-task editor, whose `done` must wait for a task that was not there before. */
+  isNew: boolean;
+  /** Tasks this frame's own quick-add made while the editor was awaited: not the editor's save. */
+  ownAdded: Set<number>;
+}
 
 /** The most pages of tasks read: PM pages under a byte budget, and nobody has this many tasks. */
 const MAX_PAGES = 200;
@@ -54,7 +75,7 @@ export function frameTaskData(
   host: ModHost,
   win: Pick<Window, "addEventListener" | "removeEventListener">,
 ): TaskData {
-  let waiting: (() => void) | null = null;
+  let waiting: Waiting | null = null;
   /** Writes this frame made while an editor was awaited, whose announcement has not come yet. */
   let ownWrites = 0;
   /** A write of this frame's own: its announcement is not the editor's. A write that fails announces
@@ -68,21 +89,48 @@ export function frameTaskData(
     });
   };
   const changed = new Set<() => void>();
+  /** A change this frame did not cause while an editor is awaited: a new-task editor's `done` runs only
+   *  once a task that was not there before is (a cancel and an unrelated change leave it waiting). */
+  const heard = (entry: Waiting) => {
+    if (!entry.isNew || entry.known === null) {
+      waiting = null;
+      entry.done();
+      return;
+    }
+    const known = entry.known;
+    void listAll(null).then(
+      (now) => {
+        if (
+          waiting !== entry ||
+          !now.tasks.some((t) => !known.has(t.id) && !entry.ownAdded.has(t.id))
+        )
+          return;
+        waiting = null;
+        entry.done();
+      },
+      () => {},
+    );
+  };
   host.onEvent((event: HostEvent) => {
     if (event.name !== "tasks.changed") return;
     if (ownWrites > 0) {
       // PM coalesces announcements: one stands for every write of ours made since the last.
       ownWrites = 0;
-    } else {
-      const done = waiting;
-      waiting = null;
-      done?.();
+    } else if (waiting !== null) {
+      heard(waiting);
     }
     for (const cb of [...changed]) cb();
   });
   return {
     list: listAll,
-    add: (input) => own(() => addTask(input)),
+    add: async (input) => {
+      // An editor that was cancelled stays awaited, so a task this frame adds meanwhile is not a
+      // task "the editor made": the next foreign change would otherwise run `done` and wipe the row.
+      const entry = waiting;
+      const made = await own(() => addTask(input));
+      if (made !== null) entry?.ownAdded.add(made);
+      return made;
+    },
     setStatus: (id, status) => own(() => setTaskStatus(id, status)),
     reorder: (ids) => own(() => reorderTasks(ids)),
     onChanged: (cb) => {
@@ -95,19 +143,36 @@ export function frameTaskData(
       });
     },
     edit: (target, done) => {
-      waiting = done;
+      const previous = waiting;
+      const entry: Waiting = { done, known: null, isNew: !("task" in target), ownAdded: new Set() };
+      waiting = entry;
       ownWrites = 0;
-      const open =
-        "task" in target
-          ? openTaskEditor({ id: target.task.id })
-          : openTaskEditor({
-              ...(target.defaults.title ? { title: target.defaults.title } : {}),
-              ...(target.defaults.project ? { project: target.defaults.project } : {}),
-              ...(target.defaults.deadline ? { deadline: target.defaults.deadline } : {}),
-            });
-      // A refusal (an editor is already open, say) means no editor, so nothing to wait for.
+      let open: Promise<void>;
+      if ("task" in target) {
+        open = openTaskEditor({ id: target.task.id });
+      } else {
+        // What PM takes as a prefill (one plain line, a title of at most 500 characters): anything
+        // else is refused and the editor would not open, so the text is made to fit first.
+        const title = tidyLine(target.defaults.title ?? "", TITLE_MAX);
+        const project = tidyProjectName(target.defaults.project ?? "");
+        open = openTaskEditor({
+          ...(title ? { title } : {}),
+          ...(project ? { project } : {}),
+          ...(target.defaults.deadline ? { deadline: target.defaults.deadline } : {}),
+        });
+        // The tasks there are now, to tell the editor's new one from any other change. Unread, the
+        // first change heard stands for a save (done only starts a fresh quick-add row).
+        void listAll(null).then(
+          (now) => {
+            if (waiting === entry) entry.known = new Set(now.tasks.map((t) => t.id));
+          },
+          () => {},
+        );
+      }
+      // A refusal (an editor is already open, say) means no new editor: the one already open keeps
+      // its own `done`.
       void open.catch(() => {
-        if (waiting === done) waiting = null;
+        if (waiting === entry) waiting = previous;
       });
     },
   };

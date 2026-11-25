@@ -13,7 +13,7 @@
 // (core's errors were plain strings; the views show `String(e)`).
 
 import { ModCallError, type ModHost } from "../../../../src/kit/host";
-import { tidyLabel } from "./pinboard/calendarEntries";
+import { tidyLabel, tidyLine } from "./pinboard/calendarEntries";
 import type { Milestone, MilestoneStatus, PinboardEntry } from "./types";
 
 /** PM refused or failed a call. Its text is PM's own sentence (never the call's arguments), and
@@ -173,15 +173,37 @@ export async function listMilestones(project: string): Promise<Milestone[]> {
   throw new PmAnswerError("milestones.list");
 }
 
+/** The most characters of a milestone's label and of a new project's name PM takes (`MOD_LABEL_MAX`,
+ *  `NEW_PROJECT_MAX`: both 200). */
+const LINE_MAX = 200;
+
+/** A milestone's label as PM takes it: one plain line of the person's words (a control or hidden
+ *  character, a tab or a line break would be refused, and an emoji with its joiner is fine), at most
+ *  200 characters. A label that comes to nothing is "deadline", as the page always called it. */
+export function milestoneLabel(label: string): string {
+  return tidyLine(label, LINE_MAX) || "deadline";
+}
+
+/** A project name as PM takes a new one: one plain line of the person's words, at most 200
+ *  characters. A card is bound to this string, so it and PM's project are the same name. */
+export function tidyProjectName(name: string): string {
+  return tidyLine(name, LINE_MAX);
+}
+
 /** Add a milestone to a project (a name PM does not know asks the person first: PM's own question).
  *  Resolves to its id. A milestone from the Pinboard is never linked to an event, so there is no
- *  `eventUid` here, unlike core's. */
+ *  `eventUid` here, unlike core's. The label and a new project's name go through the same line rule
+ *  PM holds them to, so what the person typed is never refused over a stray character. */
 export async function addMilestone(
   project: string,
   label: string,
   dueDate: string | null,
 ): Promise<number> {
-  const reply = await call("milestones.add", { project, label, dueDate });
+  const reply = await call("milestones.add", {
+    project: tidyProjectName(project),
+    label: milestoneLabel(label),
+    dueDate,
+  });
   if (!isRecord(reply) || !isWhole(reply.id)) throw new PmAnswerError("milestones.add");
   return reply.id;
 }
@@ -192,7 +214,7 @@ export async function updateMilestone(
   label: string,
   dueDate: string | null,
 ): Promise<void> {
-  await call("milestones.update", { id, label, dueDate });
+  await call("milestones.update", { id, label: milestoneLabel(label), dueDate });
 }
 
 export async function setMilestoneStatus(id: number, status: MilestoneStatus): Promise<void> {
@@ -239,12 +261,15 @@ export async function addTask(input: {
   title: string;
   project?: string | null;
   deadline?: string | null;
-}): Promise<void> {
-  await call("tasks.add", {
+}): Promise<number | null> {
+  const made = await call("tasks.add", {
     title: input.title,
     ...(input.project ? { project: input.project } : {}),
     ...(input.deadline ? { deadline: input.deadline } : {}),
   });
+  // The new task's id (PM answers it), so the frame can tell its own add from an editor's save.
+  const id = isRecord(made) ? made.id : null;
+  return typeof id === "number" && Number.isInteger(id) ? id : null;
 }
 
 export async function setTaskStatus(id: number, status: "todo" | "doing" | "done"): Promise<void> {
@@ -293,12 +318,13 @@ export async function importChecklistTasks(
 // --- notes ----------------------------------------------------------------------------------------
 
 /** The title core gave an untitled note: its first non-blank line, cut to 80 characters with an
- *  ellipsis, else "Untitled note" (`derive_title` in commands/archivist.rs). */
+ *  ellipsis, else "Untitled note" (`derive_title` in commands/archivist.rs). A line that is only
+ *  hidden or control characters is blank here, as it is to the eye. */
 export function deriveTitle(body: string): string {
   const line =
     body
       .split("\n")
-      .map((l) => l.trim())
+      .map((l) => tidyLabel(l))
       .find((l) => l !== "") ?? "";
   if (line === "") return "Untitled note";
   const chars = Array.from(line);
@@ -307,19 +333,27 @@ export function deriveTitle(body: string): string {
 
 /** Save a note's text as a document in the person's vault, keyed on the widget id (idempotent: an
  *  edited note updates the same document, keeping its filing). PM wants a title of one plain line, so
- *  the note's own title (or the one derived from its text) is tidied to one before it is sent. */
+ *  the note's own title (else the one derived from its text) goes through the shared line rule before
+ *  it is sent: a title that comes to nothing falls back to the text's first line, then to "Untitled
+ *  note", because PM refuses a blank one. */
 export async function ingestNote(widgetId: string, title: string, text: string): Promise<void> {
   const body = text.trim();
   // One plain line: PM refuses a title with a line break, a control or hidden character, a tab, or
   // `---` (it lands in the vault file's front matter), and the person never typed any of that on purpose.
-  const line = tidyLabel((title.trim() || deriveTitle(body)).replace(/-{3,}/g, "-"));
+  // Tidied BEFORE the runs of hyphens are folded: a hidden character between two hyphens ("a--<zero
+  // width space>-b") is only a run of three once the tidy has taken it out.
+  const plain = (t: string) =>
+    tidyLine(tidyLine(t, NOTE_TITLE_MAX).replace(/-{3,}/g, "-"), NOTE_TITLE_MAX);
   const reply = await call("documents.saveNote", {
     key: widgetId,
-    title: tidyLabel(Array.from(line).slice(0, 200).join("")) || "Untitled note",
+    title: plain(title) || plain(deriveTitle(body)) || "Untitled note",
     body,
   });
   if (!isRecord(reply) || reply.saved !== true) throw new PmAnswerError("documents.saveNote");
 }
+
+/** The most characters of a note's title PM takes (`NOTE_TITLE_MAX_CHARS`). */
+const NOTE_TITLE_MAX = 200;
 
 /** What a saved note's document is now: filed under a project, or waiting in Review. */
 export interface NoteStatus {

@@ -62,6 +62,7 @@ import {
 import { isRomanToken } from "../lib/pinboard/notesMarkdown";
 import { TABLE_ACTIONS, type Align, type TableAction } from "../lib/pinboard/noteTables";
 import { openLink } from "../lib/linkFailure";
+import { canOpenLink } from "../lib/pinboard/links";
 import { openContextMenu, type MenuItem } from "../../../../src/kit/lib/contextMenu";
 
 export type RichFormat = "bold" | "italic" | "heading" | "bullet" | "number" | "checkbox";
@@ -757,7 +758,7 @@ export const RichNoteEditor = memo(
                   const href = (e.target as Element)
                     .closest?.("[data-href]")
                     ?.getAttribute("data-href");
-                  if (!href || !/^https?:\/\//i.test(href)) return clickUnderTable(view, e);
+                  if (!href || !canOpenLink(href)) return clickUnderTable(view, e);
                   if (!(e.metaKey || e.ctrlKey) && view.hasFocus()) return false;
                   e.preventDefault();
                   openLink(href);

@@ -209,7 +209,7 @@ describe("edit", () => {
     ]);
   });
 
-  it("a cancelled editor never calls done, and a refused one is not waited for", async () => {
+  it("a refused editor is not waited for", async () => {
     const pm = await memoryPm({
       answers: { "ui.openTaskEditor": refuse("MOD-3001", "An editor is already open.") },
     });
@@ -220,5 +220,96 @@ describe("edit", () => {
     pm.emit("tasks.changed", {});
     await pm.settle();
     expect(done).not.toHaveBeenCalled();
+  });
+
+  it("a new-task editor cancelled, then a change from elsewhere: done does not run, and a task the editor makes later still runs it once", async () => {
+    let tasks = [dto(1), dto(2)];
+    const pm = await memoryPm({
+      answers: {
+        "ui.openTaskEditor": { opened: true },
+        "tasks.list": () => ({ tasks, stacks: [], next: null }),
+      },
+    });
+    const data = frameTaskData(pm.host, window);
+    const done = vi.fn();
+    data.edit({ defaults: { title: "draft" } }, done);
+    await pm.settle();
+    // The editor is cancelled (PM says nothing), and a calendar sync then changes a task.
+    tasks = [dto(1, { title: "renamed" }), dto(2)];
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(done).not.toHaveBeenCalled();
+    // A task that was not there when the editor opened is the editor's save.
+    tasks = [dto(1), dto(2), dto(3)];
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(done).toHaveBeenCalledTimes(1);
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it("a new-task editor cancelled, then the frame's own quick-add, then a change from elsewhere: done does not run (the typed row is not wiped)", async () => {
+    let tasks = [dto(1), dto(2)];
+    const pm = await memoryPm({
+      answers: {
+        "ui.openTaskEditor": { opened: true },
+        "tasks.add": () => {
+          tasks = [...tasks, dto(3)];
+          return { id: 3, status: "todo" };
+        },
+        "tasks.list": () => ({ tasks, stacks: [], next: null }),
+      },
+    });
+    const data = frameTaskData(pm.host, window);
+    const done = vi.fn();
+    data.edit({ defaults: { title: "draft" } }, done);
+    await pm.settle();
+    // The editor is cancelled (PM says nothing); the person quick-adds from the list instead.
+    await data.add({ title: "mine", project: null } as never);
+    await pm.settle();
+    pm.emit("tasks.changed", {}); // PM's announcement of our own add
+    await pm.settle();
+    // A calendar sync changes a task: the quick-add's task is not an editor's save.
+    tasks = [dto(1, { title: "renamed" }), dto(2), dto(3)];
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(done).not.toHaveBeenCalled();
+    // A task neither the editor's opening nor our add explains is still the editor's save.
+    tasks = [...tasks, dto(4)];
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it("an editor PM refuses because another is open leaves the open one's done waiting", async () => {
+    let opens = 0;
+    const pm = await memoryPm({
+      answers: {
+        "ui.openTaskEditor": () => (++opens === 1 ? { opened: true } : refuse("MOD-3001", "Open.")),
+        "tasks.list": { tasks: [], stacks: [], next: null },
+      },
+    });
+    const data = frameTaskData(pm.host, window);
+    const first = vi.fn();
+    const second = vi.fn();
+    data.edit({ task: { id: 7 } as never }, first);
+    await pm.settle();
+    data.edit({ task: { id: 8 } as never }, second);
+    await pm.settle();
+    pm.emit("tasks.changed", {});
+    await pm.settle();
+    expect(second).not.toHaveBeenCalled();
+    expect(first).toHaveBeenCalledTimes(1);
+  });
+
+  it("a prefill PM would refuse is made to fit, so More... always opens the editor", async () => {
+    const pm = await memoryPm({ answers: { "ui.openTaskEditor": { opened: true } } });
+    const data = frameTaskData(pm.host, window);
+    data.edit({ defaults: { title: `  ${"t".repeat(600)}`, project: "At\nlas\u0007" } }, () => {});
+    await pm.settle();
+    expect(pm.of("ui.openTaskEditor").map((c) => c.args)).toEqual([
+      { new: { title: "t".repeat(500), project: "At las" } },
+    ]);
   });
 });

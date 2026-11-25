@@ -180,6 +180,75 @@ describe("projects and milestones", () => {
   });
 });
 
+describe("a line of the person's own words goes to PM as PM takes it", () => {
+  // PM refuses a label, a note title or a new project's name with a control or hidden character, a tab
+  // or line break, or a space at either end (`user_line_fault`); a person types all of those by
+  // accident, and none of them is worth a refusal. An emoji's joiner and variation selector are
+  // theirs on purpose and stay, and so does a no-break space between two words. Expected strings are
+  // written out by hand: nothing here asks the code under test what the answer should be.
+  const ZWJ_FAMILY = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467} family";
+  const HEART = "\u2764\uFE0F heart";
+
+  it.each([
+    ["Launch \u{1F680}", "Launch \u{1F680}"],
+    [ZWJ_FAMILY, ZWJ_FAMILY],
+    [HEART, HEART],
+    ["a\tb", "a b"],
+    ["line one\nline two", "line one line two"],
+    ["zero\u200Bwidth", "zerowidth"],
+    ["bidi\u202Eflip", "bidiflip"],
+    ["  padded  ", "padded"],
+    ["\u00A0padded\u00A0", "padded"],
+    ["two\u00A0words", "two\u00A0words"],
+    ["ctrl\u0007bell", "ctrlbell"],
+    ["", "deadline"],
+    ["   ", "deadline"],
+    ["\u200B\u200D", "deadline"],
+    ["e\u0301\u0302\u0303\u0304\u0305\u0306", "e\u0301\u0302\u0303\u0304"],
+  ])("a milestone label %j is sent as %j", async (typed, sent) => {
+    const pm = await memoryPm({
+      answers: { "milestones.add": { id: 1 }, "milestones.update": { id: 1 } },
+    });
+    await addMilestone("Atlas", typed, null);
+    await updateMilestone(1, typed, null);
+    expect((pm.of("milestones.add")[0].args as { label: string }).label).toBe(sent);
+    expect((pm.of("milestones.update")[0].args as { label: string }).label).toBe(sent);
+  });
+
+  it("a label is cut to 200 characters, and a cut that lands after a space leaves no space at the end", async () => {
+    const pm = await memoryPm({ answers: { "milestones.add": { id: 1 } } });
+    await addMilestone("Atlas", "x".repeat(199) + " tail", null);
+    await addMilestone("Atlas", "\u{1F680}".repeat(250), null);
+    const labels = pm.of("milestones.add").map((c) => (c.args as { label: string }).label);
+    expect(labels[0]).toBe("x".repeat(199));
+    expect(Array.from(labels[1])).toHaveLength(200);
+  });
+
+  it("a new project's name is tidied the same way (an existing one is unchanged), and a bare emoji name is kept", async () => {
+    const pm = await memoryPm({ answers: { "milestones.add": { id: 1 } } });
+    await addMilestone("  New\u200B Project\t", "x", null);
+    await addMilestone("Atlas", "x", null);
+    await addMilestone(ZWJ_FAMILY, "x", null);
+    expect(pm.of("milestones.add").map((c) => (c.args as { project: string }).project)).toEqual([
+      "New Project",
+      "Atlas",
+      ZWJ_FAMILY,
+    ]);
+  });
+
+  it("a note's title is the note's own, else its first non-blank line, else Untitled note, tidied the same way", async () => {
+    const pm = await memoryPm({ answers: { "documents.saveNote": { saved: true } } });
+    await ingestNote("a", `${ZWJ_FAMILY}\tnotes`, "body");
+    await ingestNote("b", "\u200B", "\u200B\n\n  Second\tline\u200B here\nmore");
+    await ingestNote("c", "", "\u200B\n\u0007");
+    expect(pm.of("documents.saveNote").map((c) => (c.args as { title: string }).title)).toEqual([
+      `${ZWJ_FAMILY} notes`,
+      "Second line here",
+      "Untitled note",
+    ]);
+  });
+});
+
 describe("tasks", () => {
   it("pages tasks with the project and the cursor, and checks the answer's shape", async () => {
     const pm = await memoryPm({
@@ -260,6 +329,16 @@ describe("notes", () => {
       { key: "w-2", title: "First line", body: "First line\nsecond" },
       { key: "w-3", title: "Untitled note", body: "" },
     ]);
+  });
+
+  it("a title that only becomes --- once its hidden characters are gone is folded too, from the note's own title or its first line", async () => {
+    const pm = await memoryPm({ answers: { "documents.saveNote": { saved: true } } });
+    await ingestNote("w-1", "a--\u200B-b", "body");
+    await ingestNote("w-2", "", "x--\u200B---y\nmore");
+    await ingestNote("w-3", "-\u200B-\u200B-", "body");
+    const titles = pm.of("documents.saveNote").map((c) => (c.args as { title: string }).title);
+    expect(titles).toEqual(["a-b", "x-y", "-"]);
+    for (const title of titles) expect(title).not.toContain("---");
   });
 
   it("a title longer than PM allows is cut to 200 characters", async () => {

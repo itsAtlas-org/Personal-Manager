@@ -4,12 +4,37 @@
 // The Pinboard's state + persistence. The board is user content (notes, task lists, timelines), so
 // it lives in the mod's own storage (`storage.get`/`storage.set`, through lib/pm): PM keeps it with
 // the vault, so it travels with a backup or a transfer and is encrypted at rest, rather than sitting in
-// a webview's localStorage (a frame has none). It already loaded asynchronously on mount; the persist
-// effect is gated on the initial load so the empty default can't clobber a stored board before it
-// arrives.
+// a webview's localStorage (a frame has none).
+//
+// How it is kept safe (Mods plan K7, and boardSync.ts for the pure half):
+//   - the board STORED is the source and is kept verbatim; what the view draws is a DISPLAY board
+//     derived from it (sanitised, reflowed into this frame's width). A save is the stored board with
+//     only the person's changes applied, so reflow never rewrites a card's stored position and what
+//     this build cannot read (a newer build's cards, fields) is written back as it was;
+//   - nothing is written on load: a save needs a change the person made (`unsaved`), and a board that
+//     did not change is not sent;
+//   - a board of a version this build cannot read is never written: it is shown as unreadable;
+//   - a board over PM's one-call cap is not sent: the edit stays in memory and the header says so;
+//   - a write names the revision it was read at; if PM says it is stale, the board is read again and
+//     the person's changes are applied to what is there now, never over it;
+//   - a flush on `lifecycle.suspend` and on unmount writes what was not yet written.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getPref, setPref } from "../pm";
+import { CODE, getPref, PmError, setOverlay, setPref } from "../pm";
+import {
+  applyBoard,
+  applyList,
+  diffBoards,
+  fullness as boardFullness,
+  freshStored,
+  isObj,
+  MAX_ARGS_BYTES,
+  readStored,
+  sameJson,
+  saveBytes,
+  type Obj,
+} from "./boardSync";
+import { overlayEntries } from "./calendarEntries";
 import {
   carryGameState,
   GAME_FIELDS,
@@ -70,13 +95,53 @@ function makeId(): string {
 /** Every kind this build can draw. A widget of any other kind is one a NEWER build made. */
 const KNOWN_KINDS: readonly string[] = ["note", "timeline", "folder", "tasklist"];
 
+/** The games a folder can be given (`GameKind`); any other value is one a newer build made. */
+const GAME_KINDS: readonly string[] = ["roulette", "straws", "box", "coin", "rps"];
+
+/** The card as the view can draw it: a field of a known kind with a value the view would trip on (a
+ *  note whose text is a number, a timeline whose entries are not a list) is left out of what is
+ *  DRAWN. It is not removed from what is STORED: a save writes only what the person changed, so a
+ *  field this leaves out comes back exactly as it was unless they edit that very field. */
+function drawable(x: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...x };
+  const keep = (key: string, ok: (v: unknown) => boolean) => {
+    if (key in out && !ok(out[key])) delete out[key];
+  };
+  const isString = (v: unknown) => typeof v === "string";
+  const isBool = (v: unknown) => typeof v === "boolean";
+  for (const key of ["text", "title", "color", "ingestedAt", "ingestedHash"]) keep(key, isString);
+  keep("project", (v) => v === null || typeof v === "string");
+  for (const key of ["showOnCalendar", "gameOn", "autoPopOut", "repeat"]) keep(key, isBool);
+  keep("view", (v) => v === "list" || v === "row");
+  keep("expandMode", (v) => v === "inline" || v === "overlay");
+  keep("game", (v) => typeof v === "string" && GAME_KINDS.includes(v));
+  keep("weight", (v) => typeof v === "number" && Number.isFinite(v));
+  keep("taskSort", isObj);
+  keep("items", Array.isArray);
+  // Only a folder holds cards, and validWidget builds that list itself. A `children` on any other kind
+  // is a stored value the view would trip on (not a list, a list of nulls) and has no use for.
+  if (out.kind !== "folder") delete out.children;
+  if (Array.isArray(out.items)) {
+    out.items = (out.items as unknown[])
+      .filter((it): it is Record<string, unknown> => isObj(it) && typeof it.id === "string")
+      .map((it) => ({
+        ...it,
+        date: typeof it.date === "string" ? it.date : "",
+        label: typeof it.label === "string" ? it.label : "",
+      }));
+  }
+  return out;
+}
+
 /** A widget is only usable if it has an id, a known kind, and a fully-numeric rect — the
  *  view dereferences `w.rect.x` unconditionally while rendering, and there's no error
  *  boundary, so one malformed entry would white-screen the app. Validate per-widget, not
- *  just the top-level shape. Returns the widget to keep (a folder may come back with fewer
- *  children), or null to drop it. */
-function validWidget(w: unknown): Widget | null {
-  if (!w || typeof w !== "object") return null;
+ *  just the top-level shape. Returns the widget to DRAW (a folder may come back with fewer
+ *  children), or null to leave it out of the drawing. A card left out is still STORED, and a save
+ *  writes it back as it was (boardSync.ts): not drawing a card never deletes it. `depth` is how far
+ *  inside a folder this is: folders do not nest, so a folder in a folder is not read at all. */
+function validWidget(w: unknown, depth = 0): Widget | null {
+  if (!w || typeof w !== "object" || Array.isArray(w)) return null;
   const x = w as Record<string, unknown>;
   if (typeof x.id !== "string") return null;
   if (typeof x.kind !== "string" || !KNOWN_KINDS.includes(x.kind)) return null;
@@ -89,21 +154,19 @@ function validWidget(w: unknown): Widget | null {
     typeof r.h === "number";
   if (!rectOk) return null;
   if (x.kind === "folder") {
-    if (!Array.isArray(x.children)) return null;
-    // A folder keeps its valid, NON-folder children (folders never nest) and drops the rest, rather
-    // than failing as a whole. It used to fail as a whole, which is safe against a white screen but
-    // loses every note in the folder to one child this build can't read — a kind a newer build added,
-    // say. Since the next write sends the whole board, that loss would be permanent. So: the folder
-    // survives if anything valid is left in it, or if it was empty to begin with (an empty folder is
-    // a real thing the user made). A folder whose every child is unreadable still goes, because there
-    // is nothing of it left to show.
+    if (depth > 0 || !Array.isArray(x.children)) return null;
+    // A folder keeps its valid, NON-folder children (folders never nest) in what is drawn. The others
+    // are not drawn, and stay in what is stored (a kind a newer build added, say). The folder is
+    // drawn if anything valid is left in it, or if it was empty to begin with (an empty folder is a
+    // real thing the user made). A folder whose every child is unreadable is not drawn at all,
+    // because there is nothing of it to show; it is still stored.
     const kids = x.children
-      .map(validWidget)
+      .map((c) => validWidget(c, depth + 1))
       .filter((c): c is Widget => c !== null && c.kind !== "folder");
     if (kids.length === 0 && x.children.length > 0) return null;
-    return { ...(x as unknown as Widget), children: kids };
+    return { ...(drawable(x) as unknown as Widget), children: kids };
   }
-  return x as unknown as Widget;
+  return drawable(x) as unknown as Widget;
 }
 
 /** Apply `fn` to the widget with `id` wherever it lives — top-level or a folder child. Folders
@@ -133,49 +196,43 @@ function kindOf(widgets: Widget[], id: string): Widget["kind"] | undefined {
  *  pathological size, while still dwarfing any real (even multi-monitor) layout. */
 const MAX_BOARD_CELLS = 512;
 
-function parseBoard(raw: string | null, cols: number, rows: number): Board {
-  if (!raw) return EMPTY_BOARD;
-  try {
-    const parsed = JSON.parse(raw) as Board;
-    // Discard anything that isn't the current shape rather than rendering garbage — both the
-    // envelope and each widget, clamping rects back in-bounds for safety.
-    if (!parsed || parsed.version !== BOARD_VERSION || !Array.isArray(parsed.widgets)) {
-      return EMPTY_BOARD;
+/** The board to DRAW from a stored board's cards. Throws only on a value no board should hold (so deep
+ *  it overflows the stack); the caller treats that board as unreadable and never writes it. */
+export function deriveDisplay(stored: readonly unknown[], cols: number, rows: number): Board {
+  // Discard anything that isn't the current shape rather than rendering garbage — both the
+  // envelope and each widget, clamping rects back in-bounds for safety.
+  const valid = stored.map((w) => validWidget(w)).filter((w): w is Widget => w !== null);
+  // The board is a FIXED-WIDTH canvas = `cols` (the window) and grows only downward; give it a
+  // generous vertical cap so widgets that overhang the width wrap onto new rows (the board scrolls)
+  // rather than piling up. `rows` is the caller's generous vertical extent (≈ the screen height).
+  const rowCap = Math.min(Math.max(rows, ROWS), MAX_BOARD_CELLS);
+  // Sanity-clamp every rect to a generous box first (preserving the stored x/y up to the cap, so a
+  // fitter keeps its exact spot) — this only guards a corrupt/hand-edited pref. Children are
+  // clamped kind-aware; they aren't board-positioned so they don't take part in the re-flow.
+  const sane = valid.map((w) => {
+    const rect = clampRect(w.rect, MAX_BOARD_CELLS, MAX_BOARD_CELLS, minSize(w.kind));
+    if (w.kind === "folder") {
+      const children = (w.children ?? []).map((c) => ({
+        ...c,
+        rect: clampRect(c.rect, MAX_BOARD_CELLS, MAX_BOARD_CELLS, minSize(c.kind)),
+      }));
+      // The round a game folder is part-way through. Sanitised then pruned on the way in, because
+      // this is the one moment we know the folder's real contents after an arbitrary gap: PM may
+      // have been shut for an hour or a fortnight, and a card that left in between is not
+      // "already drawn" — it is gone. Doing it here also means every later reader can trust the
+      // list without re-checking it, which is what makes "only offer the cards that aren't greyed
+      // out" true at launch and not merely true while the app stays open.
+      const folder = { ...w, rect, children };
+      const spent = Array.isArray(w.spent) ? w.spent.filter((s) => typeof s === "string") : [];
+      return { ...folder, spent: pruneSpent({ ...folder, spent }) };
     }
-    const valid = parsed.widgets.map(validWidget).filter((w): w is Widget => w !== null);
-    // The board is a FIXED-WIDTH canvas = `cols` (the window) and grows only downward; give it a
-    // generous vertical cap so widgets that overhang the width wrap onto new rows (the board scrolls)
-    // rather than piling up. `rows` is the caller's generous vertical extent (≈ the screen height).
-    const rowCap = Math.min(Math.max(rows, ROWS), MAX_BOARD_CELLS);
-    // Sanity-clamp every rect to a generous box first (preserving the stored x/y up to the cap, so a
-    // fitter keeps its exact spot) — this only guards a corrupt/hand-edited pref. Children are
-    // clamped kind-aware; they aren't board-positioned so they don't take part in the re-flow.
-    const sane = valid.map((w) => {
-      const rect = clampRect(w.rect, MAX_BOARD_CELLS, MAX_BOARD_CELLS, minSize(w.kind));
-      if (w.kind === "folder") {
-        const children = (w.children ?? []).map((c) => ({
-          ...c,
-          rect: clampRect(c.rect, MAX_BOARD_CELLS, MAX_BOARD_CELLS, minSize(c.kind)),
-        }));
-        // The round a game folder is part-way through. Sanitised then pruned on the way in, because
-        // this is the one moment we know the folder's real contents after an arbitrary gap: PM may
-        // have been shut for an hour or a fortnight, and a card that left in between is not
-        // "already drawn" — it is gone. Doing it here also means every later reader can trust the
-        // list without re-checking it, which is what makes "only offer the cards that aren't greyed
-        // out" true at launch and not merely true while the app stays open.
-        const folder = { ...w, rect, children };
-        const spent = Array.isArray(w.spent) ? w.spent.filter((s) => typeof s === "string") : [];
-        return { ...folder, spent: pruneSpent({ ...folder, spent }) };
-      }
-      return { ...w, rect };
-    });
-    // Re-flow any widget that overhangs the fixed width back on-screen (wrapping to a new row). A
-    // folder is NOT normalised by child count: an empty or single-card folder is a legitimate thing
-    // the user made (+ Folder) and must survive a reload.
-    return { version: BOARD_VERSION, widgets: reflowToWidth(sane, cols, rowCap) };
-  } catch {
-    return EMPTY_BOARD;
-  }
+    return { ...w, rect };
+  });
+  // Re-flow any widget that overhangs the fixed width back on-screen (wrapping to a new row). A
+  // folder is NOT normalised by child count: an empty or single-card folder is a legitimate thing
+  // the user made (+ Folder) and must survive a reload. This is what is DRAWN: the stored rects are
+  // not changed by it, and a save writes a rect only for a card the person moved.
+  return { version: BOARD_VERSION, widgets: reflowToWidth(sane, cols, rowCap) };
 }
 
 /** How the stored board's arrival went, and the ONLY thing that decides whether the board may be
@@ -185,8 +242,38 @@ function parseBoard(raw: string | null, cols: number, rows: number): Board {
  *  - `failed` — the store didn't answer. The board on screen is the empty default, which is NOT the
  *    user's board; it is what we fall back to when we don't know theirs. Persisting it would destroy
  *    the real one, so a failed load never arms persistence and the view says so instead of pretending
- *    the board is empty. */
-export type BoardLoad = "loading" | "ready" | "failed";
+ *    the board is empty.
+ *  - `unreadable` — a board arrived that this build cannot read (a version it does not know, or not a
+ *    board at all). It is left exactly as it is: nothing is drawn from it and nothing is written. */
+export type BoardLoad = "loading" | "ready" | "failed" | "unreadable";
+
+/** Why a save is not being kept, for the header to say: the last write failed (`failed`), the board
+ *  is over PM's cap for one save (`tooBig`), or PM's copy changed to something this build cannot
+ *  read, so saving is stopped (`blocked`). Null when what is on screen is what is kept. */
+export type SaveProblem = "failed" | "tooBig" | "blocked" | null;
+
+/** How long a change waits for a quiet moment before it is written. */
+const SAVE_DELAY_MS = 500;
+/** A revision conflict is read and merged this many times before the save is given up (the next
+ *  change tries again). */
+const MAX_MERGES = 3;
+
+// The one board on screen asks for its own flush and refresh here, so the page's start-up can answer
+// `lifecycle.suspend` and the project events without knowing the hook.
+let flusher: (() => Promise<void>) | null = null;
+let refresher: (() => Promise<void>) | null = null;
+
+/** Write whatever the board holds that is not yet written, and wait for it (the page's answer to
+ *  `lifecycle.suspend`). Resolves at once when there is no board on screen. Never rejects. */
+export function flushBoard(): Promise<void> {
+  return flusher ? flusher() : Promise.resolve();
+}
+
+/** Read the board again (a project was renamed, merged or deleted, which rewrites the project names
+ *  in it) and merge what changed into what is on screen. Never rejects. */
+export function refreshBoard(): Promise<void> {
+  return refresher ? refresher() : Promise.resolve();
+}
 
 /** How a change enters the undo history. See {@link commitForPatch} and the mutators below for which
  *  change is which, and history.ts for why `silent` and `barrier` exist at all. */
@@ -247,7 +334,7 @@ function commitForPatch(id: string, patch: Partial<Widget>, kind?: Widget["kind"
  *  placed within it, so a widget survives a reload instead of snapping back.
  *
  *  Undo lives HERE rather than around the view's handlers, because this is the only writer: widgets
- *  are also created and destroyed inside `resolveDrop` (filing, folding) and dropped by `parseBoard`,
+ *  are also created and destroyed inside `resolveDrop` (filing, folding) and dropped by `deriveDisplay`,
  *  paths no caller sees — and nothing outside could rebuild a deleted widget's id, text and rect
  *  anyway. One funnel, one place to be right. */
 export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
@@ -266,12 +353,161 @@ export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
   boundsRef.current = bounds;
 
   const [load, setLoad] = useState<BoardLoad>("loading");
-  const [saveFailed, setSaveFailed] = useState(false);
-  // ARMED IN EXACTLY ONE PLACE: the load's success path, below. Every write goes through the two
-  // effects further down, and both refuse to run until this is true — so "we never learned what the
-  // board is" cannot end with us writing what it isn't.
+  const [problem, setProblem] = useState<SaveProblem>(null);
+  const [unreadable, setUnreadable] = useState<"version" | "shape" | null>(null);
+  /** The bytes the next save sends (what the header's meter shows against PM's cap). */
+  const [sizeBytes, setSizeBytes] = useState(0);
+  // ARMED IN EXACTLY ONE PLACE: the load's success path, below. Every write goes through `save`,
+  // which refuses to run until this is true — so "we never learned what the board is" cannot end with
+  // us writing what it isn't.
   const armed = useRef(false);
+  /** PM's copy of the board turned into something this build cannot read after it had been read (the
+   *  one way `armed` goes false once the load has landed). Saving waits, and the next change or the
+   *  next refresh looks again: the moment PM's copy can be read, saving carries on. */
+  const blocked = useRef(false);
   const [attempt, setAttempt] = useState(0);
+
+  /** The board as PM holds it, verbatim: the only thing a save is built on. */
+  const storedRef = useRef<(Obj & { widgets: unknown[] }) | null>(null);
+  /** The display board the stored one was last in step with: a save is the difference from this. */
+  const baselineRef = useRef<Board | null>(null);
+  /** The person changed something that is not yet written. NEVER set by a load. */
+  const unsaved = useRef(false);
+  /** Counts changes, so a save can tell whether more came in while it was being written. */
+  const changes = useRef(0);
+  /** The dates the Calendar was last told about (JSON), so it is told again only when they change. */
+  const lastOverlay = useRef<string | null>(null);
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const boardRef = useRef(board);
+  boardRef.current = board;
+
+  /** One thing at a time touches the stored board: saves, merges and refreshes wait their turn. */
+  const enqueue = useCallback((job: () => Promise<void>): Promise<void> => {
+    const run = queue.current.then(job, job);
+    queue.current = run.catch(() => undefined);
+    return queue.current as Promise<void>;
+  }, []);
+
+  /** The person changed the board (or undid a change): it is theirs to keep. */
+  const touch = useCallback(() => {
+    unsaved.current = true;
+    changes.current += 1;
+  }, []);
+
+  /** Tell the Calendar the dated entries of the stored board, when they are not what it was last
+   *  told. The first call of a frame always tells it (nothing was told yet): PM drops a paused mod's
+   *  dates, so a frame that starts after a resume has to say them again. */
+  const publishOverlay = useCallback(async () => {
+    const stored = storedRef.current;
+    if (!stored) return;
+    try {
+      const entries = overlayEntries(stored);
+      const text = JSON.stringify(entries);
+      if (text === lastOverlay.current) return;
+      await setOverlay(entries);
+      lastOverlay.current = text;
+    } catch {
+      /* a board too deep to read, or PM said no: the next saved change tells it again */
+    }
+  }, []);
+
+  /** Take PM's copy of the board as the stored one, and carry what the person changed since the last
+   *  save onto it: the display board becomes theirs-plus-ours, the undo trail ends (its snapshots
+   *  predate theirs), and the next save is the same difference over what is now stored. Returns false
+   *  when PM's copy cannot be read (saving stops: it is not ours to overwrite). */
+  const adopt = useCallback(async (): Promise<boolean> => {
+    let raw: string | null;
+    try {
+      raw = await getPref(PREF_KEY);
+    } catch {
+      setProblem("failed");
+      return false;
+    }
+    const read = readStored(raw);
+    let theirs: Obj & { widgets: unknown[] };
+    let display: Board;
+    try {
+      if (read.kind === "unreadable") throw new Error("unreadable");
+      theirs = read.kind === "ok" ? read.board : freshStored();
+      display = deriveDisplay(theirs.widgets, boundsRef.current.cols, boundsRef.current.rows);
+    } catch {
+      armed.current = false;
+      blocked.current = true;
+      setProblem("blocked");
+      return false;
+    }
+    const baseline = baselineRef.current;
+    const mine = baseline ? diffBoards(baseline, boardRef.current) : null;
+    storedRef.current = theirs;
+    if (blocked.current) {
+      // PM's copy can be read again: carry on saving, over what is there now (our changes are merged
+      // into it below), and stop saying it is not being kept.
+      blocked.current = false;
+      armed.current = true;
+      setProblem(null);
+    }
+    if (!mine && baseline && sameJson(display.widgets, baseline.widgets)) return true;
+    baselineRef.current = display;
+    const merged: Board = mine
+      ? { ...display, widgets: applyList(display.widgets, mine) as Widget[] }
+      : display;
+    boardRef.current = merged;
+    setHist(resetHistory(merged));
+    setSizeBytes(saveBytes(PREF_KEY, JSON.stringify(theirs)));
+    return true;
+  }, []);
+
+  /** The one write: the stored board with the person's changes applied. Every failure is REPORTED, not
+   *  swallowed: the header tells the user their board is "Saved on this device", and a promise that
+   *  can quietly be false is worse than no promise — they'd keep typing into a board that isn't being
+   *  kept. What is not written stays `unsaved`, in memory, and goes with the next save. */
+  const save = useCallback(async (): Promise<void> => {
+    for (let merges = 0; merges <= MAX_MERGES; merges += 1) {
+      if (blocked.current && !(await adopt())) return;
+      const stored = storedRef.current;
+      const baseline = baselineRef.current;
+      if (!armed.current || !stored || !baseline) return;
+      const current = boardRef.current;
+      const seen = changes.current;
+      const patch = diffBoards(baseline, current);
+      if (!patch) {
+        unsaved.current = changes.current !== seen;
+        setProblem(null);
+        return;
+      }
+      const next = applyBoard(stored, patch);
+      const json = JSON.stringify(next);
+      const bytes = saveBytes(PREF_KEY, json);
+      setSizeBytes(bytes);
+      if (bytes > MAX_ARGS_BYTES) {
+        // Over PM's cap for one call: not sent, and not lost. It stays on screen and in memory.
+        setProblem("tooBig");
+        return;
+      }
+      try {
+        await setPref(PREF_KEY, json);
+      } catch (error) {
+        const code = error instanceof PmError ? error.code : null;
+        if (code === CODE.staleRevision && merges < MAX_MERGES) {
+          // PM's copy changed since it was read (a rename rewrote a project name in it, say). Read it
+          // again and apply our changes to THAT; never write over it.
+          if (await adopt()) continue;
+          return;
+        }
+        // PM refusing the size (the call is too large, or this mod's storage is full) is the board being
+        // too big to keep, whatever our own count said.
+        setProblem(code === CODE.tooLarge || code === CODE.quotaExceeded ? "tooBig" : "failed");
+        return;
+      }
+      storedRef.current = next;
+      baselineRef.current = current;
+      unsaved.current = changes.current !== seen;
+      setProblem(null);
+      void publishOverlay();
+      return;
+    }
+    setProblem("failed");
+  }, [adopt, publishOverlay]);
 
   // Load the stored board. `attempt` re-runs it for the view's Retry.
   useEffect(() => {
@@ -282,11 +518,38 @@ export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
         // A cancelled load must not arm: it belongs to a superseded attempt (or a StrictMode
         // double-mount), and its board is about to be replaced by the one still in flight.
         if (cancelled) return;
+        const read = readStored(raw);
+        const shut = (why: "version" | "shape") => {
+          armed.current = false;
+          blocked.current = false;
+          storedRef.current = null;
+          baselineRef.current = null;
+          setUnreadable(why);
+          setHist(resetHistory(EMPTY_BOARD));
+          setLoad("unreadable");
+        };
+        if (read.kind === "unreadable") return shut(read.why);
+        const stored = read.kind === "ok" ? read.board : freshStored();
+        let display: Board;
+        try {
+          display = deriveDisplay(stored.widgets, boundsRef.current.cols, boundsRef.current.rows);
+        } catch {
+          return shut("shape");
+        }
+        storedRef.current = stored;
+        baselineRef.current = display;
+        boardRef.current = display;
+        unsaved.current = false;
+        setUnreadable(null);
+        setProblem(null);
+        setSizeBytes(saveBytes(PREF_KEY, raw ?? ""));
         // RESET, not commit: the board didn't change, it arrived. Committing it would leave the empty
         // default sitting in `past`, and the very first Ctrl+Z would wipe the user's board.
-        setHist(resetHistory(parseBoard(raw, boundsRef.current.cols, boundsRef.current.rows)));
+        setHist(resetHistory(display));
+        blocked.current = false;
         armed.current = true;
         setLoad("ready");
+        void publishOverlay();
       })
       .catch(() => {
         // The store didn't answer. Leave the empty board on screen but DON'T arm persistence: this
@@ -299,7 +562,7 @@ export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, publishOverlay]);
 
   /** Try the load again after a failure (the store may simply not have been ready yet). */
   const retryLoad = useCallback(() => setAttempt((n) => n + 1), []);
@@ -307,72 +570,75 @@ export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
   /** The one writer. `fn` produces the next board from the current one; `kind` says how that enters
    *  the undo history. `now` is read out here so the state updater stays pure (React may run it
    *  twice under StrictMode). */
-  const change = useCallback((fn: (b: Board) => Board, kind: CommitKind = { mode: "push" }) => {
-    const now = Date.now();
-    setHist((h) => {
-      const next = fn(h.present);
-      if (kind.mode === "silent") return commitSilent(h, next);
-      if (kind.mode === "barrier") return commitBarrier(h, next);
-      return commit(h, next, { key: kind.key ?? null, now, weigh: weighBoard });
-    });
-  }, []);
+  const change = useCallback(
+    (fn: (b: Board) => Board, kind: CommitKind = { mode: "push" }) => {
+      const now = Date.now();
+      touch();
+      setHist((h) => {
+        const next = fn(h.present);
+        if (kind.mode === "silent") return commitSilent(h, next);
+        if (kind.mode === "barrier") return commitBarrier(h, next);
+        return commit(h, next, { key: kind.key ?? null, now, weigh: weighBoard });
+      });
+    },
+    [touch],
+  );
 
   // Undo and redo both restore a whole past board, so both must re-graft the live round onto it —
   // see `carryGameState`. Without this, undoing a tint would un-grey cards a game had already drawn.
-  const undoBoard = useCallback(
-    () =>
-      setHist((h) => {
-        const next = undo(h);
-        return next === h ? h : { ...next, present: carryGameState(next.present, h.present) };
-      }),
-    [],
-  );
-  const redoBoard = useCallback(
-    () =>
-      setHist((h) => {
-        const next = redo(h);
-        return next === h ? h : { ...next, present: carryGameState(next.present, h.present) };
-      }),
-    [],
-  );
+  const undoBoard = useCallback(() => {
+    touch();
+    setHist((h) => {
+      const next = undo(h);
+      return next === h ? h : { ...next, present: carryGameState(next.present, h.present) };
+    });
+  }, [touch]);
+  const redoBoard = useCallback(() => {
+    touch();
+    setHist((h) => {
+      const next = redo(h);
+      return next === h ? h : { ...next, present: carryGameState(next.present, h.present) };
+    });
+  }, [touch]);
 
-  const boardRef = useRef(board);
-  boardRef.current = board;
-
-  /** The one write. A failure is REPORTED, not swallowed: the header tells the user their board is
-   *  "Saved on this device", and a promise that can quietly be false is worse than no promise —
-   *  they'd keep typing into a board that isn't being kept.
-   *
-   *  No retry logic is needed to go with it. Every write sends the whole board, so the next change
-   *  (and the unmount flush) re-sends everything the failed write was carrying: a transient failure
-   *  heals itself, and `saveFailed` clears when one actually lands. */
-  const persist = useCallback(async (b: Board) => {
-    try {
-      await setPref(PREF_KEY, JSON.stringify(b));
-      setSaveFailed(false);
-    } catch {
-      setSaveFailed(true);
-    }
-  }, []);
-
-  // Persist the board — DEBOUNCED (F-15). The board object changes on every keystroke (a note's text
+  // Write the changes — DEBOUNCED (F-15). The board object changes on every keystroke (a note's text
   // lives in it), and writing the whole JSON to the encrypted store each time is one IPC + SQLCipher
-  // write per character. Coalesce to a single write ~500 ms after the last change; a `boardRef` keeps
-  // the latest value so the trailing timer (and the unmount flush below) writes what's current.
+  // write per character. Coalesce to a single write ~500 ms after the last change; `save` reads the
+  // latest board when it runs. A board that merely LOADED has nothing unsaved, so it sets no timer.
   useEffect(() => {
-    if (!armed.current) return;
-    const handle = setTimeout(() => void persist(boardRef.current), 500);
+    if ((!armed.current && !blocked.current) || !unsaved.current) return;
+    const handle = setTimeout(() => void enqueue(save), SAVE_DELAY_MS);
     return () => clearTimeout(handle);
-  }, [board, persist]);
-  // Flush the latest board on unmount so a fast navigate-away/close doesn't drop the tail edit. This
-  // one can only ever be best-effort: there is no UI left to report a failure to, and the debounced
-  // write above has already carried everything older than the last ~500 ms.
-  useEffect(
-    () => () => {
-      if (armed.current) void persist(boardRef.current);
-    },
-    [persist],
+  }, [board, enqueue, save]);
+
+  /** Write what is not yet written, after anything already being written (the unmount flush, and the
+   *  answer to `lifecycle.suspend`). */
+  const flush = useCallback(
+    () =>
+      enqueue(async () => {
+        if (unsaved.current) await save();
+      }),
+    [enqueue, save],
   );
+  const refresh = useCallback(
+    () =>
+      enqueue(async () => {
+        if (!armed.current && !blocked.current) return;
+        if (await adopt()) await publishOverlay();
+      }),
+    [enqueue, adopt, publishOverlay],
+  );
+  // The unmount flush is best-effort: there is no UI left to report a failure to, and the debounced
+  // write has already carried everything older than the last ~500 ms.
+  useEffect(() => {
+    flusher = flush;
+    refresher = refresh;
+    return () => {
+      void flush();
+      if (flusher === flush) flusher = null;
+      if (refresher === refresh) refresher = null;
+    };
+  }, [flush, refresh]);
 
   // add* return the new widget's id so the view can scroll it into sight — a note placed on a
   // lower row would otherwise be created off-screen. The id is minted up front (outside the
@@ -756,9 +1022,22 @@ export function usePinboard(viewport: BoardSpace = { cols: COLS, rows: ROWS }) {
     load,
     /** Retry a `failed` load. */
     retryLoad,
-    /** The last write to the store failed, so what's on screen isn't (all) on disk. Sticky until a
-     *  write succeeds — the board keeps working, it just isn't being kept. */
-    saveFailed,
+    /** The last write to the store failed (or PM's copy became one this build cannot read), so what's
+     *  on screen isn't (all) on disk. Sticky until a write succeeds — the board keeps working, it just
+     *  isn't being kept. */
+    saveFailed: problem === "failed" || problem === "blocked",
+    /** PM's copy of the board changed to something this build cannot read: nothing is written over it,
+     *  and changes made here are kept in memory until it can be read again. */
+    blocked: problem === "blocked",
+    /** The board is over what PM takes in one save. Not sent and not lost: it is on screen. */
+    tooBig: problem === "tooBig",
+    /** The bytes the next save sends, and how full that is against PM's cap (percent). */
+    sizeBytes,
+    fullness: boardFullness(sizeBytes),
+    /** Why a stored board is shown as unreadable (`load` is "unreadable"), or null. */
+    unreadable,
+    /** Write what is not yet written (and wait for it). */
+    flush,
     undo: undoBoard,
     redo: redoBoard,
     /** Whether there's anything to undo or redo (the right-click menu greys them otherwise). */

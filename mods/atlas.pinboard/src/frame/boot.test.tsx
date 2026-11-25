@@ -276,6 +276,86 @@ describe("boot", () => {
     expect(box?.checked).toBe(true);
   });
 
+  it("answers lifecycle.suspend with {flushed: true} only after the board and the preferences are written", async () => {
+    const pm = await memoryPm({ seed: { board: BOARD }, answers });
+    await start(pm);
+    await act(async () => void (await pm.settle()));
+    const press = (label: string) =>
+      [...document.querySelectorAll("button")].find((b) => b.textContent === label)?.click();
+    await act(async () => press("+ Note"));
+    const box = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.includes("Ask before deleting"))
+      ?.querySelector("input") as HTMLInputElement;
+    await act(async () => box.click());
+    // Neither the board's half-second debounce nor anything else has written yet.
+    const board = () =>
+      pm.of("storage.set").filter((c) => (c.args as { key: string }).key === "board");
+    expect(board()).toHaveLength(0);
+    expect(pm.pm.stats.flushes).toBe(0);
+    await act(async () => {
+      pm.emit("lifecycle.suspend", { reason: "tab" });
+      await pm.settle();
+    });
+    await act(async () => void (await pm.settle()));
+    expect(board()).toHaveLength(1);
+    expect(pm.storage.get("prefs")).toEqual({
+      value: { confirmDelete: false, showPast: true, showCompleted: true },
+      revision: 1,
+    });
+    expect(pm.pm.stats.flushes).toBe(1);
+    // The board PM now holds has the note that was added.
+    const widgets = (pm.storage.get("board")?.value as { widgets: unknown[] }).widgets;
+    expect(widgets).toHaveLength(BOARD.widgets.length + 1);
+  });
+
+  it("answers lifecycle.suspend even with nothing to write, and even when the write fails", async () => {
+    const pm = await memoryPm({
+      seed: { board: BOARD },
+      answers: { ...answers, "storage.set": () => refuse("MOD-9001", "PM could not.") },
+    });
+    await start(pm);
+    await act(async () => void (await pm.settle()));
+    await act(async () => {
+      pm.emit("lifecycle.suspend", { reason: "tab" });
+      await pm.settle();
+    });
+    await act(async () => void (await pm.settle()));
+    expect(pm.pm.stats.flushes).toBe(1);
+    expect(pm.of("storage.set")).toHaveLength(0);
+    await act(async () =>
+      [...document.querySelectorAll("button")].find((b) => b.textContent === "+ Note")?.click(),
+    );
+    await act(async () => {
+      pm.emit("lifecycle.suspend", { reason: "tab" });
+      await pm.settle();
+    });
+    await act(async () => void (await pm.settle()));
+    expect(pm.of("storage.set").length).toBeGreaterThan(0);
+    expect(pm.pm.stats.flushes).toBe(2);
+  });
+
+  it("a project renamed while the page is open: the board is read again and shows the new name", async () => {
+    const pm = await memoryPm({ seed: { board: BOARD }, answers });
+    await start(pm);
+    await act(async () => void (await pm.settle()));
+    pm.storage.set("board", {
+      value: {
+        version: 1,
+        widgets: [BOARD.widgets[0], { ...BOARD.widgets[1], project: "Atlas 2" }],
+      },
+      revision: 2,
+    });
+    await act(async () => {
+      pm.emit("projects.renamed", {});
+      await pm.settle();
+    });
+    await act(async () => void (await pm.settle()));
+    expect(
+      pm.of("storage.get").filter((c) => (c.args as { key: string }).key === "board"),
+    ).toHaveLength(2);
+    expect(document.body.textContent).toContain("Atlas 2");
+  });
+
   it("says why when it is not inside PM", async () => {
     document.body.innerHTML = '<div id="root"></div>';
     const up = await boot({

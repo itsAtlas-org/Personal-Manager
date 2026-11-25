@@ -23,12 +23,15 @@ import {
   deleteMilestone,
   importChecklistTasks,
   ingestNote,
+  milestoneLabel,
+  tidyProjectName,
   listMilestones,
   noteStatuses,
   listProjects,
   setMilestoneStatus,
   updateMilestone,
 } from "../lib/pm";
+import { SIZE_WARN_AT, SizeMeter } from "./SizeMeter";
 import { boardExtent, CELL, folderAtPointer, spaceOf, type BoardSpace } from "../lib/pinboard/grid";
 import { measureSpace } from "../lib/pinboard/measure";
 import {
@@ -371,6 +374,11 @@ export function PinboardView() {
     load,
     retryLoad,
     saveFailed,
+    blocked,
+    tooBig,
+    sizeBytes,
+    fullness,
+    unreadable,
     undo,
     redo,
     canUndo,
@@ -780,7 +788,18 @@ export function PinboardView() {
               at min Depth, but "your work isn't being saved" is a loss warning, and those show at
               every Depth. It also replaces the prose rather than sitting under it — the last line of
               that sentence is the very promise being broken. */}
-          {saveFailed ? (
+          {tooBig ? (
+            <p role="alert" className="text-xs text-st-due">
+              This board is too big to save. Your latest changes are still here, but they
+              aren&rsquo;t being kept. Delete or shorten something to make room.
+            </p>
+          ) : blocked ? (
+            <p role="alert" className="text-xs text-st-due">
+              This board was changed somewhere else into something this version of the Pinboard
+              can&rsquo;t read, so what you change here isn&rsquo;t being saved. It will save again
+              once the board can be read.
+            </p>
+          ) : saveFailed ? (
             <p className="text-xs text-st-due">
               Couldn&rsquo;t save your board to this device — recent changes may be lost. Your next
               change will try again.
@@ -792,6 +811,11 @@ export function PinboardView() {
                 {load === "ready" && "Saved on this device."}
               </p>
             )
+          )}
+          {/* How full the board is against what PM keeps in one save. Always there when it is nearly
+              full or over: that is a loss warning, and those show at every Depth. */}
+          {load === "ready" && (showMeta || fullness >= SIZE_WARN_AT) && (
+            <SizeMeter bytes={sizeBytes} percent={fullness} />
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -868,7 +892,23 @@ export function PinboardView() {
           {/* A failed load leaves the SAME empty board on screen as a fresh install, so it must say
               which one this is. "Add a note to start planning" would be two lies at once: that the
               board is empty, and that what you add to it stays. */}
-          {load === "failed" ? (
+          {load === "unreadable" ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="max-w-sm px-6 text-center">
+                <p className="text-sm text-st-due">
+                  {unreadable === "version"
+                    ? "This board was saved by a different version of the Pinboard."
+                    : "What PM holds here isn\u2019t a board this version can read."}
+                </p>
+                <p className="mt-1 text-xs text-ink4">
+                  It hasn&rsquo;t been changed, and nothing you do here will save over it.{" "}
+                  {unreadable === "version"
+                    ? "Update the Pinboard to see it."
+                    : "It will be left exactly as it is."}
+                </p>
+              </div>
+            </div>
+          ) : load === "failed" ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="max-w-sm px-6 text-center">
                 <p className="text-sm text-st-due">Couldn&rsquo;t open your pinboard.</p>
@@ -2723,7 +2763,7 @@ function useMilestoneEditor(
   // whether the write landed, so an optimistic caller can put its field back; a no-op counts as
   // success, or a legitimate nothing-to-do would read as a refusal.
   const persist = async (dateOverride?: string): Promise<boolean> => {
-    const nextLabel = label.trim() || "deadline";
+    const nextLabel = milestoneLabel(label);
     const effectiveDate = dateOverride ?? date;
     const nextDate = m.calendar_linked ? null : effectiveDate || null;
     const curDate = m.calendar_linked ? null : msDate(m) || null;
@@ -2987,14 +3027,17 @@ function FreeformTimeline({
   // would re-emit it onto the calendar's pinboard overlay the moment it was unlinked, drawing that
   // deadline twice (once as the entry, once as the milestone it became). Both writes land together,
   // after the milestones are safely persisted, so a failed merge leaves the entries untouched.
+  // The name as PM takes it (one plain line): what a card holds and what PM's project is called must be
+  // the same string, so the card is bound to the tidied name, never to the raw draft.
+  const linkable = tidyProjectName(projDraft);
   async function linkProject(project: string) {
     await runMutation(async () => {
       const existing = await listMilestones(project);
       const seen = new Set(
-        existing.map((m) => `${m.label.trim()} ${m.due_date?.slice(0, 10) ?? ""}`),
+        existing.map((m) => `${milestoneLabel(m.label)} ${m.due_date?.slice(0, 10) ?? ""}`),
       );
       for (const it of widget.items ?? []) {
-        const label = it.label.trim() || "deadline";
+        const label = milestoneLabel(it.label);
         const date = it.date || null;
         const key = `${label} ${date ?? ""}`;
         if (seen.has(key)) continue;
@@ -3094,8 +3137,8 @@ function FreeformTimeline({
           ))}
         </datalist>
         <button
-          onClick={() => projDraft.trim() && void linkProject(projDraft.trim())}
-          disabled={!projDraft.trim()}
+          onClick={() => linkable && void linkProject(linkable)}
+          disabled={!linkable}
           className="shrink-0 rounded-[var(--radius-sm)] px-1 py-0.5 text-[0.6875rem] text-accent-text hover:bg-surface disabled:opacity-40"
         >
           Link

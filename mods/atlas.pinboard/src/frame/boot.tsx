@@ -6,9 +6,10 @@
 // What the frame can say before a board exists is said here, in plain words.
 
 import { createRoot, type Root } from "react-dom/client";
-import { HostError, type ModHost } from "../../../../src/kit/host";
+import { HostError, type HostEvent, type ModHost } from "../../../../src/kit/host";
 import { getPref, setPref, connectPm, CODE, PmError } from "../lib/pm";
 import { PREFS_KEY, startPrefs, type Prefs } from "../lib/pinboard/prefs";
+import { flushBoard, refreshBoard } from "../lib/pinboard/usePinboard";
 import { App } from "./App";
 import { startCspStyles } from "./cspStyles";
 import { frameTaskData } from "./taskData";
@@ -34,9 +35,9 @@ export interface Running {
 /** The three preferences' saving: one write at a time, the whole key, over the revision it was read at.
  *  A stale write (PM changed the key since) is read again and tried once more; any other failure just
  *  means the choice is not remembered. */
-function prefsSaver(): (prefs: Prefs) => void {
+function prefsSaver(): { save: (prefs: Prefs) => void; idle: () => Promise<void> } {
   let chain: Promise<unknown> = Promise.resolve();
-  return (prefs) => {
+  const save = (prefs: Prefs) => {
     const json = JSON.stringify(prefs);
     chain = chain.then(async () => {
       try {
@@ -52,6 +53,28 @@ function prefsSaver(): (prefs: Prefs) => void {
       }
     });
   };
+  // Resolves once every save asked for so far has been tried (never rejects: a failed one just was
+  // not remembered).
+  return { save, idle: () => chain.then(() => undefined) };
+}
+
+/** What the page does when PM says it is about to take the frame down (`lifecycle.suspend`): the
+ *  board and the preferences are written, then PM is told so with the port message `{flushed: true}`
+ *  (`host.flushed()`). It is told even when a write failed (the header says so, and PM would only
+ *  wait out its own deadline), once per suspend. Another event about a project being renamed, merged
+ *  or deleted makes the page read the board again, because PM rewrites the names inside it. */
+function answerEvents(host: ModHost, prefs: { idle: () => Promise<void> }): void {
+  host.onEvent((event: HostEvent) => {
+    if (event.name === "lifecycle.suspend") {
+      void Promise.allSettled([flushBoard(), prefs.idle()]).then(() => host.flushed());
+    } else if (
+      event.name === "projects.renamed" ||
+      event.name === "projects.merged" ||
+      event.name === "projects.deleted"
+    ) {
+      void refreshBoard();
+    }
+  });
 }
 
 /** Make the connection and draw the Pinboard, or say why it can't be drawn (null). */
@@ -88,7 +111,9 @@ export async function boot(env: BootEnv): Promise<Running | null> {
   } catch {
     /* the defaults */
   }
-  startPrefs(stored, prefsSaver());
+  const prefsSave = prefsSaver();
+  startPrefs(stored, prefsSave.save);
+  answerEvents(host, prefsSave);
   await theme.ready;
   mount.replaceChildren();
   const root = createRoot(mount);

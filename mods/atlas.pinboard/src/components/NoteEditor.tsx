@@ -33,6 +33,7 @@ import { minimalChange as diff, previewMarks, type PreviewMark } from "../lib/pi
 import { tableCellOffset, unescapeCell } from "../lib/pinboard/noteTables";
 import { toggleTaskAt, type TextEdit } from "../lib/pinboard/notesMarkdown";
 import { openLink } from "../lib/linkFailure";
+import { canOpenLink } from "../lib/pinboard/links";
 
 /** A transaction that brings the editor in line with `value` from outside, so it isn't echoed back. */
 const external = Annotation.define<boolean>();
@@ -160,6 +161,14 @@ function decorate(state: EditorState): DecorationSet {
           m.to,
         );
       case "style":
+        // A link PM would not open (`http`, `mailto`, an IP, a name with no dot) is drawn as the plain
+        // text it now is: no link style, nothing to click. The address stays readable on hover.
+        if (m.cls === "link" && !(m.href && canOpenLink(m.href))) {
+          return Decoration.mark({
+            class: "pm-cm-plainlink",
+            attributes: m.href ? { title: m.href } : undefined,
+          }).range(m.from, m.to);
+        }
         return Decoration.mark({
           class: `pm-cm-${m.cls}`,
           attributes: m.href ? { "data-href": m.href, title: m.href } : undefined,
@@ -255,7 +264,7 @@ export const NoteEditor = memo(
           // didn't open says so in the link notice.
           mousedown(e, view) {
             const href = (e.target as Element).closest?.("[data-href]")?.getAttribute("data-href");
-            if (!href || !/^https?:\/\//i.test(href)) return false;
+            if (!href || !canOpenLink(href)) return false;
             if (!(e.metaKey || e.ctrlKey) && view.hasFocus) return false;
             e.preventDefault();
             openLink(href);

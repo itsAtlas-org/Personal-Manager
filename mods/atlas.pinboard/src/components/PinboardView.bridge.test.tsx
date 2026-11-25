@@ -8,7 +8,7 @@
 // (cards, drags, menus) is held by PinboardView.test.tsx, the core tests copied.
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDataProvider } from "../../../../src/kit/taskData";
 import { ThemeProvider } from "../../../../src/kit/theme";
 import { frameTaskData } from "../frame/taskData";
@@ -120,6 +120,27 @@ describe("a note's filing status", () => {
     await waitFor(() => expect(screen.getByText("Filed · Atlas")).toBeTruthy());
     expect(screen.getByText("In review")).toBeTruthy();
     expect(pm.of("documents.statusOf").map((c) => c.args)).toEqual([{ keys: ["n1", "n2", "kid"] }]);
+  });
+
+  it("a card carrying a `children` that is not a list of cards still lets the board draw", async () => {
+    // Planted or hand-edited: a note, a timeline and a task list with a `children` of every wrong shape.
+    // The board must open, draw the readable cards, and ask about the notes.
+    await mount([
+      note("n1", { children: 5 }),
+      note("n2", { children: [null], rect: { x: 8, y: 0, w: 7, h: 5 } }),
+      note("n3", { children: { a: 1 }, rect: { x: 16, y: 0, w: 7, h: 5 } }),
+      {
+        id: "t1",
+        kind: "timeline",
+        rect: { x: 0, y: 6, w: 7, h: 5 },
+        title: "",
+        items: [],
+        children: true,
+      },
+    ]);
+    await waitFor(() => expect(pm.of("documents.statusOf")).toHaveLength(1));
+    expect(screen.getByRole("heading", { name: "Pinboard" })).toBeTruthy();
+    expect(pm.of("documents.statusOf").map((c) => c.args)).toEqual([{ keys: ["n1", "n2", "n3"] }]);
   });
 
   it("with no note on the board it asks nothing", async () => {
@@ -308,5 +329,104 @@ describe("ask before deleting", () => {
       fireEvent.click(within(dialog).getByRole("button", { name: /^Delete|Remove/ })),
     );
     expect((nameOf("Ask before deleting") as HTMLInputElement).checked).toBe(false);
+  });
+});
+
+// --- the board's own state, as the header and the surface tell it (Mods plan K7) ----------------------
+
+async function mountStored(stored: unknown, answers: Record<string, unknown> = {}) {
+  pm = await memoryPm({
+    seed: stored === undefined ? {} : { board: stored },
+    answers: {
+      "projects.list": { projects: [], truncated: false },
+      "milestones.list": { milestones: [], next: null },
+      "documents.statusOf": {},
+      "tasks.list": { tasks: [], stacks: [], next: null },
+      "calendar.overlay.set": { set: 0 },
+      ...answers,
+    },
+  });
+  const utils = render(
+    <ThemeProvider store={store}>
+      <TaskDataProvider data={frameTaskData(pm.host, window)}>
+        <PinboardView />
+      </TaskDataProvider>
+    </ThemeProvider>,
+  );
+  await act(async () => void (await pm.settle()));
+  return utils;
+}
+
+const addButtons = () =>
+  ["+ Note", "+ Timeline", "+ Folder", "+ Task list"].map(
+    (name) => screen.getByRole("button", { name }) as HTMLButtonElement,
+  );
+
+describe("a board this version cannot read", () => {
+  it("is not drawn, says so in plain words, offers nothing to add, and is never written", async () => {
+    const stored = { version: 7, widgets: [note("n1")] };
+    await mountStored(stored);
+    expect(screen.getByText(/saved by a different version of the Pinboard/)).toBeTruthy();
+    expect(screen.getByText(/nothing you do here will save over it/)).toBeTruthy();
+    expect(screen.queryByText("N1")).toBeNull();
+    for (const button of addButtons()) expect(button.disabled).toBe(true);
+    // The "saved on this device" promise is not made over a board that is not being kept.
+    expect(screen.queryByText(/Saved on this device/)).toBeNull();
+    expect(screen.queryByRole("meter")).toBeNull();
+    await act(async () => void (await pm.settle()));
+    expect(pm.of("storage.set")).toHaveLength(0);
+    expect(pm.storage.get("board")?.value).toEqual(stored);
+  });
+
+  it("something that is not a board says that instead", async () => {
+    await mountStored({ hello: "world" });
+    expect(screen.getByText(/isn.t a board this version can read/)).toBeTruthy();
+    expect(pm.of("storage.set")).toHaveLength(0);
+  });
+});
+
+describe("PM's copy turning unreadable while the board is open", () => {
+  it("says its own thing: the changes are not being saved, not that the next one will retry blindly", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await mountStored({ version: 1, widgets: [note("n1")] });
+      pm.storage.set("board", { value: { version: 9, widgets: [] }, revision: 2 });
+      await act(async () => void fireEvent.click(addButtons()[0]));
+      await act(async () => void vi.advanceTimersByTime(600));
+      await act(async () => void (await pm.settle()));
+      expect(screen.getByRole("alert").textContent).toMatch(/can.t read/);
+      expect(screen.getByRole("alert").textContent).toMatch(/isn.t being saved/);
+      expect(screen.queryByText(/Couldn.t save your board/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("the size meter and the too-big message", () => {
+  it("shows how full the board is, against PM's one-save cap, with a meter a reader can use", async () => {
+    await mountStored({ version: 1, widgets: [note("n1", { text: "x".repeat(100_000) })] });
+    const meter = screen.getByRole("meter", { name: "How full the board is" });
+    expect(meter.getAttribute("aria-valuenow")).toBe("10");
+    expect(screen.getByText(/Board size: 97\.\d KB of 1 MB \(10%\)/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("over the cap: says the board is too big to save, keeps the edit on the board, and sends nothing", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await mountStored({ version: 1, widgets: [note("n1", { text: "x".repeat(1_048_300) })] });
+      expect(screen.getByRole("meter").getAttribute("aria-valuenow")).toBe("100");
+      await act(async () => void fireEvent.click(addButtons()[0]));
+      await act(async () => void vi.advanceTimersByTime(600));
+      await act(async () => void (await pm.settle()));
+      expect(screen.getByRole("alert").textContent).toMatch(/too big to save/);
+      expect(screen.getByRole("alert").textContent).toMatch(/still here/);
+      // The new note is on the board, and nothing was sent.
+      expect(document.querySelectorAll("[data-widget-id]")).toHaveLength(2);
+      expect(pm.of("storage.set")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

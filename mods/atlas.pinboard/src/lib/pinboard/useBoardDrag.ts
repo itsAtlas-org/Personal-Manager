@@ -8,8 +8,11 @@
 // board should be told on release.
 //
 // Two things every caller gets for free:
-//   - the gesture survives the pointer leaving the widget (listeners are on `window`), and is
-//     committed or cleanly abandoned on pointercancel/blur — see the handlers below;
+//   - the gesture survives the pointer leaving the widget (listeners are on `window`) AND the
+//     frame: the grab captures the pointer, so the browser keeps sending it moves and the release
+//     after it has left the frame's edge (a window listener alone stops at that edge, and the drag
+//     would hang until the pointer came back). It is committed or cleanly abandoned on
+//     pointercancel/blur — see the handlers below;
 //   - the pointer's board CELL is reported on release, which is what decides whether a drop files
 //     into a folder (grid.folderAtPointer). The surface's origin is read LIVE per event rather than
 //     cached at grab: both boards live in scrollers the user can wheel mid-drag, and a stale origin
@@ -161,6 +164,14 @@ export function useBoardDrag(opts: BoardDragOptions): BoardDrag {
   // defeat the memo that keeps react-markdown from re-running on every pointermove.
   const startDrag = useCallback((e: ReactPointerEvent, w: Widget, mode: DragMode) => {
     e.preventDefault();
+    // Capture the pointer on the grabbed element, so a drag that leaves the frame still ends here. A
+    // pointer the browser does not know (a synthetic event, one already gone) is not an error: the
+    // window listeners still run the drag inside the frame.
+    try {
+      (e.currentTarget as Element | null)?.setPointerCapture?.(e.pointerId);
+    } catch {
+      /* the gesture runs without capture */
+    }
     optsRef.current.onGrab?.(w.id);
     setDrag({
       id: w.id,

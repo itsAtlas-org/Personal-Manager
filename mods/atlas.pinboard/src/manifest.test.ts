@@ -214,7 +214,14 @@ describe("what the page does is covered by what the manifest asks for", () => {
   });
 
   it("the events the source names are PM's", () => {
-    expect(namedEvents).toEqual(["tasks.changed", "theme.changed"]);
+    expect(namedEvents).toEqual([
+      "lifecycle.suspend",
+      "projects.deleted",
+      "projects.merged",
+      "projects.renamed",
+      "tasks.changed",
+      "theme.changed",
+    ]);
   });
 
   /** What each call needs: its row's permission, the reads a write names a target for, and the reads a

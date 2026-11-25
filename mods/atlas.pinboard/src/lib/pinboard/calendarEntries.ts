@@ -65,6 +65,15 @@ export function tidyLabel(label: string): string {
   return kept.replace(/(\p{M}{4})\p{M}+/gu, "$1");
 }
 
+/** One line of the person's words as PM takes it (a milestone's label, a new project's name): tidied
+ *  by the shared rule, cut to `maxChars` characters (code points, as Rust counts them) and tidied
+ *  again, because the cut may land after a space or inside an emoji sequence. Never throws, and an
+ *  emoji with its joiners and selectors comes through whole. */
+export function tidyLine(text: string, maxChars: number): string {
+  const cut = Array.from(tidyLabel(text)).slice(0, maxChars).join("");
+  return tidyLabel(cut);
+}
+
 /** What the overlay table may hold, from entries read off a board. Never throws; in board order:
  *  an entry whose date (its first ten characters) is not a real `YYYY-MM-DD` day within 1900 to
  *  2200 is skipped; so is one whose id a mod could not publish (one plain line of at most 200
@@ -108,6 +117,12 @@ export function pinboardEntries(raw: string | null): PinboardEntry[] {
   return clampOverlay(walkBoard(raw));
 }
 
+/** The same entries for a board already parsed (the stored board the page holds), for the page's own
+ *  publishing: what it tells the Calendar is read off the bytes it keeps, by the rule above. */
+export function overlayEntries(board: unknown): PinboardEntry[] {
+  return clampOverlay(walkParsed(board));
+}
+
 function walkBoard(raw: string | null): PinboardEntry[] {
   if (!raw) return [];
   let parsed: Board;
@@ -116,7 +131,12 @@ function walkBoard(raw: string | null): PinboardEntry[] {
   } catch {
     return [];
   }
-  if (!parsed || parsed.version !== BOARD_VERSION || !Array.isArray(parsed.widgets)) return [];
+  return walkParsed(parsed);
+}
+
+function walkParsed(parsed: unknown): PinboardEntry[] {
+  const board = parsed as Board | null;
+  if (!board || board.version !== BOARD_VERSION || !Array.isArray(board.widgets)) return [];
 
   const out: PinboardEntry[] = [];
   const visit = (w: Widget | undefined) => {
@@ -141,6 +161,6 @@ function walkBoard(raw: string | null): PinboardEntry[] {
       });
     }
   };
-  for (const w of parsed.widgets) visit(w);
+  for (const w of board.widgets) visit(w);
   return out;
 }
