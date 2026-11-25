@@ -43,6 +43,8 @@ const modThemeChanged = vi.fn();
 const modsHeartbeat = vi.fn();
 const modPermissionDecide = vi.fn();
 const modAiPromptInfo = vi.fn();
+const modFrameFlushed = vi.fn();
+const modConfirm = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   modsHeartbeat: (visible: boolean) => modsHeartbeat(visible),
@@ -55,6 +57,8 @@ vi.mock("../../lib/ipc", () => ({
   modCall: (session: string, method: string, args: unknown) => modCall(session, method, args),
   modEventsAck: (session: string, seq: number) => modEventsAck(session, seq),
   modThemeChanged: (session: string, theme: unknown) => modThemeChanged(session, theme),
+  modFrameFlushed: (session: string) => modFrameFlushed(session),
+  modConfirm: (token: string, accept: boolean) => modConfirm(token, accept),
 }));
 
 // The theme a `theme.get` is answered from: the same stub the other component tests use (the real
@@ -69,7 +73,7 @@ const THEME = {
   depth: "standard",
   autoLocation: "",
 };
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => THEME,
 }));
@@ -97,6 +101,7 @@ beforeEach(() => {
   modEventsAck.mockResolvedValue(undefined);
   modThemeChanged.mockResolvedValue(undefined);
   modsHeartbeat.mockResolvedValue(undefined);
+  modFrameFlushed.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -422,6 +427,94 @@ describe("ModFrame", () => {
       const heavy = "é𝄞".repeat(NOTICE_MAX_CHARS / 2);
       expect(readNotice({ text: heavy, tone: "warn" }).text).toBe(heavy);
       expect(() => readNotice({ text: heavy + "x", tone: "warn" })).toThrow();
+    });
+  });
+
+  describe("ui.openTaskEditor", () => {
+    const mountWith = (hooks: ModPageHooks) =>
+      render(
+        <ModPageHooksContext.Provider value={hooks}>
+          <ModFrame modId="acme.tool" name="Acme Tool" tier="second" />
+        </ModPageHooksContext.Provider>,
+      );
+    const SOURCE = { modId: "acme.tool", name: "Acme Tool", tier: "second" };
+
+    it("opens PM's editor on the task the backend found, and answers at once with opened", async () => {
+      const openTaskEditor = vi.fn(() => true);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor", args: { id: 7 } })).toEqual({
+        id: 1,
+        ok: true,
+        result: { opened: true },
+      });
+      // The mod is named by PM's own record, and the request is the backend's, never the frame's.
+      expect(openTaskEditor).toHaveBeenCalledWith(SOURCE, { id: 7 });
+    });
+
+    it("opens it on a new task started from the backend's checked prefill", async () => {
+      const openTaskEditor = vi.fn(() => true);
+      const prefill = { title: "Call Sam", project: "Atlas", deadline: "2026-12-01" };
+      modCall.mockResolvedValue({
+        kind: "page",
+        action: "ui.openTaskEditor",
+        args: { new: prefill },
+      });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      await ask(port, { id: 1, method: "ui.openTaskEditor", args: { new: { title: "x" } } });
+      expect(openTaskEditor).toHaveBeenCalledWith(SOURCE, { new: prefill });
+    });
+
+    it("tells the mod it is asking too fast while an editor is already open (one at a time)", async () => {
+      const openTaskEditor = vi.fn(() => false);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor", args: { id: 7 } })).toEqual({
+        id: 1,
+        ok: false,
+        error: {
+          code: MOD_ERRORS.rateLimited,
+          message: "PM already has a task open for this mod.",
+        },
+      });
+    });
+
+    it("answers PM's own failure, not a success that opened nothing, when nothing draws the editor", async () => {
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args: { id: 7 } });
+      mount();
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor" })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+    });
+
+    it.each([
+      null,
+      {},
+      { id: 0 },
+      { id: -3 },
+      { id: 1.5 },
+      { id: "7" },
+      { new: null },
+      { new: { title: 5, project: null, deadline: null } },
+      { new: { title: "x", project: null, deadline: "2026-12-01T10:00" } },
+      { new: { title: "x".repeat(1001), project: null, deadline: null } },
+    ])("opens nothing for the arguments %j", async (args) => {
+      const openTaskEditor = vi.fn(() => true);
+      modCall.mockResolvedValue({ kind: "page", action: "ui.openTaskEditor", args });
+      mountWith({ openTaskEditor });
+      const { port } = connect(await theFrame());
+      expect(await ask(port, { id: 1, method: "ui.openTaskEditor" })).toEqual({
+        id: 1,
+        ok: false,
+        error: { code: MOD_ERRORS.internal, message: INTERNAL_MESSAGE },
+      });
+      expect(openTaskEditor).not.toHaveBeenCalled();
     });
   });
 
@@ -827,7 +920,7 @@ describe("ModFrame events", () => {
     for (const bad of [
       null,
       "documents.added",
-      { name: "tasks.changed", seq: 1, payload: {} },
+      { name: "calendar.synced", seq: 1, payload: {} },
       { name: "documents.added", payload: {} },
       { name: "documents.added", seq: 0, payload: {} },
       { name: "documents.added", seq: 1.5, payload: {} },

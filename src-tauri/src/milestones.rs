@@ -23,6 +23,8 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 
+pub mod ops;
+
 /// The progress values `project_milestones.status` admits (v42), coarsest-first. Deliberately a
 /// small closed set mirrored by the migration's CHECK constraint — a value not in here is rejected
 /// at the setter so the DB constraint is a backstop, not the error surface the user meets.
@@ -70,6 +72,10 @@ pub struct Milestone {
     /// The source's own stable row id for an externally-owned milestone; `None` = PM-native (v42).
     pub external_id: Option<String>,
     pub sort_order: i64,
+    /// The mod that made it (the `mod_ledger` row written with it), or `None` for the user's own and
+    /// for everything made before mods. Decoration only: see [`crate::made_by`].
+    #[serde(rename = "madeBy")]
+    pub made_by: Option<crate::made_by::MadeBy>,
 }
 
 impl Milestone {
@@ -125,6 +131,7 @@ struct Row {
     source_type: Option<String>,
     external_id: Option<String>,
     sort_order: i64,
+    made_by: Option<crate::made_by::MadeBy>,
 }
 
 /// Whole days from `today` to `date` (negative = overdue). Both are read as civil
@@ -256,8 +263,31 @@ fn resolve(row: Row, uid_dates: &HashMap<String, String>) -> Milestone {
         source_type: row.source_type,
         external_id: row.external_id,
         sort_order: row.sort_order,
+        made_by: row.made_by,
     }
 }
+
+// The maker rides on a LEFT JOIN (`idx_mod_ledger_milestone` is a unique index, so a milestone
+// matches at most one row and the list is the same length as without it). A test reads the query
+// plan of both statements, so the join stays a search of that index.
+macro_rules! load_select {
+    () => {
+        "SELECT m.id, m.project_name, m.label, m.due_date, m.event_uid, m.state, \
+                m.status, m.source_type, m.external_id, m.sort_order, \
+                l.mod_name, l.tier, l.signed \
+           FROM project_milestones m LEFT JOIN mod_ledger l ON l.milestone_id = m.id"
+    };
+}
+/// One project's milestones, in their own order.
+pub(crate) const LOAD_ONE_SQL: &str = concat!(
+    load_select!(),
+    " WHERE m.project_name = ?1 ORDER BY m.sort_order, m.id"
+);
+/// Every project's milestones.
+pub(crate) const LOAD_ALL_SQL: &str = concat!(
+    load_select!(),
+    " ORDER BY m.project_name, m.sort_order, m.id"
+);
 
 fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
     let map = |r: &rusqlite::Row| -> rusqlite::Result<Row> {
@@ -272,25 +302,19 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
             source_type: r.get(7)?,
             external_id: r.get(8)?,
             sort_order: r.get(9)?,
+            made_by: crate::made_by::read(r, 10)?,
         })
     };
-    let sql_cols = "id, project_name, label, due_date, event_uid, state, \
-                    status, source_type, external_id, sort_order";
     let rows = match project {
         Some(name) => {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM project_milestones WHERE project_name = ?1 \
-                 ORDER BY sort_order, id"
-            ))?;
+            let mut stmt = conn.prepare(LOAD_ONE_SQL)?;
             let out: Vec<Row> = stmt
                 .query_map(params![name], map)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             out
         }
         None => {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM project_milestones ORDER BY project_name, sort_order, id"
-            ))?;
+            let mut stmt = conn.prepare(LOAD_ALL_SQL)?;
             let out: Vec<Row> = stmt
                 .query_map([], map)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -373,10 +397,11 @@ fn clean(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Add a milestone, upserting a bare `projects` row first so the FK holds for a lazy
-/// (never-triaged) project. `sort_order` defaults to the end of the list. A non-empty
+/// Add a milestone, making its project exist first ([`crate::projects::ensure_named`]) so the FK holds for
+/// a lazy (never-triaged) project and the pickers offer it. `sort_order` defaults to the end of the list. A non-empty
 /// `event_uid` makes it calendar-linked; `due_date` is then a cache for offline display.
-/// Returns the new stable id.
+/// Returns the new stable id. Its own transaction: [`add_in`] is the same write for a caller that
+/// has one open.
 pub fn add(
     conn: &Connection,
     project: &str,
@@ -384,23 +409,71 @@ pub fn add(
     due_date: Option<String>,
     event_uid: Option<String>,
 ) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let id = add_in(&tx, project, label, due_date, event_uid)?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// [`add`] inside the caller's transaction: it opens none and commits none, so a caller can write
+/// a gift ledger row beside the milestone and have both commit, or neither (see `tasks::add_in`).
+/// Refused outside a transaction.
+pub fn add_in(
+    conn: &Connection,
+    project: &str,
+    label: &str,
+    due_date: Option<String>,
+    event_uid: Option<String>,
+) -> Result<i64> {
+    crate::tasks::require_transaction(conn)?;
     let label = clean(Some(label.to_string())).unwrap_or_else(|| "deadline".to_string());
     let due_date = clean(due_date);
     let event_uid = clean(event_uid);
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-        params![project],
-    )?;
-    tx.execute(
+    crate::projects::ensure_named(conn, project)?;
+    conn.execute(
         "INSERT INTO project_milestones(project_name, label, due_date, event_uid, sort_order) \
          VALUES (?1, ?2, ?3, ?4, \
                  (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM project_milestones WHERE project_name = ?1))",
         params![project, label, due_date, event_uid],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
-    Ok(id)
+    Ok(conn.last_insert_rowid())
+}
+
+/// The longest milestone label a mod may write, in characters.
+pub const MOD_LABEL_MAX: usize = 200;
+
+/// A mod-supplied label and date, checked: [`add`] stores both as given and the IPC path leans on
+/// the date field in the page. A mod has no such field, so the date must be a real `YYYY-MM-DD`
+/// (month and day in range for the year, exactly ten characters, nothing after), and the label
+/// one line of the person's words of at most [`MOD_LABEL_MAX`] characters (`mods::package::user_line_fault`:
+/// no control or hidden character but an emoji's joiner and variation selector, no tab or line break). Both are trimmed first; a blank label stays blank (`add` names it
+/// "deadline", as it does for the page) and a blank date is no date. Returns the pair to store. The
+/// words are fixed and never echo what was sent.
+pub fn validate_label_and_date(
+    label: &str,
+    due_date: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let label = label.trim();
+    if crate::mods::package::user_line_fault(label, MOD_LABEL_MAX, true).is_err() {
+        return Err(Error::Other(format!(
+            "A milestone label must be plain text of at most {MOD_LABEL_MAX} characters."
+        )));
+    }
+    let date = match due_date.map(str::trim).filter(|d| !d.is_empty()) {
+        None => None,
+        Some(d) => {
+            let real = d.len() == 10
+                && NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == d);
+            if !real {
+                return Err(Error::Other(
+                    "A milestone date must be a real date written YYYY-MM-DD.".into(),
+                ));
+            }
+            Some(d.to_string())
+        }
+    };
+    Ok((label.to_string(), date))
 }
 
 /// Update a milestone's editable fields (label + PM-native date). A calendar-linked
@@ -528,10 +601,8 @@ pub fn upsert_external(
     let state = status.map(state_for_status);
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-        params![project],
-    )?;
+    // The project exists the way a filed one does (row, entity, registry tag), so the pickers offer it.
+    crate::projects::ensure_named(&tx, project)?;
     // The `ON CONFLICT` target repeats the partial index's own predicate — SQLite requires the two
     // to match before it will use a partial index to resolve an upsert.
     tx.execute(
@@ -562,6 +633,14 @@ pub fn upsert_external(
 /// Delete a milestone by id.
 pub fn remove(conn: &Connection, id: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    remove_in(&tx, id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`remove`] inside the caller's transaction (see [`add_in`]). Refused outside a transaction.
+pub fn remove_in(tx: &Connection, id: i64) -> Result<()> {
+    crate::tasks::require_transaction(tx)?;
     tx.execute("DELETE FROM project_milestones WHERE id = ?1", params![id])?;
     // The milestone id IS the flag anchor, and `flags` has no FK to `project_milestones` (the anchor
     // is a text column spanning two identity spaces — iCal UIDs and milestone ids — so no single FK
@@ -574,7 +653,6 @@ pub fn remove(conn: &Connection, id: i64) -> Result<()> {
         "DELETE FROM flags WHERE anchor_kind = ?1 AND anchor = ?2",
         params![crate::flags::ANCHOR_MILESTONE, id.to_string()],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -645,6 +723,7 @@ mod tests {
             source_type: None,
             external_id: None,
             sort_order: id,
+            made_by: None,
         }
     }
 
@@ -841,6 +920,26 @@ mod tests {
         );
     }
 
+    /// A project first named by an external milestone is one every picker offers, as for `add`.
+    #[test]
+    fn a_project_first_named_by_an_external_milestone_is_offered_by_the_pickers() {
+        let (_dir, conn) = store();
+        upsert_external(&conn, "Brand New", "sheets", "r1", "pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+        // A re-sync, and the project under another casing, add no second registry row.
+        upsert_external(&conn, "Brand New", "sheets", "r1", "pitch 2", None, None).unwrap();
+        upsert_external(&conn, "brand new", "sheets", "r2", "wrap", None, None).unwrap();
+        let tags: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tags WHERE kind = 'project'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, 1);
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+    }
+
     /// Two different sources may legitimately use the same row id; the anchor is the PAIR.
     #[test]
     fn external_anchor_is_scoped_by_source_type() {
@@ -996,5 +1095,154 @@ mod tests {
         )
         .unwrap();
         assert_eq!(row(&conn, id), (Some("met".into()), Some("done".into())));
+    }
+
+    // --- K0: the seams a mod path needs (PR C) -----------------------------------------------
+
+    fn milestone_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM project_milestones", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// See `tasks::add_in`: a gift's ledger row commits with the milestone or not at all.
+    #[test]
+    fn add_in_rolls_back_with_its_callers_transaction() {
+        let (_dir, conn) = store();
+        let tx = conn.unchecked_transaction().unwrap();
+        let id = add_in(&tx, "Brand New", "Pitch", Some("2026-12-01".into()), None).unwrap();
+        assert!(id > 0);
+        assert_eq!(milestone_rows(&tx), 1);
+        tx.rollback().unwrap();
+        assert_eq!(milestone_rows(&conn), 0);
+        let projects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(projects, 0, "the project row it minted rolled back too");
+
+        let tx = conn.unchecked_transaction().unwrap();
+        add_in(&tx, "Atlas", "Kept", None, None).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(milestone_rows(&conn), 1);
+        // The wrapper is the same write in a transaction of its own.
+        add(&conn, "Atlas", "Second", None, None).unwrap();
+        assert_eq!(milestone_rows(&conn), 2);
+    }
+
+    /// A project first named by a milestone is one every picker offers (`tags::project_names`).
+    #[test]
+    fn a_project_first_named_by_a_milestone_is_offered_by_the_pickers() {
+        let (_dir, conn) = store();
+        add(&conn, "Brand New", "Pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+        // A second milestone, and the same project under another casing, add no second registry
+        // row or entity: the milestone keeps the name it was given, as it always has.
+        add(&conn, "Brand New", "Launch", None, None).unwrap();
+        add(&conn, "brand new", "Wrap", None, None).unwrap();
+        let rows = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(rows("SELECT count(*) FROM tags WHERE kind = 'project'"), 1);
+        assert_eq!(
+            rows("SELECT count(*) FROM entities WHERE type = 'project' AND lower(canonical_name) = 'brand new'"),
+            1
+        );
+        assert_eq!(rows("SELECT count(*) FROM projects"), 2);
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+    }
+
+    /// A project named by an alias is the entity's project: the pickers keep offering the canonical
+    /// name, never the alias.
+    #[test]
+    fn a_milestone_naming_a_project_by_an_alias_offers_the_canonical_name() {
+        let (_dir, conn) = store();
+        let id = crate::entities::resolve_project(&conn, "Atlas", true)
+            .unwrap()
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entity_aliases(entity_id, alias) VALUES (?1, 'The Atlas')",
+            [id],
+        )
+        .unwrap();
+        add(&conn, "The Atlas", "Pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Atlas"]);
+        let entities: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM entities WHERE type = 'project' AND lower(canonical_name) LIKE '%atlas'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entities, 1);
+    }
+
+    #[test]
+    fn add_in_refuses_to_run_outside_a_transaction() {
+        let (_dir, conn) = store();
+        assert!(add_in(&conn, "Atlas", "Pitch", None, None).is_err());
+        assert_eq!(milestone_rows(&conn), 0);
+    }
+
+    #[test]
+    fn a_mod_milestone_date_must_be_a_real_ymd() {
+        let ok = |d: &str| validate_label_and_date("Pitch", Some(d)).map(|(_, date)| date);
+        assert_eq!(ok("2026-12-01").unwrap().as_deref(), Some("2026-12-01"));
+        assert_eq!(
+            ok(" 2028-02-29 ").unwrap().as_deref(),
+            Some("2028-02-29"),
+            "a leap day, trimmed"
+        );
+        for bad in [
+            "2026-02-30",       // not a day
+            "2027-02-29",       // not a leap year
+            "2026-13-01",       // not a month
+            "2026-1-5",         // not zero-padded
+            "26-12-01",         // not four digits
+            "2026-12-01T10:00", // a time is not a date
+            "01-12-2026",
+            "2026/12/01",
+            "tomorrow",
+            "２０２６-12-01",
+            "+2026-12-01",
+        ] {
+            let err = validate_label_and_date("Pitch", Some(bad)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "A milestone date must be a real date written YYYY-MM-DD.",
+                "{bad:?}"
+            );
+        }
+        // No date is allowed (a blank is no date); the label is trimmed and a blank one is left for
+        // `add` to name.
+        assert_eq!(
+            validate_label_and_date("  Pitch ", None).unwrap(),
+            ("Pitch".into(), None)
+        );
+        assert_eq!(
+            validate_label_and_date("Pitch", Some("  ")).unwrap().1,
+            None
+        );
+        assert_eq!(validate_label_and_date("  ", None).unwrap().0, "");
+    }
+
+    #[test]
+    fn a_mod_milestone_label_is_short_plain_text() {
+        let longest = "x".repeat(MOD_LABEL_MAX);
+        assert_eq!(validate_label_and_date(&longest, None).unwrap().0, longest);
+        let too_long = "x".repeat(MOD_LABEL_MAX + 1);
+        for bad in [
+            too_long.as_str(),
+            "two\nlines",
+            "tab\there",
+            "bell\u{7}",
+            "hidden\u{200b}space",
+            "flip\u{202e}text",
+        ] {
+            let err = validate_label_and_date(bad, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "A milestone label must be plain text of at most 200 characters.",
+                "{bad:?}"
+            );
+        }
+        // Counted in characters, not bytes.
+        assert!(validate_label_and_date(&"é".repeat(MOD_LABEL_MAX), None).is_ok());
     }
 }

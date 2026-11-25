@@ -55,6 +55,7 @@ function milestone(over: Partial<Milestone> = {}): Milestone {
     source_type: null,
     external_id: null,
     sort_order: 0,
+    madeBy: null,
     ...over,
   };
 }

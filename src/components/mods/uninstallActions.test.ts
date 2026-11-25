@@ -9,12 +9,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { currentModActions, resetModActions, runModAction } from "../../lib/modActions";
-import type { ModUninstalled } from "../../lib/modsTypes";
+import type { ModUninstalled, NotesPlan } from "../../lib/modsTypes";
 import { REMOVE_ALL_KEY, removeAllMods, removeAllNote, uninstallAction } from "./uninstallActions";
 
 const uninstallMod = vi.fn<(id: string, also: boolean) => Promise<ModUninstalled>>();
+const uninstallNotesPlan = vi.fn<(id: string) => Promise<NotesPlan | null>>();
 vi.mock("../../lib/ipc", () => ({
   uninstallMod: (id: string, also: boolean) => uninstallMod(id, also),
+  uninstallNotesPlan: (id: string) => uninstallNotesPlan(id),
 }));
 
 const gone = (id: string, extra: Partial<ModUninstalled> = {}): ModUninstalled => ({
@@ -27,6 +29,8 @@ const gone = (id: string, extra: Partial<ModUninstalled> = {}): ModUninstalled =
 
 beforeEach(() => {
   uninstallMod.mockReset();
+  uninstallNotesPlan.mockReset();
+  uninstallNotesPlan.mockResolvedValue(null);
   resetModActions();
   localStorage.clear();
 });
@@ -145,6 +149,49 @@ describe("Remove all", () => {
     expect(uninstallMod).toHaveBeenCalledTimes(1);
     release();
     await pause;
+  });
+
+  it("leaves the Pinboard for its own dialog, which offers to keep its notes and board first", async () => {
+    const plan = (over: Partial<NotesPlan>): NotesPlan => ({
+      total: 3,
+      toSave: [{ key: "n1", title: "One" }],
+      alreadySaved: 2,
+      unsaveable: 0,
+      engineReady: true,
+      boardBytes: 900,
+      source: "mod",
+      ...over,
+    });
+    uninstallMod.mockImplementation(async (id) => gone(id));
+    uninstallNotesPlan.mockImplementation(async (id) =>
+      id === "atlas.pinboard" ? plan({}) : null,
+    );
+    let r = await removeAllMods([
+      { id: "atlas.pinboard", name: "Pinboard" },
+      { id: "acme.b", name: "B" },
+    ]);
+    expect(r.ok && r.value.removed).toEqual(["B"]);
+    expect(r.ok && r.value.failed).toHaveLength(1);
+    expect(r.ok && r.value.failed[0].error).toContain("Uninstall it on its own");
+    expect(uninstallMod.mock.calls.map((c) => c[0])).toEqual(["acme.b"]);
+    // A Pinboard with a board and every note already saved still stays: the board is the person's.
+    uninstallMod.mockClear();
+    uninstallNotesPlan.mockResolvedValue(plan({ toSave: [], alreadySaved: 3 }));
+    await removeAllMods([{ id: "atlas.pinboard", name: "Pinboard" }]);
+    expect(uninstallMod).not.toHaveBeenCalled();
+    // One with nothing at all to keep goes like any other mod.
+    uninstallNotesPlan.mockResolvedValue(
+      plan({ total: 0, toSave: [], alreadySaved: 0, boardBytes: 0 }),
+    );
+    r = await removeAllMods([{ id: "atlas.pinboard", name: "Pinboard" }]);
+    expect(r.ok && r.value.removed).toEqual(["Pinboard"]);
+  });
+
+  it("holds a mod back, saying so, when it cannot be told whether it holds notes", async () => {
+    uninstallNotesPlan.mockRejectedValue({ code: "no-store", message: "PM's data isn't open." });
+    const r = await removeAllMods([{ id: "acme.a", name: "A" }]);
+    expect(r.ok && r.value.failed).toEqual([{ name: "A", error: "PM's data isn't open." }]);
+    expect(uninstallMod).not.toHaveBeenCalled();
   });
 
   it("uses a plain line for a name, falling back to the id when nothing is left of it", async () => {

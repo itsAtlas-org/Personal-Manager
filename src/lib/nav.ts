@@ -478,8 +478,13 @@ export function isNavIdShape(id: string, core: ReadonlySet<string> = CORE_IDS): 
 }
 
 /** Core tabs that became a mod's tab, by the id a placement stored for them (the Map: `graph`
- *  became `mod:atlas.map`). A pin or a hide the user made on the old tab belongs to the new one. */
-const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([["graph", "mod:atlas.map"]]);
+ *  became `mod:atlas.map`; the Pinboard's `pinboard` will become `mod:atlas.pinboard`, which takes
+ *  effect only once PM's own list has no `pinboard` entry: PR C2). A pin or a hide the user made on
+ *  the old tab belongs to the new one. */
+const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([
+  ["graph", "mod:atlas.map"],
+  ["pinboard", "mod:atlas.pinboard"],
+]);
 
 /** The id a stored placement entry means now. The translation takes effect only while the old id is
  *  not one of PM's own entries (`core`), which is the case for `graph` now that the core Map tab is
@@ -524,12 +529,28 @@ export function parsePlacement(
 const PILOT_CORE_TAB: ReadonlyMap<
   string,
   { tab: string; shown: (depth: Depth) => boolean; feature: string }
-> = new Map([["atlas.map", { tab: "graph", shown: notMinimal, feature: "Map" }]]);
+> = new Map([
+  ["atlas.map", { tab: "graph", shown: notMinimal, feature: "Map" }],
+  // Dormant until PR C2 takes the core Pinboard tab out: the rule applies only once `pinboard` is
+  // gone from PM's own entries (`pilotHiddenRuleApplies`), and a tab that was always shown stays so.
+  ["atlas.pinboard", { tab: "pinboard", shown: always, feature: "Pinboard" }],
+]);
 
 /** What the person used that made PM install `modId` for them ("Map"), or null when it isn't one of
  *  the mods PM installs on its own. Worded on the mod's first-open screen. */
 export function pilotFeature(modId: string): string | null {
   return PILOT_CORE_TAB.get(modId)?.feature ?? null;
+}
+
+/** Every mod PM installs on its own for a feature it moved out of core, by id. */
+export function pilotModIds(): string[] {
+  return [...PILOT_CORE_TAB.keys()];
+}
+
+/** The id of the core tab a pilot mod took over (`graph` for the Map), or null for a mod that is no
+ *  pilot. Pinned against the backend's table of pilots by a test. */
+export function pilotCoreTab(modId: string): string | null {
+  return PILOT_CORE_TAB.get(modId)?.tab ?? null;
 }
 
 /** Whether the installed-hidden rule applies to `modId` at all: only once the core tab it replaced

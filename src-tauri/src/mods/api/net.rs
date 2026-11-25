@@ -220,7 +220,7 @@ pub fn check_headers(
 
 /// The header PM adds from a stored secret: its manifest slot's name and the value the user typed.
 /// A slot name the filter would refuse, or a value that cannot go on a header line, is as good as
-/// no key: [`ModError::secret_not_set`], so the stored text is never judged out loud.
+/// no key: [`ModError::key_not_stored`], so the stored text is never judged out loud.
 pub fn secret_header(name: &str, value: &str) -> Result<(String, String), ModError> {
     let lower = name.to_ascii_lowercase();
     if !is_token(&lower)
@@ -230,7 +230,7 @@ pub fn secret_header(name: &str, value: &str) -> Result<(String, String), ModErr
         || value != value.trim_matches(|c| c == ' ' || c == '\t')
         || !is_line_safe(value)
     {
-        return Err(ModError::secret_not_set());
+        return Err(ModError::key_not_stored());
     }
     Ok((lower, value.to_owned()))
 }

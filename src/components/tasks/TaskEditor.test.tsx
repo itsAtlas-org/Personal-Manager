@@ -32,7 +32,7 @@ vi.mock("../../lib/ipc", () => ({
   deleteTaskStack: vi.fn(async () => {}),
 }));
 
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({
     system: "slate",
@@ -70,6 +70,7 @@ function milestone(over: Partial<Milestone> = {}): Milestone {
     source_type: null,
     external_id: null,
     sort_order: 0,
+    madeBy: null,
     ...over,
   };
 }
@@ -101,6 +102,7 @@ function task(over: Partial<Task> = {}): Task {
     source: "user",
     created_at: "",
     updated_at: "",
+    madeBy: null,
     ...over,
   };
 }
@@ -612,5 +614,31 @@ describe("TaskEditor", () => {
   it("renders nothing while closed", () => {
     render(<TaskEditor open={false} onClose={() => {}} />);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("who made the task (PR C, K5)", () => {
+  it("says so in a line of its own, with the tier word, for a task a mod made", () => {
+    render(
+      <TaskEditor
+        open
+        task={task({ madeBy: { name: "Pinboard", tier: "second", signed: true } })}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText("Made by Pinboard (reviewed by Atlas)")).toBeTruthy();
+  });
+
+  it("an unsigned maker named Atlas is shown as unsigned, and the user's own task has no such line", () => {
+    const { rerender } = render(
+      <TaskEditor
+        open
+        task={task({ madeBy: { name: "Atlas", tier: "first", signed: false } })}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText("Made by Atlas (unsigned)")).toBeTruthy();
+    rerender(<TaskEditor open task={task()} onClose={() => {}} />);
+    expect(screen.queryByText(/^Made by/)).toBeNull();
   });
 });

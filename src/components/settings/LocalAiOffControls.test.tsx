@@ -23,7 +23,7 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 // The primitives reach for `useTheme`; the real provider pulls in IPC.
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

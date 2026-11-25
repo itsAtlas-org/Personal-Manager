@@ -1,0 +1,146 @@
+<div>
+  <div>
+    <div
+      class="rounded-[var(--radius-sm)] border px-3 py-2 text-xs"
+      style="background: color-mix(in oklab, var(--st-look) 12%, transparent); border-color: color-mix(in oklab, var(--st-look) 40%, transparent); color: var(--st-look);"
+    >
+      Careful
+    </div>
+    <div
+      class="border-b px-4 py-2 text-sm"
+      role="alert"
+      style="background: color-mix(in oklab, var(--st-due) 12%, transparent); border-color: color-mix(in oklab, var(--st-due) 40%, transparent); color: var(--st-due);"
+    >
+      Broken
+    </div>
+    <select
+      aria-label="Pick"
+      class="rounded-[var(--radius-sm)] border border-ink4 bg-surface text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 px-2 py-1 text-xs"
+    >
+      <option
+        value="a"
+      >
+        A
+      </option>
+      <option
+        selected=""
+        value="b"
+      >
+        B
+      </option>
+    </select>
+    <select
+      aria-label="Bar"
+      class="rounded-[var(--radius-sm)] border border-ink4 bg-surface text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2 py-1.5 text-xs"
+    >
+      <option>
+        One
+      </option>
+    </select>
+    <input
+      aria-label="Name"
+      class="w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3"
+      placeholder="Name"
+      value="Atlas"
+    />
+    <div
+      aria-label="View"
+      class="inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-ink4 p-0.5"
+      role="group"
+    >
+      <button
+        aria-pressed="false"
+        class="inline-flex min-h-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] px-2.5 py-1 text-xs transition disabled:cursor-not-allowed aria-disabled:cursor-not-allowed text-ink3 enabled:hover:text-ink disabled:text-ink4"
+        type="button"
+      >
+        Alpha
+      </button>
+      <button
+        aria-pressed="true"
+        class="inline-flex min-h-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] px-2.5 py-1 text-xs transition disabled:cursor-not-allowed aria-disabled:cursor-not-allowed bg-accent text-accent-ink font-medium shadow-[inset_0_0_0_1px_var(--ink4)]"
+        title="The second"
+        type="button"
+      >
+        Beta
+      </button>
+      <button
+        aria-pressed="false"
+        class="inline-flex min-h-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] px-2.5 py-1 text-xs transition disabled:cursor-not-allowed aria-disabled:cursor-not-allowed text-ink3 enabled:hover:text-ink disabled:text-ink4"
+        disabled=""
+        type="button"
+      >
+        Gamma
+      </button>
+    </div>
+    <div
+      class="flex flex-col"
+    >
+      <button
+        aria-expanded="true"
+        class="flex w-full items-center gap-2 text-left text-sm text-ink2 transition-colors hover:text-ink"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="inline-block text-xs text-ink4 transition-transform duration-200 motion-reduce:transition-none"
+          style="transform: rotate(90deg);"
+        >
+          ▸
+        </span>
+        <span
+          class="flex-1 font-medium"
+        >
+          Open fold
+        </span>
+        <span
+          class="shrink-0 font-mono text-xs text-ink4"
+        >
+          3
+        </span>
+      </button>
+      <div
+        class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+        style="grid-template-rows: 1fr;"
+      >
+        <div
+          class="overflow-hidden"
+        >
+          Body
+        </div>
+      </div>
+    </div>
+    <div
+      class="flex flex-col"
+    >
+      <button
+        aria-expanded="false"
+        class="flex w-full items-center gap-2 text-left text-sm text-ink2 transition-colors hover:text-ink"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="inline-block text-xs text-ink4 transition-transform duration-200 motion-reduce:transition-none"
+          style="transform: rotate(0deg);"
+        >
+          ▸
+        </span>
+        <span
+          class="flex-1 font-medium"
+        >
+          Shut fold
+        </span>
+      </button>
+      <div
+        class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+        style="grid-template-rows: 0fr;"
+      >
+        <div
+          class="overflow-hidden"
+          inert=""
+        >
+          Hidden
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

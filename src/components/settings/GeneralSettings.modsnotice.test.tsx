@@ -24,7 +24,7 @@ vi.mock("../../lib/ipc", async (importOriginal) => ({
   onModsChanged: () => Promise.resolve(() => {}),
 }));
 vi.mock("./TrayIconRow", () => ({ TrayIconRow: () => null }));
-vi.mock("../../theme", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

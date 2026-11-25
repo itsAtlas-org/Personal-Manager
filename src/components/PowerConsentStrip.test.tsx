@@ -21,7 +21,7 @@ vi.mock("../lib/ipc", () => ({
   keepLocalOnBattery: (...a: unknown[]) => keepLocalOnBattery(...a),
 }));
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({ depth: "standard" }),
 }));

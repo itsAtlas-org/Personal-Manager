@@ -12,7 +12,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectorItemRow } from "./ConnectorItemRow";
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({
     system: "slate",

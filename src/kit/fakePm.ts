@@ -92,6 +92,8 @@ export interface FakePmStats {
   acks: number[];
   /** Heights asked for, in order. */
   heights: number[];
+  /** Answers to `lifecycle.suspend` received (`{ flushed: true }`). */
+  flushes: number;
   /** Events dropped because the frame had `BACKEND_EVENT_WINDOW` outstanding. */
   dropped: number;
   /** Messages the page could not read and dropped. */
@@ -131,6 +133,7 @@ export function fakePm(handle: Handler): FakePm {
     stopped: false,
     acks: [],
     heights: [],
+    flushes: 0,
     dropped: 0,
     dropsRead: 0,
   };
@@ -203,6 +206,10 @@ export function fakePm(handle: Handler): FakePm {
         stats.acks.push(message.seq);
         // The backend clamps an acknowledgement to what it sent.
         ackedSeq = Math.max(ackedSeq, Math.min(message.seq, seq));
+        return;
+      case "flushed":
+        if (!flood.take(clock.now)) return stop();
+        stats.flushes += 1;
         return;
       case "refuse":
         if (!flood.take(clock.now)) return stop();

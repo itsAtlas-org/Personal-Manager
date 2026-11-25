@@ -207,7 +207,7 @@ describe("contrast axis — WCAG targets across every system × mode", () => {
 describe("segmented controls use the measured edge and rim", () => {
   const RAW = import.meta.glob(
     [
-      "../components/ui/SegmentedControl.tsx",
+      "../kit/ui/SegmentedControl.tsx",
       "../components/ui/IconButton.tsx",
       "../components/calendar/RangeControl.tsx",
       "../components/PinboardView.tsx",

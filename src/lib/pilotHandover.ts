@@ -12,6 +12,10 @@
 //     wasn't showing here (Minimal and not pinned), so installing it doesn't make a tab appear that
 //     this sidebar had left out (`placementAfterPilotLanded`).
 //
+//   - the Pinboard's three nags ("ask before deleting a card", "show past entries", "show completed
+//     entries"), kept in localStorage by the core Pinboard, go to the mod's `prefs` key through
+//     `adoptPinboardPrefs` the same way (dormant until PM's move of the Pinboard has run).
+//
 // Both start from `modsHandoverState`, which is empty for a vault with no auto-install (a fresh one,
 // or one with no documents: v61 writes the Map's marker only where a document exists), so this does
 // nothing there. The sidebar rule additionally waits for the core Map tab to be gone from PM's own
@@ -19,7 +23,7 @@
 
 import { useEffect, useState } from "react";
 import { useTheme, type Depth } from "../theme";
-import { adoptMapPrefs, modsHandoverState, onModsChanged } from "./ipc";
+import { adoptMapPrefs, adoptPinboardPrefs, modsHandoverState, onModsChanged } from "./ipc";
 import { clamp } from "./math";
 import { useModRows } from "./modRows";
 import type { ModsHandoverState } from "./modsTypes";
@@ -36,6 +40,12 @@ import { subscribeUntilCleanup } from "./subscribe";
 export const MAP_MODE_KEY = "pm.map.layoutMode";
 export const MAP_COHESION_KEY = "pm.map.cohesion";
 export const MAP_LABELS_KEY = "pm.map.labels";
+
+// The core Pinboard's own localStorage keys (`lib/pinboard/prefs.ts`): each is "false" when the person
+// said "don't ask again" or hid that kind of entry, and anything else (or nothing) means the default.
+export const PINBOARD_CONFIRM_DELETE_KEY = "pm.pinboard.confirmDelete";
+export const PINBOARD_SHOW_PAST_KEY = "pm.pinboard.timeline.showPast";
+export const PINBOARD_SHOW_COMPLETED_KEY = "pm.pinboard.timeline.showCompleted";
 
 /** The mods whose arrival this device has already dealt with (its sidebar rule ran): a JSON array of
  *  mod ids. Per device, because the sidebar is. */
@@ -93,6 +103,30 @@ export function readDeviceMapPrefs(): DeviceMapPrefs | null {
   };
 }
 
+/** This device's Pinboard nags, each read the way the core Pinboard read it (only the literal "false"
+ *  turns a nag off) or null when this device never set it. */
+export interface DevicePinboardPrefs {
+  confirmDelete: boolean | null;
+  showPast: boolean | null;
+  showCompleted: boolean | null;
+}
+
+/** This device's Pinboard nags, or null when it set none (there is nothing to hand over). */
+export function readDevicePinboardPrefs(): DevicePinboardPrefs | null {
+  const nag = (key: string): boolean | null => {
+    const value = lsGet(key);
+    return value === null ? null : value !== "false";
+  };
+  const prefs = {
+    confirmDelete: nag(PINBOARD_CONFIRM_DELETE_KEY),
+    showPast: nag(PINBOARD_SHOW_PAST_KEY),
+    showCompleted: nag(PINBOARD_SHOW_COMPLETED_KEY),
+  };
+  return prefs.confirmDelete === null && prefs.showPast === null && prefs.showCompleted === null
+    ? null
+    : prefs;
+}
+
 let running = false;
 
 /** Carry out what `state` says is owed on this device. Never throws: a failure leaves the device's
@@ -121,6 +155,18 @@ export async function applyHandover(state: ModsHandoverState, depth: Depth): Pro
       if (prefs) {
         try {
           await adoptMapPrefs(prefs.layoutMode, prefs.cohesion, prefs.labels);
+        } catch {
+          /* the backend keeps its flag: tried again on the next change */
+        }
+      }
+    }
+    // The Pinboard's nags: the same way. Only the fields the mod doesn't hold are filled, and the
+    // device's keys stay for the same reason.
+    if (state.adoptPinboardPrefs) {
+      const prefs = readDevicePinboardPrefs();
+      if (prefs) {
+        try {
+          await adoptPinboardPrefs(prefs.confirmDelete, prefs.showPast, prefs.showCompleted);
         } catch {
           /* the backend keeps its flag: tried again on the next change */
         }

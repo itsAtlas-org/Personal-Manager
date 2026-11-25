@@ -17,7 +17,7 @@ vi.mock("../lib/ipc", () => ({ deleteDocument: vi.fn(), deleteUnreachableDocumen
 
 // Same stub the other component tests use: the dialog's <Button>s reach for `useTheme`, and the real
 // ThemeProvider pulls in IPC.
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

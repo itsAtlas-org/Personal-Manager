@@ -275,7 +275,8 @@ fn wire_tray(app: &AppHandle) -> Result<()> {
             let _ = toggle_briefing_window(app);
         }
         "open" => show_main_window(app),
-        "quit" => app.exit(0),
+        // Through the mods' suspend handshake: a running frame saves first, within PM's deadline.
+        "quit" => crate::mods::suspend::quit(app),
         _ => {}
     });
 
@@ -326,7 +327,10 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
             api.prevent_close();
             let _ = window.hide();
         } else {
-            app.exit(0);
+            // Held open while a running mod's frame saves (`mods::suspend`, never past its deadline),
+            // then PM exits as it always did.
+            api.prevent_close();
+            crate::mods::suspend::quit(app);
         }
     }
 }

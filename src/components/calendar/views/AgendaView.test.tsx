@@ -13,7 +13,7 @@ import type { CalendarEvent } from "../../../lib/types";
 import { DRAFT_EVENT_ID, TASK_CALENDAR_ID } from "../../../lib/calendar-layout";
 import { formatClock } from "../../../lib/format";
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

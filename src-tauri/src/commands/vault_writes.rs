@@ -108,8 +108,13 @@ pub(super) struct MutationFiles {
 /// commands. This is the single write path the Teach tab drives, identical to the inline review
 /// correction — and now also the path project deletion (#573) rides, so the rules file, the
 /// rollback and the delete-after-commit rule all stay defined in exactly one place.
-pub(super) async fn spawn_entity_mutation<F>(app: AppHandle, work: F) -> Result<()>
+///
+/// What the closure returns comes back once the commit is durable and not before (and never when the
+/// mutation failed): a caller that announces what it did (the mods' `projects.*` events) captures it
+/// inside the closure and says it only from here.
+pub(super) async fn spawn_entity_mutation<T, F>(app: AppHandle, work: F) -> Result<T>
 where
+    T: Send + 'static,
     F: FnOnce(
             &Connection,
             &std::path::Path,
@@ -117,11 +122,11 @@ where
             &std::path::Path,
             &index_only::ManifestCipher,
             &mut MutationFiles,
-        ) -> Result<()>
+        ) -> Result<T>
         + Send
         + 'static,
 {
-    spawn_blocking_result("entity", move || -> Result<()> {
+    spawn_blocking_result("entity", move || -> Result<T> {
         let state = app.state::<AppState>();
         let (vault, cipher) = state.markdown_io()?;
         let (vault_root, rules_cipher) = state.rules_io()?;
@@ -145,7 +150,8 @@ where
             &manifest_cipher,
             &mut files,
         );
-        finish_vault_transaction(tx, files.written, Some((&vault_root, &rules_cipher)), done)?;
+        let done =
+            finish_vault_transaction(tx, files.written, Some((&vault_root, &rules_cipher)), done)?;
         // Committed: the deletions are now safe to make real. Best-effort by contract — see the
         // `MutationFiles` note; a file that outlives its row is reclaimed by the next Rebuild.
         for path in files.unlink {
@@ -154,7 +160,7 @@ where
         for source_id in files.forget_sources {
             let _ = index_only::forget_source(&vault_root, &manifest_cipher, &source_id);
         }
-        Ok(())
+        Ok(done)
     })
     .await
 }

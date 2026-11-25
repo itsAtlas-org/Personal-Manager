@@ -75,7 +75,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 // The same stub the other component tests use: the panel's primitives reach for `useTheme`, and the
 // real ThemeProvider pulls in IPC.
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

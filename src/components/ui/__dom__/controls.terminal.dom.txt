@@ -1,0 +1,57 @@
+<div>
+  <div>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm font-mono bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      [ 
+      Plain
+       ]
+    </button>
+    <select
+      aria-label="Pick"
+      class="rounded-[var(--radius-sm)] border border-ink4 bg-surface text-ink2 outline-none transition focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 px-2 py-1.5 text-sm font-mono"
+    >
+      <option>
+        One
+      </option>
+    </select>
+    <input
+      aria-label="Name"
+      class="w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 font-mono caret-[var(--accent-text)]"
+      value="Atlas"
+    />
+    <div
+      class="flex flex-col"
+    >
+      <button
+        aria-expanded="true"
+        class="flex w-full items-center gap-2 text-left text-sm text-ink2 transition-colors hover:text-ink"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="inline-block text-xs text-ink4 transition-transform duration-200 motion-reduce:transition-none"
+          style="transform: rotate(90deg);"
+        >
+          &gt;
+        </span>
+        <span
+          class="flex-1 font-medium"
+        >
+          Fold
+        </span>
+      </button>
+      <div
+        class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+        style="grid-template-rows: 1fr;"
+      >
+        <div
+          class="overflow-hidden"
+        >
+          Inside
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

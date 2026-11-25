@@ -35,7 +35,13 @@ import {
 } from "../../../lib/runway";
 import type { CalendarEvent, Milestone, Task, TaskLane, TaskStack } from "../../../lib/types";
 import { useDepth } from "../../../theme";
-import { DeadlineChip, ProjectChip, StackChip, TaskStatusButton } from "../../tasks/TaskBits";
+import {
+  DeadlineChip,
+  MadeByChip,
+  ProjectChip,
+  StackChip,
+  TaskStatusButton,
+} from "../../../kit/tasks/TaskBits";
 import { TaskEditor } from "../../tasks/TaskEditor";
 import { Button, Callout, SectionLabel, cn } from "../../ui";
 import {
@@ -592,6 +598,7 @@ function TaskCardView({
           )}
           {t.project_name && <ProjectChip project={t.project_name} onOpen={ctx.onOpenProject} />}
           {stack && <StackChip stack={stack} />}
+          <MadeByChip made={t.madeBy} />
           {ev && (
             <button
               type="button"
@@ -661,6 +668,7 @@ function MilestoneCardView({
       >
         {words}
       </button>
+      <MadeByChip made={m.madeBy} />
       {info && (
         <span className={cn("shrink-0 font-mono text-[0.6875rem]", TONE_CLASS[info.tone])}>
           {info.text}

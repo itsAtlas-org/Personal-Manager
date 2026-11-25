@@ -720,7 +720,14 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
-        self.install_verified_with(pkg, package_sha256, opts, now, &|_, _| Ok(()))
+        // A person's own install of a pilot (the Pinboard, which a migration may owe a board to) runs
+        // that pilot's handover in this transaction, before the row can serve: the frame must never
+        // write a board of its own first (`autoinstall::finish_manual`).
+        let from_catalogue = opts.source == Source::Catalogue;
+        let id = pkg.manifest.id.as_str().to_owned();
+        self.install_verified_with(pkg, package_sha256, opts, now, &|c, kind| {
+            super::autoinstall::finish_manual(c, &id, kind, from_catalogue)
+        })
     }
 
     fn install_verified_with(
@@ -1760,8 +1767,14 @@ mod tests {
     mod slice5;
     // The pilots' auto-install (PR B, B8).
     mod pilots;
+    // The Pinboard's move, as the install carries it out (PR C, K8).
+    mod pinboard_move;
     // An update that only adds cache keys: unattended, stored as cache, left out of a backup.
     mod enhanced_keys;
+    // Which namespace the Pinboard's notes get when it is installed and signed by a dev test key.
+    mod pinboard_namespace;
+    // What uninstalling the Pinboard says about its notes from before it was a mod (PR C, K5).
+    mod legacy_gifts;
     // The ledger's writers against the registry's frames (slice 6, seams).
     mod seams;
     // The Mods tab's writers: pause, resume, turn on, consented installs, uninstall (slice 6).
@@ -3124,6 +3137,51 @@ mod tests {
             w.ledger().uninstall(&id("atlas.map")),
             Err(LedgerError::NotInstalled)
         ));
+    }
+
+    /// K4: the Calendar's dots of a moved Pinboard are its `mod_overlay` rows, so an uninstall must
+    /// take exactly those (another mod's stay), and take the overlay's legacy name `pm:pinboard` out
+    /// of the hidden set, leaving the rest of the blob and every other source.
+    #[test]
+    fn uninstall_takes_the_mods_overlay_rows_and_prunes_its_hidden_entry() {
+        let w = world();
+        w.install(
+            &pkg("1.0.0", |m| {
+                m["id"] = Value::String("atlas.pinboard".into())
+            }),
+            Approval::Approved,
+        )
+        .unwrap();
+        w.install(&pkg("1.0.0", |_| {}), Approval::Approved)
+            .unwrap();
+        w.exec(
+            "INSERT INTO mod_overlay(mod_id, id, date, label) VALUES
+                 ('atlas.pinboard', 'w1:i1', '2026-12-01', 'ship'),
+                 ('atlas.pinboard', 'w1:i2', '2026-12-02', 'review'),
+                 ('atlas.map', 'm:1', '2026-12-03', 'not the Pinboard');
+             INSERT INTO settings(key, value) VALUES ('calendar_ui',
+                 '{\"hidden\":[\"pm:pinboard\",\"mod:atlas.map\",\"work@example.com\"],\"last_create\":\"work@example.com\"}');",
+        );
+        w.ledger().uninstall(&id("atlas.pinboard")).unwrap();
+        assert_eq!(
+            w.sql::<i64>("SELECT count(*) FROM mod_overlay WHERE mod_id = 'atlas.pinboard'"),
+            0,
+            "its dots go with it"
+        );
+        assert_eq!(
+            w.sql::<i64>("SELECT count(*) FROM mod_overlay WHERE mod_id = 'atlas.map'"),
+            1,
+            "another mod's stay"
+        );
+        let ui: Value = serde_json::from_str(
+            &w.sql::<String>("SELECT value FROM settings WHERE key = 'calendar_ui'"),
+        )
+        .unwrap();
+        assert_eq!(
+            ui["hidden"],
+            serde_json::json!(["mod:atlas.map", "work@example.com"])
+        );
+        assert_eq!(ui["last_create"], "work@example.com");
     }
 
     #[test]

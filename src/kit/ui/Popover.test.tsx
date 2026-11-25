@@ -1,0 +1,249 @@
+// @vitest-environment jsdom
+// SPDX-FileCopyrightText: 2026 Bobby Yu
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Popover's stacking contract. An `escapeClipping` panel is portalled to `document.body` and
+// positioned `fixed`, which takes it out of its parent's stacking context — so its z-index is no
+// longer compared against its siblings but against everything in the page, `Modal`'s `z-50`
+// included. At the shared `z-30` it painted BEHIND the dialog surface: the date picker inside a
+// pinboard folder set to "Overlay" opened completely invisibly, and because the panel was mounted
+// and merely covered, the next click landed on the scrim and read as an outside-dismissal.
+//
+// jsdom cannot see paint order, so these assert the classes rather than the pixels — which is also
+// the sharper test for the second half of the bug: `cn` is a plain joiner, NOT tailwind-merge, so a
+// fix that appended `z-[60]` beside a constant `z-30` would leave BOTH on the element and let the
+// generated stylesheet's ordering decide the winner. "Exactly one z-utility" is the property that
+// has to hold, and only a class-level assertion can state it.
+
+import { useRef } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+import { useDialogLayer } from "../lib/useDialogLayer";
+import { Modal } from "./Modal";
+import { Popover } from "./Popover";
+
+// jsdom ships no ResizeObserver, and the escape-clipping branch constructs one to re-place the panel
+// when it resizes. Placement is not what these assert — the class list is — so a no-op is enough.
+beforeAll(() => {
+  if (!("ResizeObserver" in globalThis)) {
+    (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+  }
+});
+
+afterEach(cleanup);
+
+/** Every z-index utility on the panel, in the order they appear in `className`. */
+function zClasses(el: HTMLElement): string[] {
+  return Array.from(el.classList).filter((c) => /^z-(\[|\d)/.test(c));
+}
+
+function open(escapeClipping: boolean) {
+  render(
+    <Popover
+      escapeClipping={escapeClipping}
+      ariaLabel="Pick a date"
+      trigger={({ toggle }) => (
+        <button type="button" onClick={toggle}>
+          Open
+        </button>
+      )}
+    >
+      <span>panel body</span>
+    </Popover>,
+  );
+  fireEvent.click(screen.getByText("Open"));
+  return screen.getByRole("group", { name: "Pick a date" });
+}
+
+describe("Popover stacking", () => {
+  it("lifts a clipping-escaped panel above Modal's scrim", () => {
+    // The regression. `z-[60]` is the tier HelpOverlay already uses for exactly this reason
+    // ("above Modal's z-50"), so this is the established rung rather than a new one.
+    const panel = open(true);
+    expect(panel.className).toContain("fixed");
+    expect(zClasses(panel)).toEqual(["z-[60]"]);
+  });
+
+  it("leaves an anchored panel at z-30", () => {
+    // The other half, and the reason the lift is conditional rather than global: an anchored panel
+    // lives inside its parent's stacking context. Raising it too would let a popover in the page
+    // punch through overlays that are meant to cover it.
+    const panel = open(false);
+    expect(panel.className).toContain("absolute");
+    expect(zClasses(panel)).toEqual(["z-30"]);
+  });
+
+  // A picker inside a dialog: Popover listens for Escape on `document`, the dialog on `window`, so
+  // without stopping the key one press closed both — the date picker AND the editor around it.
+  it("closes only itself on Escape when it sits inside a dialog", () => {
+    const onDialogClose = vi.fn();
+    render(
+      <Modal open onClose={onDialogClose} label="Edit event">
+        <Popover
+          ariaLabel="Pick a date"
+          trigger={({ toggle }) => (
+            <button type="button" onClick={toggle}>
+              Open
+            </button>
+          )}
+        >
+          <span>panel body</span>
+        </Popover>
+      </Modal>,
+    );
+    fireEvent.click(screen.getByText("Open"));
+    expect(screen.queryByRole("group", { name: "Pick a date" })).not.toBeNull();
+    fireEvent.keyDown(screen.getByText("panel body"), { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Pick a date" })).toBeNull();
+    expect(onDialogClose).not.toHaveBeenCalled();
+    // With the picker closed, the next Escape reaches the dialog.
+    fireEvent.keyDown(screen.getByText("Open"), { key: "Escape" });
+    expect(onDialogClose).toHaveBeenCalledTimes(1);
+  });
+
+  // The other direction: a dialog opened OVER an open popover (Ctrl+K's palette over an open Panels
+  // menu). The key is the dialog's — the hidden popover must not swallow it and pull focus behind.
+  it("leaves Escape to a dialog opened over it", () => {
+    const onDialogClose = vi.fn();
+    function Page({ dialogOpen }: { dialogOpen: boolean }) {
+      return (
+        <>
+          <Popover
+            ariaLabel="Panels"
+            trigger={({ toggle }) => (
+              <button type="button" onClick={toggle}>
+                Panels
+              </button>
+            )}
+          >
+            <span>panel body</span>
+          </Popover>
+          <Modal open={dialogOpen} onClose={onDialogClose} label="Command palette">
+            <input aria-label="Search" />
+          </Modal>
+        </>
+      );
+    }
+    const { rerender } = render(<Page dialogOpen={false} />);
+    fireEvent.click(screen.getByText("Panels"));
+    rerender(<Page dialogOpen />);
+    fireEvent.keyDown(screen.getByLabelText("Search"), { key: "Escape" });
+    expect(onDialogClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: "Panels" })).not.toBeNull();
+  });
+
+  // A list the keyboard has to reach inside a dialog (the new event's calendars): portalled to the
+  // body it sat outside the dialog's focus trap and its aria-modal, so neither Tab nor a screen
+  // reader could get to it. `withinDialog` puts it inside; without it, the body as before.
+  it("portals into the dialog around it with withinDialog, and to the body without", () => {
+    for (const withinDialog of [true, false]) {
+      render(
+        <Modal open onClose={vi.fn()} label="New event">
+          <Popover
+            escapeClipping
+            withinDialog={withinDialog}
+            ariaLabel="Calendars"
+            trigger={({ toggle }) => (
+              <button type="button" onClick={toggle}>
+                Open
+              </button>
+            )}
+          >
+            <span>panel body</span>
+          </Popover>
+        </Modal>,
+      );
+      fireEvent.click(screen.getByText("Open"));
+      const panel = screen.getByRole("group", { name: "Calendars" });
+      expect(screen.getByRole("dialog").contains(panel)).toBe(withinDialog);
+      // Placed in the viewport either way, so the dialog's scrolling body can't clip it.
+      expect(panel.className).toContain("fixed");
+      cleanup();
+    }
+  });
+
+  // A non-modal layer (the calendar's quick create) registers as a dialog without taking focus, so a
+  // popover opened beside it is still the one in use: Escape closes it wherever it's pressed, except
+  // in the layer itself. A modal dialog over it holds the keyboard, and the key is the dialog's.
+  function besideLayer(modal: boolean) {
+    function Layer() {
+      const ref = useRef<HTMLDivElement>(null);
+      useDialogLayer(true, ref);
+      return (
+        <div ref={ref} role="dialog" aria-label="Quick create" aria-modal={modal || undefined}>
+          <input aria-label="Title" />
+        </div>
+      );
+    }
+    render(
+      <>
+        <Layer />
+        <Popover
+          ariaLabel="Mini calendar"
+          trigger={({ toggle }) => (
+            <button type="button" onClick={toggle}>
+              Open
+            </button>
+          )}
+        >
+          <button type="button">A day</button>
+        </Popover>
+      </>,
+    );
+    const isOpen = () => screen.queryByRole("group", { name: "Mini calendar" }) !== null;
+    const reopen = () => {
+      if (!isOpen()) fireEvent.click(screen.getByText("Open"));
+    };
+    return { isOpen, reopen };
+  }
+
+  it("closes on Escape on its panel, its trigger or the page, beside a non-modal layer", () => {
+    const { isOpen, reopen } = besideLayer(false);
+    reopen();
+    // Pressed in the layer, the key is the layer's: the popover stays open.
+    fireEvent.keyDown(screen.getByLabelText("Title"), { key: "Escape" });
+    expect(isOpen()).toBe(true);
+    fireEvent.keyDown(screen.getByText("A day"), { key: "Escape" });
+    expect(isOpen()).toBe(false);
+    // Focus left on the trigger by the click that opened it (WebKitGTK, WebView2).
+    reopen();
+    fireEvent.keyDown(screen.getByText("Open"), { key: "Escape" });
+    expect(isOpen()).toBe(false);
+    // Focus on the page (macOS WebKit doesn't focus a clicked button).
+    reopen();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(isOpen()).toBe(false);
+  });
+
+  it("leaves Escape to a modal dialog over it, wherever it's pressed", () => {
+    const { isOpen, reopen } = besideLayer(true);
+    reopen();
+    fireEvent.keyDown(screen.getByText("Open"), { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(isOpen()).toBe(true);
+  });
+
+  // A surface with its own outside-click rule tells a click in a picker it opened (portalled out of
+  // its box) from a click outside by this attribute.
+  it("marks its panel, portalled or not, as a popover panel", () => {
+    for (const escapeClipping of [true, false]) {
+      expect(open(escapeClipping).hasAttribute("data-popover-panel")).toBe(true);
+      cleanup();
+    }
+  });
+
+  it("never emits two z-index utilities", () => {
+    // `cn` does not de-conflict. Two z-classes on one element is a silent, stylesheet-ordering-
+    // dependent bug, so pin the count directly for both modes.
+    for (const escapeClipping of [true, false]) {
+      const panel = open(escapeClipping);
+      expect(zClasses(panel)).toHaveLength(1);
+      cleanup();
+    }
+  });
+});

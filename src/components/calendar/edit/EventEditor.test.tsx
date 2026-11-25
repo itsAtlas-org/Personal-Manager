@@ -111,7 +111,7 @@ vi.mock("../../../theme/timezones", async (importOriginal) => ({
 
 // Standard depth unless a test says Power.
 let depth = "standard";
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth }),
 }));
@@ -2538,6 +2538,7 @@ describe("EventEditor, a linked milestone", () => {
     source_type: null,
     external_id: null,
     sort_order: 0,
+    madeBy: null,
   };
   const editor = (clicked: CalendarEvent) => (
     <EventEditor

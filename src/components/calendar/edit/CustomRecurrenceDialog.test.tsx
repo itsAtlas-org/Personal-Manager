@@ -13,7 +13,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { RepeatRule } from "../../../lib/types";
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

@@ -768,6 +768,15 @@ export type ProjectStatus = "due_soon" | "blocked" | "quick_win" | "take_a_look"
 /** A rough effort estimate for a project ("quick" → Quick win), or unset. */
 export type ProjectSize = "quick" | "standard" | "large" | null;
 
+/** One dated entry of the Pinboard on the Calendar (the `pm:pinboard` overlay), as
+ *  `calendar_pinboard_entries` answers. `id` is `<widgetId>:<itemId>`; the Calendar's event is
+ *  `pinboard:<id>`. `date` is a real `YYYY-MM-DD` day and `label` is never empty. */
+export interface PinboardEntry {
+  id: string;
+  date: string;
+  label: string;
+}
+
 /** One project milestone (card 7). A milestone is either PM-native (a user-set,
  *  editable `due_date`) or calendar-linked (`calendar_linked` / `event_uid` set), in
  *  which case `due_date` is the read-only date synced from the calendar event. */
@@ -792,6 +801,18 @@ export interface Milestone {
   /** The source's own row id for an externally-owned milestone; null = PM-native. */
   external_id: string | null;
   sort_order: number;
+  /** The mod that made it, from the ledger written with it; null for the user's own and for
+   *  everything made before mods. Decoration only: never a decision (`MadeBy`). */
+  madeBy: MadeBy | null;
+}
+
+/** Who made a task or milestone, as the ledger recorded it (`made_by.rs`): the mod's name when it
+ *  was made, its tier and whether the package was signed. Drawn as clamped text and ALWAYS with the
+ *  tier word beside it (`madeByLabel`), so an unsigned mod named "Atlas" reads as unsigned. */
+export interface MadeBy {
+  name: string;
+  tier: "first" | "second" | "third";
+  signed: boolean;
 }
 
 /** The four progress values a milestone's `status` admits, coarsest-first. Mirrors
@@ -853,6 +874,9 @@ export interface Task {
   source: TaskSource;
   created_at: string;
   updated_at: string;
+  /** The mod that made it, from the ledger written with it; null for the user's own and for
+   *  everything made before mods. Decoration only: never a decision (`MadeBy`). */
+  madeBy: MadeBy | null;
 }
 
 /** A named group of tasks (`tasks::TaskStack`). */

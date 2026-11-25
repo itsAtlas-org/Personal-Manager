@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, it, expect } from "vitest";
-import { pinboardEntries } from "./calendarEntries";
+import fixtures from "../../../tests/pinboard-overlay-fixtures.json";
+import { clampOverlay, pinboardEntries } from "./calendarEntries";
 import { BOARD_VERSION, type Board, type Widget } from "./types";
 
 // The calendar's pinboard overlay draws freeform timeline entries. The load-bearing rules are the
@@ -27,8 +28,8 @@ const timeline = (over: Partial<Widget> = {}): Widget => ({
 describe("pinboardEntries — freeform timeline entries for the calendar overlay", () => {
   it("lifts every dated entry of a freeform timeline", () => {
     expect(pinboardEntries(board([timeline()]))).toEqual([
-      { widgetId: "w1", itemId: "i1", date: "2026-07-20", label: "pitch" },
-      { widgetId: "w1", itemId: "i2", date: "2026-07-22", label: "demo" },
+      { id: "w1:i1", date: "2026-07-20", label: "pitch" },
+      { id: "w1:i2", date: "2026-07-22", label: "demo" },
     ]);
   });
 
@@ -49,7 +50,7 @@ describe("pinboardEntries — freeform timeline entries for the calendar overlay
       rect: { x: 0, y: 0, w: 3, h: 3 },
       children: [timeline({ id: "w2" })],
     };
-    expect(pinboardEntries(board([folder])).map((e) => e.widgetId)).toEqual(["w2", "w2"]);
+    expect(pinboardEntries(board([folder])).map((e) => e.id)).toEqual(["w2:i1", "w2:i2"]);
   });
 
   it("ignores notes, dateless entries, and trims a label (falling back when blank)", () => {
@@ -62,9 +63,9 @@ describe("pinboardEntries — freeform timeline entries for the calendar overlay
       ],
     });
     expect(pinboardEntries(board([note, mixed]))).toEqual([
-      { widgetId: "w1", itemId: "i2", date: "2026-07-20", label: "spaced" },
+      { id: "w1:i2", date: "2026-07-20", label: "spaced" },
       // Blank falls back to the same word linkProject writes, so linking can't rename the row.
-      { widgetId: "w1", itemId: "i3", date: "2026-07-21", label: "deadline" },
+      { id: "w1:i3", date: "2026-07-21", label: "deadline" },
     ]);
   });
 
@@ -107,6 +108,93 @@ describe("pinboardEntries — freeform timeline entries for the calendar overlay
         timeline({ id: "ok" }),
       ],
     });
-    expect(pinboardEntries(raw).map((e) => e.widgetId)).toEqual(["ok", "ok"]);
+    expect(pinboardEntries(raw).map((e) => e.id)).toEqual(["ok:i1", "ok:i2"]);
+  });
+});
+
+// The shared fixtures (`tests/pinboard-overlay-fixtures.json`) are the contract between this
+// TypeScript original and the Rust port (`src-tauri/src/pinboard_legacy/tests.rs`): each case holds a
+// board and the entries the overlay must come to, and both implementations must agree on every one.
+type Entry = { id: string; date: string; label: string };
+interface FixtureCase {
+  name: string;
+  board?: unknown;
+  raws?: string[];
+  expected?: Entry[];
+  expectedCount?: number;
+  expectedFirst?: Entry;
+  expectedLast?: Entry;
+}
+
+/** `{"$repeat": N, "item": {...}}` stands for N items, "{n}" in their strings read 1..N. */
+function expand(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.flatMap((v) => {
+      if (v && typeof v === "object" && "$repeat" in v) {
+        const { $repeat, item } = v as { $repeat: number; item: Record<string, unknown> };
+        return Array.from({ length: $repeat }, (_, i) =>
+          Object.fromEntries(
+            Object.entries(item).map(([k, x]) => [
+              k,
+              typeof x === "string" ? x.replace(/\{n\}/g, String(i + 1)) : x,
+            ]),
+          ),
+        );
+      }
+      return [expand(v)];
+    });
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expand(v)]));
+  }
+  return value;
+}
+
+describe("the shared overlay fixtures", () => {
+  for (const c of fixtures.cases as FixtureCase[]) {
+    it(c.name, () => {
+      const raws = c.raws ?? [JSON.stringify(expand(c.board))];
+      for (const raw of raws) {
+        const got = pinboardEntries(raw);
+        if (c.expected) expect(got).toEqual(c.expected);
+        if (c.expectedCount !== undefined) expect(got).toHaveLength(c.expectedCount);
+        if (c.expectedFirst) expect(got[0]).toEqual(c.expectedFirst);
+        if (c.expectedLast) expect(got[got.length - 1]).toEqual(c.expectedLast);
+      }
+    });
+  }
+
+  it("holds every case the plan names", () => {
+    const names = (fixtures.cases as FixtureCase[]).map((c) => c.name).join("\n");
+    for (const word of [
+      "bound to a project",
+      "showOnCalendar",
+      "blank label",
+      "folders",
+      "unicode",
+      "2,001-entry",
+      "bad date",
+      "datetime",
+      "141-character",
+      "repeated id",
+      "undated",
+    ]) {
+      expect(names.toLowerCase()).toContain(word.toLowerCase());
+    }
+  });
+});
+
+describe("clampOverlay — the rule the reader and the move's seeding share", () => {
+  const e = (id: string, date: string, label: string): Entry => ({ id, date, label });
+
+  it("never throws on odd entries, and clamps what the table cannot hold", () => {
+    expect(
+      clampOverlay([
+        e("a", "2026-1-5", "x"),
+        e("b", "2026-12-01T10:00", "  y  "),
+        e("c", "2026-12-02", ""),
+        e("b", "2026-12-03", "again"),
+      ]),
+    ).toEqual([e("b", "2026-12-01", "y"), e("c", "2026-12-02", "deadline")]);
   });
 });

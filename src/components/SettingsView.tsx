@@ -38,6 +38,7 @@ import { ModelListEditor } from "./ModelListEditor";
 import { OnboardingLocalConnect } from "./onboarding/OnboardingLocalConnect";
 import { ModNoticeStrips } from "./mods/ModNoticeStrips";
 import { ModsStrips } from "./mods/ModsStrips";
+import { PinboardMoveStrips } from "./mods/PinboardMoveStrips";
 import { SignInStrip } from "./SignInStrip";
 import { StorageSettings } from "./StorageSettings";
 import type { LanguageOptions } from "../lib/types";
@@ -598,6 +599,8 @@ export function SettingsView({
       <ModsStrips variant="app" />
       {/* What a mod said through `notify`: App's copy is under this scrim too. */}
       <ModNoticeStrips />
+      {/* What PM says about the Pinboard's move into its mod: App's copy is under this scrim too. */}
+      <PinboardMoveStrips />
 
       <div className="flex min-h-0 flex-1">
         <nav className="w-52 shrink-0 overflow-y-auto border-r border-border p-3">

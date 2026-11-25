@@ -856,3 +856,145 @@ fn the_pilot_table_names_a_first_party_id_and_a_manifest_that_agrees() {
         .iter()
         .any(|k| k["key"] == "settings" && k["class"] == "content"));
 }
+
+// ---- A rename or delete before 'Turn on' (PR C, K3) -----------------------------------------------------
+
+/// A pilot installed through `land_pilot` that declares the right to have its stored project names
+/// rewritten (`projects.read` and a `projectRefs` path), with its `settings` value holding two.
+fn landed_with_project_refs(w: &World, project: &str) {
+    let b = built("1.0.0", |m| {
+        m["permissions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "projects.read", "why": "Keeps its cards on the right project."}));
+        m["data"]["projectRefs"] = json!([{"key": "settings", "path": "$.items[*].project"}]);
+    });
+    let index = b.index();
+    w.seed_core_map(r#"{"nodeCap":2500}"#);
+    assert!(matches!(w.land(&b, &index), PilotLanded::Installed(_)));
+    w.exec(&format!(
+        "UPDATE mod_kv SET value = '{}' WHERE key = 'settings'",
+        json!({"items": [{"project": project}, {"project": "Other"}]})
+    ));
+}
+
+fn stored(w: &World) -> (Value, i64) {
+    let (value, revision): (String, i64) = w.read(|c| {
+        c.query_row(
+            "SELECT value, revision FROM mod_kv WHERE key = 'settings'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    });
+    (serde_json::from_str(&value).unwrap(), revision)
+}
+
+#[test]
+fn a_pilot_that_is_not_turned_on_yet_has_its_project_names_rewritten_by_a_rename_and_a_delete() {
+    let w = world();
+    landed_with_project_refs(&w, "Atlas");
+    // As an auto-install leaves it: no grants, no consent, not running.
+    assert_eq!(w.sql::<i64>("SELECT count(*) FROM mod_grants"), 0);
+    assert!(!w.sql::<bool>("SELECT consented_at IS NOT NULL FROM mods"));
+    let (_, before) = stored(&w);
+
+    w.read(|c| crate::projects::rename_project_satellites(c, "Atlas", "Atlas 2"))
+        .unwrap();
+    let (value, revision) = stored(&w);
+    assert_eq!(
+        value,
+        json!({"items": [{"project": "Atlas 2"}, {"project": "Other"}]})
+    );
+    assert_eq!(
+        revision,
+        before + 1,
+        "the revision moves, so a frame's stale copy is refused"
+    );
+
+    w.read(|c| crate::projects::delete_project_satellites(c, "Atlas 2"))
+        .unwrap();
+    let (value, revision) = stored(&w);
+    assert_eq!(
+        value,
+        json!({"items": [{"project": null}, {"project": "Other"}]})
+    );
+    assert_eq!(revision, before + 2);
+
+    // Bind the board to a name again, then drive the real 'Turn on' (the ledger's `consent`, which
+    // sets `consented_at` and writes the grants the screen named in one transaction). It reads and
+    // writes no stored value: bytes and revision stay exactly as they were.
+    w.exec(&format!(
+        "UPDATE mod_kv SET value = '{}' WHERE key = 'settings'",
+        json!({"items": [{"project": "Atlas"}, {"project": "Other"}]})
+    ));
+    let bound = stored(&w);
+    let raw_before: String = w.sql("SELECT value FROM mod_kv WHERE key = 'settings'");
+    let standing = w
+        .ledger()
+        .consent(
+            &crate::mods::ids::ModId::parse("atlas.map").unwrap(),
+            &|_: &str, _: &str, _: Option<&str>| None,
+            now(),
+            |conn| {
+                let plan = crate::mods::tab::consent::GrantPlan {
+                    grant: vec!["projects.read".into()],
+                    ..Default::default()
+                };
+                crate::mods::tab::consent::apply(
+                    conn,
+                    &crate::mods::ids::ModId::parse("atlas.map").unwrap(),
+                    &plan,
+                    true,
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(standing.state, "active");
+    assert_eq!(
+        w.sql::<String>("SELECT value FROM mod_kv WHERE key = 'settings'"),
+        raw_before,
+        "'Turn on' leaves the stored bytes alone"
+    );
+    assert_eq!(stored(&w), bound, "and its revision");
+
+    // From now on the grant is what lets a rename through: one rewrite, one bump, and a second run
+    // of the same names finds nothing.
+    w.read(|c| crate::projects::rename_project_satellites(c, "Atlas", "Atlas 2"))
+        .unwrap();
+    let after = stored(&w);
+    assert_eq!(
+        after,
+        (
+            json!({"items": [{"project": "Atlas 2"}, {"project": "Other"}]}),
+            bound.1 + 1
+        )
+    );
+    w.read(|c| crate::projects::rename_project_satellites(c, "Atlas", "Atlas 2"))
+        .unwrap();
+    assert_eq!(stored(&w), after);
+}
+
+#[test]
+fn a_pilot_that_was_asked_and_denied_projects_read_keeps_its_string() {
+    let w = world();
+    landed_with_project_refs(&w, "Atlas");
+    // The first-open screen: consented, and said no to this one.
+    w.exec(
+        "UPDATE mods SET consented_at = '2026-11-20T00:00:00.000Z';
+         INSERT INTO mod_grants(mod_id, permission, decision)
+             VALUES ('atlas.map', 'projects.read', 'denied');",
+    );
+    let (_, before) = stored(&w);
+    w.read(|c| crate::projects::rename_project_satellites(c, "Atlas", "Atlas 2"))
+        .unwrap();
+    w.read(|c| crate::projects::delete_project_satellites(c, "Atlas"))
+        .unwrap();
+    assert_eq!(
+        stored(&w),
+        (
+            json!({"items": [{"project": "Atlas"}, {"project": "Other"}]}),
+            before
+        )
+    );
+}

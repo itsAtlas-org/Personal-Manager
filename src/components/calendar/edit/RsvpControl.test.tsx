@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const writes = vi.hoisted(() => ({ noteReply: vi.fn() }));
 vi.mock("./useEventWrites", () => writes);
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

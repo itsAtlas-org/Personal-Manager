@@ -1,0 +1,171 @@
+<div>
+  <div>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="primary"
+    >
+      primary
+       
+      xs
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="primary"
+    >
+      primary
+       
+      sm
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="primary"
+    >
+      primary
+       
+      md
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-4 py-2 text-sm bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="primary"
+    >
+      primary
+       
+      lg
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs bg-accent text-accent-ink font-semibold enabled:hover:brightness-105 enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="primary"
+    >
+      primary
+       
+      bar
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      secondary
+       
+      xs
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      secondary
+       
+      sm
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      secondary
+       
+      md
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-4 py-2 text-sm bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      secondary
+       
+      lg
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+    >
+      secondary
+       
+      bar
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+    >
+      tertiary
+       
+      xs
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+    >
+      tertiary
+       
+      sm
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+    >
+      tertiary
+       
+      md
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-4 py-2 text-sm bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+    >
+      tertiary
+       
+      lg
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+      data-variant="tertiary"
+    >
+      tertiary
+       
+      bar
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-[color-mix(in_oklab,var(--st-due)_15%,transparent)] text-st-due font-semibold enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)] enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="danger"
+    >
+      danger
+       
+      xs
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-[color-mix(in_oklab,var(--st-due)_15%,transparent)] text-st-due font-semibold enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)] enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="danger"
+    >
+      danger
+       
+      sm
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm bg-[color-mix(in_oklab,var(--st-due)_15%,transparent)] text-st-due font-semibold enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)] enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="danger"
+    >
+      danger
+       
+      md
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-4 py-2 text-sm bg-[color-mix(in_oklab,var(--st-due)_15%,transparent)] text-st-due font-semibold enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)] enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="danger"
+    >
+      danger
+       
+      lg
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[calc(max(var(--tap-min,24px),1.5rem)_+_0.25rem_+_2px)] px-2.5 py-1.5 text-xs bg-[color-mix(in_oklab,var(--st-due)_15%,transparent)] text-st-due font-semibold enabled:hover:bg-[color-mix(in_oklab,var(--st-due)_24%,transparent)] enabled:active:brightness-95 disabled:bg-surface disabled:text-faint"
+      data-variant="danger"
+    >
+      danger
+       
+      bar
+    </button>
+    <button
+      class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-3 py-1.5 text-sm bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+      data-variant="secondary"
+      disabled=""
+    >
+      Off
+    </button>
+  </div>
+</div>

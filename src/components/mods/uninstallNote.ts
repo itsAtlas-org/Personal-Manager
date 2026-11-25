@@ -13,8 +13,11 @@ export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 
 export function uninstallNote(
   name: string,
   done: ModUninstalled,
+  /** What PM kept first (the Pinboard's notes), already a sentence. */
+  kept: string | null = null,
 ): { warning: boolean; text: string } {
   const parts = [`${quoteName(name)} was uninstalled.`];
+  if (kept) parts.push(kept);
   if (!done.filesRemoved) {
     parts.push("PM couldn't delete all of its files, and will clear them out itself later.");
   }

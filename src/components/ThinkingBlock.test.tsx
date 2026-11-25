@@ -11,7 +11,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Collapsible reaches for `useTheme`, and the real ThemeProvider pulls in IPC.
-vi.mock("../theme", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

@@ -65,7 +65,7 @@ vi.mock("./useEventWrites", () => ({
     writes.settleSplit(token, action, title) as Promise<WriteOutcome | null>,
 }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

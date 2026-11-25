@@ -26,8 +26,11 @@
 //       built output (no inline script or style, no module script, no `crossorigin`, no script or
 //       link that loads from off-folder). Those are an author's lint, read broadly off the raw text
 //       (a comment that mentions `<script` is refused too): the frame's CSP is the guard that holds
-//       at run time. It cannot check the signature itself: the trusted keys are embedded
-//       in PM, and only PM verifies against them.
+//       at run time. It also refuses a bundle that holds PM's Tauri bridge (`__TAURI_INTERNALS__`) and
+//       a NOTICE that lists an `@tauri-apps/*` package: a mod's frame has no Tauri API, so either
+//       means the kit (src/kit) pulled a core module that reaches `ipc` into the bundle. The same
+//       package rule applies to `<mod>/.build/modules.json` when the mod is packed. It cannot check
+//       the signature itself: the trusted keys are embedded in PM, and only PM verifies against them.
 //
 // TWO IMPLEMENTATIONS OF ONE FORMAT. package.rs is the verifier that counts; the checks here are a
 // mirror so a bad file fails in the build, not at install. They can drift, so the constants are
@@ -440,6 +443,56 @@ const parseMajorMinor = (s) => {
 const SEMVER =
   /^(0|[1-9]\d{0,17})\.(0|[1-9]\d{0,17})\.(0|[1-9]\d{0,17})(-((0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/;
 
+/** The permission a mod must declare to hold `data.projectRefs` (package.rs `refs::PERMISSION`). */
+const PROJECT_REFS_PERMISSION = "projects.read";
+
+/**
+ * The `data.projectRefs` path grammar, the mirror of `refs::parse` in src-tauri/src/mods/refs.rs
+ * (both read the vectors in tests/mod-project-ref-paths.json):
+ *
+ *   path = "$" segment+ ; segment = "." key | "[*]" | ".." key ; key = [A-Za-z0-9_-]{1,64}
+ *
+ * The last segment is a key; at most 256 bytes, 8 segments and 2 `..` segments. Returns `null` for a
+ * path that parses, else a fixed phrase for the refusal.
+ */
+export function projectRefPathProblem(path) {
+  if (typeof path !== "string") return "must be a string";
+  if (Buffer.byteLength(path, "utf8") > 256) return "is too long";
+  if (!path.startsWith("$")) return "must start with $";
+  const segments = [];
+  let rest = path.slice(1);
+  const KEY = /^[A-Za-z0-9_-]{1,64}$/;
+  const splitKey = (s) => {
+    const end = s.search(/[.[]/);
+    return end === -1 ? [s, ""] : [s.slice(0, end), s.slice(end)];
+  };
+  while (rest.length > 0) {
+    let kind;
+    let key = null;
+    if (rest.startsWith("[*]")) {
+      kind = "each";
+      rest = rest.slice(3);
+    } else if (rest.startsWith("..")) {
+      kind = "deep";
+      [key, rest] = splitKey(rest.slice(2));
+    } else if (rest.startsWith(".")) {
+      kind = "key";
+      [key, rest] = splitKey(rest.slice(1));
+    } else {
+      return "has something that is not .key, [*] or ..key";
+    }
+    if (key !== null && !KEY.test(key)) {
+      return "has a key that is empty, too long or uses other characters";
+    }
+    segments.push(kind);
+  }
+  if (segments.length === 0) return "names nothing after the $";
+  if (segments.length > 8) return "has too many segments";
+  if (segments.filter((k) => k === "deep").length > 2) return "has too many ..key segments";
+  if (segments[segments.length - 1] === "each") return "must end on an object key";
+  return null;
+}
+
 /**
  * Check a parsed manifest the way package.rs does and return the fields the rest of the packer needs.
  * `files` is the set of package paths the package holds, for the paths the manifest names.
@@ -598,12 +651,11 @@ export function checkManifest(raw, files) {
           `a projectRef names ${quote(String(r.key))}, which data.keys doesn't declare`,
         );
       }
-      const ok =
-        typeof r.path === "string" &&
-        r.path.length >= 1 &&
-        r.path.length <= 256 &&
-        /^[\x21-\x7e]+$/.test(r.path);
-      if (!ok) manifestError(`projectRef path ${quote(String(r.path))}`);
+      const problem = projectRefPathProblem(r.path);
+      if (problem !== null) manifestError(`projectRef path ${quote(String(r.path))} ${problem}`);
+    }
+    if (refs.length > 0 && !granted.has(PROJECT_REFS_PERMISSION)) {
+      manifestError(`data.projectRefs needs the ${PROJECT_REFS_PERMISSION} permission`);
     }
   }
   const entry = fields(raw.entry, "entry", ["page"], ["workers"]);
@@ -1141,6 +1193,13 @@ function checkBuiltHtml(html, where) {
   }
 }
 
+/** The Tauri API's package scope. A mod's frame has none of it, so no mod bundles a package from it. */
+const TAURI_SCOPE = "@tauri-apps/";
+/** Where Tauri's page-side bridge keeps `invoke`: a bundle that names it has the IPC layer in it. */
+const TAURI_BRIDGE = "__TAURI_INTERNALS__";
+const TAURI_WHY =
+  "a mod's frame has no Tauri API, so the kit pulled a core module that reaches `ipc` or a Tauri API into the bundle (src/kit may import only the kit)";
+
 /**
  * An AUTHOR'S LINT for built output, not a security boundary. package.rs does not look at HTML (a
  * package is data to it), and what stops inline script and style in every engine is the frame's CSP
@@ -1163,6 +1222,7 @@ export function checkBuiltFile(path, bytes) {
   } catch {
     where("isn't UTF-8 text");
   }
+  if (text.includes(TAURI_BRIDGE)) where(`holds ${TAURI_BRIDGE}: ${TAURI_WHY}`);
   if (isHtml) checkBuiltHtml(text, where);
   else if (isCss) {
     if (/url\(\s*["']?\s*data:/i.test(text)) {
@@ -1176,6 +1236,25 @@ export function checkBuiltFile(path, bytes) {
       where(`isn't a classic script (${String(e.message).split("\n").pop()})`);
     }
   }
+}
+
+/**
+ * A NOTICE.txt that lists an `@tauri-apps/*` package (its block header is `<name> <version>` on a line
+ * of its own) is the build record's `modules.json` showing in the package: `bundledPackages` refuses
+ * the record when the mod is packed, and this refuses the file it made, in case the record was not
+ * the one read.
+ */
+function checkNoTauriPackage(files) {
+  const notice = files.get(NOTICE_FILE);
+  if (notice === undefined) return;
+  let text;
+  try {
+    text = utf8(notice);
+  } catch {
+    return; // checkLicenceText has the say on a NOTICE that isn't text
+  }
+  const hit = text.match(/^(@tauri-apps\/\S+) \S+$/m);
+  if (hit) refuse(`${NOTICE_FILE} lists ${quote(hit[1])}: ${TAURI_WHY}`);
 }
 
 /**
@@ -1225,6 +1304,7 @@ export function verifyArchive(bytes) {
   checkTier(manifest.id, manifest.tier);
   if (signed) checkSignatureFile(entries.get(SIGNATURE), manifest);
   checkLicenceText(files);
+  checkNoTauriPackage(files);
   for (const [name, data] of files) {
     if (name.startsWith(APP_DIR)) checkBuiltFile(name, data);
   }
@@ -1303,6 +1383,12 @@ export function bundledPackages(modDir, root) {
     );
   }
   const dirs = [...new Set(record.modules.map(packageDirOf))].sort(cmp);
+  for (const dir of dirs) {
+    const name = dir.slice(dir.lastIndexOf("node_modules/") + "node_modules/".length);
+    if (name.startsWith(TAURI_SCOPE)) {
+      refuse(`${recordPath} lists ${quote(name)}: ${TAURI_WHY}`);
+    }
+  }
   const packages = [];
   for (const dir of dirs) {
     const packageJson = join(root, dir, "package.json");

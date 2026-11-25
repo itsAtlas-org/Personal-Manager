@@ -13,7 +13,7 @@ import { addNotice, forgetModSurface } from "../../lib/modSurface";
 import { RLO, ZERO_WIDTH } from "./modFixtures";
 import type { ModSource, NoticeTone } from "./modPageHooks";
 
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

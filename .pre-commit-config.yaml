@@ -106,6 +106,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: tasks-emit
+        name: the task list's change event has one emit
+        entry: just tasks-emit
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: script-deps
         name: scripts/ stays zero-dependency
         entry: just script-deps

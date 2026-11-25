@@ -31,7 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   calendarOverview,
-  getPref,
+  calendarPinboardEntries,
   listAllCalendarEvents,
   listAllMilestones,
   listArchivedProjects,
@@ -48,6 +48,7 @@ import type {
   CalendarEvent,
   CalendarOverview,
   Milestone,
+  PinboardEntry,
   Task,
   TaskInput,
   TaskStack,
@@ -171,8 +172,6 @@ import {
   type DraftState,
   type LandedGhost,
 } from "../../lib/calendar-layout";
-import { pinboardEntries, type PinboardEntry } from "../../lib/pinboard/calendarEntries";
-import { PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
 import {
   deviceTimeZoneOrNull,
   milestoneColor,
@@ -565,14 +564,14 @@ export function CalendarView({
     }
   }, []);
 
-  // The board lives in the encrypted settings table (not localStorage), so its overlay is a plain read
-  // like everything else here. Switching tabs unmounts this view, so the mount load below picks up any
-  // board edit; the focus listener covers one made while the window was away.
+  // The Pinboard's dots come from one backend command (the board's own freeform timeline entries, or
+  // the Pinboard mod's overlay rows once the board has moved to it), a plain read like everything else
+  // here. Switching tabs unmounts this view, so the mount load below picks up any board edit; the focus
+  // listener covers one made while the window was away.
   const loadPinboard = useCallback(async () => {
     try {
-      const raw = await getPref(PINBOARD_PREF_KEY);
+      const entries = await calendarPinboardEntries();
       if (!aliveRef.current) return;
-      const entries = pinboardEntries(raw);
       setPinboardItems(entries);
       cachedPinboard = entries;
     } catch {
@@ -1191,12 +1190,12 @@ export function CalendarView({
   );
 
   // Freeform pinboard timeline entries as synthetic all-day events — the second first-party overlay.
-  // `pinboardEntries` has already dropped project-bound timelines (their entries are real milestones,
-  // drawn above), opted-out widgets, and dateless entries, so this is a straight projection.
+  // The backend has already dropped project-bound timelines (their entries are real milestones, drawn
+  // above), opted-out widgets and dateless entries, so this is a straight projection.
   const pinboardEvents = useMemo<CalendarEvent[]>(
     () =>
       pinboardItems.map((e) => ({
-        id: `pinboard:${e.widgetId}:${e.itemId}`,
+        id: `pinboard:${e.id}`,
         calendar_id: PINBOARD_CALENDAR_ID,
         summary: e.label,
         description: null,

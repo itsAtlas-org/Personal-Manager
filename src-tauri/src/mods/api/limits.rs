@@ -27,6 +27,11 @@
 //!   model slot or its sockets), and the payload caps of `ai.complete`, `net.fetch`, `notify` and
 //!   `secrets.set`. They were chosen before any mod uses a call, so each is a first guess to tune
 //!   after the live tests; every one errs toward refusing.
+//! - **PR C's families (K1)** stay in the same place: the gifts (`tasks.add`, `tasks.importChecklist`,
+//!   `milestones.add`), the document embed (`documents.saveNote`) and the links (`shell.openLink`)
+//!   each have a bucket and a concurrency cap of their own, a mod's gifts are held to
+//!   [`MAX_GIFTS_PER_MOD`] rows in `mod_ledger`, and a question PM asks the person ([`CONFIRM_TTL`])
+//!   runs out after a minute. They are first guesses for the live tests, and err toward refusing.
 //! - **50 MiB of private storage per mod** (`mod_kv` and `mod_doc_data` together), counted as each
 //!   row's value and key bytes plus a fixed per-row cost, so a million empty rows fill it too. The
 //!   Map's coordinates for 5,000 documents are well under 1 MiB.
@@ -131,6 +136,74 @@ pub const NOTIFY_PER_DAY: u32 = 5;
 /// Times a mod may ask for a key in one session (`secrets.set`).
 pub const SECRET_ASKS_PER_SESSION: u32 = 3;
 
+// PR C's families (K1). The rows that use them arrive in K2; the numbers are the plan's.
+
+/// Gift calls (`tasks.add`, `tasks.importChecklist`, `milestones.add`) of one mod running at once.
+/// Each writes the user's own lists, so a mod may not queue many.
+pub const GIFT_MAX_IN_FLIGHT: usize = 2;
+/// Gift calls a mod may make per second, sustained.
+pub const GIFTS_PER_SECOND: u64 = 10;
+/// Gift calls a mod may make at once after a quiet spell (the Pinboard's first import of a checklist
+/// is a few dozen).
+pub const GIFT_BURST: u64 = 50;
+/// The most tasks and milestones one mod may ever have made (its rows in `mod_ledger`, counted
+/// inside the transaction that adds one; an uninstall keeps the rows, so a reinstall doesn't reset
+/// it). Past it the call is refused `MOD-3003`.
+pub const MAX_GIFTS_PER_MOD: u64 = 10_000;
+
+/// Embed-family calls (`documents.saveNote`, later `search`) of one mod running at once: each holds a
+/// CPU-heavy embed.
+pub const EMBED_MAX_IN_FLIGHT: usize = 1;
+/// Embed-family calls a mod may make per minute, sustained.
+pub const EMBEDS_PER_MINUTE: u64 = 6;
+/// Embed-family calls a mod may make at once after a quiet spell.
+pub const EMBED_BURST: u64 = 10;
+
+/// `shell.openLink` calls of one mod running at once (a launcher may block on the desktop).
+pub const LINKS_MAX_IN_FLIGHT: usize = 1;
+/// `shell.openLink` calls a mod may make per minute, sustained.
+pub const LINKS_PER_MINUTE: u64 = 6;
+/// `shell.openLink` calls a mod may make at once after a quiet spell.
+pub const LINK_BURST: u64 = 3;
+
+// The caps of PR C's calls (K2), each held by its handler as a refusal, never a trim.
+
+/// Tasks (or milestones) one page of a list returns at most, and ids one `tasks.reorder` names.
+pub const MAX_TASKS_PER_CALL: usize = 5000;
+/// Lines one `tasks.importChecklist` takes.
+pub const MAX_CHECKLIST_ITEMS: usize = 200;
+/// Project names `projects.list` returns before it says it was cut short.
+pub const MAX_PROJECTS_LISTED: usize = 5000;
+/// A note's key, in a mod's own namespace (`mod-<id>.<key>.md` with an id of up to 159 characters
+/// stays under a file name's 255).
+pub const NOTE_KEY_MAX_OWN: usize = 64;
+/// A note's key through the Pinboard's legacy mapping (`note-<key>.md`): no tighter than the board's
+/// own widget ids allow, so a board whose ids are older or imported still saves after the move.
+pub const NOTE_KEY_MAX_LEGACY: usize = 200;
+/// Keys one `documents.statusOf` asks about.
+pub const MAX_NOTE_KEYS_PER_CALL: usize = 500;
+/// A note's title, in characters: one plain line, which lands in the vault file's front matter.
+pub const NOTE_TITLE_MAX_CHARS: usize = 200;
+/// A note's body, in bytes.
+pub const NOTE_BODY_MAX_BYTES: usize = 512 << 10;
+/// An address `shell.openLink` takes, in bytes.
+pub const LINK_MAX_BYTES: usize = 2048;
+/// How much of an address PM's question shows before it says how many characters more there are.
+pub const LINK_SHOWN_CHARS: usize = 300;
+/// Entries one `calendar.overlay.set` publishes: the whole set of the mod.
+pub const OVERLAY_MAX_ENTRIES: usize = 2000;
+/// An overlay entry's id, in characters. The Pinboard's are `<widgetId>:<itemId>`, two random UUIDs
+/// (73), and the Calendar's event ids, hidden sets and Runway key on them, so a mod can't shorten them.
+pub const OVERLAY_ID_MAX_CHARS: usize = 200;
+/// An overlay entry's label, in characters.
+pub const OVERLAY_LABEL_MAX_CHARS: usize = 140;
+/// The first and last year an overlay entry may fall in.
+pub const OVERLAY_YEARS: std::ops::RangeInclusive<i32> = 1900..=2200;
+
+/// How long a question PM asks the person for a mod's call (`mods::confirm`) stays answerable. Past
+/// it the answer does nothing and the call's token is gone.
+pub const CONFIRM_TTL: Duration = Duration::from_secs(60);
+
 /// The calls that are counted against a bucket and a cap of their own, as well as the generic
 /// ones (every call is admitted by [`Calls::admit`] first). A row names its family in the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,6 +214,13 @@ pub enum Family {
     Ai,
     /// `net.fetch`.
     Net,
+    /// The calls that add a task or a milestone to the user's lists (K1: `tasks.add`,
+    /// `tasks.importChecklist`, `milestones.add`).
+    Gifts,
+    /// The calls that hold a CPU-heavy embed (`documents.saveNote`; later `search`).
+    Embed,
+    /// `shell.openLink`: it waits on the desktop's launcher.
+    Links,
 }
 
 /// One family's concurrency cap and bucket, `rate` calls every `per_seconds` seconds.
@@ -173,6 +253,30 @@ impl Family {
                 burst: NET_FETCH_BURST,
                 busy: "Too many of this mod's web requests are running at once.",
                 fast: "This mod is fetching from the web too fast.",
+            }),
+            Self::Gifts => Some(FamilyLimit {
+                max_in_flight: GIFT_MAX_IN_FLIGHT,
+                rate: GIFTS_PER_SECOND,
+                per_seconds: 1,
+                burst: GIFT_BURST,
+                busy: "Too many of this mod's additions are running at once.",
+                fast: "This mod is adding to your lists too fast.",
+            }),
+            Self::Embed => Some(FamilyLimit {
+                max_in_flight: EMBED_MAX_IN_FLIGHT,
+                rate: EMBEDS_PER_MINUTE,
+                per_seconds: 60,
+                burst: EMBED_BURST,
+                busy: "This mod is already saving a document.",
+                fast: "This mod is saving documents too often.",
+            }),
+            Self::Links => Some(FamilyLimit {
+                max_in_flight: LINKS_MAX_IN_FLIGHT,
+                rate: LINKS_PER_MINUTE,
+                per_seconds: 60,
+                burst: LINK_BURST,
+                busy: "This mod is already opening a link.",
+                fast: "This mod is opening links too often.",
             }),
         }
     }
@@ -286,6 +390,9 @@ struct PerMod {
     growth: TokenBucket,
     ai: FamilyState,
     net: FamilyState,
+    gifts: FamilyState,
+    embed: FamilyState,
+    links: FamilyState,
 }
 
 /// One family's bucket and in-flight count for one mod.
@@ -318,6 +425,9 @@ impl PerMod {
             growth: TokenBucket::new(STORAGE_GROWTH_PER_SECOND, STORAGE_GROWTH_BURST, now),
             ai: FamilyState::new(Family::Ai, now),
             net: FamilyState::new(Family::Net, now),
+            gifts: FamilyState::new(Family::Gifts, now),
+            embed: FamilyState::new(Family::Embed, now),
+            links: FamilyState::new(Family::Links, now),
         }
     }
 
@@ -327,6 +437,9 @@ impl PerMod {
             Family::General => None,
             Family::Ai => Some(&mut self.ai),
             Family::Net => Some(&mut self.net),
+            Family::Gifts => Some(&mut self.gifts),
+            Family::Embed => Some(&mut self.embed),
+            Family::Links => Some(&mut self.links),
         }
     }
 }
@@ -427,6 +540,28 @@ impl Calls {
         family: Family,
         now: Instant,
     ) -> Result<FamilyAdmission, ModError> {
+        self.admit_family_charging(id, family, now, true)
+    }
+
+    /// Admit the PERFORMING of a call the person has just said yes to: the family's concurrency cap,
+    /// but no token from its bucket, because the call that asked the question already paid one. So a
+    /// confirmed call cannot run past the cap on what is in flight, and is not charged twice.
+    pub fn admit_family_answer(
+        &self,
+        id: &ModId,
+        family: Family,
+        now: Instant,
+    ) -> Result<FamilyAdmission, ModError> {
+        self.admit_family_charging(id, family, now, false)
+    }
+
+    fn admit_family_charging(
+        &self,
+        id: &ModId,
+        family: Family,
+        now: Instant,
+        charge: bool,
+    ) -> Result<FamilyAdmission, ModError> {
         // Built only once a slot is taken (a `FamilyAdmission` gives one back when dropped, and its
         // drop takes the lock this method holds). A general call counts nothing, and `family_mut`
         // is `None` for it, so its drop counts nothing either.
@@ -449,7 +584,7 @@ impl Calls {
             if state.in_flight >= limit.max_in_flight {
                 return Err(ModError::new(Code::RateLimited, limit.busy));
             }
-            if !state.bucket.take(now) {
+            if charge && !state.bucket.take(now) {
                 return Err(ModError::new(Code::RateLimited, limit.fast));
             }
             state.in_flight += 1;
@@ -757,6 +892,169 @@ mod tests {
         assert!(calls
             .admit_family(&a, Family::Net, t0 + Duration::from_millis(200))
             .is_ok());
+    }
+
+    /// One test per PR C family (K1): its in-flight cap, its burst, and its refill, with the refusal's
+    /// own sentence, and another family and another mod untouched.
+    #[test]
+    fn the_gift_family_holds_two_at_once_a_burst_of_fifty_and_ten_a_second() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let (a, b) = (id("acme.a"), id("acme.b"));
+        let one = calls.admit_family(&a, Family::Gifts, t0).unwrap();
+        let two = calls.admit_family(&a, Family::Gifts, t0).unwrap();
+        assert_eq!(
+            calls.family_in_flight(&a, Family::Gifts),
+            GIFT_MAX_IN_FLIGHT
+        );
+        let busy = calls.admit_family(&a, Family::Gifts, t0).unwrap_err();
+        assert_eq!(busy.code, Code::RateLimited);
+        assert!(busy.message.contains("at once"), "{busy}");
+        // Another family and another mod have their own.
+        assert!(calls.admit_family(&a, Family::Embed, t0).is_ok());
+        assert!(calls.admit_family(&b, Family::Gifts, t0).is_ok());
+        drop((one, two));
+        // The burst: two are spent, so 48 more at once, then it is empty.
+        for i in 0..(GIFT_BURST - GIFT_MAX_IN_FLIGHT as u64) {
+            drop(
+                calls
+                    .admit_family(&a, Family::Gifts, t0)
+                    .unwrap_or_else(|e| panic!("{i}: {e}")),
+            );
+        }
+        let fast = calls.admit_family(&a, Family::Gifts, t0).unwrap_err();
+        assert!(fast.message.contains("too fast"), "{fast}");
+        // Ten a second: one every 100 ms.
+        assert!(calls
+            .admit_family(&a, Family::Gifts, t0 + Duration::from_millis(99))
+            .is_err());
+        assert!(calls
+            .admit_family(&a, Family::Gifts, t0 + Duration::from_millis(100))
+            .is_ok());
+    }
+
+    #[test]
+    fn the_embed_family_holds_one_at_once_a_burst_of_ten_and_six_a_minute() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let a = id("acme.a");
+        let held = calls.admit_family(&a, Family::Embed, t0).unwrap();
+        let busy = calls.admit_family(&a, Family::Embed, t0).unwrap_err();
+        assert_eq!(busy.code, Code::RateLimited);
+        assert!(busy.message.contains("already"), "{busy}");
+        assert_eq!(
+            calls.family_in_flight(&a, Family::Embed),
+            EMBED_MAX_IN_FLIGHT
+        );
+        drop(held);
+        // Nine more of the ten, one at a time, then the bucket is empty.
+        for i in 1..EMBED_BURST {
+            drop(
+                calls
+                    .admit_family(&a, Family::Embed, t0)
+                    .unwrap_or_else(|e| panic!("{i}: {e}")),
+            );
+        }
+        let fast = calls.admit_family(&a, Family::Embed, t0).unwrap_err();
+        assert!(fast.message.contains("too often"), "{fast}");
+        // Six a minute: one every ten seconds.
+        assert!(calls
+            .admit_family(&a, Family::Embed, t0 + Duration::from_millis(9999))
+            .is_err());
+        assert!(calls
+            .admit_family(&a, Family::Embed, t0 + Duration::from_secs(10))
+            .is_ok());
+    }
+
+    #[test]
+    fn the_links_family_holds_one_at_once_a_burst_of_three_and_six_a_minute() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let a = id("acme.a");
+        let held = calls.admit_family(&a, Family::Links, t0).unwrap();
+        let busy = calls.admit_family(&a, Family::Links, t0).unwrap_err();
+        assert!(busy.message.contains("already"), "{busy}");
+        assert_eq!(
+            calls.family_in_flight(&a, Family::Links),
+            LINKS_MAX_IN_FLIGHT
+        );
+        drop(held);
+        for i in 1..LINK_BURST {
+            drop(
+                calls
+                    .admit_family(&a, Family::Links, t0)
+                    .unwrap_or_else(|e| panic!("{i}: {e}")),
+            );
+        }
+        let fast = calls.admit_family(&a, Family::Links, t0).unwrap_err();
+        assert!(fast.message.contains("too often"), "{fast}");
+        assert!(calls
+            .admit_family(&a, Family::Links, t0 + Duration::from_millis(9999))
+            .is_err());
+        assert!(calls
+            .admit_family(&a, Family::Links, t0 + Duration::from_secs(10))
+            .is_ok());
+        // A family's slot is its own: the embed family was never touched.
+        assert_eq!(calls.family_in_flight(&a, Family::Embed), 0);
+    }
+
+    /// The answer to a question is admitted by the cap alone: it is refused with the slot taken, and
+    /// when let through it takes no token (the question paid it), however many answers there are.
+    #[test]
+    fn an_answer_is_held_to_the_cap_and_spends_no_token() {
+        let calls = Calls::default();
+        let t0 = Instant::now();
+        let a = id("acme.a");
+        let held = calls.admit_family(&a, Family::Links, t0).unwrap();
+        let busy = calls
+            .admit_family_answer(&a, Family::Links, t0)
+            .unwrap_err();
+        assert!(busy.message.contains("already"), "{busy}");
+        drop(held);
+        // Many answers in turn: the burst is untouched, so the full burst of asks is still there.
+        for _ in 0..(LINK_BURST * 4) {
+            drop(calls.admit_family_answer(&a, Family::Links, t0).unwrap());
+        }
+        // (`held` took one token of the burst.)
+        for i in 1..LINK_BURST {
+            drop(
+                calls
+                    .admit_family(&a, Family::Links, t0)
+                    .unwrap_or_else(|e| panic!("{i}: {e}")),
+            );
+        }
+        assert!(calls.admit_family(&a, Family::Links, t0).is_err());
+        // The slot is given back each time.
+        assert_eq!(calls.family_in_flight(&a, Family::Links), 0);
+    }
+
+    /// PR C's numbers are the plan's, tighter than the generic limits, and every non-general family
+    /// has limits (a family that returned `None` would be admitted unlimited).
+    #[test]
+    fn the_pr_c_limits_are_the_plans_and_every_family_has_limits() {
+        const {
+            assert!(GIFT_MAX_IN_FLIGHT == 2 && GIFTS_PER_SECOND == 10 && GIFT_BURST == 50);
+            assert!(EMBED_MAX_IN_FLIGHT == 1 && EMBEDS_PER_MINUTE == 6 && EMBED_BURST == 10);
+            assert!(LINKS_MAX_IN_FLIGHT == 1 && LINKS_PER_MINUTE == 6 && LINK_BURST == 3);
+            assert!(MAX_GIFTS_PER_MOD == 10_000);
+            assert!(GIFT_MAX_IN_FLIGHT < MAX_IN_FLIGHT);
+            assert!(GIFTS_PER_SECOND < CALLS_PER_SECOND && GIFT_BURST <= CALL_BURST);
+            assert!(EMBED_BURST <= CALL_BURST && LINK_BURST <= CALL_BURST);
+        }
+        assert_eq!(CONFIRM_TTL, Duration::from_secs(60));
+        for family in [
+            Family::Ai,
+            Family::Net,
+            Family::Gifts,
+            Family::Embed,
+            Family::Links,
+        ] {
+            let limit = family.limit().expect("a family has limits");
+            assert!(limit.max_in_flight >= 1 && limit.rate >= 1 && limit.burst >= 1);
+            assert!(limit.busy.ends_with('.') && limit.fast.ends_with('.'));
+            assert_ne!(limit.busy, limit.fast);
+        }
+        assert!(Family::General.limit().is_none());
     }
 
     #[test]

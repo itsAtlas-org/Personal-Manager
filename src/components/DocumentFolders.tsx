@@ -43,6 +43,16 @@ export function FolderCrumbs({
       {trail.map((node, depth) => {
         const last = depth === trail.length - 1;
         const label = depth === 0 ? rootLabel : node.name;
+        // What a folder is (a mod's tier word, a connector's account) is part of where you are: a
+        // group a mod named "Pinboard" must not read like the Pinboard's own (never decided from a
+        // name alone). The name truncates; the detail never does.
+        const detail = depth === 0 ? undefined : node.detail;
+        const text = (
+          <>
+            <span className="truncate">{label}</span>
+            {detail && <span className="shrink-0 text-ink4">· {detail}</span>}
+          </>
+        );
         return (
           <span key={`${depth}-${node.key}`} className="flex min-w-0 items-center gap-1">
             {depth > 0 && (
@@ -51,16 +61,16 @@ export function FolderCrumbs({
               </span>
             )}
             {last ? (
-              <span aria-current="page" className="truncate font-medium text-ink">
-                {label}
+              <span aria-current="page" className="flex min-w-0 gap-1 font-medium text-ink">
+                {text}
               </span>
             ) : (
               <button
                 type="button"
                 onClick={() => onOpen(depth)}
-                className="truncate rounded-[var(--radius-sm)] px-1 text-ink3 hover:bg-surface hover:text-ink"
+                className="flex min-w-0 gap-1 rounded-[var(--radius-sm)] px-1 text-ink3 hover:bg-surface hover:text-ink"
               >
-                {label}
+                {text}
               </button>
             )}
           </span>

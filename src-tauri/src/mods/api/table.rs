@@ -75,6 +75,21 @@ const fn experimental_call(
     }
 }
 
+/// A call row under a family of limits that is not experimental: one of PR C's (K2), whose call waits
+/// on something outside the DB (a launcher, an embed) or writes the user's lists (the gifts). Like
+/// [`experimental_call`], it must say which family it lives under.
+const fn family_call(
+    name: &'static str,
+    permission: &'static str,
+    class: Class,
+    family: Family,
+) -> Row {
+    Row {
+        family,
+        ..call(name, permission, class)
+    }
+}
+
 /// An event a frame needs `permission` to be told (or any session, with `None`: PM's word about the
 /// session itself, which carries no data).
 const fn event(name: &'static str, permission: Option<&'static str>, class: Class) -> Row {
@@ -126,6 +141,46 @@ pub const ROWS: &[Row] = &[
     experimental_call("secrets.set", "internet", Class::Egress, Family::General),
     // An in-app notice strip with the mod's name, capped per day.
     experimental_call("notify", "notify", Class::Local, Family::General),
+    // PR C's calls (K2): what the Pinboard uses. Every one is stable (API 1.0). A call that writes the
+    // user's lists names a second read (`second_read::WRITE_RULES`); the ones that wait on something
+    // outside the DB (a launcher, an embed) or add to the lists live under a family of limits.
+    call("tasks.list", "tasks.read", Class::Read),
+    family_call("tasks.add", "tasks.write", Class::Write, Family::Gifts),
+    call("tasks.setStatus", "tasks.write", Class::Write),
+    call("tasks.reorder", "tasks.write", Class::Write),
+    family_call(
+        "tasks.importChecklist",
+        "tasks.write",
+        Class::Write,
+        Family::Gifts,
+    ),
+    // Milestones belong to projects, so reading them is `projects.read` (spec §1.5).
+    call("milestones.list", "projects.read", Class::Read),
+    family_call(
+        "milestones.add",
+        "milestones.write",
+        Class::Write,
+        Family::Gifts,
+    ),
+    call("milestones.update", "milestones.write", Class::Write),
+    call("milestones.setStatus", "milestones.write", Class::Write),
+    // A milestone the caller did not make goes through PM's own question first.
+    call("milestones.delete", "milestones.write", Class::Write),
+    call("projects.list", "projects.read", Class::Read),
+    // Embeds, so the engine must be set up (MOD-5007); family `Embed`.
+    family_call(
+        "documents.saveNote",
+        "documents.write",
+        Class::Write,
+        Family::Embed,
+    ),
+    call("documents.statusOf", "documents.meta", Class::Read),
+    call("ui.openTaskEditor", "tasks.write", Class::Write),
+    // A link in the person's browser: `links` is egress, so D3 judges it like `internet`.
+    family_call("shell.openLink", "links", Class::Egress, Family::Links),
+    // The caller's own calendar overlay, drawn by PM without running its code: `storage`, and the
+    // handler requires the manifest to declare `contributions['calendar.overlay']`.
+    call("calendar.overlay.set", "storage", Class::Local),
     // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
     // A document that landed, as `documents.list`'s DTO with every field.
     event("documents.added", Some("documents.meta"), Class::Read),
@@ -138,6 +193,14 @@ pub const ROWS: &[Row] = &[
     // ...it was paused, and its session ended. These two are PM's goodbye (outbox.rs).
     event("mod.paused", None, Class::Local),
     event("session.closed", None, Class::Local),
+    // PR C's events (K3). A bare signal, no ids: the frame lists again (events.rs).
+    event("tasks.changed", Some("tasks.read"), Class::Read),
+    // The names are the project's own, after the mutation committed.
+    event("projects.renamed", Some("projects.read"), Class::Read),
+    event("projects.merged", Some("projects.read"), Class::Read),
+    event("projects.deleted", Some("projects.read"), Class::Read),
+    // PM's word to one frame before it takes it down: no permission, `{reason}`, answered `{flushed}`.
+    event("lifecycle.suspend", None, Class::Local),
 ];
 
 /// The live event row named `name` in `rows` at API `version`.
@@ -214,12 +277,13 @@ mod tests {
                 "{} arrives after this PM",
                 row.name
             );
-            // A family's limits are for the calls that wait on the outside, which are the
-            // experimental ones; an event is never admitted at all.
+            // A family's limits are for a call that waits on something outside the DB (a model, a
+            // website, a launcher, an embed) or that writes the user's lists; an event is never
+            // admitted at all.
             if row.family != Family::General {
                 assert!(
-                    row.kind == Kind::Call && row.experimental,
-                    "{}: a family is for an experimental call",
+                    row.kind == Kind::Call,
+                    "{}: a family is for a call, and an event is never admitted",
                     row.name
                 );
             }
@@ -331,7 +395,8 @@ mod tests {
     }
 
     /// The only experimental rows the live table may ever carry are PR B's four, each under the
-    /// family its limits are written for; every other row is general.
+    /// family its limits are written for; every other row is general, or (a call only) under one of
+    /// PR C's families, the ones a call that writes the lists or waits on the outside uses.
     #[test]
     fn the_live_tables_experimental_rows_are_held_to_their_families() {
         for row in ROWS {
@@ -345,8 +410,91 @@ mod tests {
                 assert_eq!(row.family, want, "{}", row.name);
                 assert_eq!(row.kind, Kind::Call, "{}", row.name);
             } else {
-                assert_eq!(row.family, Family::General, "{}", row.name);
+                // Never one of the experimental families (`ai`, `net`): those are PR B's four's.
+                assert!(
+                    !matches!(row.family, Family::Ai | Family::Net),
+                    "{}: only an experimental call is under the AI or network family",
+                    row.name
+                );
             }
+        }
+    }
+
+    /// The family each of K2's calls must be admitted under, by name. A row left on `General` would
+    /// run with no family bucket and no in-flight cap, and nothing else reads this wiring: the family
+    /// tests in `limits.rs` call `admit_family` directly (see [`family_wiring_faults`]). `search`
+    /// arrives with the MCP slice and is not in the table yet.
+    const FAMILY_OF: &[(&str, Family)] = &[
+        ("tasks.add", Family::Gifts),
+        ("tasks.importChecklist", Family::Gifts),
+        ("milestones.add", Family::Gifts),
+        ("documents.saveNote", Family::Embed),
+        ("search", Family::Embed),
+        ("shell.openLink", Family::Links),
+    ];
+
+    /// What is wrong with `rows`' family wiring: a row named in [`FAMILY_OF`] not under its family, or a
+    /// stable (non-experimental) row under a PR C family that [`FAMILY_OF`] doesn't name.
+    fn family_wiring_faults(rows: &[Row]) -> Vec<String> {
+        let mut faults = Vec::new();
+        for row in rows.iter().filter(|r| r.kind == Kind::Call) {
+            let want = FAMILY_OF.iter().find(|(n, _)| *n == row.name).map(|f| f.1);
+            match (want, row.experimental) {
+                (Some(f), _) if row.family != f => {
+                    faults.push(format!("{} is under {:?}, not {f:?}", row.name, row.family))
+                }
+                (None, false) if row.family != Family::General => faults.push(format!(
+                    "{} is under {:?} but FAMILY_OF doesn't name it",
+                    row.name, row.family
+                )),
+                _ => {}
+            }
+        }
+        faults
+    }
+
+    #[test]
+    fn the_live_tables_gift_embed_and_link_rows_carry_their_family() {
+        assert_eq!(family_wiring_faults(ROWS), Vec::<String>::new());
+    }
+
+    /// The check itself bites: a gift row left on `General`, a link row under the wrong family, and a
+    /// family on an unnamed row are each reported, and a correctly wired set reports nothing.
+    #[test]
+    fn the_family_wiring_check_names_a_row_left_on_general() {
+        let w = Class::Write;
+        let right = [
+            family_call("tasks.add", "tasks.write", w, Family::Gifts),
+            family_call("shell.openLink", "links", Class::Egress, Family::Links),
+        ];
+        assert!(family_wiring_faults(&right).is_empty());
+        let general = [call("tasks.add", "tasks.write", w)];
+        assert_eq!(family_wiring_faults(&general).len(), 1);
+        let wrong = [family_call(
+            "shell.openLink",
+            "links",
+            Class::Egress,
+            Family::Embed,
+        )];
+        assert_eq!(family_wiring_faults(&wrong).len(), 1);
+        let unnamed = [family_call("tasks.other", "tasks.write", w, Family::Gifts)];
+        assert_eq!(family_wiring_faults(&unnamed).len(), 1);
+    }
+
+    /// The helper PR C's rows are made with: a plain call row (stable, API 1.0) under the family it
+    /// is given; it differs from `call` in that one field only.
+    #[test]
+    fn a_family_call_is_a_plain_call_row_under_its_family() {
+        for family in [Family::Gifts, Family::Embed, Family::Links] {
+            let row = family_call("a.b", "tasks.write", Class::Write, family);
+            assert_eq!(
+                row,
+                Row {
+                    family,
+                    ..call("a.b", "tasks.write", Class::Write)
+                }
+            );
+            assert!(!row.experimental && row.kind == Kind::Call);
         }
     }
 

@@ -55,10 +55,15 @@ vi.mock("../lib/reader", () => ({
 
 // The same stub the other component tests use: <Button>/<Input> reach for `useTheme`, and the real
 // ThemeProvider pulls in IPC.
+// The kit's own components read the theme from the kit's context, so `useTheme` is stubbed there (core's
+// `../theme` re-exports it); `useDepth` is core's index's own name for the depth.
+vi.mock("../kit/theme", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
+}));
 vi.mock("../theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useDepth: () => ({ depth: "standard", atLeast: () => true, showPower: false }),
-  useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
 
 import { ReviewView } from "./ReviewView";

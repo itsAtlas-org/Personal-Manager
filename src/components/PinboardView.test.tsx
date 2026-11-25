@@ -25,7 +25,7 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   ...ipc,
 }));
 
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

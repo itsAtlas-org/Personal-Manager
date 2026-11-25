@@ -1,0 +1,479 @@
+<div
+  class="px-4 pb-3 pt-3"
+  data-help="project-tasks"
+>
+  <span
+    class="font-mono text-xs uppercase tracking-wide text-ink4"
+  >
+    Tasks
+  </span>
+  <div
+    class="mt-2"
+  >
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <div
+        class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+      >
+        <button
+          aria-label="To do: mark as doing"
+          class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+          title="To do: mark as doing"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+          />
+        </button>
+        <div
+          class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+        >
+          <button
+            aria-expanded="false"
+            class="min-w-0 break-words text-left text-xs text-ink2 hover:text-ink"
+            title="Show why"
+            type="button"
+          >
+            Write the pitch
+          </button>
+          <div
+            class="flex min-w-0 flex-wrap items-center gap-1"
+          >
+            <span
+              class="shrink-0 whitespace-nowrap font-mono text-[0.6875rem] text-st-look"
+              title="Deadline"
+            >
+              2d · 06-11
+            </span>
+          </div>
+        </div>
+        <div
+          class="flex shrink-0 items-center"
+        >
+          <button
+            aria-label="Move Write the pitch up"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            disabled=""
+            title="Move up"
+          >
+            ↑
+          </button>
+          <button
+            aria-label="Move Write the pitch down"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move down"
+          >
+            ↓
+          </button>
+          <button
+            aria-label="Edit Write the pitch"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Edit task"
+          >
+            ✎
+          </button>
+        </div>
+      </div>
+      <div
+        class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+      >
+        <button
+          aria-label="Doing: mark as done"
+          class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+          title="Doing: mark as done"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+          >
+            <span
+              class="absolute inset-y-0 left-0 w-1/2 bg-accent"
+            />
+          </span>
+        </button>
+        <div
+          class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+        >
+          <span
+            class="min-w-0 break-words text-left text-xs text-ink2"
+          >
+            Call the bank
+          </span>
+          <div
+            class="flex min-w-0 flex-wrap items-center gap-1"
+          >
+            <span
+              class="shrink-0 font-mono text-[0.6875rem] text-accent-text"
+            >
+              doing
+            </span>
+          </div>
+        </div>
+        <div
+          class="flex shrink-0 items-center"
+        >
+          <button
+            aria-label="Move Call the bank up"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move up"
+          >
+            ↑
+          </button>
+          <button
+            aria-label="Move Call the bank down"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move down"
+          >
+            ↓
+          </button>
+          <button
+            aria-label="Edit Call the bank"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Edit task"
+          >
+            ✎
+          </button>
+        </div>
+      </div>
+      <div
+        class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+      >
+        <button
+          aria-label="To do: mark as doing"
+          class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+          title="To do: mark as doing"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+          />
+        </button>
+        <div
+          class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+        >
+          <span
+            class="min-w-0 break-words text-left text-xs text-ink2"
+          >
+            Book the venue
+          </span>
+          <div
+            class="flex min-w-0 flex-wrap items-center gap-1"
+          >
+            <span
+              class="shrink-0 whitespace-nowrap font-mono text-[0.6875rem] text-st-look"
+              title="A date to aim for"
+            >
+              aim 2d late
+            </span>
+          </div>
+        </div>
+        <div
+          class="flex shrink-0 items-center"
+        >
+          <button
+            aria-label="Move Book the venue up"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move up"
+          >
+            ↑
+          </button>
+          <button
+            aria-label="Move Book the venue down"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move down"
+          >
+            ↓
+          </button>
+          <button
+            aria-label="Edit Book the venue"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Edit task"
+          >
+            ✎
+          </button>
+        </div>
+      </div>
+      <div
+        class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+      >
+        <button
+          aria-label="To do: mark as doing"
+          class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+          title="To do: mark as doing"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+          />
+        </button>
+        <div
+          class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+        >
+          <span
+            class="min-w-0 break-words text-left text-xs text-ink2"
+          >
+            Passport photo
+          </span>
+          <div
+            class="flex min-w-0 flex-wrap items-center gap-1"
+          >
+            <span
+              class="max-w-[8rem] shrink-0 truncate rounded-[var(--radius-sm)] border border-border px-1 text-[0.6875rem] text-ink3"
+              title="Visa · In sequence"
+            >
+              ≡ 
+              Visa
+            </span>
+          </div>
+        </div>
+        <div
+          class="flex shrink-0 items-center"
+        >
+          <button
+            aria-label="Move Passport photo up"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Move up"
+          >
+            ↑
+          </button>
+          <button
+            aria-label="Move Passport photo down"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            disabled=""
+            title="Move down"
+          >
+            ↓
+          </button>
+          <button
+            aria-label="Edit Passport photo"
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Edit task"
+          >
+            ✎
+          </button>
+        </div>
+      </div>
+      <div
+        class="flex flex-wrap items-center gap-1.5"
+      >
+        <input
+          aria-label="New task"
+          class="w-full rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-sm text-ink2 outline-none transition placeholder:text-ink4 focus:border-accent-text disabled:cursor-not-allowed disabled:border-border2 disabled:bg-transparent disabled:text-ink3 min-w-0 flex-1 basis-28 text-xs h-7"
+          maxlength="500"
+          placeholder="New task"
+          value=""
+        />
+        <div
+          class="relative flex min-w-0 items-center min-w-0 flex-1 basis-24"
+        >
+          <input
+            aria-expanded="false"
+            aria-label="New task deadline"
+            autocomplete="off"
+            class="min-w-0 flex-1 rounded-[var(--radius-sm)] border bg-surface outline-none transition placeholder:text-ink4 focus:border-accent-text border-ink4 px-1.5 text-xs h-7"
+            inputmode="numeric"
+            placeholder="dd-mm-yyyy"
+            role="combobox"
+            title="Deadline (optional)"
+            type="text"
+            value=""
+          />
+        </div>
+        <div
+          class="flex shrink-0 items-center gap-1"
+        >
+          <button
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-2 py-1 text-xs bg-transparent text-ink2 border border-ink4 enabled:hover:bg-surface disabled:border-border2 disabled:text-faint"
+            data-variant="secondary"
+            disabled=""
+          >
+            Add
+          </button>
+          <button
+            class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+            data-variant="tertiary"
+            title="Add with links, a plan and more"
+          >
+            More…
+          </button>
+        </div>
+      </div>
+      <div
+        class="flex flex-col mt-1"
+      >
+        <button
+          aria-expanded="false"
+          class="flex w-full items-center gap-2 text-left text-sm text-ink2 transition-colors hover:text-ink"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block text-xs text-ink4 transition-transform duration-200 motion-reduce:transition-none"
+            style="transform: rotate(0deg);"
+          >
+            ▸
+          </span>
+          <span
+            class="flex-1 font-medium"
+          >
+            Parked
+          </span>
+          <span
+            class="shrink-0 font-mono text-xs text-ink4"
+          >
+            1
+          </span>
+        </button>
+        <div
+          class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+          style="grid-template-rows: 0fr;"
+        >
+          <div
+            class="overflow-hidden"
+            inert=""
+          >
+            <div
+              class="flex flex-col pt-1 gap-1.5"
+            >
+              <div
+                class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+              >
+                <button
+                  aria-label="To do: mark as doing"
+                  class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                  title="To do: mark as doing"
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-ink4 bg-surface"
+                  />
+                </button>
+                <div
+                  class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+                >
+                  <span
+                    class="min-w-0 break-words text-left text-xs text-ink2"
+                  >
+                    Shelved idea
+                  </span>
+                  <div
+                    class="flex min-w-0 flex-wrap items-center gap-1"
+                  />
+                </div>
+                <div
+                  class="flex shrink-0 items-center"
+                >
+                  <button
+                    aria-label="Edit Shelved idea"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Edit task"
+                  >
+                    ✎
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div
+        class="flex flex-col mt-1"
+      >
+        <button
+          aria-expanded="false"
+          class="flex w-full items-center gap-2 text-left text-sm text-ink2 transition-colors hover:text-ink"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block text-xs text-ink4 transition-transform duration-200 motion-reduce:transition-none"
+            style="transform: rotate(0deg);"
+          >
+            ▸
+          </span>
+          <span
+            class="flex-1 font-medium"
+          >
+            Done (1)
+          </span>
+        </button>
+        <div
+          class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+          style="grid-template-rows: 0fr;"
+        >
+          <div
+            class="overflow-hidden"
+            inert=""
+          >
+            <div
+              class="flex flex-col pt-1 gap-1.5"
+            >
+              <div
+                class="flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-1"
+              >
+                <button
+                  aria-label="Done: mark as to do"
+                  class="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center disabled:cursor-not-allowed"
+                  title="Done: mark as to do"
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    class="relative inline-flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[2px] border border-accent bg-accent"
+                  >
+                    <span
+                      class="mb-0.5 h-2 w-1 rotate-45 border-b-2 border-r-2 border-accent-ink"
+                    />
+                  </span>
+                </button>
+                <div
+                  class="flex min-w-0 flex-1 flex-col gap-0.5 py-1"
+                >
+                  <span
+                    class="min-w-0 break-words text-left text-xs text-ink2 line-through opacity-60"
+                  >
+                    Send the invoice
+                  </span>
+                  <div
+                    class="flex min-w-0 flex-wrap items-center gap-1"
+                  />
+                </div>
+                <div
+                  class="flex shrink-0 items-center"
+                >
+                  <button
+                    aria-label="Edit Send the invoice"
+                    class="inline-flex min-w-[var(--tap-min,24px)] items-center justify-center gap-1.5 rounded-[var(--radius-sm)] transition disabled:cursor-not-allowed min-h-[var(--tap-min,24px)] px-1.5 py-0.5 text-xs bg-transparent text-ink4 enabled:hover:text-ink2 disabled:text-faint"
+                    data-variant="tertiary"
+                    title="Edit task"
+                  >
+                    ✎
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

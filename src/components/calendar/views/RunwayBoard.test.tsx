@@ -33,7 +33,7 @@ vi.mock("../../../lib/ipc", () => ({
 }));
 
 const env = vi.hoisted(() => ({ depth: "standard" }));
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: env.depth, accent: "mono", colorblind: false }),
 }));
@@ -152,6 +152,7 @@ function task(over: Partial<Task> = {}): Task {
     source: "user",
     created_at: "2026-11-01T00:00:00Z",
     updated_at: "2026-11-01T00:00:00Z",
+    madeBy: null,
     ...over,
   };
 }
@@ -169,6 +170,7 @@ const milestone: Milestone = {
   source_type: null,
   external_id: null,
   sort_order: 0,
+  madeBy: null,
 };
 
 const stack: TaskStack = {

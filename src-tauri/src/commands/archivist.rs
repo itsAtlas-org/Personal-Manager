@@ -13,6 +13,7 @@ use crate::blocking::spawn_blocking_result;
 use crate::error::{Error, Result};
 use crate::ingest::{self, Document, IngestEvent};
 use crate::llm_gateway::{self, Role};
+use crate::notes;
 use crate::retrieval_config::RetrievalConfig;
 use crate::retrieval_diag;
 use crate::retrieval_feedback;
@@ -906,7 +907,7 @@ pub struct NoteIngest {
 
 /// The title for a note-derived document: its first non-blank line, trimmed and capped by
 /// characters (never splitting a codepoint), else a friendly fallback. Pure — see tests.
-fn derive_title(body: &str) -> String {
+pub(crate) fn derive_title(body: &str) -> String {
     const MAX: usize = 80;
     let line = body
         .lines()
@@ -940,12 +941,8 @@ pub async fn ingest_note(
     text: String,
 ) -> Result<NoteIngest> {
     spawn_blocking_result("ingest note", move || -> Result<NoteIngest> {
+        // An empty body is refused by `notes::save`, with the same words.
         let body = text.trim();
-        if body.is_empty() {
-            return Err(Error::Other(
-                "this note is empty — nothing to ingest".into(),
-            ));
-        }
         // Prefer the note's own (editable) title; fall back to the first non-blank line of the body
         // for untitled notes, preserving the previous behaviour.
         let title = {
@@ -958,28 +955,11 @@ pub async fn ingest_note(
         };
 
         let state = app.state::<AppState>();
-        state.sidecar.ensure_installed()?;
-        let gateway = {
-            let conn = state.conn()?;
-            state.gateway_for_write(&conn)?
-        };
-        let (vault, cipher) = state.markdown_io()?;
-        let (vault_root, manifest_cipher) = state.manifest_io()?;
-
-        let document = ingest::ingest_note_document(
-            &state,
-            &gateway,
-            &vault,
-            &cipher,
-            &vault_root,
-            &manifest_cipher,
-            &widget_id,
-            &title,
-            body,
-        )?;
+        let namespace = notes::Namespace::Legacy;
+        let document = notes::save(&state, &namespace, &widget_id, &title, body)?;
 
         Ok(NoteIngest {
-            source_id: format!("note:{widget_id}"),
+            source_id: namespace.source_id(&widget_id),
             document_id: document.id,
             reviewed: document.reviewed,
             project: document.project,

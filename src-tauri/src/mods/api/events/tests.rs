@@ -206,7 +206,8 @@ fn the_payload_is_not_built_unless_someone_may_hear_it() {
 fn a_name_with_no_row_is_never_sent() {
     let host = TestHost::new();
     let frame = open(&host, second("acme.tool", &["storage"]), &[]);
-    let said = emit_with(&host, "tasks.changed", &Audience::Everyone, |_| {
+    // `calendar.synced` is an MCP-only event (PR C3): until it has a row it is never sent.
+    let said = emit_with(&host, "calendar.synced", &Audience::Everyone, |_| {
         Ok(vec![json!({})])
     });
     assert_eq!(said, Emitted::default());
@@ -1425,6 +1426,317 @@ fn grants_changed_goes_to_each_running_mod_named_once_and_carries_nothing() {
     assert_eq!(twice.payloads(GRANTS_CHANGED), [json!({})]);
 }
 
+// ---- tasks.changed, projects.*, lifecycle.suspend (PR C, K3) -------------------------------------------
+
+/// A mod that holds `permissions`, running, with a live frame.
+fn holder(host: &TestHost, m: &'static str, permissions: &[&'static str]) -> Frame {
+    open(host, second(m, permissions), permissions)
+}
+
+/// Every project event, with a name an email address could be (a mod must learn nothing else).
+fn project_changes() -> [(&'static str, ProjectChange, Value); 3] {
+    [
+        (
+            PROJECTS_RENAMED,
+            ProjectChange::Renamed {
+                from: "me@example.com".into(),
+                to: "New \"name\"".into(),
+            },
+            json!({ "from": "me@example.com", "to": "New \"name\"" }),
+        ),
+        (
+            PROJECTS_MERGED,
+            ProjectChange::Merged {
+                from: "me@example.com".into(),
+                into: "Marketing".into(),
+            },
+            json!({ "from": "me@example.com", "into": "Marketing" }),
+        ),
+        (
+            PROJECTS_DELETED,
+            ProjectChange::Deleted {
+                name: "me@example.com".into(),
+            },
+            json!({ "name": "me@example.com" }),
+        ),
+    ]
+}
+
+#[test]
+fn a_mod_that_is_not_granted_receives_none_of_the_new_events() {
+    let host = TestHost::new();
+    let tasks = holder(&host, "acme.tasks", &["tasks.read"]);
+    let projects = holder(&host, "acme.projects", &["projects.read"]);
+    // Declared, never granted (second party: asked at install).
+    let ungranted = open(
+        &host,
+        second("acme.ungranted", &["tasks.read", "projects.read"]),
+        &[],
+    );
+    let denied = open(
+        &host,
+        second("acme.denied", &["tasks.read", "projects.read"]),
+        &[],
+    );
+    grant(&host, "acme.denied", "tasks.read", "denied");
+    grant(&host, "acme.denied", "projects.read", "denied");
+    // Never asked for either.
+    let undeclared = open(&host, second("acme.undeclared", &["storage"]), &[]);
+    // Unsigned: asked at first use, and not asked yet.
+    let unsigned = open(
+        &host,
+        ModRow::unsigned("acme.unsigned", &["tasks.read", "projects.read"]),
+        &[],
+    );
+    // A neighbouring permission isn't this one.
+    let writer = holder(&host, "acme.writer", &["tasks.write", "milestones.write"]);
+    let mut paused_row = second("acme.paused", &["tasks.read", "projects.read"]);
+    paused_row.state = "paused";
+    let paused = open(&host, paused_row, &["tasks.read", "projects.read"]);
+
+    let said = emit_with(&host, MOD_TASKS_CHANGED, &Audience::Everyone, |_| {
+        Ok(vec![json!({})])
+    });
+    assert_eq!((said.sent, said.refused), (1, 7), "tasks.changed");
+    for (name, change, _) in project_changes() {
+        let said = project_changed(&host, &change);
+        assert_eq!((said.sent, said.refused), (1, 7), "{name}");
+    }
+    assert_eq!(tasks.rec.names(), [MOD_TASKS_CHANGED]);
+    assert_eq!(
+        projects.rec.names(),
+        [PROJECTS_RENAMED, PROJECTS_MERGED, PROJECTS_DELETED]
+    );
+    for (who, frame) in [
+        ("ungranted", &ungranted),
+        ("denied", &denied),
+        ("undeclared", &undeclared),
+        ("unsigned, unasked", &unsigned),
+        ("a writer only", &writer),
+        ("paused", &paused),
+    ] {
+        assert!(frame.rec.all().is_empty(), "{who} was told something");
+    }
+    // A grant that arrives later is heard from then on.
+    grant(&host, "acme.ungranted", "projects.read", "granted");
+    project_changed(&host, &ProjectChange::Deleted { name: "X".into() });
+    assert_eq!(
+        ungranted.rec.payloads(PROJECTS_DELETED),
+        [json!({ "name": "X" })]
+    );
+    assert!(ungranted.rec.payloads(MOD_TASKS_CHANGED).is_empty());
+}
+
+#[test]
+fn a_locked_app_tells_no_frame_of_a_task_or_project_change() {
+    let host = TestHost::new();
+    let f = holder(&host, "acme.both", &["tasks.read", "projects.read"]);
+    host.0.locked.store(true, Ordering::SeqCst);
+    let said = emit_with(&host, MOD_TASKS_CHANGED, &Audience::Everyone, |_| {
+        Ok(vec![json!({})])
+    });
+    assert_eq!((said.sent, said.refused), (0, 1));
+    for (_, change, _) in project_changes() {
+        assert_eq!(project_changed(&host, &change).sent, 0);
+    }
+    // And the flush of a raised signal over a locked app says nothing either.
+    Hub::raise(&host.hub().tasks, host.store().store_epoch());
+    assert_eq!(flush_tasks_changed(&host).sent, 0);
+    assert!(f.rec.all().is_empty());
+    host.0.locked.store(false, Ordering::SeqCst);
+    project_changed(&host, &ProjectChange::Deleted { name: "X".into() });
+    assert_eq!(f.rec.names(), [PROJECTS_DELETED]);
+}
+
+#[test]
+fn the_payloads_carry_only_the_listed_keys() {
+    let host = TestHost::new();
+    let f = holder(&host, "acme.both", &["tasks.read", "projects.read"]);
+    // A project whose name is an email: it is the name, in the one key it belongs to, and nothing else.
+    for (name, change, expected) in project_changes() {
+        project_changed(&host, &change);
+        assert_eq!(f.rec.payloads(name), [expected], "{name}");
+    }
+    Hub::raise(&host.hub().tasks, host.store().store_epoch());
+    flush_tasks_changed(&host);
+    assert_eq!(
+        f.rec.payloads(MOD_TASKS_CHANGED),
+        [json!({})],
+        "a bare signal"
+    );
+    // Nothing else of the project or the task is in any of what the frame received.
+    for message in f.rec.all() {
+        let keys: Vec<String> = message
+            .payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let allowed: &[&str] = match message.name {
+            PROJECTS_RENAMED => &["from", "to"],
+            PROJECTS_MERGED => &["from", "into"],
+            PROJECTS_DELETED => &["name"],
+            _ => &[],
+        };
+        assert!(
+            keys.iter().all(|k| allowed.contains(&k.as_str())),
+            "{message:?}"
+        );
+    }
+}
+
+#[test]
+fn ten_thousand_task_writes_are_a_handful_of_events() {
+    let host = TestHost::with_interval(Duration::from_millis(100));
+    let f = holder(&host, "acme.tasks", &["tasks.read"]);
+    for _ in 0..10_000 {
+        tasks_changed(&host);
+    }
+    wait_for(|| !f.rec.payloads(MOD_TASKS_CHANGED).is_empty());
+    std::thread::sleep(Duration::from_millis(250));
+    let heard = f.rec.payloads(MOD_TASKS_CHANGED);
+    assert!(
+        (1..=3).contains(&heard.len()),
+        "10,000 writes made {} events",
+        heard.len()
+    );
+    assert!(heard.iter().all(|p| *p == json!({})));
+    // The next change starts a new interval, and a quiet hub holds nothing.
+    assert_eq!(host.hub().tasks_state(), (false, false));
+    tasks_changed(&host);
+    wait_for(|| f.rec.payloads(MOD_TASKS_CHANGED).len() > heard.len());
+}
+
+#[test]
+fn a_change_is_not_even_noted_while_no_frame_is_live() {
+    let host = TestHost::new();
+    tasks_changed(&host);
+    assert_eq!(host.hub().tasks_state(), (false, false));
+}
+
+#[test]
+fn a_task_signal_raised_over_one_store_is_never_sent_over_another() {
+    let host = TestHost::new();
+    let old = holder(&host, "acme.tasks", &["tasks.read"]);
+    let new_rec = Recorder::default();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fresh = new_rec.clone();
+    host.hook(move |host, at| {
+        if at == Point::BeforeEmit && !fired.swap(true, Ordering::SeqCst) {
+            let conn = host.store().take_conn().unwrap().unwrap();
+            *host.store().db.lock().unwrap() = Some(conn);
+            live_session(host, "acme.tasks", fresh.outbox());
+        }
+    });
+    Hub::raise(&host.hub().tasks, host.store().store_epoch());
+    assert_eq!(flush_tasks_changed(&host).sent, 0);
+    assert!(new_rec.all().is_empty(), "{:?}", new_rec.names());
+    assert!(old.rec.all().is_empty());
+    // A signal raised over the new store is sent over it.
+    Hub::raise(&host.hub().tasks, host.store().store_epoch());
+    assert_eq!(flush_tasks_changed(&host).sent, 1);
+    assert_eq!(new_rec.names(), [MOD_TASKS_CHANGED]);
+}
+
+#[test]
+fn lifecycle_suspend_needs_no_permission_and_reaches_only_the_named_session() {
+    let host = TestHost::new();
+    // No permission at all, and not granted anything.
+    let a = open(&host, second("acme.a", &[]), &[]);
+    let b = open(&host, second("acme.b", &[]), &[]);
+    let said = lifecycle_suspend(&host, &a.session, SuspendReason::Hidden);
+    assert_eq!((said.sent, said.refused), (1, 0));
+    assert_eq!(
+        a.rec.payloads(LIFECYCLE_SUSPEND),
+        [json!({ "reason": "hidden" })]
+    );
+    assert!(b.rec.all().is_empty(), "another mod's session isn't told");
+    // One mod's second frame isn't either: the session is the audience.
+    let second_frame = Recorder::default();
+    live_session(&host, "acme.a", second_frame.outbox());
+    lifecycle_suspend(&host, &a.session, SuspendReason::Quit);
+    assert!(second_frame.all().is_empty());
+    // Every reason is a plain word, and the payload is exactly `{reason}`.
+    for reason in SuspendReason::ALL {
+        let c = open(
+            &host,
+            second(
+                Box::leak(format!("acme.r{}", reason.word()).into_boxed_str()),
+                &[],
+            ),
+            &[],
+        );
+        lifecycle_suspend(&host, &c.session, reason);
+        assert_eq!(
+            c.rec.payloads(LIFECYCLE_SUSPEND),
+            [json!({ "reason": reason.word() })]
+        );
+    }
+    // A mod that isn't running, and a locked app, hear nothing.
+    let mut paused_row = second("acme.paused", &[]);
+    paused_row.state = "paused";
+    let paused = open(&host, paused_row, &[]);
+    assert_eq!(
+        lifecycle_suspend(&host, &paused.session, SuspendReason::Paused).sent,
+        0
+    );
+    host.0.locked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        lifecycle_suspend(&host, &b.session, SuspendReason::Locked).sent,
+        0
+    );
+    assert!(b.rec.all().is_empty());
+}
+
+/// The commands that re-key or drop a project's name reach the mods through one helper, after their
+/// mutation is committed, with names captured inside it.
+#[test]
+fn every_project_command_tells_the_mods_after_its_commit() {
+    let sources = sources();
+    let canon = &sources
+        .iter()
+        .find(|s| s.0 == "commands/canon.rs")
+        .unwrap()
+        .1;
+    for (command, captured) in [
+        ("pub async fn rename_entity", "Ok(rekey.change)"),
+        ("pub async fn merge_projects", "Ok(rekey.change)"),
+        (
+            "pub async fn delete_project",
+            "Ok(project_deleted(&canonical))",
+        ),
+        ("pub async fn merge_entities", "Ok(rekey.change)"),
+    ] {
+        let from = canon.find(command).unwrap_or_else(|| panic!("{command}"));
+        let body = &canon[from..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let mutation = body
+            .find("let change = spawn_entity_mutation(")
+            .unwrap_or_else(|| panic!("{command} keeps what its mutation returns"));
+        let capture = body
+            .find(captured)
+            .unwrap_or_else(|| panic!("{command}: {captured}"));
+        let said = body
+            .find("project_changed(&notify, change)")
+            .unwrap_or_else(|| panic!("{command} tells the mods"));
+        assert!(
+            mutation < capture && capture < said,
+            "{command}: names captured inside the mutation, announced after it"
+        );
+        assert!(
+            !body.contains("tasks_changed(&notify)"),
+            "{command}: one helper"
+        );
+    }
+    // The task views and the mods are told from the one place.
+    let tasks = &sources.iter().find(|s| s.0 == "tasks.rs").unwrap().1;
+    let from = tasks.find("pub fn announce_changed").unwrap();
+    let body = &tasks[from..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(body.contains("events::app_tasks_changed(app)"));
+}
+
 // ---- the table -------------------------------------------------------------------------------------
 
 #[test]
@@ -1460,4 +1772,10 @@ fn the_events_the_page_lets_through_are_exactly_the_events_there_are() {
     assert_eq!(permission(GRANTS_CHANGED), None);
     assert_eq!(permission(outbox::MOD_PAUSED), None);
     assert_eq!(permission(outbox::SESSION_CLOSED), None);
+    // PR C's: the data ones need the read the matching call needs, the lifecycle one nothing.
+    assert_eq!(permission(MOD_TASKS_CHANGED), Some("tasks.read"));
+    assert_eq!(permission(PROJECTS_RENAMED), Some("projects.read"));
+    assert_eq!(permission(PROJECTS_MERGED), Some("projects.read"));
+    assert_eq!(permission(PROJECTS_DELETED), Some("projects.read"));
+    assert_eq!(permission(LIFECYCLE_SUSPEND), None);
 }

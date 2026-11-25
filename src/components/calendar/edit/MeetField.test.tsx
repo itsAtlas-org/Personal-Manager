@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const openUrl = vi.hoisted(() => vi.fn<(url: string) => Promise<void>>());
 vi.mock("../../../lib/ipc", () => ({ openUrl: (url: string) => openUrl(url) }));
 
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

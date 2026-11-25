@@ -19,7 +19,7 @@ import { sectionLabel } from "./sections";
 
 // `useTheme` is stubbed so the section's <Button>s don't need the full ThemeProvider, matching
 // ConnectorItemRow.test.tsx.
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal()),
   useTheme: () => ({
     system: "slate",

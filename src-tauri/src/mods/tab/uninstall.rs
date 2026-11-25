@@ -49,6 +49,10 @@ pub struct UninstallPreview {
     pub stays: Stays,
     /// The safety list removed it: the dialog says why it is being uninstalled.
     pub removed_by_safety_list: bool,
+    /// The Pinboard's notes, when this is the first-party Pinboard: the dialog offers to keep them
+    /// first (D9, [`super::uninstall_notes`]). Filled by the command, which holds the app state the
+    /// plan needs; `None` for every other mod.
+    pub notes: Option<super::uninstall_notes::NotesPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -73,7 +77,19 @@ pub struct Stays {
     pub milestones: u64,
     /// Documents whose `source_id` begins `mod:<id>:`.
     pub documents: u64,
+    /// Documents the mod's namespace never held but that are its own notes by an older name (the
+    /// Pinboard's `note:<widget>`, [`LEGACY_NOTE_PREFIXES`]). Listed as kept and NEVER offered for
+    /// deletion: they predate the mod, and a document's deletion cannot be undone (D-4).
+    pub kept_documents: u64,
 }
+
+/// Documents a first-party mod owns by a name older than the mod (PR C, K5, D-4): the Pinboard saved
+/// notes as `note:<widget id>` long before it was a mod, so the `mod:<id>:` prefix never matches
+/// them. Per mod id: the prefix and the one family excluded from it. The same constant that keeps
+/// the legacy `source_id` mapping in the mod API (`note_calls`) in core for good, and like
+/// [`crate::mods::ledger`]'s `LEGACY_OVERLAY_SOURCES` it is a map of two named things, never a
+/// decision made from a name alone: it applies only to a signed first-party install of that id.
+const LEGACY_NOTE_PREFIXES: [(&str, &str, &str); 1] = [("atlas.pinboard", "note:", "note:chat-")];
 
 /// The folder's size in bytes: regular files only, links not followed, at most [`WALK_LIMIT`]
 /// entries looked at. A folder that isn't there is 0. Blocking.
@@ -165,10 +181,15 @@ fn read(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<Stored>> {
         Some(current) => read_gifts(conn, id, &current)?,
         None => Gifts::default(),
     };
+    let kept_documents = match read_current(conn, id)? {
+        Some(current) => read_kept(conn, id, &current)?,
+        None => 0,
+    };
     let stays = Stays {
         tasks: gifts.tasks.len() as u64,
         milestones: gifts.milestones.len() as u64,
         documents: gifts.documents.len() as u64,
+        kept_documents,
     };
     Ok(Some(Stored {
         name,
@@ -192,6 +213,7 @@ pub fn preview<S: LedgerStore>(ledger: &Ledger<'_, S>, id: &ModId) -> Result<Uni
         leaves: stored.leaves,
         stays: stored.stays,
         removed_by_safety_list: stored.reason.as_deref() == Some(store::REASON_BLACKLIST_REMOVED),
+        notes: None,
     })
 }
 
@@ -246,6 +268,28 @@ struct Gifts {
     tasks: Vec<i64>,
     milestones: Vec<i64>,
     documents: Vec<i64>,
+}
+
+/// What a first-party mod made under an older name, to list and to leave alone.
+fn read_kept(conn: &Connection, id: &ModId, current: &Current) -> rusqlite::Result<u64> {
+    // A dev-folder or unsigned `atlas.pinboard` is a stranger using the name: nothing is its own.
+    if current.maker.tier != "first" || !current.maker.signed {
+        return Ok(0);
+    }
+    let Some((_, prefix, except)) = LEGACY_NOTE_PREFIXES
+        .iter()
+        .find(|(m, _, _)| *m == id.as_str())
+    else {
+        return Ok(0);
+    };
+    // No install-time bound (the notes all predate the install), and plain prefix compares, so a
+    // `%` or `_` in a source id is never a wildcard.
+    bytes(
+        conn,
+        "SELECT COUNT(*) FROM documents \
+         WHERE substr(source_id, 1, length(?1)) = ?1 AND substr(source_id, 1, length(?2)) <> ?2",
+        params![prefix, except],
+    )
 }
 
 /// The installed row as gifts are judged against it: who it is, and when the row was made.

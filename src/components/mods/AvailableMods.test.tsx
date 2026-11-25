@@ -19,7 +19,7 @@ vi.mock("../../lib/ipc", () => ({
   installFromCatalogue: (id: string) => installFromCatalogue(id),
   modIcon: () => Promise.reject(new Error("none")),
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));

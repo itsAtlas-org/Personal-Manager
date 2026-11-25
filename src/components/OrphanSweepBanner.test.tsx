@@ -28,7 +28,7 @@ vi.mock("../lib/ipc", () => ({
 
 // The same stub the other component tests use: every <Button> reaches for `useTheme`, and the real
 // ThemeProvider pulls in IPC.
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({
     system: "slate",

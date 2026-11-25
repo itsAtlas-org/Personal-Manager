@@ -13,6 +13,7 @@ import type {
   DevModeState,
   DevSwitch,
   AiPromptInfo,
+  ExportOutcome,
   InstallResult,
   ModIcon,
   ModInfo,
@@ -23,9 +24,12 @@ import type {
   ModsChanged,
   ModsDisclaimerState,
   ModsHandoverState,
+  PinboardMoveState,
   ModsResetResult,
   ModsRetryResult,
   ModsSafetyStatus,
+  NotesPlan,
+  NoteSaved,
   Reloaded,
   Repaired,
   TestModStatus,
@@ -119,6 +123,7 @@ import type {
   AnswerRating,
   EventKind,
   Milestone,
+  PinboardEntry,
   MilestoneStatus,
   ChecklistItem,
   ImportResult,
@@ -363,7 +368,11 @@ export const setHelpMode = (enabled: boolean) => invoke<void>("set_help_mode", {
 export const appLockStatus = () => invoke<AppLockStatus>("app_lock_status");
 
 /** Turn the app-lock on/off. Enabling is rejected by the backend when unavailable. */
-export const setAppLock = (enabled: boolean) => invoke<void>("set_app_lock", { enabled });
+export const setAppLock = async (enabled: boolean) => {
+  // Turning the lock on stops every mod call in flight, so the frames are asked to save first.
+  if (enabled) await suspendModFrames("locked");
+  return invoke<void>("set_app_lock", { enabled });
+};
 
 /** Run the OS verification (Windows Hello / Touch ID) to lift the launch lock.
  *  Resolves true on success, false when the user cancels/fails; rejects when the
@@ -391,11 +400,14 @@ export const createReplacementStore = () => invoke<void>("create_replacement_sto
  *  to also move it to a cross-account-reachable folder in the SAME crash-recoverable
  *  migration — the guided share flow always does, since a shareable vault left in the
  *  per-user profile folder is unreachable by every other account. */
-export const createShareableVault = (passphrase: string, targetLocation?: string) =>
-  invoke<VaultOpOutcome>("create_shareable_vault", {
+export const createShareableVault = async (passphrase: string, targetLocation?: string) => {
+  // The move closes the store the frames save into: let them save first.
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("create_shareable_vault", {
     passphrase,
     targetLocation: targetLocation ?? null,
   });
+};
 
 /** Change a shareable vault's passphrase: re-derive the key and re-encrypt the Markdown.
  *
@@ -415,11 +427,17 @@ export const changeVaultPassphrase = (newPassphrase: string, confirmOwnershipTra
  *  confirmation to override it — when `status.ownership === "joined"`: it would re-key someone
  *  else's vault to THIS account's device key and move it out of the shared folder, with no
  *  passphrase that gets anyone back in. Leave the vault (`detachFromSharedVault`) instead. */
-export const makeVaultPrivate = () => invoke<VaultOpOutcome>("make_vault_private");
+export const makeVaultPrivate = async () => {
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("make_vault_private");
+};
 
 /** Move the vault to another folder (e.g. a shared location), keeping key + policy.
  *  Refuses a folder that already holds a different vault — join that one instead. */
-export const moveVault = (folder: string) => invoke<VaultOpOutcome>("move_vault", { folder });
+export const moveVault = async (folder: string) => {
+  await suspendModFrames("vault");
+  return invoke<VaultOpOutcome>("move_vault", { folder });
+};
 
 /** Unlock the current passphrase vault for this session and cache the key on this
  *  profile, so the next launch is silent. */
@@ -452,14 +470,19 @@ export const listSharedVaults = () => invoke<SharedVaultAd[]>("list_shared_vault
 /** Join an existing shared vault: unlock `folder` with the passphrase, cache the key for
  *  silent launches, and point this profile at it. The previous vault is set aside on disk,
  *  never deleted — `detachFromSharedVault` brings it back. */
-export const adoptSharedVault = (folder: string, passphrase: string) =>
-  invoke<AdoptOutcome>("adopt_shared_vault", { folder, passphrase });
+export const adoptSharedVault = async (folder: string, passphrase: string) => {
+  await suspendModFrames("vault");
+  return invoke<AdoptOutcome>("adopt_shared_vault", { folder, passphrase });
+};
 
 /** Leave the shared vault: retire this profile's pointer (kept on record so Settings can
  *  offer a rejoin) and reopen the vault set aside at join time — or a fresh, EMPTY one for
  *  an owner whose vault physically moved into the shared folder. The shared folder itself
  *  is untouched. Callers confirm via DetachConfirm first — this is not a silent switch. */
-export const detachFromSharedVault = () => invoke<void>("detach_from_shared_vault");
+export const detachFromSharedVault = async () => {
+  await suspendModFrames("vault");
+  return invoke<void>("detach_from_shared_vault");
+};
 
 /** Owner-side repair for a vault folder the OS is refusing (`fault.code === "denied"`):
  *  re-grant this account, restore the intended lockdown, and reopen the session. Works
@@ -993,6 +1016,11 @@ export const listMilestones = (project: string) =>
 /** Every project's milestones, resolved — read-only, for the calendar overlay (each carries its
  *  `project_name` for click-to-open). */
 export const listAllMilestones = () => invoke<Milestone[]>("list_all_milestones");
+
+/** The Pinboard's dated entries for the Calendar's overlay: the Pinboard mod's own rows once the
+ *  board has moved to it (an empty answer then means no dots), else derived from the stored board.
+ *  Read-only; the Calendar's one reader of them. */
+export const calendarPinboardEntries = () => invoke<PinboardEntry[]>("calendar_pinboard_entries");
 
 /** Add a milestone to a project. A non-null `eventUid` makes it calendar-linked. */
 export const addMilestone = (
@@ -1863,8 +1891,10 @@ export const restoreLocalBackup = (srcPath: string, passphrase: string) =>
  *  (ignored for a device-mode restore). Resolves with what the reconcile couldn't do cleanly (warnings)
  *  and where each restored mod ended up, read after the same-machine recovery has run. Developer mode
  *  and connected apps are reset on the restored store before it opens (spec §1.11). */
-export const switchToVault = (folder: string, makePrivate: boolean) =>
-  invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+export const switchToVault = async (folder: string, makePrivate: boolean) => {
+  await suspendModFrames("vault");
+  return invoke<SwitchOutcome>("switch_to_vault", { folder, makePrivate });
+};
 
 /** Whether backups also carry the mods' own saved data ("Also save mod data in my backups"). On
  *  unless turned off. Mod secrets and connected apps never leave in any backup or export. */
@@ -2225,6 +2255,43 @@ export const modThemeChanged = (session: string, theme: unknown) =>
  *  ended session is fine. */
 export const modFrameClose = (session: string) => invoke<void>("mod_frame_close", { session });
 
+/** Why PM is about to take a frame down: the seven words a frame is told (`lifecycle.suspend`'s
+ *  `{reason}`, `SuspendReason` in Rust). */
+export type ModSuspendReason =
+  "hidden" | "locked" | "paused" | "uninstalled" | "updated" | "vault" | "quit";
+
+/** Tell the frames of `modId` (every frame with none) that PM is about to take them down, and wait
+ *  until each has saved and answered or PM's own deadline (1.5 s) has passed. The backend holds the
+ *  deadline; the page's is a little longer, so a backend that never answers costs the person this
+ *  and no more. */
+export const modFramesSuspend = (reason: ModSuspendReason, modId?: string) =>
+  invoke<void>("mod_frames_suspend", { reason, modId: modId ?? null });
+
+/** The frame of `session` answered `{ flushed: true }` on its port: what it held is saved. Counts only
+ *  for a session PM asked, so a frame cannot answer early. */
+export const modFrameFlushed = (session: string) => invoke<void>("mod_frame_flushed", { session });
+
+/** The page's longest wait for [`modFramesSuspend`]: past the backend's deadline, so it is the
+ *  backend's own that normally ends the wait. */
+export const SUSPEND_PAGE_DEADLINE_MS = 2500;
+
+/** [`modFramesSuspend`] that never rejects and never waits past [`SUSPEND_PAGE_DEADLINE_MS`]: what
+ *  every path that retires a frame awaits. A failure or a silence means the frame is taken down
+ *  without waiting. */
+export async function suspendModFrames(reason: ModSuspendReason, modId?: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SUSPEND_PAGE_DEADLINE_MS);
+  });
+  try {
+    await Promise.race([modFramesSuspend(reason, modId).catch(() => {}), deadline]);
+  } catch {
+    // A synchronous throw from a broken bridge: nothing to wait for.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Relay one bridge call: `args` is the JSON text the bridge measured, so the backend checks its size
  *  before parsing it. The backend resolves the session to its mod (the frame never names one) and
  *  always answers with a reply, `{kind: "value" | "page" | "error", …}`, which modBridge.ts reads;
@@ -2233,6 +2300,16 @@ export const modFrameClose = (session: string) => invoke<void>("mod_frame_close"
  *  `readVectors` reads it). */
 export const modCall = (session: string, method: string, args: string) =>
   invoke<unknown>("mod_call", { session, method, args });
+
+/** Answer the question PM asked the person for a mod's call (PR C). A `mod_call` reply carrying
+ *  `MOD-2003` holds `{token, summary}`: PM's own dialog shows the summary, and this sends the person's
+ *  answer with the token, which is good once and for a minute. The backend finds the action it stored
+ *  with the token, checks the call again, and performs it (Accept) or answers `MOD-2004` (Decline); the
+ *  page never performs anything itself and never names an action. The answer is a reply like
+ *  `modCall`'s, and the page relays it as the frame's answer. The token is the page's: it is never
+ *  handed to the frame. */
+export const modConfirm = (token: string, accept: boolean) =>
+  invoke<unknown>("mod_confirm", { token, accept });
 
 // --- Mods: the Mods tab (Mods spec §1.13) -------------------------------------------------------
 // Main window only, and every one refuses while the vault is locked or another PM window is the
@@ -2338,6 +2415,20 @@ export const uninstallPreview = (modId: string) =>
 export const uninstallMod = (modId: string, alsoDeleteGifts: boolean) =>
   invoke<ModUninstalled>("uninstall_mod", { modId, alsoDeleteGifts });
 
+/** The Pinboard's notes as the uninstall dialog would keep them (null for any other mod). */
+export const uninstallNotesPlan = (modId: string) =>
+  invoke<NotesPlan | null>("uninstall_notes_plan", { modId });
+
+/** Save one of the Pinboard's notes as a document and read it back; the dialog calls it note by note
+ *  and uninstalls only when every call answered. Rejects with a typed refusal. */
+export const uninstallSaveNote = (modId: string, key: string) =>
+  invoke<NoteSaved>("uninstall_save_note", { modId, key });
+
+/** Write the Pinboard's notes as `.md` files (`notes`) and its whole board as one `.json` file
+ *  (`board`) into a folder PM asks the person for. Null when they cancel. */
+export const uninstallExportFiles = (modId: string, notes: boolean, board: boolean) =>
+  invoke<ExportOutcome | null>("uninstall_export_files", { modId, notes, board });
+
 /** Pause a running mod: its data stays. */
 export const pauseMod = (modId: string) => invoke<void>("pause_mod", { modId });
 
@@ -2421,6 +2512,27 @@ export const modsHandoverState = () => invoke<ModsHandoverState>("mods_handover_
  *  every vault on the device is owed them once. */
 export const adoptMapPrefs = (layoutMode: string, cohesion: number, labels: boolean) =>
   invoke<boolean>("adopt_map_prefs", { layoutMode, cohesion, labels });
+
+/** Hand this device's three Pinboard nags (null: this device never set it) to the Pinboard mod's
+ *  storage; it fills only what the mod lacks. Resolves true when it did or there was nothing left.
+ *  The device's own keys stay. Dormant until PM's move of the Pinboard has run. */
+export const adoptPinboardPrefs = (
+  confirmDelete: boolean | null,
+  showPast: boolean | null,
+  showCompleted: boolean | null,
+) => invoke<boolean>("adopt_pinboard_prefs", { confirmDelete, showPast, showCompleted });
+
+/** What PM's strips about the Pinboard's move say: both boards kept, a copy with characters
+ *  replaced, a board that cannot move yet. Booleans and a word, never the board's text. */
+export const pinboardMoveState = () => invoke<PinboardMoveState>("pinboard_move_state");
+
+/** "Use my old board": the mod's board is saved as "board before move" first, then the old one
+ *  becomes the mod's. Nothing is deleted. Rejects (nothing changed) with the reason in words. */
+export const pinboardUseOldBoard = () => invoke<void>("pinboard_use_old_board");
+
+/** Clear one of the move's notes: `conflict` ("Keep this one") or `repaired`. */
+export const pinboardMoveDismiss = (note: "conflict" | "repaired") =>
+  invoke<void>("pinboard_move_dismiss", { note });
 
 /** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
  *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows

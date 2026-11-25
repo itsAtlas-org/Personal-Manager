@@ -13,7 +13,7 @@ whenever a sync teaches something new.
 
 ## Provider — required
 - Components call `useTheme()` (e.g. `Button` reads `system` to branch the terminal look), so every
-  preview must be wrapped in a provider that supplies `ThemeProvider` (`src/theme/ThemeContext.tsx`).
+  preview must be wrapped in a provider that supplies `ThemeProvider` (`src/theme/ThemeContext.tsx`, a thin wrapper that adds the settings store to the kit's context in `src/kit/theme.tsx`).
 - **`cfg.provider` is `PreviewSurface`** (`.design-sync/preview-provider.tsx`), NOT `ThemeProvider`
   directly. The primitives use light-on-dark text designed for the app's dark canvas, but the
   upstream preview-card body is hardcoded white (`emit.mjs` — a contract file, do not fork), so plain
@@ -71,3 +71,6 @@ whenever a sync teaches something new.
   `cfg.cssEntry` before running the converter.
 - The committed `dist/` can be stale relative to `src/` (package.json version lagged HEAD at first
   sync). Always rebuild before syncing so the CSS matches the current primitives.
+- Components moved into the mod kit (Button, Input, Select, SegmentedControl, Collapsible, Modal,
+  ConfirmDialog) are one-line re-exports at `src/components/ui/<Name>.tsx`; their source (and props) is
+  `src/kit/ui/<Name>.tsx`, which is what `componentSrcMap` names. Point a new moved component there too.

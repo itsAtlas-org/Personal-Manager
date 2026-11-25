@@ -38,6 +38,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 // @ts-expect-error no @types/node
 import { dirname, join, relative, resolve, sep } from "node:path";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 import { build as viteBuild, defineConfig, type Plugin, type UserConfig } from "vite";
 
 // @ts-expect-error no @types/node (import.meta.dirname)
@@ -163,6 +165,103 @@ function classicHtml(): Plugin {
   };
 }
 
+/**
+ * The stylesheet with its comments removed. A `/*` inside a quoted string is not a comment opener, so
+ * the scan walks the text and copies a string through whole: a regex over the raw text would take
+ * `a{content:"/*"} @import "./x.css"; b{content:"*\/"}` for one long comment and miss the `@import`
+ * between the two strings, while Tailwind (which reads strings as strings) would follow it. A string
+ * ends at its closing quote, or at a newline (an unterminated string is an error to Tailwind). A
+ * backslash outside a string escapes the next character, so an escaped slash before a star opens no
+ * comment, and a directive between two such pairs is still read.
+ */
+export function withoutComments(css: string): string {
+  let out = "";
+  let i = 0;
+  while (i < css.length) {
+    const c = css[i];
+    if (c === "/" && css[i + 1] === "*") {
+      const end = css.indexOf("*/", i + 2);
+      i = end === -1 ? css.length : end + 2;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < css.length && css[j] !== c && css[j] !== "\n") j += css[j] === "\\" ? 2 : 1;
+      out += css.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === "\\") {
+      // An escape outside a string takes the next character whole: a backslash, a slash and a star
+      // are an escaped slash and a star, not a comment opener, exactly as Tailwind reads them.
+      out += css.slice(i, i + 2);
+      i += 2;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * What Tailwind may scan for class names in a mod's build: the kit (`src/kit`, the only part of PM a
+ * mod imports) and the mod's own `src/`, test files excluded, and nothing else. Tailwind's own
+ * default is the folder of the stylesheet (it would miss the kit), and an `@source` written by hand
+ * could name any folder (it would pull core's classes into a mod's CSS). So a mod's stylesheet says
+ * only `@import "tailwindcss";` and this plugin writes the rest: `source(none)` switches the automatic
+ * scan off, and the `@source` lines name the two folders. Any other form of a Tailwind import, an
+ * `@source` of the mod's own, or any other `@import`, `@config`, `@plugin` or `@reference` (the file
+ * they load never reaches this plugin) fails the build, as `classicHtml` does for a script tag it did not expect.
+ */
+export function tailwindScan(modSrc: string): Plugin {
+  const folders = [join(repoRoot, "src", "kit"), modSrc].map((d) => d.split(sep).join("/"));
+  const inModSrc = (id: string) => {
+    const file = id.replace(/\?.*$/, "").split(sep).join("/");
+    return file.startsWith(`${folders[1]}/`);
+  };
+  const scan = folders
+    .flatMap((d) => [`@source "${d}";`, `@source not "${d}/**/*.test.*";`])
+    .join("\n");
+  return {
+    name: "mod-tailwind-scan",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.replace(/\?.*$/, "").endsWith(".css")) return null;
+      // A comment is not code: the stylesheet may explain these directives without using them.
+      const live = withoutComments(code);
+      if (/@source\b/i.test(live)) {
+        throw new Error(
+          "a mod's stylesheet may not use @source: the build names the folders Tailwind scans",
+        );
+      }
+      const imports = live.match(/@import[^;]*tailwindcss[^;]*;/g) ?? [];
+      if (
+        imports.length > 1 ||
+        (imports.length === 1 && !/^@import\s+(["'])tailwindcss\1\s*;$/.test(imports[0]))
+      ) {
+        throw new Error(
+          'a mod\'s stylesheet imports Tailwind as one `@import "tailwindcss";`: the build limits what it scans',
+        );
+      }
+      // Tailwind resolves a stylesheet's own `@import` itself, from disk: the imported file never
+      // reaches this hook, so an `@source` (or a second Tailwind import) inside it would go unseen. A
+      // mod's own stylesheet therefore imports nothing but the one Tailwind import, and names no
+      // `@config`, `@plugin` or `@reference` (each loads another file the same way).
+      if (inModSrc(id)) {
+        const other = live.replace(/@import\s+(["'])tailwindcss\1\s*;/gi, "");
+        if (/@(?:import|config|plugin|reference)\b/i.test(other)) {
+          throw new Error(
+            "a mod's stylesheet may not use @import (but for Tailwind), @config, @plugin or @reference: the build cannot see the file they load",
+          );
+        }
+      }
+      if (imports.length === 0) return null;
+      const bare = /@import\s+(["'])tailwindcss\1\s*;/;
+      return {
+        code: code.replace(bare, `@import "tailwindcss" source(none);\n${scan}`),
+        map: null,
+      };
+    },
+  };
+}
+
 /** Writes the record of which node_modules files the bundle (and its workers) contains. */
 function moduleRecord(modDir: string, outDir: string, collected: Set<string>): Plugin {
   return {
@@ -202,7 +301,22 @@ export function modConfig(modDir: string): UserConfig {
     // Nothing from the developer's machine reaches the bundle: no .env files, no public/ copy.
     envDir: false,
     publicDir: false,
-    plugins: [inlineWorker(collected), moduleRecord(dir, outDir, collected), classicHtml()],
+    // React (and any package that branches on it) picks its production build from this, and Vite reads
+    // NODE_ENV from the developer's shell first: a shell with NODE_ENV=development, or a test runner,
+    // would bundle React's development build, a different (and larger) bundle and a different
+    // modules.json from the same sources. A mod ships production code whatever the environment says.
+    define: { "process.env.NODE_ENV": JSON.stringify("production") },
+    // The same for JSX: Vite compiles it as development JSX (`jsxDEV`, with the source file's absolute
+    // path in every call) unless NODE_ENV says production, which is the other half of that rule.
+    oxc: { jsx: { development: false } },
+    plugins: [
+      inlineWorker(collected),
+      react(),
+      tailwindScan(join(dir, "src")),
+      tailwindcss(),
+      moduleRecord(dir, outDir, collected),
+      classicHtml(),
+    ],
     build: {
       outDir,
       emptyOutDir: true,

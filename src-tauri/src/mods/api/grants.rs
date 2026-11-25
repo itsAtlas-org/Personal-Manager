@@ -124,6 +124,9 @@ pub struct ModFacts {
     pub declared: BTreeSet<String>,
     /// Its manifest's storage keys and their classes (`data.keys`).
     pub data_classes: BTreeMap<String, DataClass>,
+    /// The contributions its installed manifest declares (`calendar.overlay`, `nav.tab`, `help`):
+    /// what PM draws for it without running its code, and so what a call that feeds one is gated on.
+    pub contributions: BTreeSet<String>,
 }
 
 impl ModFacts {
@@ -168,6 +171,21 @@ pub fn manifest_declarations(manifest: &str) -> (BTreeSet<String>, BTreeMap<Stri
     (declared, classes)
 }
 
+/// The contributions a stored manifest declares: the names under its `contributions` that hold a
+/// value. A manifest that can't be read declares none.
+pub fn manifest_contributions(manifest: &str) -> BTreeSet<String> {
+    let Ok(value) = serde_json::from_str::<Value>(manifest) else {
+        return BTreeSet::new();
+    };
+    value["contributions"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// The installed mod `id`, or `None` when it has no row (uninstalled).
 pub fn read_mod(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<ModFacts>> {
     conn.query_row(
@@ -176,6 +194,7 @@ pub fn read_mod(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<ModFac
         |r| {
             let manifest: String = r.get(4)?;
             let (declared, data_classes) = manifest_declarations(&manifest);
+            let contributions = manifest_contributions(&manifest);
             Ok(ModFacts {
                 id: id.clone(),
                 state: r.get(0)?,
@@ -183,6 +202,7 @@ pub fn read_mod(conn: &Connection, id: &ModId) -> rusqlite::Result<Option<ModFac
                 tier: PolicyTier::of(r.get(2)?, &r.get::<_, String>(3)?),
                 declared,
                 data_classes,
+                contributions,
             })
         },
     )
@@ -621,6 +641,20 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_manifest_declares_its_contributions() {
+        let with = |contributions: &str| format!(r#"{{"contributions": {contributions}}}"#);
+        assert_eq!(
+            manifest_contributions(&with(
+                r#"{"nav.tab": {"label": "x"}, "calendar.overlay": {"label": "y"}, "help": null}"#
+            )),
+            BTreeSet::from(["nav.tab".to_owned(), "calendar.overlay".to_owned()])
+        );
+        for none in ["not json", "{}", &with("[]"), &with("{}"), &with("null")] {
+            assert!(manifest_contributions(none).is_empty(), "{none}");
+        }
+    }
+
+    #[test]
     fn running_means_active_and_turned_on() {
         let mut f = ModFacts {
             id: ModId::parse("acme.tool").unwrap(),
@@ -629,6 +663,7 @@ mod tests {
             tier: First,
             declared: BTreeSet::new(),
             data_classes: BTreeMap::new(),
+            contributions: BTreeSet::new(),
         };
         assert!(f.running().is_ok());
         f.consented = false;

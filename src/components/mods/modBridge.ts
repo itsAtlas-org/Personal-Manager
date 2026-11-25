@@ -11,7 +11,10 @@
 //   the frame's origin is opaque, and once per session: it posts `{ pm: "port", version: 1 }` to the
 //   frame with a MessagePort transferred. Both sides post with "*", because an opaque origin can't be
 //   named. Every mod's origin is "null", so the origin can't tell two mods apart; the `source` does.
-// - Over the port the frame sends a call, `{ id, method, args }`, or a height request, `{ resize }`.
+// - Over the port the frame sends a call, `{ id, method, args }`, a height request, `{ resize }`, or
+//   (once PM has told it `lifecycle.suspend`, which it needs no permission to hear) its answer,
+//   `{ flushed: true }`: what it was holding is saved, so PM may take the frame down. PM never
+//   answers that either; the page waits for it up to its own deadline (ModFrame.tsx).
 //   PM answers a call with `{ id, ok: true, result }` or `{ id, ok: false, error }`, where `error` is
 //   `{ code, message }` with a stable `MOD-####` code (ERROR_CODES.md), plus `permission` when a
 //   permission is the reason and `revision` when a stored value moved on. PM never answers a height
@@ -67,12 +70,15 @@ export const MAX_FRAME_HEIGHT = 4096;
  *  turns into PM's first-use question; `notGranted` is what a mod is told after the person says no
  *  to it. The lines from `aiCapReached` on are the experimental calls' (PR B), listed so a page-side
  *  answer for `ai.complete`, `net.fetch`, `secrets.set` or `notify` names a code by word and the
- *  same test holds it to the backend's; their numbers freeze at the first release after PR C. */
+ *  same test holds it to the backend's; their numbers freeze at the first release after PR C. The
+ *  last three are PR C's: `needsConfirmation` is the one PM's page turns into its own yes/no question
+ *  (answered with `mod_confirm`), and `declined` is what the mod is told after a no. */
 export const MOD_ERRORS = {
   unknownMethod: "MOD-1001",
   badArgs: "MOD-1003",
   notGranted: "MOD-2001",
   needsPrompt: "MOD-2002",
+  rateLimited: "MOD-3001",
   tooLarge: "MOD-3002",
   internal: "MOD-9001",
   aiCapReached: "MOD-3004",
@@ -87,11 +93,20 @@ export const MOD_ERRORS = {
   tooManyRedirects: "MOD-6005",
   responseTooLarge: "MOD-6006",
   secretNotSet: "MOD-6007",
+  engineNotReady: "MOD-5007",
+  needsConfirmation: "MOD-2003",
+  declined: "MOD-2004",
 } as const;
 
 /** The calls PM's page performs once the backend has authorised them (`api::PageAction`), because
  *  only the page holds what they need. A test in handlers.rs pins this list to the backend's. */
-export const PAGE_ACTIONS = ["theme.get", "ui.openDocument", "secrets.set", "notify"] as const;
+export const PAGE_ACTIONS = [
+  "theme.get",
+  "ui.openDocument",
+  "secrets.set",
+  "notify",
+  "ui.openTaskEditor",
+] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];
 
@@ -104,6 +119,11 @@ export const MOD_EVENTS = [
   "grants.changed",
   "mod.paused",
   "session.closed",
+  "tasks.changed",
+  "projects.renamed",
+  "projects.merged",
+  "projects.deleted",
+  "lifecycle.suspend",
 ] as const;
 
 export type ModEventName = (typeof MOD_EVENTS)[number];
@@ -144,6 +164,7 @@ export type PortMessage =
   | { kind: "call"; id: number; method: string; args: string }
   | { kind: "resize"; height: number }
   | { kind: "ack"; seq: number }
+  | { kind: "flushed" }
   | { kind: "refuse"; id: number; error: ModError }
   | { kind: "drop" };
 
@@ -237,6 +258,18 @@ export function refusal(code: keyof typeof MOD_ERRORS, message: string): ModErro
   return { code: MOD_ERRORS[code], message };
 }
 
+/** Thrown by a page action that PM's page, and not the backend, has to refuse (only the page knows
+ *  that an editor is already open): the frame is told this code, never PM's own failure. */
+export class PageRefusal extends Error {
+  constructor(
+    readonly code: keyof typeof MOD_ERRORS,
+    message: string,
+  ) {
+    super(message);
+    this.name = "PageRefusal";
+  }
+}
+
 /** A call's arguments as exactly the JSON text PM will send, measured in bytes. Structured clone
  *  carries more than JSON (a BigInt, a cycle), and none of it is an argument PM's API takes. */
 export function encodeArgs(
@@ -267,6 +300,8 @@ export function readPortMessage(data: unknown): PortMessage {
       ? { kind: "ack", seq }
       : DROP;
   }
+  // The answer to `lifecycle.suspend`: the frame has saved what it held. Only `true` says so.
+  if ("flushed" in data) return data.flushed === true ? { kind: "flushed" } : DROP;
   const id = data.id;
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return DROP;
   const method = data.method;

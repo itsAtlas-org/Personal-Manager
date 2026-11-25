@@ -17,6 +17,7 @@ const install = vi.fn<() => Promise<void>>();
 const download = vi.fn(async () => undefined);
 const showMainWindow = vi.fn<() => Promise<void>>();
 const relaunch = vi.fn(async () => undefined);
+const suspendModFrames = vi.fn<(reason: string) => Promise<void>>(async () => undefined);
 const macosVersion = vi.fn<() => Promise<string | null>>();
 /** The feed as the updater received it; a test sets the minimum macOS it states. */
 let rawJson: Record<string, unknown> = {};
@@ -36,6 +37,7 @@ vi.mock("./ipc", () => ({
   packageManagedLinux: vi.fn(async () => false),
   macosVersion: () => macosVersion(),
   showMainWindow: () => showMainWindow(),
+  suspendModFrames: (reason: string) => suspendModFrames(reason),
 }));
 
 import { useUpdater } from "./useUpdater";
@@ -94,6 +96,21 @@ describe("useUpdater restart", () => {
     await waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
     expect(showMainWindow).not.toHaveBeenCalled();
     expect(result.current.installFailed).toBe(false);
+  });
+
+  it("asks the mods' frames to save before the installer can end the app", async () => {
+    const order: string[] = [];
+    suspendModFrames.mockImplementation(async (reason: string) => {
+      order.push(`suspend:${reason}`);
+    });
+    install.mockImplementation(async () => {
+      order.push("install");
+    });
+    const { result } = await staged();
+
+    act(() => result.current.restart());
+    await waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["suspend:quit", "install"]);
   });
 });
 

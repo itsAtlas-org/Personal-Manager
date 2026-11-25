@@ -76,12 +76,21 @@ pub enum Code {
     ResponseTooLarge,
     /// The mod's key for the website has not been typed in.
     SecretNotSet,
+    // PR C's codes (K1). Appended, never reordered.
+    /// The document engine isn't set up, and PM provisions nothing for a mod (the page shows a PM
+    /// "Set it up" button).
+    EngineNotReady,
+    /// The call needs the person's yes first: the error carries the token PM's own question is
+    /// answered with, and the question's text ([`Confirmation`]).
+    NeedsConfirmation,
+    /// The person said no to PM's question.
+    Declined,
 }
 
 // `ALL` and `name` are the tests' (and the Developer tab's, slice 6).
 #[cfg_attr(not(test), allow(dead_code))]
 impl Code {
-    pub const ALL: [Code; 26] = [
+    pub const ALL: [Code; 29] = [
         Self::UnknownMethod,
         Self::RemovedMethod,
         Self::BadArgs,
@@ -108,6 +117,9 @@ impl Code {
         Self::TooManyRedirects,
         Self::ResponseTooLarge,
         Self::SecretNotSet,
+        Self::EngineNotReady,
+        Self::NeedsConfirmation,
+        Self::Declined,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -138,6 +150,9 @@ impl Code {
             Self::TooManyRedirects => "MOD-6005",
             Self::ResponseTooLarge => "MOD-6006",
             Self::SecretNotSet => "MOD-6007",
+            Self::EngineNotReady => "MOD-5007",
+            Self::NeedsConfirmation => "MOD-2003",
+            Self::Declined => "MOD-2004",
         }
     }
 
@@ -170,6 +185,9 @@ impl Code {
             Self::TooManyRedirects => "tooManyRedirects",
             Self::ResponseTooLarge => "responseTooLarge",
             Self::SecretNotSet => "secretNotSet",
+            Self::EngineNotReady => "engineNotReady",
+            Self::NeedsConfirmation => "needsConfirmation",
+            Self::Declined => "declined",
         }
     }
 }
@@ -193,6 +211,20 @@ pub struct ModError {
     /// The current revision, with [`Code::StaleRevision`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
+    /// The question PM's page must ask, with [`Code::NeedsConfirmation`] (and only then).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<Confirmation>,
+}
+
+/// What PM's page needs to ask the person one yes/no question for a call: the single-use token its
+/// answer is sent back with (`mod_confirm`), and the text of the question. The text is built in Rust
+/// from PM's own data, never from what the mod said (`mods::confirm`). It is for PM's page: the page
+/// never hands the token to the frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Confirmation {
+    pub token: String,
+    pub summary: String,
 }
 
 impl ModError {
@@ -202,6 +234,7 @@ impl ModError {
             message: message.into(),
             permission: None,
             revision: None,
+            confirm: None,
         }
     }
 
@@ -307,10 +340,53 @@ impl ModError {
         )
     }
 
-    pub fn secret_not_set() -> Self {
+    pub fn key_not_stored() -> Self {
         Self::new(
             Code::SecretNotSet,
             "This mod's key for that website hasn't been set.",
+        )
+    }
+}
+
+// PR C's errors (K1), each one fixed PM sentence like the experimental calls' above.
+impl ModError {
+    pub fn engine_not_ready() -> Self {
+        Self::new(
+            Code::EngineNotReady,
+            "PM's document engine isn't set up yet.",
+        )
+    }
+
+    /// The call waits for the person's yes. `summary` is PM's own question, built from PM's data.
+    pub fn needs_confirmation(token: String, summary: String) -> Self {
+        Self {
+            confirm: Some(Confirmation { token, summary }),
+            ..Self::new(
+                Code::NeedsConfirmation,
+                "PM needs the person's OK before this can go ahead.",
+            )
+        }
+    }
+
+    pub fn declined() -> Self {
+        Self::new(Code::Declined, "The person chose not to allow that.")
+    }
+
+    /// A confirmation PM no longer holds: answered already, run out, revoked or never asked. It is
+    /// answered `MOD-2004` like a no, so a token that isn't live does nothing and tells a caller
+    /// nothing more than that the person didn't agree to it.
+    pub fn confirmation_gone() -> Self {
+        Self::new(
+            Code::Declined,
+            "That question has already been answered or has run out, so nothing was done.",
+        )
+    }
+
+    /// What the person was asked about changed while the question was open.
+    pub fn changed_while_asking() -> Self {
+        Self::new(
+            Code::StaleRevision,
+            "That changed while the question was open, so nothing was done.",
         )
     }
 }
@@ -413,7 +489,7 @@ mod tests {
                 code.name()
             );
         }
-        assert_eq!(seen, 6 + Code::ALL.len() - SHIPPED_BY_PR_A.len(), "{block}");
+        assert_eq!(seen, 7 + Code::ALL.len() - SHIPPED_BY_PR_A.len(), "{block}");
     }
 
     /// The codes PR A shipped, which a mod may already branch on. A test pins them so a later edit
@@ -463,7 +539,11 @@ mod tests {
             ModError::network_unavailable(),
             ModError::too_many_redirects(),
             ModError::response_too_large(),
-            ModError::secret_not_set(),
+            ModError::key_not_stored(),
+            // PR C's (K1), in `Code::ALL`'s order.
+            ModError::engine_not_ready(),
+            ModError::needs_confirmation(String::new(), String::new()),
+            ModError::declined(),
         ];
         let new_codes: Vec<Code> = Code::ALL[SHIPPED_BY_PR_A.len()..].to_vec();
         assert_eq!(
@@ -497,6 +577,50 @@ mod tests {
         }
         assert_eq!(Code::AiCapReached.as_str(), "MOD-3004");
         assert_eq!(Code::CallTimedOut.as_str(), "MOD-3005");
+    }
+
+    /// PR C's three codes (K1) keep the numbers the plan gave them, sit last in `Code::ALL` after
+    /// `SecretNotSet`, and the confirmation travels with its token and its question; no other error
+    /// carries one.
+    #[test]
+    fn prs_c_codes_are_pinned_and_a_confirmation_carries_its_token_and_question() {
+        let tail: Vec<(&str, &str)> = Code::ALL[Code::ALL.len() - 4..]
+            .iter()
+            .map(|c| (c.name(), c.as_str()))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                ("secretNotSet", "MOD-6007"),
+                ("engineNotReady", "MOD-5007"),
+                ("needsConfirmation", "MOD-2003"),
+                ("declined", "MOD-2004"),
+            ]
+        );
+        let e = ModError::needs_confirmation("ab".into(), "Delete it?".into());
+        assert_eq!(e.code, Code::NeedsConfirmation);
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            serde_json::json!({
+                "code": "MOD-2003",
+                "message": e.message,
+                "confirm": {"token": "ab", "summary": "Delete it?"}
+            })
+        );
+        for plain in [
+            ModError::declined(),
+            ModError::engine_not_ready(),
+            ModError::confirmation_gone(),
+            ModError::changed_while_asking(),
+        ] {
+            assert!(plain.confirm.is_none(), "{plain}");
+            assert!(serde_json::to_value(&plain)
+                .unwrap()
+                .get("confirm")
+                .is_none());
+        }
+        assert_eq!(ModError::declined().code, Code::Declined);
+        assert_eq!(ModError::engine_not_ready().code, Code::EngineNotReady);
     }
 
     #[test]

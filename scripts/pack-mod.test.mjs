@@ -396,6 +396,7 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         { id: "ui.tab", why: "Shows its tab." },
         { id: "storage", why: "Keeps settings." },
         { id: "internet", why: "Talks to a service." },
+        { id: "projects.read", why: "Keeps its cards on the right project." },
       ],
       internetHosts: ["api.example.com"],
       secrets: [{ name: "api_key", host: "api.example.com", header: "X-Api-Key" }],
@@ -422,6 +423,37 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
       api: "1.0-1.0",
       entryPage: "app/index.html",
     });
+  });
+
+  // The path grammar's shared vectors (tests/mod-project-ref-paths.json), read by package.rs's own
+  // test too: the two verifiers accept and refuse exactly the same paths.
+  const VECTORS = JSON.parse(
+    readFileSync(join(repoRoot, "tests/mod-project-ref-paths.json"), "utf8"),
+  );
+  const withPath = (path) =>
+    check({
+      permissions: [
+        { id: "storage", why: "x" },
+        { id: "ui.tab", why: "x" },
+        { id: "projects.read", why: "x" },
+      ],
+      data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path }] },
+    });
+
+  it("accepts every valid path of the shared vector table", () => {
+    expect(VECTORS.valid.length).toBeGreaterThanOrEqual(10);
+    for (const path of VECTORS.valid) {
+      expect(() => withPath(path), path).not.toThrow();
+      expect(pack.projectRefPathProblem(path), path).toBeNull();
+    }
+  });
+
+  it("refuses every invalid path of the shared vector table", () => {
+    expect(VECTORS.invalid.length).toBeGreaterThanOrEqual(20);
+    for (const { path, why } of VECTORS.invalid) {
+      refused(() => withPath(path), "projectRef path");
+      expect(pack.projectRefPathProblem(path), `${path} (${why})`).not.toBeNull();
+    }
   });
 
   it.each([
@@ -637,11 +669,24 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         permissions: [
           { id: "storage", why: "x" },
           { id: "ui.tab", why: "x" },
+          { id: "projects.read", why: "x" },
         ],
         data: { projectRefs: [{ key: "a", path: "$.x" }] },
       },
       [],
       "doesn't declare",
+    ],
+    [
+      "projectRefs without the permission that says the mod reads projects",
+      {
+        permissions: [
+          { id: "storage", why: "x" },
+          { id: "ui.tab", why: "x" },
+        ],
+        data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path: "$.x" }] },
+      },
+      [],
+      "needs the projects.read permission",
     ],
     ["an entry that is not html", { entry: { page: "app/w.js" } }, [], "must be an .html"],
     ["an entry outside app/", { entry: { page: "manifest.json" } }, [], "isn't one of its app/"],
@@ -813,6 +858,7 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         permissions: [
           { id: "storage", why: "x" },
           { id: "ui.tab", why: "x" },
+          { id: "projects.read", why: "x" },
         ],
         data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path: "$. x" }] },
       },
@@ -2163,6 +2209,127 @@ describe("built-output rules", () => {
     refused(() => packed(css), "data: URL");
     const js = makeMod({ app: { ...APP, "assets/app.js": "export {}" } });
     refused(() => packed(js), "classic script");
+  });
+});
+
+// ---- The Tauri belt (the kit's second fence, K6b) -------------------------------------------------
+//
+// The kit's lint fence keeps a kit file from importing a core module that reaches `ipc`; this is the
+// check on what was built. A mod's frame has no Tauri API, so a bundle that holds PM's bridge, or a
+// build record that lists an `@tauri-apps/*` package, means something got through.
+
+describe("the Tauri belt", () => {
+  const BRIDGE_JS = "(function(){window.__TAURI_INTERNALS__.invoke('open_url',{url:'x'})})();";
+
+  /** An archive with `tweak` applied to its files and the checksums made again, so only the tweak is wrong. */
+  const archiveWith = (tweak) => {
+    const mod = makeMod();
+    const files = pack.assemble({ modDir: mod.modDir, root: mod.root, commit: COMMIT });
+    tweak(files);
+    files.set("pmmod/checksums.json", pack.checksumsFor(files));
+    return pack.writeZip(files);
+  };
+
+  it("refuses a built script that names the Tauri bridge, however it is written", () => {
+    for (const text of [
+      BRIDGE_JS,
+      "var a = window['__TAURI_INTERNALS__'];",
+      "var s = '__TAURI_INTERNALS__';",
+      "/* __TAURI_INTERNALS__ */ (function(){})();",
+    ]) {
+      refused(
+        () => pack.checkBuiltFile("app/assets/app.js", Buffer.from(text)),
+        "__TAURI_INTERNALS__",
+      );
+    }
+    // The belt is the bridge's name, not the word Tauri: a mod may say it in its own text.
+    for (const text of [
+      "var s = 'Tauri is the shell';",
+      "var a = window.__TAURI__;",
+      "var b = '__TAURI_INTERNAL__';",
+    ]) {
+      expect(() => pack.checkBuiltFile("app/assets/app.js", Buffer.from(text)), text).not.toThrow();
+    }
+  });
+
+  it("refuses it in a stylesheet or a page too, and says why", () => {
+    refused(
+      () => pack.checkBuiltFile("app/a.css", Buffer.from("/* __TAURI_INTERNALS__ */a{}")),
+      "pulled a core module",
+    );
+    refused(
+      () => pack.checkBuiltFile("app/a.html", Buffer.from("<!-- __TAURI_INTERNALS__ -->")),
+      "__TAURI_INTERNALS__",
+    );
+  });
+
+  it("refuses to pack a mod whose bundle holds the bridge, and to verify such a file", () => {
+    refused(
+      () => packed(makeMod({ app: { ...APP, "assets/app.js": BRIDGE_JS } })),
+      "__TAURI_INTERNALS__",
+    );
+    const bytes = archiveWith((files) => files.set("app/assets/app.js", Buffer.from(BRIDGE_JS)));
+    refused(() => pack.verifyArchive(bytes), "__TAURI_INTERNALS__");
+    // and on the command line, `--verify <file>`
+    const file = join(tempDir(), "bad.pmmod");
+    writeFileSync(file, bytes);
+    refused(() => pack.run(["--verify", file]), "__TAURI_INTERNALS__");
+  });
+
+  it("refuses a build record that lists an @tauri-apps package, from any depth", () => {
+    for (const name of ["@tauri-apps/api", "@tauri-apps/plugin-shell"]) {
+      const mod = makeMod({ packages: [pkg(name, "MIT")] });
+      refused(() => pack.bundledPackages(mod.modDir, mod.root), `lists ${JSON.stringify(name)}`);
+      refused(() => packed(mod), "pulled a core module");
+    }
+    const nested = makeMod({
+      packages: [
+        pkg("a", "MIT"),
+        pkg("b", "MIT", {
+          dir: "node_modules/a/node_modules/@tauri-apps/api",
+          name: "@tauri-apps/api",
+        }),
+      ],
+    });
+    refused(() => pack.bundledPackages(nested.modDir, nested.root), "@tauri-apps/api");
+  });
+
+  it("names only the scope: a package that merely looks like it is bundled as ever", () => {
+    const mod = makeMod({
+      packages: [
+        pkg("tauri-apps", "MIT"),
+        pkg("@tauri-apps-like/x", "MIT"),
+        pkg("d3-force", "ISC"),
+      ],
+    });
+    expect(pack.bundledPackages(mod.modDir, mod.root).map((p) => p.name)).toEqual([
+      "@tauri-apps-like/x",
+      "d3-force",
+      "tauri-apps",
+    ]);
+  });
+
+  it("refuses a file whose NOTICE lists an @tauri-apps package, as `--verify` meets it", () => {
+    const notice = pack.noticeText([
+      { name: "@tauri-apps/api", version: "2.9.0", license: "MIT", text: "Copyright (c) Tauri" },
+    ]);
+    const bytes = archiveWith((files) => files.set("NOTICE.txt", notice));
+    refused(() => pack.verifyArchive(bytes), "NOTICE.txt lists");
+    // The same file with an ordinary package is a good package.
+    const fine = archiveWith((files) =>
+      files.set(
+        "NOTICE.txt",
+        pack.noticeText([
+          {
+            name: "d3-force",
+            version: "3.0.0",
+            license: "ISC",
+            text: "Copyright (c) Mike Bostock",
+          },
+        ]),
+      ),
+    );
+    expect(pack.verifyArchive(fine).kind).toBe("pre-sign");
   });
 });
 

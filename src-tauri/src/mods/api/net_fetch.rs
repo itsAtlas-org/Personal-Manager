@@ -145,7 +145,7 @@ fn prepare<H: Host>(
             // are all the same answer: "not set" (`read_for_use` binds in its query).
             let bound = secrets::read_for_use(&conn, id, name)
                 .map_err(ModError::internal)?
-                .ok_or_else(ModError::secret_not_set)?;
+                .ok_or_else(ModError::key_not_stored)?;
             Some(net::slot_secret(
                 &bound.slot.host,
                 &bound.slot.header,

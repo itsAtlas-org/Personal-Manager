@@ -9,14 +9,17 @@
 // set of ids that still had `graph`.
 
 import { describe, expect, it } from "vitest";
+import autoinstallRs from "../../src-tauri/src/mods/autoinstall.rs?raw";
 import {
   adoptLegacy,
   CORE_NAV,
   isNavIdShape,
   modNavEntries,
   parsePlacement,
+  pilotCoreTab,
   pilotFeature,
   pilotHiddenRuleApplies,
+  pilotModIds,
   placementAfterPilotLanded,
   renamedNavId,
   resolveNav,
@@ -177,5 +180,74 @@ describe("what PM installs by itself", () => {
   it("names the feature the person used, and knows no other mod", () => {
     expect(pilotFeature("atlas.map")).toBe("Map");
     expect(pilotFeature("acme.tool")).toBeNull();
+  });
+});
+
+describe("the sidebar's pilot tables and the backend's PILOTS", () => {
+  // `src-tauri/src/mods/autoinstall.rs` is where PM names the mods it installs on its own. The
+  // sidebar keeps its own two tables (the core tab each took over, and the stored id a placement
+  // translates), and a pilot missing from either is a tab that appears, vanishes or loses its pin
+  // for one user. Read the Rust table as text so the three cannot drift.
+  const source = autoinstallRs;
+  const table = source.split("pub const PILOTS")[1]?.split("\n];")[0] ?? "";
+  const pilots = [
+    ...table.matchAll(
+      /id: "([^"]+)",\s*marker: "([^"]+)",\s*name: "([^"]+)",\s*tab_label: "([^"]+)",\s*landed: "([^"]+)"/g,
+    ),
+  ].map(([, id, marker, name, tabLabel, landed]) => ({ id, marker, name, tabLabel, landed }));
+
+  it("reads the Rust table (the Map and the Pinboard)", () => {
+    expect(pilots.map((p) => p.id)).toEqual(["atlas.map", "atlas.pinboard"]);
+  });
+
+  it("has the same pilots in the sidebar's table", () => {
+    expect(pilotModIds().sort()).toEqual(pilots.map((p) => p.id).sort());
+  });
+
+  it("gives each pilot a core tab that a stored placement translates to its mod's tab", () => {
+    const none = new Set<string>();
+    for (const p of pilots) {
+      const tab = pilotCoreTab(p.id);
+      expect(tab, p.id).not.toBeNull();
+      // Once PM's own list has no such tab (the Map now, the Pinboard after PR C2) a pin or a hide
+      // stored for it means the mod's tab; while PM's list has it, nothing is translated.
+      expect(renamedNavId(tab as string, none), p.id).toBe(`mod:${p.id}`);
+      expect(pilotFeature(p.id), p.id).not.toBeNull();
+    }
+  });
+
+  it("names a marker and a landed key after the same word, and the tab as the core tab did", () => {
+    for (const p of pilots) {
+      const word = p.id.split(".")[1];
+      expect(p.marker).toBe(`mods_autoinstall_${word}`);
+      expect(p.landed).toBe(`mods_pilot_landed_${word}`);
+      const core = CORE_NAV.find((e) => e.id === pilotCoreTab(p.id));
+      if (core) expect(core.label, p.id).toBe(p.tabLabel);
+    }
+  });
+
+  it("changes nothing for the Pinboard while PM still has its own Pinboard tab", () => {
+    // PR C1: the core Pinboard is live, so the translation, and the rule, wait.
+    expect(CORE.has("pinboard")).toBe(true);
+    expect(renamedNavId("pinboard")).toBe("pinboard");
+    expect(parsePlacement('{"hidden":["pinboard"],"pinned":["pinboard"]}')).toEqual({
+      hidden: ["pinboard"],
+      pinned: ["pinboard"],
+    });
+    expect(pilotHiddenRuleApplies("atlas.pinboard")).toBe(false);
+    expect(placementAfterPilotLanded({ hidden: [], pinned: [] }, "atlas.pinboard", "min")).toEqual({
+      hidden: [],
+      pinned: [],
+    });
+    // And a tab that was always shown stays so after the core tab goes: nothing is hidden for it.
+    const gone = new Set([...CORE].filter((id) => id !== "pinboard"));
+    expect(pilotHiddenRuleApplies("atlas.pinboard", gone)).toBe(true);
+    expect(
+      placementAfterPilotLanded({ hidden: [], pinned: [] }, "atlas.pinboard", "min", gone),
+    ).toEqual({ hidden: [], pinned: [] });
+    const [pending] = modNavEntries([
+      { id: "atlas.pinboard", name: "Pinboard", navTab: "Pinboard", pending: true },
+    ]);
+    expect(pending.defaultShown("min")).toBe(true);
   });
 });

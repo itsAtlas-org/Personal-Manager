@@ -82,6 +82,24 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     "uninstall_mod",
     { modId: "atlas.map", alsoDeleteGifts: true },
   ],
+  [
+    "uninstallNotesPlan",
+    () => ipc.uninstallNotesPlan("atlas.pinboard"),
+    "uninstall_notes_plan",
+    { modId: "atlas.pinboard" },
+  ],
+  [
+    "uninstallSaveNote",
+    () => ipc.uninstallSaveNote("atlas.pinboard", "n-1"),
+    "uninstall_save_note",
+    { modId: "atlas.pinboard", key: "n-1" },
+  ],
+  [
+    "uninstallExportFiles",
+    () => ipc.uninstallExportFiles("atlas.pinboard", true, false),
+    "uninstall_export_files",
+    { modId: "atlas.pinboard", notes: true, board: false },
+  ],
   ["pauseMod", () => ipc.pauseMod("atlas.map"), "pause_mod", { modId: "atlas.map" }],
   ["resumeMod", () => ipc.resumeMod("atlas.map"), "resume_mod", { modId: "atlas.map" }],
   [
@@ -155,6 +173,20 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     () => ipc.adoptMapPrefs("semantic", 0.25, true),
     "adopt_map_prefs",
     { layoutMode: "semantic", cohesion: 0.25, labels: true },
+  ],
+  [
+    "adoptPinboardPrefs",
+    () => ipc.adoptPinboardPrefs(false, null, true),
+    "adopt_pinboard_prefs",
+    { confirmDelete: false, showPast: null, showCompleted: true },
+  ],
+  ["pinboardMoveState", () => ipc.pinboardMoveState(), "pinboard_move_state", undefined],
+  ["pinboardUseOldBoard", () => ipc.pinboardUseOldBoard(), "pinboard_use_old_board", undefined],
+  [
+    "pinboardMoveDismiss",
+    () => ipc.pinboardMoveDismiss("conflict"),
+    "pinboard_move_dismiss",
+    { note: "conflict" },
   ],
 ];
 

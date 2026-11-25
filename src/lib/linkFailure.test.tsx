@@ -1107,19 +1107,28 @@ const OPEN_URL_CALLERS: Record<string, number> = {
 };
 
 /** Every other `openUrl` the parser sees, by file, as its role and its line: ipc.ts's definition,
- *  and the right-click menu's "Open link" action (contextMenu.ts's type member and its call), which
- *  ContextMenuHost fills with `openLink`. And the one literal that spells the command, `open_url`:
- *  openUrl's, so it is the only wrapper of it. Comments aren't code, so none is here. */
+ *  and the right-click menu's "Open link" action (the kit's contextMenu.ts type member and its call,
+ *  the kit host's optional `openUrl` prop), which core's ContextMenuHost fills with `openLink`. And the
+ *  one literal that spells the command, `open_url`: openUrl's, so it is the only wrapper of it.
+ *  Comments aren't code, so none is here. */
 const OPEN_URL_ELSEWHERE: Record<string, string[]> = {
   "src/lib/ipc.ts": [
     'export const: export const openUrl = (url: string) => invoke<void>("open_url", { url });',
     'command: export const openUrl = (url: string) => invoke<void>("open_url", { url });',
   ],
-  "src/lib/contextMenu.ts": [
-    "type member: actions: { openUrl: (url: string) => void; copy: (text: string) => void },",
-    'property access: { label: "Open link", onSelect: () => actions.openUrl(link) },',
+  "src/kit/lib/contextMenu.ts": [
+    "type member: actions: { openUrl?: (url: string) => void; copy: (text: string) => void },",
+    "property access: const open = actions.openUrl;",
   ],
-  "src/components/ui/ContextMenuHost.tsx": ["property name: openUrl: openLink,"],
+  "src/kit/ui/ContextMenuHost.tsx": [
+    "other: export function ContextMenuHost({ openUrl }: { openUrl?: (url: string) => void }) {",
+    "type member: export function ContextMenuHost({ openUrl }: { openUrl?: (url: string) => void }) {",
+    "other: openUrl,",
+    "other: }, [openUrl]);",
+  ],
+  "src/components/ui/ContextMenuHost.tsx": [
+    "other: return <KitContextMenuHost openUrl={openLink} />;",
+  ],
 };
 
 describe("callers of openUrl", () => {
@@ -1148,13 +1157,15 @@ describe("callers of openUrl", () => {
       "src/components/calendar/edit/DescriptionEditor.tsx",
       "src/components/backup/ProtonDriveSection.tsx",
     ]) {
-      // Called, or handed on as the menu's opener; an import alone isn't either.
+      // Called, or handed on as the menu's opener (a property, or the kit host's `openUrl` prop); an
+      // import alone isn't either.
       const reaches = nodesOf(files.get(path)!).some(
         (n) =>
           ts.isIdentifier(n) &&
           n.text === "openLink" &&
           (callOf(n) !== undefined ||
-            (ts.isPropertyAssignment(n.parent) && n.parent.initializer === n)),
+            (ts.isPropertyAssignment(n.parent) && n.parent.initializer === n) ||
+            (ts.isJsxExpression(n.parent) && ts.isJsxAttribute(n.parent.parent))),
       );
       expect(reaches, path).toBe(true);
     }

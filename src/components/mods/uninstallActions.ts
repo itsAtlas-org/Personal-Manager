@@ -12,10 +12,10 @@
 // per-mod dialog's, with its preview, and a bulk button doesn't make it for the person. It goes one mod
 // at a time, each its own step; a mod that can't be removed is reported and the rest still go.
 
-import { uninstallMod } from "../../lib/ipc";
+import { uninstallMod, uninstallNotesPlan } from "../../lib/ipc";
 import { addModNote, runModAction, type ModActionResult } from "../../lib/modActions";
 import { pruneAfterUninstall } from "../../lib/modFolds";
-import type { ModUninstalled } from "../../lib/modsTypes";
+import { failureText, type ModUninstalled } from "../../lib/modsTypes";
 import { modText, quoteName } from "./modText";
 import { plural, uninstallNote } from "./uninstallNote";
 
@@ -25,13 +25,15 @@ export const REMOVE_ALL_KEY = "mods:remove-all";
 /**
  * Uninstall one mod. `alsoDeleteGifts` is the person's choice from the preview; `quiet` leaves the
  * "was uninstalled" line out of the Mods tab's notes (a caller that says it once for many does).
- * Resolves `{ok: false, error: null}` when that mod already has something going.
+ * Resolves `{ok: false, error: null}` when that mod already has something going. `kept` is what PM
+ * saved first (the Pinboard's notes), already a sentence, said with the "was uninstalled" line.
  */
 export function uninstallAction(
   modId: string,
   name: string,
   alsoDeleteGifts: boolean,
   quiet = false,
+  kept: string | null = null,
 ): Promise<ModActionResult<ModUninstalled>> {
   return runModAction(
     modId,
@@ -42,7 +44,7 @@ export function uninstallAction(
       // Before anything is drawn again, and whether or not the caller's screen is still there.
       pruneAfterUninstall(modId, done.prune);
       if (quiet) return;
-      const note = uninstallNote(name, done);
+      const note = uninstallNote(name, done, kept);
       addModNote(note.warning ? "warning" : "info", note.text);
     },
   );
@@ -55,6 +57,21 @@ export interface RemoveAllResult {
   filesLeft: string[];
   /** A mod that stayed, and why. */
   failed: { name: string; error: string }[];
+}
+
+/** Why "Remove all" leaves a mod alone because it holds notes the person has not been asked about, or
+ *  null when it can go. Only the first-party Pinboard has any; a plan that can't be read holds the
+ *  mod back too, since the uninstall that follows would not be able to keep anything either. */
+async function heldForNotes(modId: string): Promise<string | null> {
+  try {
+    const plan = await uninstallNotesPlan(modId);
+    if (plan && (plan.toSave.length > 0 || plan.boardBytes > 0)) {
+      return "It holds your notes and board, so it stays. Uninstall it on its own and PM will offer to keep them first.";
+    }
+    return null;
+  } catch (e) {
+    return failureText(e, "PM couldn't check whether it holds notes, so it stays.");
+  }
 }
 
 /** What "Remove all" says once it has finished. A warning when anything didn't go cleanly. */
@@ -86,6 +103,13 @@ export function removeAllMods(
       const result: RemoveAllResult = { removed: [], filesLeft: [], failed: [] };
       for (const m of mods) {
         const name = modText(m.name) || m.id;
+        // The Pinboard's board and notes are the person's own words: "Remove all" does not make the
+        // choice to keep them for them (D9). It stays until it is uninstalled on its own.
+        const held = await heldForNotes(m.id);
+        if (held) {
+          result.failed.push({ name, error: held });
+          continue;
+        }
         const r = await uninstallAction(m.id, name, false, true);
         if (r.ok) {
           result.removed.push(name);

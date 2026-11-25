@@ -71,6 +71,7 @@ use tauri::http::{Method, Request, Response, StatusCode, Uri};
 use tauri::Url;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::confirm::{self, Ask, Bound};
 use super::engine::Platform;
 use super::folder::FolderSessions;
 use super::headers;
@@ -167,6 +168,14 @@ pub struct CallTicket {
     generation: u64,
     /// `AppState::store_epoch` when the session was minted.
     pub store_epoch: u64,
+}
+
+/// A question taken by its token ([`ModRuntime::confirm_take`]): the ticket of the call that asked it
+/// (current, as of the take) and what was asked.
+#[derive(Debug, Clone)]
+pub struct Redeemed {
+    pub ticket: CallTicket,
+    pub ask: Ask,
 }
 
 /// What ModFrame gets: the URL its iframe loads once, and the session its bridge calls under.
@@ -266,6 +275,9 @@ struct Session {
     /// How many times this session's frame has asked PM to show a key field (`secrets.set`), counted
     /// here so the limit is Rust's: PM's page can't be talked round it and a new frame starts at 0.
     secret_asks: u32,
+    /// The one question PM may be asking the person for this session's call (`confirm`). A field of
+    /// the session, so it ends with it, whichever way that happens.
+    confirm: confirm::Slot,
 }
 
 impl Session {
@@ -448,6 +460,8 @@ pub struct ModRuntime {
     /// The test folders loaded this session (`folder`): memory only, forgotten with the store, the
     /// mod or developer mode. A `folder` row with no session here is never served.
     folders: FolderSessions,
+    /// Who the suspend handshake is waiting on (`suspend`).
+    flushes: super::suspend::Flushes,
 }
 
 impl ModRuntime {
@@ -460,7 +474,13 @@ impl ModRuntime {
             ledger: Mutex::new(()),
             unsigned_allowed: AtomicBool::new(false),
             folders: FolderSessions::default(),
+            flushes: super::suspend::Flushes::default(),
         }
+    }
+
+    /// The suspend handshake's waits (`suspend`).
+    pub fn flushes(&self) -> &super::suspend::Flushes {
+        &self.flushes
     }
 
     /// The loaded test folders (`folder`).
@@ -689,6 +709,9 @@ impl ModRuntime {
             let next = inner.next_generation();
             if let Some(session) = inner.sessions.get_mut(&id) {
                 session.generation = next;
+                // A question PM was asking is for a call the lock has stopped: its dialog is closed
+                // by the page (K5), and the token is dead whether or not the page notices.
+                session.confirm.revoke();
             }
         }
     }
@@ -767,6 +790,7 @@ impl ModRuntime {
                 opened: now,
                 touched: now,
                 secret_asks: 0,
+                confirm: confirm::Slot::default(),
             },
         );
         Ok(FrameOpened {
@@ -888,6 +912,92 @@ impl ModRuntime {
             }
             _ => Err(FrameError::ClosedOrUnknown),
         }
+    }
+
+    /// Hold a question for the person on behalf of the call `ticket` began (`confirm`), and return the
+    /// token its answer must carry. Refused when the session is no longer the call's (`Ended`), or
+    /// already waiting for the person's answer to another call (`Busy`: no queue).
+    pub fn confirm_mint(&self, ticket: &CallTicket, ask: Ask) -> Result<String, confirm::Refused> {
+        self.confirm_mint_at(ticket, ask, Instant::now())
+    }
+
+    fn confirm_mint_at(
+        &self,
+        ticket: &CallTicket,
+        ask: Ask,
+        now: Instant,
+    ) -> Result<String, confirm::Refused> {
+        let mut inner = self.lock();
+        match inner.sessions.get_mut(&ticket.session) {
+            Some(session) if session.is_current(ticket) => {
+                let bound = Bound {
+                    generation: session.generation,
+                    store_epoch: session.store_epoch,
+                };
+                session.confirm.mint(ask, bound, now)
+            }
+            _ => Err(confirm::Refused::Ended),
+        }
+    }
+
+    /// Take the question `token` names: single use, so it is gone after this whatever the answer.
+    /// `store_epoch` is the open store's now (`AppState::store_epoch`). `None` for a token the registry
+    /// doesn't hold (used, run out, revoked, never made), or whose session is no longer live, at its
+    /// generation, and over this store. On `Some`, the call's ticket (to check the call again with) and
+    /// what was asked.
+    pub fn confirm_take(&self, token: &str, store_epoch: u64) -> Option<Redeemed> {
+        self.confirm_take_at(token, store_epoch, Instant::now())
+    }
+
+    fn confirm_take_at(&self, token: &str, store_epoch: u64, now: Instant) -> Option<Redeemed> {
+        let mut inner = self.lock();
+        let (id, taken) = inner
+            .sessions
+            .iter_mut()
+            .find_map(|(id, s)| s.confirm.take(token).map(|o| (id.clone(), o)))?;
+        let session = inner.sessions.get(&id)?;
+        let bound = Bound {
+            generation: session.generation,
+            store_epoch,
+        };
+        if !matches!(session.state, SessionState::Live) || !taken.answerable(now, bound) {
+            return None;
+        }
+        Some(Redeemed {
+            ticket: CallTicket {
+                session: id,
+                mod_id: session.mod_id.clone(),
+                generation: session.generation,
+                store_epoch: session.store_epoch,
+            },
+            ask: taken.ask,
+        })
+    }
+
+    /// The person answered a question `session` held: counts a no towards PM going quiet for it (a
+    /// treadmill of questions), and a yes clears the count. See `mods::confirm`.
+    pub fn confirm_answered(&self, session: &str, accept: bool) {
+        if let Some(s) = self.lock().sessions.get_mut(session) {
+            s.confirm.answered(accept, Instant::now());
+        }
+    }
+
+    /// Drop whatever question `session` is waiting on (a suspend's deadline, K5: it never waits for
+    /// the person). True when there was one.
+    pub fn confirm_revoke(&self, session: &str) -> bool {
+        self.lock()
+            .sessions
+            .get_mut(session)
+            .is_some_and(|s| s.confirm.revoke())
+    }
+
+    /// Whether `session` holds a question (any, answerable or not): what the revocation tests read.
+    #[cfg(test)]
+    pub fn confirm_held(&self, session: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(session)
+            .is_some_and(|s| s.confirm.holds_any())
     }
 
     /// Answer one `pmmod` request from the webview labelled `label`.
@@ -1471,6 +1581,86 @@ mod tests {
         rt.close(&a.session);
         assert_eq!(rt.still_current(&a), Err(FrameError::ClosedOrUnknown));
         assert_eq!(rt.still_current(&b), Ok(()));
+    }
+
+    /// The confirm registry in the runtime (`confirm`): a token is minted for a call's own session, is
+    /// good for a minute and once, and is refused for a stale call, another store, or a moved generation.
+    #[test]
+    fn a_confirm_token_is_minted_for_a_current_call_and_good_for_a_minute_and_once() {
+        use super::super::api::limits::{Family, CONFIRM_TTL};
+        use super::super::api::permissions::Class;
+        use super::super::api::table::{Kind, Row};
+        use super::super::confirm::{snapshot_hash, Action};
+        const ROW: Row = Row {
+            name: "test.confirm",
+            kind: Kind::Call,
+            permission: Some("storage"),
+            class: Class::Local,
+            added: (1, 0),
+            deprecated: None,
+            removed: None,
+            experimental: false,
+            family: Family::General,
+        };
+        let ask = || Ask {
+            row: &ROW,
+            action: Action::Probe { key: "k".into() },
+            snapshot: snapshot_hash("probe", "v"),
+        };
+        let s = setup(Platform::Linux);
+        let rt = &s.runtime;
+        let t0 = Instant::now();
+        let opened = rt
+            .open_frame_in(
+                &id("atlas.map"),
+                5,
+                super::super::outbox::testing::discarding(),
+            )
+            .unwrap();
+        assert!(is_document(&get(rt, "main", &opened.entry_url)));
+        let ticket = rt.begin_call(&opened.session).unwrap();
+        // Within its minute, over the same store: the token gives back the ticket and the ask.
+        let token = rt.confirm_mint_at(&ticket, ask(), t0).unwrap();
+        let got = rt
+            .confirm_take_at(&token, 5, t0 + CONFIRM_TTL - Duration::from_millis(1))
+            .expect("within its minute");
+        assert_eq!(got.ticket, ticket);
+        assert_eq!(got.ask.snapshot, snapshot_hash("probe", "v"));
+        // Once only.
+        assert!(rt.confirm_take_at(&token, 5, t0).is_none());
+        // At its minute it is gone, and an expired token still burns (the slot is emptied).
+        let token = rt.confirm_mint_at(&ticket, ask(), t0).unwrap();
+        assert!(rt.confirm_take_at(&token, 5, t0 + CONFIRM_TTL).is_none());
+        assert!(!rt.confirm_held(&opened.session));
+        // Another store's epoch, and a moved generation, refuse it.
+        let token = rt.confirm_mint_at(&ticket, ask(), t0).unwrap();
+        assert!(rt.confirm_take_at(&token, 6, t0).is_none());
+        let token = rt.confirm_mint_at(&ticket, ask(), t0).unwrap();
+        rt.bump_all();
+        assert!(rt.confirm_take_at(&token, 5, t0).is_none());
+        // A call begun before the bump can't mint; one begun after can.
+        assert_eq!(
+            rt.confirm_mint_at(&ticket, ask(), t0),
+            Err(super::super::confirm::Refused::Ended)
+        );
+        let fresh = rt.begin_call(&opened.session).unwrap();
+        assert!(rt.confirm_mint_at(&fresh, ask(), t0).is_ok());
+        // A session that is not yet live (its page not served) mints nothing, and an unknown one neither.
+        let pending = rt
+            .open_frame_in(
+                &id("atlas.map"),
+                5,
+                super::super::outbox::testing::discarding(),
+            )
+            .unwrap();
+        let forged = CallTicket {
+            session: pending.session.clone(),
+            ..fresh.clone()
+        };
+        assert_eq!(
+            rt.confirm_mint_at(&forged, ask(), t0),
+            Err(super::super::confirm::Refused::Ended)
+        );
     }
 
     #[test]

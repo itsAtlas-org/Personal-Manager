@@ -9672,7 +9672,7 @@ impl Host for AppHandle {
 /// listens app-wide (the pinboard and project page as well as the calendar), so this is a plain
 /// `emit`, like the calendar's own events. Called with no lock held.
 fn tasks_changed(app: &AppHandle) {
-    let _ = app.emit(crate::tasks::TASKS_CHANGED, ());
+    crate::tasks::announce_changed(app);
 }
 
 /// Write Google's copy into the mirror, remember it for the next sync, and tell the briefing and

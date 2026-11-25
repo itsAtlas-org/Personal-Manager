@@ -59,7 +59,7 @@ vi.mock("../../lib/ipc", () => ({
     return Promise.resolve(() => noticeHandlers.delete(h));
   },
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
@@ -402,6 +402,7 @@ describe("uninstalling from a row", () => {
     },
     stays: { tasks: 0, milestones: 0, documents: 0 },
     removedBySafetyList: false,
+    notes: null,
   };
   const gone: ModUninstalled = {
     id: "acme.tool",

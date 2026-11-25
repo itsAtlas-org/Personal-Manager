@@ -15,7 +15,7 @@ import type { DragCapability } from "../../../lib/calendarDrag";
 
 // The Depth the mocked theme reports; a test sets it. Hoisted because the mock factory reads it.
 const mockTheme = vi.hoisted(() => ({ depth: "standard" }));
-vi.mock("../../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: mockTheme.depth }),
 }));

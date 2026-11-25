@@ -111,6 +111,15 @@ describe("a call", () => {
     });
   });
 
+  it("reads the frame's answer to lifecycle.suspend only when it says flushed: true", () => {
+    expect(readPortMessage({ flushed: true })).toEqual({ kind: "flushed" });
+    // Anything else under that name is no answer, and is never read as a call.
+    for (const flushed of [false, 1, "true", null, undefined, {}, []]) {
+      expect(readPortMessage({ flushed })).toEqual({ kind: "drop" });
+      expect(readPortMessage({ flushed, id: 1, method: "storage.get" })).toEqual({ kind: "drop" });
+    }
+  });
+
   it.each([
     null,
     "a string",
@@ -436,7 +445,7 @@ describe("events", () => {
       undefined,
       "documents.added",
       [],
-      { seq: 1, name: "tasks.changed", payload: {} },
+      { seq: 1, name: "calendar.synced", payload: {} },
       { seq: 1, name: "constructor", payload: {} },
       { seq: 1, payload: {} },
       { name: "documents.added", payload: {} },
@@ -468,7 +477,7 @@ describe("events", () => {
     const pump = new EventPump((e) => sent.push(e.seq));
     pump.push({ seq: 1, name: "documents.added", payload: {} });
     pump.push({ seq: 2, name: "documents.added", payload: {} });
-    pump.push({ seq: 3, name: "tasks.changed", payload: {} });
+    pump.push({ seq: 3, name: "calendar.synced", payload: {} });
     expect(sent).toEqual([]);
     pump.connect();
     expect(sent).toEqual([1, 2]);

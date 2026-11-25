@@ -538,7 +538,8 @@ store" are held by their code-or-literal gates, which need a keychain or a live 
 
 **Why.** Before this, `run` simply skipped a newer store and opened it as if current, which was safe
 only while every migration was additive. Mods v61 is the first that isn't safe to ignore (it drops
-the Map's `doc_layout` cache; the Pinboard move waits for a later migration), and from here on a newer
+the Map's `doc_layout` cache; the Pinboard's move into its mod, built and dormant, waits for a later
+migration that never deletes it, I-36), and from here on a newer
 store is the user's whole library at a schema this build can't name. Opening it would misread it; any recovery that treats it as damaged deletes it.
 
 **Co-signers.** A new open path goes through `db::open`, never `open_keyed` plus its own migrate. A new
@@ -890,6 +891,74 @@ because the engage reaches either `ModRuntime::clear` (not the writer: silent) o
 ends the frames of whatever it no longer serves). A new path that swaps the store engages the same
 way, or forgets the sessions and calls `ledger::folder::purge_rows` itself. A new place that copies the `mods` table out of
 the live database either strips them or says why it can't carry one.
+
+### I-36 · The Pinboard's board is copied into its mod, never moved: nothing deletes `settings['pinboard']`, and the copy is read back before the install commits — **Held**
+
+The Pinboard's move (`mods/pinboard_move.rs`, run by `autoinstall::finish` and `finish_manual` inside the
+install's transaction) is **dormant until a later migration writes `pinboard_move_pending`**, and
+what it may do is fixed in advance, because the board is a person's own words and the old row is
+the only pre-mod copy of it. Nothing in PM deletes the `pinboard` row of `settings`, and the move
+never writes it;
+the move binds its bytes **unchanged** (no parse and re-serialise on the normal path, so no field,
+key order or number is rewritten; the one exception is a copy with lone surrogate escapes replaced,
+flagged by `pinboard_move_repaired`, while the legacy bytes stay) as the mod's `board`, and reads the
+row back in the same transaction, comparing bytes and SHA-256: a mismatch or any failure rolls the
+install back with its marker, so the mod never exists without its board and the next pass tries
+again. A board already in the mod is never overwritten: both stay, `pinboard_move_conflict` records
+the legacy row's SHA-256, and "Use my old board" first copies the mod's board to `board-before-move`.
+Until `pinboard_moved_sha` is written a project rename or delete keeps rewriting the legacy row's
+bindings (`rekey_pinboard_project`, as before the mod existed); from then on that row is a frozen
+snapshot, the mod's own `projectRefs` take over, and the Calendar reads the mod's `mod_overlay`
+rows with no fallback to the legacy row (SYNC-SET.md, `settings`).
+
+**Why.** A copy that a bug or a crash could turn into a move would be the one way PM loses someone's
+planning for good. Copy, read back, keep the old row costs a few kilobytes and makes every failure
+recoverable by doing nothing.
+
+**Co-signers.** The later migration (and any later cleanup of the old row, which is its own change on
+Bobby Yu's word) writes `pinboard_move_pending` from the board's content and deletes no row. A new
+reader of the Pinboard's data asks `pinboard_move_recorded` which copy is live. A mod's `projectRefs`
+rewrite (`mods/refs.rs`) runs inside the rename, merge or delete's own transaction, holding the DB
+mutex (I-14), on data a shared vault's member may have written: it never raises on what a member
+stored (that is skipped and counted; a database failure still ends the rename, merge or delete, as
+for any other statement in it), never takes the connection again, and puts no stored text in an
+error or a log line.
+
+### I-37 · A mod's act that needs the person's yes is performed by Rust from what Rust stored, never from what the page or the frame says — **Held**
+
+A call in `CONFIRM_EACH_TIME` (deleting a milestone the mod did not make, opening a link for a
+second-party or unsigned mod, creating a project the mod names that PM does not know) is answered `MOD-2003` with a token and a summary Rust built from PM's own data, never from
+mod text (`mods/confirm.rs`). The page draws the question (`ModConfirmDialog`) and answers
+`mod_confirm(token, accept)`; the action is the one stored with the token, so no argument a frame
+or the page supplies can change what is done. A token is single use, tied to its session and to a
+hash of the facts the question was built from, and good for `CONFIRM_TTL`; on a yes Rust re-runs the
+dispatcher's checks under the DB guard and reads the target again, refusing if it changed. A session
+holds one open question; three noes within two minutes, counted for that window's session, quiet
+the mod for two minutes (a yes clears the count, and noes spread over a longer time never add up),
+so a mod cannot lock the person out of the Mods tab.
+
+**Why.** A confirmation the requester can influence is no confirmation. The summary is the only
+thing the person sees before saying yes, so it must come from the side that will act.
+
+**Co-signers.** A new confirm-class call registers its action in `confirm.rs` and builds its summary
+from PM's rows; a new page that draws a question never forwards arguments from a frame; a handler
+never accepts a confirmation by any route but the token.
+
+### I-38 · Every orderly end of a mod's frame asks it to save first, and the wait is Rust's and has a deadline — **Held**
+
+Before PM takes a frame down for a reason that is not an emergency (leaving the tab, a pause, an
+uninstall, an update, a vault switch, the app lock, a quit) it sends `lifecycle.suspend`, and goes on
+when the frame answers `flushed` or when `SUSPEND_DEADLINE` passes, whichever is first (`mods/suspend.rs`).
+The wait is in Rust so that every path gets the same one, and PM never waits past the deadline, so a
+mute or hostile frame costs that long and a quit is never held. A suspend never waits for the
+person: a question open for the frame is revoked when the wait ends. A frozen-page stop or a safety
+list removal is not a suspend and gives the mod no more time.
+
+**Why.** A mod that debounces its saves (the Pinboard keeps edits 500 ms) loses them if its frame is
+destroyed on a tab switch, and nothing would say so.
+
+**Co-signers.** A new path that takes frames down calls `suspend::suspend` (or `quit`) first, and a
+`flushed` answer counts only for a session PM is waiting on.
 
 ---
 

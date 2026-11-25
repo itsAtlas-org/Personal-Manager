@@ -36,6 +36,15 @@
 //! authorised; bytes, for the vectors; or an error. The page never performs anything Rust didn't authorise, and never one
 //! a frame names: the action comes from here.
 //!
+//! **Rules every write call shares (PR C, K1).** A write that names an existing target also needs the
+//! matching READ permissions, checked in the handler before any lookup (`second_read`, one table, one
+//! helper, one table-driven test over the dispatch table), so a write-only mod cannot probe ids. A gift
+//! (a task or milestone a mod adds) counts against the mod's quota inside the transaction that adds it
+//! (`gifts`), and its DTOs are built field by field from a [`projection::Projection`] of the caller's
+//! grants. A call that needs the person's yes (a link, a foreign milestone delete, a new project) ends
+//! in [`confirm::request`]: PM asks in its own words and the answer comes back through `mod_confirm`
+//! ([`confirm::complete`]), which checks the call again before it acts (`mods::confirm` is the registry).
+//!
 //! **Events** go the other way ([`events`]): Rust asks the same grant questions per session, builds
 //! the payload from the store (never PM's own event), and sends only into the outbox of a session
 //! that may hear it (`mods::outbox`), bounded by the frame's acknowledgements.
@@ -45,6 +54,12 @@ mod ai;
 mod ai_prompt_tests;
 #[cfg(test)]
 mod ai_tests;
+#[cfg(test)]
+mod call_fixtures;
+mod calls;
+pub mod confirm;
+#[cfg(test)]
+mod confirm_tests;
 mod doc_storage;
 mod documents;
 mod embeddings;
@@ -52,19 +67,40 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 mod fixture_tests;
+mod gifts;
 pub mod grants;
 mod handlers;
 pub mod limits;
+mod link_calls;
+#[cfg(test)]
+mod link_tests;
+mod milestone_calls;
+#[cfg(test)]
+mod milestone_tests;
 pub(crate) mod net;
 mod net_fetch;
 #[cfg(test)]
 mod net_fetch_tests;
+mod note_calls;
+#[cfg(test)]
+mod note_tests;
+mod overlay_calls;
+#[cfg(test)]
+mod overlay_tests;
 pub mod permissions;
+mod project_calls;
+#[cfg(test)]
+mod project_tests;
+pub mod projection;
+mod second_read;
 mod storage;
 mod surface;
 #[cfg(test)]
 mod surface_tests;
 pub mod table;
+mod task_calls;
+#[cfg(test)]
+mod task_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -93,6 +129,8 @@ use super::netfetch::{HopFetcher, SystemHops};
 use super::policy::MOD_API_VERSION;
 use super::runtime::{CallTicket, ModRuntime};
 use super::{EngineState, MAIN_LABEL};
+use crate::milestones::ops::Aftermath;
+use crate::notes::Namespace;
 use crate::AppState;
 
 /// Who is calling.
@@ -106,6 +144,10 @@ pub enum Caller {
 /// The events PM posts to frames, each with its row in the table (`events.rs`).
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use events::EVENTS;
+/// The overlay's day rule, shared with the legacy reader (`pinboard_legacy::clamp_overlay`).
+#[cfg(test)]
+pub(crate) use overlay_calls::writer_accepts as overlay_writer_accepts;
+pub(crate) use overlay_calls::{id_ok as overlay_id_ok, real_date as real_overlay_date};
 
 /// What the dispatcher reaches: the store, the frame sessions, the call limits, the events waiting
 /// for their interval, the engine's seal and the app lock. The app is the host; a test builds its own.
@@ -127,6 +169,30 @@ pub trait Host: Clone + Send + Sync + 'static {
     /// test scripts it, so the call's money rules run with no model.
     type Model: ai::ModelEdge + 'static;
     fn model(&self) -> &Self::Model;
+
+    /// Settle what a write left for after its DB guard was dropped (`calls::write`): the task views
+    /// re-read, the briefing looks again. The host is the one that can reach every window.
+    fn settle(&self, aftermath: Aftermath);
+
+    /// Whether the document engine is already set up: a cheap probe that provisions nothing
+    /// (`documents.saveNote` answers `MOD-5007` when it is not, and PM never sets it up for a mod).
+    fn engine_ready(&self) -> bool;
+
+    /// Save `body` as a note document under `namespace` and `key` (the shared body of the Pinboard's
+    /// note command: embeds, writes the vault file, indexes). Blocking. Returns the document's id.
+    /// The engine is already known to be ready.
+    fn save_note(
+        &self,
+        namespace: &Namespace,
+        key: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<i64, ModError>;
+
+    /// Hand `url` (a parsed, screened https address) to the system's browser, detached: it never
+    /// waits for the launcher, so a desktop whose launcher blocks cannot hold a thread. Whether
+    /// anything started is all PM can know.
+    fn open_link(&self, url: &str) -> bool;
 
     /// A test's hook into a call in flight, so it can change the world at an exact point (an
     /// uninstall between the checks and the commit). Nothing in a build.
@@ -159,6 +225,11 @@ pub enum Point {
     /// An `ai.complete` booking is made and the call is about to be checked once more. The DB guard
     /// is held: a hook here must not take it.
     Booked,
+    /// A note's heavy step (`documents.saveNote`: the embed and the vault write) has begun. No guard is
+    /// held: a hook here may change the world (an uninstall landing mid-call) with the host's own tools.
+    Embedding,
+    /// The document engine's readiness has just been read (`documents.saveNote`). No guard is held.
+    EngineRead,
 }
 
 impl Host for AppHandle {
@@ -186,6 +257,33 @@ impl Host for AppHandle {
 
     fn app_locked(&self) -> crate::error::Result<bool> {
         crate::settings::app_locked_for_mods(self.store())
+    }
+
+    fn settle(&self, aftermath: Aftermath) {
+        aftermath.finish(self.store(), self);
+    }
+
+    fn engine_ready(&self) -> bool {
+        self.store().sidecar.is_ready()
+    }
+
+    fn save_note(
+        &self,
+        namespace: &Namespace,
+        key: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<i64, ModError> {
+        crate::notes::save(self.store(), namespace, key, title, body)
+            .map(|document| document.id)
+            .map_err(ModError::internal)
+    }
+
+    fn open_link(&self, url: &str) -> bool {
+        // The error's text repeats the address, so only its kind is logged.
+        open::that_detached(url)
+            .map_err(|e| eprintln!("mod link: no browser opened ({:?})", e.kind()))
+            .is_ok()
     }
 
     type Hops = SystemHops;
@@ -220,15 +318,20 @@ pub enum PageAction {
     /// A notice strip with the mod's name, in PM's own band (`notify`).
     #[serde(rename = "notify")]
     Notify,
+    /// PM's own task editor, on a task Rust found (or on a new one with a prefill that is text for its
+    /// fields, `ui.openTaskEditor`). The page answers at once; the editor stays open on its own.
+    #[serde(rename = "ui.openTaskEditor")]
+    UiOpenTaskEditor,
 }
 
 impl PageAction {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [PageAction; 4] = [
+    pub const ALL: [PageAction; 5] = [
         Self::ThemeGet,
         Self::UiOpenDocument,
         Self::SecretsSet,
         Self::Notify,
+        Self::UiOpenTaskEditor,
     ];
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -238,6 +341,7 @@ impl PageAction {
             Self::UiOpenDocument => "ui.openDocument",
             Self::SecretsSet => "secrets.set",
             Self::Notify => "notify",
+            Self::UiOpenTaskEditor => "ui.openTaskEditor",
         }
     }
 }

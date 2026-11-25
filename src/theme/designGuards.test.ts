@@ -103,8 +103,7 @@ function openingTag(src: string, start: number): string {
 
 describe("every dialog has an accessible name", () => {
   const offenders = SOURCES.filter(([path, text]) => {
-    if (path === "src/components/ui/Modal.tsx" || path === "src/components/ui/Dialog.tsx")
-      return false;
+    if (path === "src/kit/ui/Modal.tsx" || path === "src/kit/ui/Dialog.tsx") return false;
     return [...text.matchAll(/<Modal[\s>]/g)].some((m) => {
       const tag = openingTag(text, m.index);
       return !/\blabelledBy\b/.test(tag) && !/\blabel\s*=/.test(tag);
@@ -116,7 +115,7 @@ describe("every dialog has an accessible name", () => {
     // through `Dialog`. Pin that the matcher still sees the ones that remain — `Dialog` itself,
     // and the folder board that names itself with `label`.
     const withModals = SOURCES.filter(([, t]) => /<Modal[\s>]/.test(t)).map(([p]) => p);
-    expect(withModals).toContain("src/components/ui/Dialog.tsx");
+    expect(withModals).toContain("src/kit/ui/Dialog.tsx");
     expect(withModals).toContain("src/components/PinboardView.tsx");
   });
 
@@ -159,7 +158,7 @@ const DECORATIVE_FAINT: ReadonlySet<string> = new Set([
   // The " · " between key/value pairs; its own parent is already `text-ink4`.
   "src/components/dev/DevRaw.tsx ×1",
   // `disabled:text-faint` on primary / secondary / tertiary / danger.
-  "src/components/ui/Button.tsx ×4",
+  "src/kit/ui/Button.tsx ×4",
   // The single `disabled:text-faint` in IconButton's base — one entry, not one per variant,
   // because it wins over each VARIANT's `text-ink4` on specificity.
   "src/components/ui/IconButton.tsx ×1",
@@ -257,11 +256,11 @@ describe("every <label> is associated with a control", () => {
 // later is covered by the same rule but not by this list, so add it here when it lands.
 describe("form-control edges use --ink4, not --border2", () => {
   const CONTROL_FILES = [
-    "src/components/ui/Input.tsx",
+    "src/kit/ui/Input.tsx",
     "src/components/ui/Textarea.tsx",
-    "src/components/ui/Select.tsx",
-    "src/components/ui/Button.tsx",
-    "src/components/DateField.tsx",
+    "src/kit/ui/Select.tsx",
+    "src/kit/ui/Button.tsx",
+    "src/kit/ui/DateField.tsx",
     "src/components/ModelPicker.tsx",
     "src/components/DeleteProjectDialog.tsx",
     "src/components/MergeProjectDialog.tsx",
@@ -341,12 +340,15 @@ describe("form-control edges use --ink4, not --border2", () => {
 
   it("the shared primitives edge in --ink4 and focus in --accent-text", () => {
     for (const path of ["Input", "Textarea", "Select"]) {
-      const text = SOURCES.find(([p]) => p === `src/components/ui/${path}.tsx`)?.[1] ?? "";
+      const text =
+        SOURCES.find(
+          ([p]) => p === `src/${path === "Textarea" ? "components" : "kit"}/ui/${path}.tsx`,
+        )?.[1] ?? "";
       expect(text).toContain("border-ink4");
       expect(text).toContain("focus:border-accent-text");
       expect(text).not.toMatch(/(?<![\w:-])focus:border-accent\b(?!-)/);
     }
-    const button = SOURCES.find(([p]) => p === "src/components/ui/Button.tsx")?.[1] ?? "";
+    const button = SOURCES.find(([p]) => p === "src/kit/ui/Button.tsx")?.[1] ?? "";
     expect(button).toContain("border border-ink4");
   });
 

@@ -23,7 +23,7 @@ vi.mock("../../lib/ipc", () => ({
     return Promise.resolve(() => changedHandlers.delete(h));
   },
 }));
-vi.mock("../../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
@@ -148,7 +148,7 @@ describe("the limits", () => {
     render(<DeveloperKit on />);
     const limits = section("sec-dev-limits");
     expect(await limits.findByText("Calls per second, sustained")).toBeTruthy();
-    expect(limits.getByText("50")).toBeTruthy();
+    expect(limits.getAllByText("50")).toHaveLength(2); // calls per second, additions after a quiet spell
     expect(limits.getByText("1 MB")).toBeTruthy(); // largest call
     expect(limits.getByText("8 MB")).toBeTruthy(); // largest answer
     expect(limits.getByText("50 MB")).toBeTruthy(); // a mod's own storage
@@ -169,6 +169,22 @@ describe("the limits", () => {
     expect(said("Largest web answer")).toContain("4 MB");
     expect(said("Largest web request body")).toContain("256 KB");
     expect(said("Notices per mod per day")).toContain("5");
+  });
+
+  it("says PR C's limits: the lists, the document saves, the links, the quota and the question's minute", async () => {
+    devKitInfo.mockResolvedValue(devKit());
+    render(<DeveloperKit on />);
+    const limits = section("sec-dev-limits");
+    await limits.findByText("Calls per second, sustained");
+    const said = (label: string) => limits.getByText(label).parentElement?.textContent ?? "";
+    expect(said("Additions to your lists per second, sustained")).toContain("10");
+    expect(said("Additions to your lists running at the same time")).toContain("2");
+    expect(said("Tasks and milestones one mod may ever make")).toContain("10000");
+    expect(said("Document saves per minute, sustained")).toContain("6");
+    expect(said("Document saves at once after a quiet spell")).toContain("10");
+    expect(said("Links opened per minute, sustained")).toContain("6");
+    expect(said("Links opened at once after a quiet spell")).toContain("3");
+    expect(said("How long PM's question to you stays open")).toContain("60 s");
   });
 
   it("has a label for exactly the limits the backend sends (a new one can't ship unnamed)", () => {

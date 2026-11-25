@@ -96,6 +96,12 @@ release remain the open post-v1 work.
     `src/lib/markdown.tsx` boundary; a Google event's formatted description renders only through
     `RichDescription` (`src/lib/calendarEdit/descriptionHtml.ts`), and nothing in `src/` parses
     HTML or writes it into the page (ESLint).
+  - `src/kit/` — the mod kit (Mods spec D14): the shared components, theme context and pure helpers that
+    are bundled into a mod's sealed frame as well as used by the page (`components/ui/Button.tsx` and
+    friends are one-line re-exports of `src/kit/ui/`). It is closed under its own imports: a kit file may
+    import only `src/kit/**`, packages and `import type` from `src/lib/types.ts` (ESLint, `kitFence.test.ts`),
+    so `ipc` and Tauri can never ride in through it; `pack-mod --verify` is the second belt. The theme
+    context is ONE object, here (`src/kit/theme.tsx`); core's `ThemeProvider` gives it the `ipc` store.
   - `src/lib/help.ts` — help-mode registry (`data-help` id → explanation) + context.
 - **Backend** — `src-tauri/src/` (Rust). Grouped by area; the roadmap board + `docs/` carry
   the living detail. Pure decision functions stay DB/network-free and unit-tested.
@@ -218,6 +224,15 @@ release remain the open post-v1 work.
     `isFolderScreen`), beside the kit's readouts (`settings/DeveloperKit.tsx`, all from `dev_kit_info`),
     and Settings → Storage's "Mods" fold (`StorageMods.tsx`) uninstalls through the same runtime action
     (`mods/uninstallActions.ts`), never `removeStorageComponent`.
+    A call that needs the person's yes is a question PM draws itself (`confirm.rs`, `ModConfirmDialog`,
+    INVARIANTS.md I-37); before PM takes a frame down in an orderly way it asks it to save
+    (`suspend.rs`, I-38); `refs.rs` rewrites a mod's stored project names when a project is renamed,
+    merged or deleted (`data.projectRefs`); `pinboard_move.rs` is the Pinboard's copy into its mod,
+    built and dormant until a later migration (I-36), and `pinboard_legacy.rs` is what core still
+    reads of the old board (the Calendar's dots). `mods/atlas.pinboard/` is the Pinboard as a mod, a
+    copy of the core one built on `src/kit`; core's Pinboard stays the live one. A mod's build
+    (`mods/vite.config.ts`) takes React and Tailwind, and Tailwind scans only `src/kit` and the mod's
+    own source.
     `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
@@ -257,7 +272,7 @@ presets; shows/hides optional fields, **never** forks layout).
 3. **No secrets / personal data** (this just restates the rules below for the design layer).
 
 **Tokens are the single source of truth.** `themeVars(system, mode, accent)`
-(`src/theme/tokens.ts`, ported from `DESIGN_TOKENS.md`) computes CSS custom properties set on
+(`src/kit/design/tokens.ts`, ported from `DESIGN_TOKENS.md`; `src/theme/tokens.ts` re-exports it) computes CSS custom properties set on
 the document root; **components read only `var(--…)` (or the Tailwind utilities mapped to them),
 never a hex literal.** Role vocabulary: neutrals `--bg --panel --surface --border --border2
 --rule --ink --ink2 --ink3 --ink4` plus `--faint`, which is **decorative/disabled only** — no
@@ -275,7 +290,7 @@ font CDN (privacy + offline + CSP `default-src 'self'`).
 
 **One hard, real design rule (not placeholder):** all user-facing dates render `DD-MM-YYYY`,
 dropping the `-YYYY` when the date is in the current year (`21-06` this year, `21-06-2027`
-otherwise). Implemented in `src/lib/format.ts`.
+otherwise). Implemented in `src/kit/lib/format.ts` (`src/lib/format.ts` re-exports it).
 
 ## Non-negotiable rules (spec §7, §8.7)
 

@@ -53,7 +53,7 @@ vi.mock("./components/calendar/CalendarView", () => ({
   ),
 }));
 
-vi.mock("./theme/ThemeContext", async (importOriginal) => ({
+vi.mock("./kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", depth: "standard" }),
 }));

@@ -68,7 +68,7 @@ fn frame(session: &str) -> Caller {
     }
 }
 
-async fn secrets_set(host: &TestHost, session: &str, args: Value) -> Reply {
+async fn key_slots_set(host: &TestHost, session: &str, args: Value) -> Reply {
     dispatch(host, frame(session), "secrets.set", &args.to_string()).await
 }
 
@@ -114,9 +114,9 @@ fn counter(host: &TestHost) -> (Option<String>, i64) {
 // --- secrets.set --------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_set_asks_the_page_for_the_slots_field_and_says_where_the_key_will_go() {
+async fn key_slots_set_asks_the_page_for_the_slots_field_and_says_where_the_key_will_go() {
     let (host, session) = setup();
-    let (action, args) = page(secrets_set(&host, &session, json!({"name": "token"})).await);
+    let (action, args) = page(key_slots_set(&host, &session, json!({"name": "token"})).await);
     assert_eq!(action, PageAction::SecretsSet);
     assert_eq!(
         args,
@@ -124,11 +124,11 @@ async fn secrets_set_asks_the_page_for_the_slots_field_and_says_where_the_key_wi
     );
     // Once a key is held for the slot, the mod is told so (and only that).
     store_key(&host, "token");
-    let (_, args) = page(secrets_set(&host, &session, json!({"name": "token"})).await);
+    let (_, args) = page(key_slots_set(&host, &session, json!({"name": "token"})).await);
     assert_eq!(args["set"], true);
     assert!(!args.to_string().contains(KEY));
     // The other slot is its own.
-    let (_, args) = page(secrets_set(&host, &session, json!({"name": "other"})).await);
+    let (_, args) = page(key_slots_set(&host, &session, json!({"name": "other"})).await);
     assert_eq!(
         (args["header"].as_str(), args["set"].as_bool()),
         (Some("Authorization"), Some(false))
@@ -143,12 +143,12 @@ async fn a_key_bound_to_a_moved_slot_is_reported_as_not_set() {
         c.execute("UPDATE mod_secrets SET host = 'cdn.example.com'", [])
             .unwrap();
     });
-    let (_, args) = page(secrets_set(&host, &session, json!({"name": "token"})).await);
+    let (_, args) = page(key_slots_set(&host, &session, json!({"name": "token"})).await);
     assert_eq!(args["set"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_set_refuses_what_is_not_a_declared_slot_and_counts_nothing_for_it() {
+async fn key_slots_set_refuses_what_is_not_a_declared_slot_and_counts_nothing_for_it() {
     let (host, session) = setup();
     for args in [
         json!({"name": "nope"}),
@@ -159,14 +159,14 @@ async fn secrets_set_refuses_what_is_not_a_declared_slot_and_counts_nothing_for_
         json!(null),
     ] {
         assert_eq!(
-            code(secrets_set(&host, &session, args.clone()).await),
+            code(key_slots_set(&host, &session, args.clone()).await),
             Code::BadArgs,
             "{args}"
         );
     }
     // None of those used up an ask: the session still has all of its own.
     for _ in 0..limits::SECRET_ASKS_PER_SESSION {
-        page(secrets_set(&host, &session, json!({"name": "token"})).await);
+        page(key_slots_set(&host, &session, json!({"name": "token"})).await);
     }
 }
 
@@ -174,18 +174,18 @@ async fn secrets_set_refuses_what_is_not_a_declared_slot_and_counts_nothing_for_
 async fn a_session_may_ask_only_so_many_times_and_a_new_frame_starts_fresh() {
     let (host, session) = setup();
     for _ in 0..limits::SECRET_ASKS_PER_SESSION {
-        page(secrets_set(&host, &session, json!({"name": "token"})).await);
+        page(key_slots_set(&host, &session, json!({"name": "token"})).await);
     }
-    let e = error(secrets_set(&host, &session, json!({"name": "token"})).await);
+    let e = error(key_slots_set(&host, &session, json!({"name": "token"})).await);
     assert_eq!(e.code, Code::RateLimited);
     // Still refused, and still told the same.
     assert_eq!(
-        code(secrets_set(&host, &session, json!({"name": "other"})).await),
+        code(key_slots_set(&host, &session, json!({"name": "other"})).await),
         Code::RateLimited
     );
     // Another frame of the same mod is another session with its own count.
     let again = live_session(&host, MOD, crate::mods::outbox::testing::discarding());
-    page(secrets_set(&host, &again, json!({"name": "token"})).await);
+    page(key_slots_set(&host, &again, json!({"name": "token"})).await);
 }
 
 /// The last ask is taken once however many calls race for it.
@@ -195,7 +195,7 @@ async fn parallel_asks_cannot_take_more_than_the_sessions_limit() {
     let calls = (0..12).map(|_| {
         let auth = authorise(&host, table::ROWS, &session, "secrets.set").unwrap();
         let host = host.clone();
-        async move { surface::secrets_set(&host, &auth, &json!({"name": "token"})).await }
+        async move { surface::key_slots_set(&host, &auth, &json!({"name": "token"})).await }
     });
     let results = futures_util::future::join_all(calls).await;
     let allowed = results.iter().filter(|r| r.is_ok()).count();
@@ -207,7 +207,7 @@ async fn parallel_asks_cannot_take_more_than_the_sessions_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_set_needs_the_internet_permission_and_a_live_session() {
+async fn key_slots_set_needs_the_internet_permission_and_a_live_session() {
     let (host, session) = setup();
     host.sql(|c| {
         c.execute(
@@ -217,7 +217,7 @@ async fn secrets_set_needs_the_internet_permission_and_a_live_session() {
         .unwrap();
     });
     assert_eq!(
-        code(secrets_set(&host, &session, json!({"name": "token"})).await),
+        code(key_slots_set(&host, &session, json!({"name": "token"})).await),
         Code::NotGranted
     );
     host.sql(|c| {
@@ -229,7 +229,7 @@ async fn secrets_set_needs_the_internet_permission_and_a_live_session() {
     });
     host.runtime().close(&session);
     assert_eq!(
-        code(secrets_set(&host, &session, json!({"name": "token"})).await),
+        code(key_slots_set(&host, &session, json!({"name": "token"})).await),
         Code::SessionEnded
     );
 }

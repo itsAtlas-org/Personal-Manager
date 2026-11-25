@@ -43,7 +43,7 @@ vi.mock("./settings/AiModelsSettings", () => ({ AiModelsSettings: () => <p>AI ta
 vi.mock("./settings/GeneralSettings", () => ({ GeneralSettings: () => <p>General tab</p> }));
 vi.mock("./ModelListEditor", () => ({ ModelListEditor: () => null }));
 vi.mock("./SignInStrip", () => ({ SignInStrip: () => null }));
-vi.mock("../theme/ThemeContext", async (importOriginal) => ({
+vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useTheme: () => ({ system: "slate", mode: "dark", accent: "mono", depth: "standard" }),
 }));
