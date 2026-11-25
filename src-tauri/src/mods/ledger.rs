@@ -3128,6 +3128,51 @@ mod tests {
         ));
     }
 
+    /// K4: the Calendar's dots of a moved Pinboard are its `mod_overlay` rows, so an uninstall must
+    /// take exactly those (another mod's stay), and take the overlay's legacy name `pm:pinboard` out
+    /// of the hidden set, leaving the rest of the blob and every other source.
+    #[test]
+    fn uninstall_takes_the_mods_overlay_rows_and_prunes_its_hidden_entry() {
+        let w = world();
+        w.install(
+            &pkg("1.0.0", |m| {
+                m["id"] = Value::String("atlas.pinboard".into())
+            }),
+            Approval::Approved,
+        )
+        .unwrap();
+        w.install(&pkg("1.0.0", |_| {}), Approval::Approved)
+            .unwrap();
+        w.exec(
+            "INSERT INTO mod_overlay(mod_id, id, date, label) VALUES
+                 ('atlas.pinboard', 'w1:i1', '2026-12-01', 'ship'),
+                 ('atlas.pinboard', 'w1:i2', '2026-12-02', 'review'),
+                 ('atlas.map', 'm:1', '2026-12-03', 'not the Pinboard');
+             INSERT INTO settings(key, value) VALUES ('calendar_ui',
+                 '{\"hidden\":[\"pm:pinboard\",\"mod:atlas.map\",\"work@example.com\"],\"last_create\":\"work@example.com\"}');",
+        );
+        w.ledger().uninstall(&id("atlas.pinboard")).unwrap();
+        assert_eq!(
+            w.sql::<i64>("SELECT count(*) FROM mod_overlay WHERE mod_id = 'atlas.pinboard'"),
+            0,
+            "its dots go with it"
+        );
+        assert_eq!(
+            w.sql::<i64>("SELECT count(*) FROM mod_overlay WHERE mod_id = 'atlas.map'"),
+            1,
+            "another mod's stay"
+        );
+        let ui: Value = serde_json::from_str(
+            &w.sql::<String>("SELECT value FROM settings WHERE key = 'calendar_ui'"),
+        )
+        .unwrap();
+        assert_eq!(
+            ui["hidden"],
+            serde_json::json!(["mod:atlas.map", "work@example.com"])
+        );
+        assert_eq!(ui["last_create"], "work@example.com");
+    }
+
     #[test]
     fn a_failed_uninstall_changes_nothing() {
         let w = world();

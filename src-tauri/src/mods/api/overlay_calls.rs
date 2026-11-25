@@ -65,8 +65,9 @@ fn refused(what: &str) -> ModError {
     ModError::bad_args(format!("An overlay entry's {what} is not allowed."))
 }
 
-/// A real `YYYY-MM-DD` day within [`limits::OVERLAY_YEARS`], exactly as written.
-fn real_date(date: &str) -> bool {
+/// A real `YYYY-MM-DD` day within [`limits::OVERLAY_YEARS`], exactly as written. Also the day rule of
+/// the legacy reader's `clamp_overlay` (`pinboard_legacy`), so the two cannot disagree.
+pub(crate) fn real_date(date: &str) -> bool {
     date.len() == 10
         && NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok_and(|d| {
             d.format("%Y-%m-%d").to_string() == date && limits::OVERLAY_YEARS.contains(&d.year())
@@ -112,6 +113,19 @@ pub(super) fn check_entries(raw: Vec<EntryArgs>) -> Result<Vec<Entry>, ModError>
         });
     }
     Ok(out)
+}
+
+/// Whether `calendar.overlay.set` would take these `(id, date, label)` entries (tests only: the
+/// legacy reader's output must always be publishable again by the mod).
+#[cfg(test)]
+pub(crate) fn writer_accepts(entries: &[(&str, &str, &str)]) -> bool {
+    let raw: Vec<EntryArgs> = entries
+        .iter()
+        .map(|(id, date, label)| {
+            serde_json::from_value(json!({"id": id, "date": date, "label": label})).unwrap()
+        })
+        .collect();
+    check_entries(raw).is_ok()
 }
 
 /// `calendar.overlay.set({entries: [{id, date, label}]})` → `{count}`.

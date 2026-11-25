@@ -614,7 +614,7 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
 
 /// Whether the Pinboard's board has moved to the mod (`pinboard_moved_sha` is recorded): the legacy
 /// row `settings['pinboard']` is then a frozen snapshot that a rename or delete leaves alone.
-fn pinboard_move_recorded(conn: &Connection) -> Result<bool> {
+pub(crate) fn pinboard_move_recorded(conn: &Connection) -> Result<bool> {
     Ok(crate::db::get_setting(conn, "pinboard_moved_sha")?
         .is_some_and(|sha| !sha.trim().is_empty()))
 }

@@ -1,0 +1,1652 @@
+{
+  "about": "Shared by src/lib/pinboard/calendarEntries.test.ts (the TypeScript original) and src-tauri/src/pinboard_legacy/tests.rs (the Rust port): both must give `expected` for every case. A case holds `board` (an object, written out as JSON) or `raws` (strings read as they stand, each giving `expected`). An item list may hold {\"$repeat\": N, \"item\": {...}}, which stands for N items with \"{n}\" in the strings replaced by 1..N. A long answer is checked by `expectedCount`, `expectedFirst` and `expectedLast`. An entry's id is <widgetId>:<itemId>.",
+  "cases": [
+    {
+      "name": "a freeform timeline lifts every dated entry",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "pitch"
+              },
+              {
+                "id": "i2",
+                "date": "2026-07-22",
+                "label": "demo"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:i1",
+          "date": "2026-07-20",
+          "label": "pitch"
+        },
+        {
+          "id": "w1:i2",
+          "date": "2026-07-22",
+          "label": "demo"
+        }
+      ]
+    },
+    {
+      "name": "no board, an empty string and bad JSON give nothing",
+      "raws": ["", "{not json", "null", "[]", "42", "\"x\""],
+      "expected": []
+    },
+    {
+      "name": "another version, or widgets that are not a list, give nothing",
+      "raws": [
+        "{\"version\":2,\"widgets\":[{\"id\":\"w1\",\"kind\":\"timeline\",\"rect\":{\"x\":0,\"y\":0,\"w\":3,\"h\":3},\"items\":[{\"id\":\"i1\",\"date\":\"2026-07-20\",\"label\":\"x\"}]}]}",
+        "{\"widgets\":[{\"id\":\"w1\",\"kind\":\"timeline\",\"rect\":{\"x\":0,\"y\":0,\"w\":3,\"h\":3},\"items\":[{\"id\":\"i1\",\"date\":\"2026-07-20\",\"label\":\"x\"}]}]}",
+        "{\"version\":1,\"widgets\":{}}",
+        "{\"version\":1}"
+      ],
+      "expected": []
+    },
+    {
+      "name": "a version written 1.0 is version 1",
+      "raws": [
+        "{\"version\":1.0,\"widgets\":[{\"id\":\"w\",\"kind\":\"timeline\",\"items\":[{\"id\":\"i\",\"date\":\"2026-07-20\",\"label\":\"x\"}]}]}"
+      ],
+      "expected": [
+        {
+          "id": "w:i",
+          "date": "2026-07-20",
+          "label": "x"
+        }
+      ]
+    },
+    {
+      "name": "undated entries are skipped, whatever the date holds",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "label": "none"
+              },
+              {
+                "id": "b",
+                "date": "",
+                "label": "empty"
+              },
+              {
+                "id": "c",
+                "date": null,
+                "label": "null"
+              },
+              {
+                "id": "d",
+                "date": 20260720,
+                "label": "number"
+              },
+              {
+                "id": "e",
+                "date": "2026-07-20",
+                "label": "kept"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:e",
+          "date": "2026-07-20",
+          "label": "kept"
+        }
+      ]
+    },
+    {
+      "name": "a timeline bound to a project is skipped; an empty binding is not a binding",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "bound",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "x"
+              }
+            ],
+            "project": "Atlas"
+          },
+          {
+            "id": "blank",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-21",
+                "label": "y"
+              }
+            ],
+            "project": ""
+          },
+          {
+            "id": "nul",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-22",
+                "label": "z"
+              }
+            ],
+            "project": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "blank:i1",
+          "date": "2026-07-21",
+          "label": "y"
+        },
+        {
+          "id": "nul:i1",
+          "date": "2026-07-22",
+          "label": "z"
+        }
+      ]
+    },
+    {
+      "name": "showOnCalendar false is skipped; true and unset are shown",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "off",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "x"
+              }
+            ],
+            "showOnCalendar": false
+          },
+          {
+            "id": "on",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-21",
+                "label": "y"
+              }
+            ],
+            "showOnCalendar": true
+          },
+          {
+            "id": "unset",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-22",
+                "label": "z"
+              }
+            ]
+          },
+          {
+            "id": "str",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-23",
+                "label": "s"
+              }
+            ],
+            "showOnCalendar": "false"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "on:i1",
+          "date": "2026-07-21",
+          "label": "y"
+        },
+        {
+          "id": "unset:i1",
+          "date": "2026-07-22",
+          "label": "z"
+        },
+        {
+          "id": "str:i1",
+          "date": "2026-07-23",
+          "label": "s"
+        }
+      ]
+    },
+    {
+      "name": "an empty or blank label becomes deadline",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": ""
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "   \t "
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22"
+              },
+              {
+                "id": "d",
+                "date": "2026-07-23",
+                "label": 5
+              },
+              {
+                "id": "e",
+                "date": "2026-07-24",
+                "label": "  padded  "
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "2026-07-20",
+          "label": "deadline"
+        },
+        {
+          "id": "w1:b",
+          "date": "2026-07-21",
+          "label": "deadline"
+        },
+        {
+          "id": "w1:c",
+          "date": "2026-07-22",
+          "label": "deadline"
+        },
+        {
+          "id": "w1:d",
+          "date": "2026-07-23",
+          "label": "deadline"
+        },
+        {
+          "id": "w1:e",
+          "date": "2026-07-24",
+          "label": "padded"
+        }
+      ]
+    },
+    {
+      "name": "folders are walked, at any depth; notes and lists add nothing",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "n",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 2,
+              "h": 2
+            },
+            "text": "x"
+          },
+          {
+            "id": "l",
+            "kind": "list",
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "not a timeline"
+              }
+            ]
+          },
+          {
+            "id": "f",
+            "kind": "folder",
+            "children": [
+              {
+                "id": "t1",
+                "kind": "timeline",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 3,
+                  "h": 3
+                },
+                "items": [
+                  {
+                    "id": "i1",
+                    "date": "2026-07-20",
+                    "label": "in folder"
+                  }
+                ]
+              },
+              {
+                "id": "f2",
+                "kind": "folder",
+                "children": [
+                  {
+                    "id": "t2",
+                    "kind": "timeline",
+                    "rect": {
+                      "x": 0,
+                      "y": 0,
+                      "w": 3,
+                      "h": 3
+                    },
+                    "items": [
+                      {
+                        "id": "i1",
+                        "date": "2026-07-21",
+                        "label": "nested"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "junk",
+              null,
+              7
+            ]
+          },
+          {
+            "id": "fbad",
+            "kind": "folder",
+            "children": "not a list"
+          },
+          {
+            "id": "fnone",
+            "kind": "folder"
+          },
+          null,
+          "junk",
+          3,
+          {
+            "id": "t3",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-22",
+                "label": "after"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "t1:i1",
+          "date": "2026-07-20",
+          "label": "in folder"
+        },
+        {
+          "id": "t2:i1",
+          "date": "2026-07-21",
+          "label": "nested"
+        },
+        {
+          "id": "t3:i1",
+          "date": "2026-07-22",
+          "label": "after"
+        }
+      ]
+    },
+    {
+      "name": "a widget or an item without a text id is skipped",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": 5,
+            "kind": "timeline",
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "x"
+              }
+            ]
+          },
+          {
+            "kind": "timeline",
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "x"
+              }
+            ]
+          },
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": 1,
+                "date": "2026-07-20",
+                "label": "x"
+              },
+              null,
+              "junk",
+              {
+                "id": "ok",
+                "date": "2026-07-21",
+                "label": "kept"
+              }
+            ]
+          },
+          {
+            "id": "w2",
+            "kind": "timeline",
+            "items": "abc"
+          },
+          {
+            "id": "w3",
+            "kind": "timeline"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:ok",
+          "date": "2026-07-21",
+          "label": "kept"
+        }
+      ]
+    },
+    {
+      "name": "unicode labels are kept whole",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "R\u00e9union \u00e9quipe \u2014 \u65e5\u672c\u8a9e \ud83d\ude80"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "e\u0301"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "2026-07-20",
+          "label": "R\u00e9union \u00e9quipe \u2014 \u65e5\u672c\u8a9e \ud83d\ude80"
+        },
+        {
+          "id": "w1:b",
+          "date": "2026-07-21",
+          "label": "e\u0301"
+        }
+      ]
+    },
+    {
+      "name": "trim is JavaScript's: it takes a byte-order mark and no-break spaces; U+0085 is a line break, which the tidy turns into a space and trims",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "\ufeff\u00a0\u2003name\u3000\u2028"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "\u0085name\u0085"
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22",
+                "label": "\ufeff \u00a0"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "2026-07-20",
+          "label": "name"
+        },
+        {
+          "id": "w1:b",
+          "date": "2026-07-21",
+          "label": "name"
+        },
+        {
+          "id": "w1:c",
+          "date": "2026-07-22",
+          "label": "deadline"
+        }
+      ]
+    },
+    {
+      "name": "a bad date is skipped, never repaired",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-1-5",
+                "label": "short"
+              },
+              {
+                "id": "b",
+                "date": "20261201",
+                "label": "compact"
+              },
+              {
+                "id": "c",
+                "date": "2026-13-45",
+                "label": "month 13"
+              },
+              {
+                "id": "d",
+                "date": "1899-12-31",
+                "label": "year 1899"
+              },
+              {
+                "id": "e",
+                "date": "2201-01-01",
+                "label": "year 2201"
+              },
+              {
+                "id": "f",
+                "date": "2026-02-30",
+                "label": "no such day"
+              },
+              {
+                "id": "g",
+                "date": "2023-02-29",
+                "label": "no such leap day"
+              },
+              {
+                "id": "h",
+                "date": "abcd-ef-gh",
+                "label": "letters"
+              },
+              {
+                "id": "i",
+                "date": "\uff12\uff10\uff12\uff16-12-01",
+                "label": "full-width digits"
+              },
+              {
+                "id": "j",
+                "date": "2026/12/01",
+                "label": "slashes"
+              },
+              {
+                "id": "k",
+                "date": "01-12-2026",
+                "label": "day first"
+              },
+              {
+                "id": "l",
+                "date": "2026-00-10",
+                "label": "month 0"
+              },
+              {
+                "id": "m",
+                "date": "2026-12-00",
+                "label": "day 0"
+              },
+              {
+                "id": "ok",
+                "date": "2026-12-01",
+                "label": "kept"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:ok",
+          "date": "2026-12-01",
+          "label": "kept"
+        }
+      ]
+    },
+    {
+      "name": "the first and last day, and a leap day, are kept",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "1900-01-01",
+                "label": "first"
+              },
+              {
+                "id": "b",
+                "date": "2200-12-31",
+                "label": "last"
+              },
+              {
+                "id": "c",
+                "date": "2024-02-29",
+                "label": "leap"
+              },
+              {
+                "id": "d",
+                "date": "2000-02-29",
+                "label": "century leap"
+              },
+              {
+                "id": "e",
+                "date": "1900-02-29",
+                "label": "not a leap year"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "1900-01-01",
+          "label": "first"
+        },
+        {
+          "id": "w1:b",
+          "date": "2200-12-31",
+          "label": "last"
+        },
+        {
+          "id": "w1:c",
+          "date": "2024-02-29",
+          "label": "leap"
+        },
+        {
+          "id": "w1:d",
+          "date": "2000-02-29",
+          "label": "century leap"
+        }
+      ]
+    },
+    {
+      "name": "a datetime is kept as its date",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-12-01T10:00",
+                "label": "at ten"
+              },
+              {
+                "id": "b",
+                "date": "2026-12-02T23:59:59.000Z",
+                "label": "with a zone"
+              },
+              {
+                "id": "c",
+                "date": "2026-12-03 and more",
+                "label": "text after"
+              },
+              {
+                "id": "d",
+                "date": "2026-12-0",
+                "label": "cut short"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "2026-12-01",
+          "label": "at ten"
+        },
+        {
+          "id": "w1:b",
+          "date": "2026-12-02",
+          "label": "with a zone"
+        },
+        {
+          "id": "w1:c",
+          "date": "2026-12-03",
+          "label": "text after"
+        }
+      ]
+    },
+    {
+      "name": "a 141-character label is cut to 140, by characters not code units, and a cut that ends in a space is trimmed",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22",
+                "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude80\ud83d\ude80"
+              },
+              {
+                "id": "d",
+                "date": "2026-07-23",
+                "label": "  yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy z"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:a",
+          "date": "2026-07-20",
+          "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "w1:b",
+          "date": "2026-07-21",
+          "label": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        {
+          "id": "w1:c",
+          "date": "2026-07-22",
+          "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d\ude80"
+        },
+        {
+          "id": "w1:d",
+          "date": "2026-07-23",
+          "label": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+        }
+      ]
+    },
+    {
+      "name": "a repeated id keeps the first; the joined id is the key",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-20",
+                "label": "first"
+              },
+              {
+                "id": "i1",
+                "date": "2026-07-21",
+                "label": "second"
+              },
+              {
+                "id": "bad",
+                "date": "2026-13-40",
+                "label": "bad first"
+              },
+              {
+                "id": "bad",
+                "date": "2026-07-22",
+                "label": "valid second"
+              }
+            ]
+          },
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "i1",
+                "date": "2026-07-23",
+                "label": "another widget, same id"
+              }
+            ]
+          },
+          {
+            "id": "a:b",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "c",
+                "date": "2026-07-24",
+                "label": "joins to a:b:c"
+              }
+            ]
+          },
+          {
+            "id": "a",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "b:c",
+                "date": "2026-07-25",
+                "label": "also a:b:c"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w1:i1",
+          "date": "2026-07-20",
+          "label": "first"
+        },
+        {
+          "id": "w1:bad",
+          "date": "2026-07-22",
+          "label": "valid second"
+        },
+        {
+          "id": "a:b:c",
+          "date": "2026-07-24",
+          "label": "joins to a:b:c"
+        }
+      ]
+    },
+    {
+      "name": "entries keep board order across widgets and folders",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "z",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "2",
+                "date": "2026-09-01",
+                "label": "late"
+              }
+            ]
+          },
+          {
+            "id": "f",
+            "kind": "folder",
+            "children": [
+              {
+                "id": "m",
+                "kind": "timeline",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 3,
+                  "h": 3
+                },
+                "items": [
+                  {
+                    "id": "1",
+                    "date": "2026-01-01",
+                    "label": "early"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "a",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "1",
+                "date": "2026-05-01",
+                "label": "mid"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "z:2",
+          "date": "2026-09-01",
+          "label": "late"
+        },
+        {
+          "id": "m:1",
+          "date": "2026-01-01",
+          "label": "early"
+        },
+        {
+          "id": "a:1",
+          "date": "2026-05-01",
+          "label": "mid"
+        }
+      ]
+    },
+    {
+      "name": "a 2,001-entry board stops at 2,000",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "$repeat": 2001,
+                "item": {
+                  "id": "i{n}",
+                  "date": "2026-07-20",
+                  "label": "entry {n}"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expectedCount": 2000,
+      "expectedFirst": {
+        "id": "w1:i1",
+        "date": "2026-07-20",
+        "label": "entry 1"
+      },
+      "expectedLast": {
+        "id": "w1:i2000",
+        "date": "2026-07-20",
+        "label": "entry 2000"
+      }
+    },
+    {
+      "name": "the 2,000-entry cap counts kept entries, not bad ones",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "$repeat": 50,
+                "item": {
+                  "id": "bad{n}",
+                  "date": "nope",
+                  "label": "bad {n}"
+                }
+              },
+              {
+                "$repeat": 2000,
+                "item": {
+                  "id": "i{n}",
+                  "date": "2026-07-20",
+                  "label": "entry {n}"
+                }
+              },
+              {
+                "$repeat": 5,
+                "item": {
+                  "id": "extra{n}",
+                  "date": "2026-07-21",
+                  "label": "extra"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expectedCount": 2000,
+      "expectedFirst": {
+        "id": "w1:i1",
+        "date": "2026-07-20",
+        "label": "entry 1"
+      },
+      "expectedLast": {
+        "id": "w1:i2000",
+        "date": "2026-07-20",
+        "label": "entry 2000"
+      }
+    },
+    {
+      "name": "a duplicate before the cap does not use a place",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w1",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "$repeat": 1999,
+                "item": {
+                  "id": "i{n}",
+                  "date": "2026-07-20",
+                  "label": "e"
+                }
+              },
+              {
+                "id": "i1",
+                "date": "2026-07-21",
+                "label": "dup"
+              },
+              {
+                "id": "last",
+                "date": "2026-07-22",
+                "label": "the 2000th"
+              },
+              {
+                "id": "over",
+                "date": "2026-07-23",
+                "label": "the 2001st"
+              }
+            ]
+          }
+        ]
+      },
+      "expectedCount": 2000,
+      "expectedFirst": {
+        "id": "w1:i1",
+        "date": "2026-07-20",
+        "label": "e"
+      },
+      "expectedLast": {
+        "id": "w1:last",
+        "date": "2026-07-22",
+        "label": "the 2000th"
+      }
+    },
+    {
+      "name": "a real id is two UUIDs joined by a colon, 73 characters, and is kept",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "3f2b8c1e-6a4d-4f0b-9d2e-1c7a5b8e9f01",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "9a7e5d3c-2b1f-4e8a-8c6d-0f4b2a1e7d35",
+                "date": "2026-07-20",
+                "label": "pitch"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "3f2b8c1e-6a4d-4f0b-9d2e-1c7a5b8e9f01:9a7e5d3c-2b1f-4e8a-8c6d-0f4b2a1e7d35",
+          "date": "2026-07-20",
+          "label": "pitch"
+        }
+      ]
+    },
+    {
+      "name": "an id of 200 characters is kept and one of 201 or with a control character is skipped",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "date": "2026-07-20",
+                "label": "edge"
+              },
+              {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "date": "2026-07-21",
+                "label": "over"
+              },
+              {
+                "id": "tab\tid",
+                "date": "2026-07-22",
+                "label": "control"
+              },
+              {
+                "id": "ok",
+                "date": "2026-07-23",
+                "label": "fine"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "date": "2026-07-20",
+          "label": "edge"
+        },
+        {
+          "id": "w:ok",
+          "date": "2026-07-23",
+          "label": "fine"
+        }
+      ]
+    },
+    {
+      "name": "a label keeps an emoji with its variation selector and joiner and a no-break space inside",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "\u26a0\ufe0f deploy"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "\ud83d\udc68\u200d\ud83d\udc69 family"
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22",
+                "label": "two\u00a0words"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "\u26a0\ufe0f deploy"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "\ud83d\udc68\u200d\ud83d\udc69 family"
+        },
+        {
+          "id": "w:c",
+          "date": "2026-07-22",
+          "label": "two\u00a0words"
+        }
+      ]
+    },
+    {
+      "name": "a label's tab or line break becomes a space and its control and hidden characters go",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "one\ttwo\nthree"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "bell\u0007 zero\u200bwidth \u202eflip"
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22",
+                "label": "\u200b\u0007"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "one two three"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "bell zerowidth flip"
+        },
+        {
+          "id": "w:c",
+          "date": "2026-07-22",
+          "label": "deadline"
+        }
+      ]
+    },
+    {
+      "name": "whitespace of every kind is trimmed off both ends of a label, and one inside stays",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "\u00a0\u3000padded\u2003\u00a0"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "in\u00a0side\u2003gap"
+              },
+              {
+                "id": "c",
+                "date": "2026-07-22",
+                "label": "x\u00a0\u200b"
+              },
+              {
+                "id": "d",
+                "date": "2026-07-23",
+                "label": "\u200b\u3000\u00a0y"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "padded"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "in\u00a0side\u2003gap"
+        },
+        {
+          "id": "w:c",
+          "date": "2026-07-22",
+          "label": "x"
+        },
+        {
+          "id": "w:d",
+          "date": "2026-07-23",
+          "label": "y"
+        }
+      ]
+    },
+    {
+      "name": "a run of more than four combining marks is cut to four",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "e\u0301\u0301\u0301\u0301\u0301\u0301"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "e\u0301\u0301\u0301\u0301"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "e\u0301\u0301\u0301\u0301"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "e\u0301\u0301\u0301\u0301"
+        }
+      ]
+    },
+    {
+      "name": "a label with only an emoji joiner and selector left has nothing to show",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "\u200d\ufe0f"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "\u200d"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "deadline"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "deadline"
+        }
+      ]
+    },
+    {
+      "name": "a cut that lands after a space or leaves only joiners is tidied again",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "w",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": [
+              {
+                "id": "a",
+                "date": "2026-07-20",
+                "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b"
+              },
+              {
+                "id": "b",
+                "date": "2026-07-21",
+                "label": "\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200da"
+              }
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "w:a",
+          "date": "2026-07-20",
+          "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "id": "w:b",
+          "date": "2026-07-21",
+          "label": "deadline"
+        }
+      ]
+    }
+  ]
+}

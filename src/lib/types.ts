@@ -768,6 +768,15 @@ export type ProjectStatus = "due_soon" | "blocked" | "quick_win" | "take_a_look"
 /** A rough effort estimate for a project ("quick" → Quick win), or unset. */
 export type ProjectSize = "quick" | "standard" | "large" | null;
 
+/** One dated entry of the Pinboard on the Calendar (the `pm:pinboard` overlay), as
+ *  `calendar_pinboard_entries` answers. `id` is `<widgetId>:<itemId>`; the Calendar's event is
+ *  `pinboard:<id>`. `date` is a real `YYYY-MM-DD` day and `label` is never empty. */
+export interface PinboardEntry {
+  id: string;
+  date: string;
+  label: string;
+}
+
 /** One project milestone (card 7). A milestone is either PM-native (a user-set,
  *  editable `due_date`) or calendar-linked (`calendar_linked` / `event_uid` set), in
  *  which case `due_date` is the read-only date synced from the calendar event. */

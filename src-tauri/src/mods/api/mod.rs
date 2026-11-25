@@ -144,6 +144,10 @@ pub enum Caller {
 /// The events PM posts to frames, each with its row in the table (`events.rs`).
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use events::EVENTS;
+/// The overlay's day rule, shared with the legacy reader (`pinboard_legacy::clamp_overlay`).
+#[cfg(test)]
+pub(crate) use overlay_calls::writer_accepts as overlay_writer_accepts;
+pub(crate) use overlay_calls::{id_ok as overlay_id_ok, real_date as real_overlay_date};
 
 /// What the dispatcher reaches: the store, the frame sessions, the call limits, the events waiting
 /// for their interval, the engine's seal and the app lock. The app is the host; a test builds its own.

@@ -36,6 +36,18 @@ use super::shared::{
 };
 use super::vaults::require_vault_owner;
 
+/// The Pinboard's dated entries for the Calendar's `pm:pinboard` overlay: the Pinboard mod's own
+/// `mod_overlay` rows once the board has moved to it, else derived from the stored board. Never
+/// fails on a bad board (a bad entry is dropped; see `pinboard_legacy::clamp_overlay`). Each entry's
+/// `id` is `<widgetId>:<itemId>`, and the Calendar's event is `pinboard:<id>`.
+#[tauri::command]
+pub fn calendar_pinboard_entries(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::pinboard_legacy::Entry>> {
+    let conn = state.conn()?;
+    crate::pinboard_legacy::calendar_entries(&conn)
+}
+
 // --- personal assistant: calendar (multi-provider, read-only — cards 6A/6B) ---
 //
 // The calendar surface is multi-PROVIDER and multi-ACCOUNT: Google (OAuth, per-account), Outlook

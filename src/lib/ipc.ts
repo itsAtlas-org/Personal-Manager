@@ -119,6 +119,7 @@ import type {
   AnswerRating,
   EventKind,
   Milestone,
+  PinboardEntry,
   MilestoneStatus,
   ChecklistItem,
   ImportResult,
@@ -993,6 +994,11 @@ export const listMilestones = (project: string) =>
 /** Every project's milestones, resolved — read-only, for the calendar overlay (each carries its
  *  `project_name` for click-to-open). */
 export const listAllMilestones = () => invoke<Milestone[]>("list_all_milestones");
+
+/** The Pinboard's dated entries for the Calendar's overlay: the Pinboard mod's own rows once the
+ *  board has moved to it (an empty answer then means no dots), else derived from the stored board.
+ *  Read-only; the Calendar's one reader of them. */
+export const calendarPinboardEntries = () => invoke<PinboardEntry[]>("calendar_pinboard_entries");
 
 /** Add a milestone to a project. A non-null `eventUid` makes it calendar-linked. */
 export const addMilestone = (

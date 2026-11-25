@@ -324,7 +324,7 @@ fn stored_paths(column: &str, declared: impl Fn(&str) -> bool) -> BTreeMap<Strin
 
 /// Whether `err` says a column held another type than the one read (a BLOB in a TEXT column, bytes
 /// that are not UTF-8): data that is not what it should be, as against a database that failed.
-fn is_wrong_type(err: &rusqlite::Error) -> bool {
+pub(crate) fn is_wrong_type(err: &rusqlite::Error) -> bool {
     matches!(
         err,
         rusqlite::Error::InvalidColumnType(..)

@@ -93,6 +93,7 @@ mod outlook_calendar;
 mod pathguard;
 mod paths;
 mod photos;
+mod pinboard_legacy;
 /// The Calendar in a window of its own (#1039).
 mod popout;
 // The On battery policy (#432): the pure latch and settings parsers in `power`, the per-OS reading of
@@ -1951,6 +1952,7 @@ pub fn run() {
             commands::propose_project_metadata,
             commands::list_milestones,
             commands::list_all_milestones,
+            commands::calendar_pinboard_entries,
             commands::add_milestone,
             commands::update_milestone,
             commands::set_milestone_event,

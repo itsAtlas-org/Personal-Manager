@@ -34,13 +34,20 @@ import { COPY_CALL_OFF_NOTE } from "../../lib/calendarEdit/eventDraft";
 import { isoToDisplay } from "../../lib/dateField";
 import { resetKeyboardPrefs, writeCharacterShortcuts } from "../../lib/keyboardPrefs";
 import { formatDateLocal, formatDateOnly, pad2 } from "../../lib/format";
-import { BOARD_VERSION, PINBOARD_PREF_KEY } from "../../lib/pinboard/types";
+
+// The sources, read as text, for the one test that checks the pop-out wiring.
+const sources = import.meta.glob(["../../CalendarWindow.tsx", "./CalendarView.tsx"], {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
 
 const ipc = vi.hoisted(() => ({
   calendarOverview: vi.fn(),
   listAllCalendarEvents: vi.fn(),
   loadCalendarMonths: vi.fn(),
   listAllMilestones: vi.fn(),
+  calendarPinboardEntries: vi.fn(),
   getPref: vi.fn(),
   setPref: vi.fn(),
   getSettings: vi.fn(),
@@ -313,6 +320,7 @@ beforeEach(() => {
   ipc.loadCalendarMonths.mockResolvedValue(0);
   ipc.listAllMilestones.mockResolvedValue([milestone]);
   ipc.getPref.mockResolvedValue(null);
+  ipc.calendarPinboardEntries.mockResolvedValue([]);
   ipc.onCalendarSynced.mockResolvedValue(() => {});
   ipc.onCalendarWriteLanded.mockImplementation((cb: () => void) => {
     writeLanded = cb;
@@ -1896,24 +1904,13 @@ describe("CalendarView: tasks", () => {
   });
 
   // R1: the Runway heads its columns with what the calendar shows on their days, read-only.
-  const pinboard = JSON.stringify({
-    version: BOARD_VERSION,
-    widgets: [
-      {
-        id: "w1",
-        kind: "timeline",
-        rect: { x: 0, y: 0, w: 3, h: 3 },
-        items: [{ id: "i1", date: today, label: "Seed order" }],
-      },
-    ],
-  });
+  // What `calendar_pinboard_entries` answers: the Pinboard's dated entries, ids `<widgetId>:<itemId>`.
+  const pinboard = [{ id: "w1:i1", date: today, label: "Seed order" }];
 
   it("the Runway's columns show the events and pinboard entries, not the task or milestone overlays", async () => {
     localStorage.removeItem("pm.calendar.agendaMode");
     tasks = [task({})];
-    ipc.getPref.mockImplementation((key: string) =>
-      Promise.resolve(key === PINBOARD_PREF_KEY ? pinboard : null),
-    );
+    ipc.calendarPinboardEntries.mockResolvedValue(pinboard);
     const View = (await import("./CalendarView")).CalendarView;
     const onOpenPinboard = vi.fn();
     render(<View onOpenPinboard={onOpenPinboard} />);
@@ -1934,9 +1931,7 @@ describe("CalendarView: tasks", () => {
     localStorage.removeItem("pm.calendar.agendaMode");
     tasks = [task({})];
     env.hidden = new Set([PERSONAL, "pm:pinboard"]);
-    ipc.getPref.mockImplementation((key: string) =>
-      Promise.resolve(key === PINBOARD_PREF_KEY ? pinboard : null),
-    );
+    ipc.calendarPinboardEntries.mockResolvedValue(pinboard);
     const View = (await import("./CalendarView")).CalendarView;
     render(<View />);
     const todayCol = await screen.findByRole("region", { name: "Today" });
@@ -1945,6 +1940,79 @@ describe("CalendarView: tasks", () => {
     expect(within(todayCol).queryByRole("group", { name: "Events, Today" })).toBeNull();
     expect(screen.queryByText("Standup")).toBeNull();
     expect(screen.queryByText("Seed order")).toBeNull();
+  });
+
+  // K4: the Pinboard's dots come from `calendar_pinboard_entries` alone, in the main window and the
+  // pop-out (the same component), on mount and on the focus refresh.
+  async function mountForPinboard() {
+    localStorage.removeItem("pm.calendar.agendaMode");
+    tasks = [task({})];
+    const View = (await import("./CalendarView")).CalendarView;
+    render(<View />);
+    const todayCol = await screen.findByRole("region", { name: "Today" });
+    await within(todayCol).findByText("Draft the deck");
+    await act(async () => {});
+    return todayCol;
+  }
+
+  it("reads the Pinboard's dots through the command, never the stored board", async () => {
+    ipc.calendarPinboardEntries.mockResolvedValue(pinboard);
+    // A stored board the old reader would have drawn: it must be ignored.
+    ipc.getPref.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        widgets: [
+          {
+            id: "old",
+            kind: "timeline",
+            items: [{ id: "x", date: today, label: "From the old row" }],
+          },
+        ],
+      }),
+    );
+    const todayCol = await mountForPinboard();
+    expect(await within(todayCol).findByRole("button", { name: /Seed order/ })).toBeTruthy();
+    expect(screen.queryByText("From the old row")).toBeNull();
+    expect(ipc.calendarPinboardEntries).toHaveBeenCalled();
+    expect(ipc.getPref.mock.calls.map((c) => c[0])).not.toContain("pinboard");
+  });
+
+  it("an empty answer draws no dots", async () => {
+    ipc.calendarPinboardEntries.mockResolvedValue([]);
+    await mountForPinboard();
+    expect(screen.queryByText("Seed order")).toBeNull();
+  });
+
+  it("the focus refresh asks the command again, and a failed read keeps the last dots", async () => {
+    ipc.calendarPinboardEntries.mockResolvedValue(pinboard);
+    const todayCol = await mountForPinboard();
+    await within(todayCol).findByRole("button", { name: /Seed order/ });
+    const before = ipc.calendarPinboardEntries.mock.calls.length;
+
+    ipc.calendarPinboardEntries.mockResolvedValue([
+      { id: "w1:i9", date: today, label: "Moved by the mod" },
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(ipc.calendarPinboardEntries.mock.calls.length).toBeGreaterThan(before);
+    await within(todayCol).findByRole("button", { name: /Moved by the mod/ });
+    expect(screen.queryByText("Seed order")).toBeNull();
+
+    ipc.calendarPinboardEntries.mockRejectedValue(new Error("locked"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(within(todayCol).getByRole("button", { name: /Moved by the mod/ })).toBeTruthy();
+  });
+
+  it("the pop-out Calendar is this same component, so it reads the same command", () => {
+    const popout = sources["../../CalendarWindow.tsx"];
+    expect(popout).toMatch(/from "\.\/components\/calendar\/CalendarView"/);
+    expect(popout).not.toMatch(/getPref|calendarEntries|PINBOARD_PREF_KEY/);
+    const view = sources["./CalendarView.tsx"];
+    expect(view).toContain("calendarPinboardEntries()");
+    expect(view).not.toMatch(/PINBOARD_PREF_KEY|getPref\(/);
   });
 });
 
