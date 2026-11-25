@@ -140,3 +140,63 @@ async fn a_write_in_flight_across_an_uninstall_commits_nothing() {
         assert_eq!(status, "todo", "{method}");
     }
 }
+
+/// A frame that read its board before a rename holds a stale copy: the rename bumped the revision
+/// (`mods::refs`), so writing that copy back is refused instead of undoing the rename (PR C, K3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_write_after_a_rename_is_refused_and_the_current_one_lands() {
+    let (host, s) = first("atlas.boardy", &["storage", "projects.read"]);
+    host.sql(|c| {
+        c.execute(
+            "UPDATE mods SET manifest = ?1, project_refs = ?2 WHERE id = 'atlas.boardy'",
+            rusqlite::params![
+                super::test_support::manifest(
+                    &["storage", "projects.read"],
+                    &[("board", "content")]
+                ),
+                json!([{"key": "board", "path": "$.widgets[*].project"}]).to_string()
+            ],
+        )
+        .unwrap();
+    });
+    let board = json!({"widgets": [{"project": "Atlas"}]});
+    let v = value(
+        call(
+            &host,
+            &s,
+            "storage.set",
+            json!({"key": "board", "value": board, "expectedRevision": 0}),
+        )
+        .await,
+    );
+    assert_eq!(v, json!({"revision": 1}));
+
+    host.sql(|c| crate::projects::rename_project_satellites(c, "Atlas", "Atlas 2").unwrap());
+
+    let v = value(call(&host, &s, "storage.get", json!({"key": "board"})).await);
+    assert_eq!(v["revision"], 2);
+    assert_eq!(v["value"], json!({"widgets": [{"project": "Atlas 2"}]}));
+    // The copy the frame read at revision 1, written back: refused, naming the revision it is at.
+    let e = error(
+        call(
+            &host,
+            &s,
+            "storage.set",
+            json!({"key": "board", "value": board, "expectedRevision": 1}),
+        )
+        .await,
+    );
+    assert_eq!((e.code, e.revision), (Code::StaleRevision, Some(2)));
+    // The same write from a frame that read again lands.
+    let fresh = json!({"widgets": [{"project": "Atlas 2"}, {"project": null}]});
+    let v = value(
+        call(
+            &host,
+            &s,
+            "storage.set",
+            json!({"key": "board", "value": fresh, "expectedRevision": 2}),
+        )
+        .await,
+    );
+    assert_eq!(v, json!({"revision": 3}));
+}

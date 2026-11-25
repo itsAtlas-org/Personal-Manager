@@ -531,6 +531,12 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
           }
           modEventsAck(live.session, message.seq).catch(() => {});
           return;
+        case "flushed":
+          // The answer to `lifecycle.suspend`. The page's handshake that waits for it (a frame is
+          // retired only after it, or at the deadline) is K5's; until then nothing waits, so the answer
+          // is read and paid for like any message, and there is nothing else to do with it.
+          if (!live.flood.take(performance.now())) stopFlooding(live);
+          return;
         case "refuse":
           if (!live.flood.take(performance.now())) {
             stopFlooding(live);

@@ -396,6 +396,7 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         { id: "ui.tab", why: "Shows its tab." },
         { id: "storage", why: "Keeps settings." },
         { id: "internet", why: "Talks to a service." },
+        { id: "projects.read", why: "Keeps its cards on the right project." },
       ],
       internetHosts: ["api.example.com"],
       secrets: [{ name: "api_key", host: "api.example.com", header: "X-Api-Key" }],
@@ -422,6 +423,37 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
       api: "1.0-1.0",
       entryPage: "app/index.html",
     });
+  });
+
+  // The path grammar's shared vectors (tests/mod-project-ref-paths.json), read by package.rs's own
+  // test too: the two verifiers accept and refuse exactly the same paths.
+  const VECTORS = JSON.parse(
+    readFileSync(join(repoRoot, "tests/mod-project-ref-paths.json"), "utf8"),
+  );
+  const withPath = (path) =>
+    check({
+      permissions: [
+        { id: "storage", why: "x" },
+        { id: "ui.tab", why: "x" },
+        { id: "projects.read", why: "x" },
+      ],
+      data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path }] },
+    });
+
+  it("accepts every valid path of the shared vector table", () => {
+    expect(VECTORS.valid.length).toBeGreaterThanOrEqual(10);
+    for (const path of VECTORS.valid) {
+      expect(() => withPath(path), path).not.toThrow();
+      expect(pack.projectRefPathProblem(path), path).toBeNull();
+    }
+  });
+
+  it("refuses every invalid path of the shared vector table", () => {
+    expect(VECTORS.invalid.length).toBeGreaterThanOrEqual(20);
+    for (const { path, why } of VECTORS.invalid) {
+      refused(() => withPath(path), "projectRef path");
+      expect(pack.projectRefPathProblem(path), `${path} (${why})`).not.toBeNull();
+    }
   });
 
   it.each([
@@ -637,11 +669,24 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         permissions: [
           { id: "storage", why: "x" },
           { id: "ui.tab", why: "x" },
+          { id: "projects.read", why: "x" },
         ],
         data: { projectRefs: [{ key: "a", path: "$.x" }] },
       },
       [],
       "doesn't declare",
+    ],
+    [
+      "projectRefs without the permission that says the mod reads projects",
+      {
+        permissions: [
+          { id: "storage", why: "x" },
+          { id: "ui.tab", why: "x" },
+        ],
+        data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path: "$.x" }] },
+      },
+      [],
+      "needs the projects.read permission",
     ],
     ["an entry that is not html", { entry: { page: "app/w.js" } }, [], "must be an .html"],
     ["an entry outside app/", { entry: { page: "manifest.json" } }, [], "isn't one of its app/"],
@@ -813,6 +858,7 @@ describe("checkManifest mirrors package.rs's parse_manifest", () => {
         permissions: [
           { id: "storage", why: "x" },
           { id: "ui.tab", why: "x" },
+          { id: "projects.read", why: "x" },
         ],
         data: { keys: [{ key: "a", class: "cache" }], projectRefs: [{ key: "a", path: "$. x" }] },
       },

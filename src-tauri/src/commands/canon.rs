@@ -11,6 +11,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::{Error, Result};
 use crate::ingest;
 use crate::llm_gateway::{self, Role};
+use crate::mods::api::events::{self, ProjectChange};
 use crate::projects::{self, ProjectOverview, ProjectProposalEvent};
 use crate::{chat, clock, db, entities, index_only, openrouter, vault, AppState};
 
@@ -132,18 +133,14 @@ fn rewrite_after_project_rekey(
 #[tauri::command]
 pub async fn rename_entity(app: AppHandle, entity_id: i64, new_name: String) -> Result<()> {
     let notify = app.clone();
-    spawn_entity_mutation(
+    let change = spawn_entity_mutation(
         app,
         move |tx, vault, cipher, vault_root, manifest_cipher, files| {
             // Capture the old canonical BEFORE the rename so we can re-key the name-keyed project
             // satellites (triage, milestones, activity, chats) onto the new name — otherwise the
             // renamed project silently loses all of them (F-05). Runs before the document rewrite,
             // whose truth-writer would otherwise lazily upsert a bare new-name projects row.
-            let old = entities::canonical_name(tx, entity_id)?;
-            // Captured before the satellites (and with them the project tag) are re-keyed.
-            let members = crate::tags::documents_tagged(tx, &old)?;
-            let canonical = entities::rename_entity(tx, entity_id, &new_name)?;
-            projects::rename_project_satellites(tx, &old, &canonical)?;
+            let rekey = rename_rekey(tx, entity_id, &new_name)?;
             rewrite_after_project_rekey(
                 tx,
                 vault,
@@ -151,14 +148,15 @@ pub async fn rename_entity(app: AppHandle, entity_id: i64, new_name: String) -> 
                 vault_root,
                 manifest_cipher,
                 entity_id,
-                &canonical,
-                &members,
+                &rekey.canonical,
+                &rekey.members,
                 &mut files.written,
-            )
+            )?;
+            Ok(rekey.change)
         },
     )
     .await?;
-    tasks_changed(&notify);
+    project_changed(&notify, change);
     Ok(())
 }
 
@@ -166,6 +164,83 @@ pub async fn rename_entity(app: AppHandle, entity_id: i64, new_name: String) -> 
 /// re-read. Called once the mutation has committed and released the guard.
 fn tasks_changed(app: &AppHandle) {
     crate::tasks::announce_changed(app);
+}
+
+/// What a rename or a fold did to a project's name, before its documents are rewritten.
+struct Rekey {
+    /// What the mods are told, captured from the names the mutation acted on.
+    change: Option<ProjectChange>,
+    /// The name the project's documents are now filed under.
+    canonical: String,
+    /// The documents tagged with the project, read before the satellites (and the tag) were re-keyed.
+    members: Vec<i64>,
+}
+
+/// The database half of renaming entity `entity_id`: capture the old canonical BEFORE the rename,
+/// rename, and re-key the name-keyed satellites (including the mods' `projectRefs`) onto the new name.
+fn rename_rekey(tx: &Connection, entity_id: i64, new_name: &str) -> Result<Rekey> {
+    let old = entities::canonical_name(tx, entity_id)?;
+    // Captured before the satellites (and with them the project tag) are re-keyed.
+    let members = crate::tags::documents_tagged(tx, &old)?;
+    let canonical = entities::rename_entity(tx, entity_id, new_name)?;
+    projects::rename_project_satellites(tx, &old, &canonical)?;
+    Ok(Rekey {
+        change: renamed(&old, &canonical),
+        canonical,
+        members,
+    })
+}
+
+/// [`rename_rekey`] for folding `from_id` into `into_id`: the folded name is captured BEFORE the
+/// merge deletes its entity, and its satellites are folded onto the survivor's name.
+fn fold_rekey(tx: &Connection, from_id: i64, into_id: i64) -> Result<Rekey> {
+    let old = entities::canonical_name(tx, from_id)?;
+    // Captured before the satellites (and with them the project tag) are folded.
+    let members = crate::tags::documents_tagged(tx, &old)?;
+    entities::merge_entities(tx, from_id, into_id)?;
+    let canonical = entities::canonical_name(tx, into_id)?;
+    projects::rename_project_satellites(tx, &old, &canonical)?;
+    Ok(Rekey {
+        change: merged(&old, &canonical),
+        canonical,
+        members,
+    })
+}
+
+/// What the mods are told of a project's name (`projects.renamed`, `.merged`, `.deleted`), captured
+/// inside the mutation's closure from the names it acted on: nothing when the name didn't change.
+fn renamed(old: &str, canonical: &str) -> Option<ProjectChange> {
+    let (from, to) = (old.trim(), canonical.trim());
+    (!from.is_empty() && !to.is_empty() && from != to).then(|| ProjectChange::Renamed {
+        from: from.to_owned(),
+        to: to.to_owned(),
+    })
+}
+
+/// [`renamed`] for a fold: `old` became part of `canonical`.
+fn merged(old: &str, canonical: &str) -> Option<ProjectChange> {
+    let (from, into) = (old.trim(), canonical.trim());
+    (!from.is_empty() && !into.is_empty() && from != into).then(|| ProjectChange::Merged {
+        from: from.to_owned(),
+        into: into.to_owned(),
+    })
+}
+
+fn project_deleted(canonical: &str) -> Option<ProjectChange> {
+    let name = canonical.trim();
+    (!name.is_empty()).then(|| ProjectChange::Deleted {
+        name: name.to_owned(),
+    })
+}
+
+/// The one helper the four commands that re-key or drop a project's name call once their mutation
+/// has committed and released the guard: the task views re-read ([`tasks_changed`]) and the mods that
+/// hold `projects.read` are told what was done to the name.
+fn project_changed(app: &AppHandle, change: Option<ProjectChange>) {
+    tasks_changed(app);
+    if let Some(change) = change {
+        events::announce_project_change(app, change);
+    }
 }
 
 /// What a project merge will move — the honest, computed preview behind the type-to-confirm
@@ -288,18 +363,13 @@ pub async fn merge_projects(app: AppHandle, from: String, into: String) -> Resul
         resolve_merge_pair(&conn, &from, &into)?;
     }
     let notify = app.clone();
-    spawn_entity_mutation(
+    let change = spawn_entity_mutation(
         app,
         move |tx, vault, cipher, vault_root, manifest_cipher, files| {
             let (from_id, into_id, _) = resolve_merge_pair(tx, &from, &into)?;
             // Identical ordering to `merge_entities`: capture the folded name BEFORE the entity
             // row dies, fold the entity, then re-key the name-keyed satellites onto the survivor.
-            let old = entities::canonical_name(tx, from_id)?;
-            // Captured before the satellites (and with them the project tag) are folded.
-            let members = crate::tags::documents_tagged(tx, &old)?;
-            entities::merge_entities(tx, from_id, into_id)?;
-            let canonical = entities::canonical_name(tx, into_id)?;
-            projects::rename_project_satellites(tx, &old, &canonical)?;
+            let rekey = fold_rekey(tx, from_id, into_id)?;
             rewrite_after_project_rekey(
                 tx,
                 vault,
@@ -307,14 +377,15 @@ pub async fn merge_projects(app: AppHandle, from: String, into: String) -> Resul
                 vault_root,
                 manifest_cipher,
                 into_id,
-                &canonical,
-                &members,
+                &rekey.canonical,
+                &rekey.members,
                 &mut files.written,
-            )
+            )?;
+            Ok(rekey.change)
         },
     )
     .await?;
-    tasks_changed(&notify);
+    project_changed(&notify, change);
     Ok(())
 }
 
@@ -439,7 +510,7 @@ pub async fn delete_project(
         resolve_deletable_project(&conn, &project)?;
     }
     let notify = app.clone();
-    spawn_entity_mutation(
+    let change = spawn_entity_mutation(
         app,
         move |tx, vault, cipher, vault_root, manifest_cipher, out| {
             let (entity_id, canonical) = resolve_deletable_project(tx, &project)?;
@@ -642,11 +713,11 @@ pub async fn delete_project(
                     tx.execute("DELETE FROM entities WHERE id = ?1", params![entity_id])?;
                 }
             }
-            Ok(())
+            Ok(project_deleted(&canonical))
         },
     )
     .await?;
-    tasks_changed(&notify);
+    project_changed(&notify, change);
     Ok(())
 }
 
@@ -656,18 +727,13 @@ pub async fn delete_project(
 #[tauri::command]
 pub async fn merge_entities(app: AppHandle, from_id: i64, into_id: i64) -> Result<()> {
     let notify = app.clone();
-    spawn_entity_mutation(
+    let change = spawn_entity_mutation(
         app,
         move |tx, vault, cipher, vault_root, manifest_cipher, files| {
             // Capture the folded project's name BEFORE the merge deletes the source entity, then fold
             // its name-keyed satellites into the survivor's name (F-05). `rename_project_satellites`
             // keeps the survivor's own triage (INSERT OR IGNORE) and sums the daily rollup on collision.
-            let old = entities::canonical_name(tx, from_id)?;
-            // Captured before the satellites (and with them the project tag) are folded.
-            let members = crate::tags::documents_tagged(tx, &old)?;
-            entities::merge_entities(tx, from_id, into_id)?;
-            let canonical = entities::canonical_name(tx, into_id)?;
-            projects::rename_project_satellites(tx, &old, &canonical)?;
+            let rekey = fold_rekey(tx, from_id, into_id)?;
             rewrite_after_project_rekey(
                 tx,
                 vault,
@@ -675,14 +741,15 @@ pub async fn merge_entities(app: AppHandle, from_id: i64, into_id: i64) -> Resul
                 vault_root,
                 manifest_cipher,
                 into_id,
-                &canonical,
-                &members,
+                &rekey.canonical,
+                &rekey.members,
                 &mut files.written,
-            )
+            )?;
+            Ok(rekey.change)
         },
     )
     .await?;
-    tasks_changed(&notify);
+    project_changed(&notify, change);
     Ok(())
 }
 
@@ -944,5 +1011,161 @@ mod merge_project_tests {
         let (_dir, conn) = conn_with_projects(&["Marketing"]);
         assert!(super::resolve_deletable_project(&conn, "Ghost").is_err());
         assert!(super::resolve_deletable_project(&conn, "   ").is_err());
+    }
+}
+
+/// What the mods are told when a project is renamed, folded in or deleted (`projects.renamed`,
+/// `.merged`, `.deleted`): captured inside each command's mutation, from the names it acted on.
+#[cfg(test)]
+mod project_change_tests {
+    use super::*;
+    use crate::commands::shared::temp_db;
+    use crate::mods::api::test_support::{insert_mod, ModRow};
+
+    fn project(conn: &Connection, name: &str) -> i64 {
+        entities::resolve_project(conn, name, true)
+            .unwrap()
+            .expect("created")
+    }
+
+    #[test]
+    fn the_three_helpers_trim_and_say_nothing_when_the_name_did_not_change() {
+        assert_eq!(
+            renamed(" Atlas ", " Atlas 2"),
+            Some(ProjectChange::Renamed {
+                from: "Atlas".into(),
+                to: "Atlas 2".into()
+            })
+        );
+        assert_eq!(
+            renamed("Atlas", " Atlas "),
+            None,
+            "the same name once trimmed"
+        );
+        assert_eq!(renamed("", "Atlas"), None);
+        assert_eq!(renamed("Atlas", "  "), None);
+        assert_eq!(
+            merged("Old", " Keeper"),
+            Some(ProjectChange::Merged {
+                from: "Old".into(),
+                into: "Keeper".into()
+            })
+        );
+        assert_eq!(merged("Same", "Same"), None);
+        assert_eq!(merged(" ", "Keeper"), None);
+        assert_eq!(
+            project_deleted(" Gone "),
+            Some(ProjectChange::Deleted {
+                name: "Gone".into()
+            })
+        );
+        assert_eq!(project_deleted("  "), None);
+    }
+
+    /// A mod that holds `projects.read` and keeps a project's name in its `board` value.
+    fn board_mod(conn: &Connection, project: &str) {
+        insert_mod(
+            conn,
+            &ModRow {
+                keys: vec![("board", "content")],
+                consented: false,
+                ..ModRow::signed("acme.board", "second", &["storage", "projects.read"])
+            },
+        );
+        conn.execute(
+            "UPDATE mods SET project_refs = ?1 WHERE id = 'acme.board'",
+            [r#"[{"key":"board","path":"$.cards[*].project"}]"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mod_kv(mod_id, key, class, value) VALUES ('acme.board', 'board', 'content', ?1)",
+            [format!(r#"{{"cards":[{{"project":"{project}"}}]}}"#)],
+        )
+        .unwrap();
+    }
+
+    fn board_project(conn: &Connection) -> String {
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM mod_kv WHERE mod_id = 'acme.board'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&v).unwrap()["cards"][0]["project"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn a_rename_captures_the_old_name_before_it_moves_and_re_keys_the_mods_data() {
+        let (_dir, conn) = temp_db();
+        let id = project(&conn, "Atlas");
+        board_mod(&conn, "Atlas");
+        let rekey = rename_rekey(&conn, id, "Atlas Two").unwrap();
+        assert_eq!(rekey.canonical, "Atlas Two");
+        assert_eq!(
+            rekey.change,
+            Some(ProjectChange::Renamed {
+                from: "Atlas".into(),
+                to: "Atlas Two".into()
+            })
+        );
+        assert_eq!(board_project(&conn), "Atlas Two");
+    }
+
+    #[test]
+    fn a_fold_captures_the_folded_name_before_its_entity_is_gone() {
+        let (_dir, conn) = temp_db();
+        let from = project(&conn, "Old Name");
+        let into = project(&conn, "Keeper");
+        board_mod(&conn, "Old Name");
+        let rekey = fold_rekey(&conn, from, into).unwrap();
+        assert_eq!(rekey.canonical, "Keeper");
+        assert_eq!(
+            rekey.change,
+            Some(ProjectChange::Merged {
+                from: "Old Name".into(),
+                into: "Keeper".into()
+            }),
+            "a merge is told as a merge, with the folded project's name"
+        );
+        assert_eq!(board_project(&conn), "Keeper");
+    }
+
+    /// The four commands (`rename_entity`, `merge_entities`, `merge_projects`, `delete_project`) need
+    /// the running app (vault, cipher, the guard), which no test here builds. What each must do is one
+    /// line: hand back the change its helper made from the names it acted on, and announce it
+    /// through `project_changed` once committed. Read the source for exactly that.
+    #[test]
+    fn each_of_the_four_commands_returns_its_own_change_and_announces_it_once_committed() {
+        let src = include_str!("canon.rs");
+        let body = |name: &str| -> &str {
+            let start = src
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} exists"));
+            let rest = &src[start..];
+            // A top-level function ends at the first closing brace in the first column.
+            &rest[..rest.find("\n}\n").expect("the function ends")]
+        };
+        let announces = |b: &str| b.contains("project_changed(&notify, change);");
+        for (name, returns) in [
+            ("rename_entity", "Ok(rekey.change)"),
+            ("merge_entities", "Ok(rekey.change)"),
+            ("merge_projects", "Ok(rekey.change)"),
+            ("delete_project", "Ok(project_deleted(&canonical))"),
+        ] {
+            let b = body(name);
+            assert!(b.contains(returns), "{name} returns {returns}");
+            assert!(announces(b), "{name} announces after the commit");
+        }
+        assert!(body("rename_entity").contains("rename_rekey("));
+        for name in ["merge_entities", "merge_projects"] {
+            assert!(body(name).contains("fold_rekey("), "{name}");
+        }
+        // Only a delete says `deleted`, and only a fold says `merged`.
+        assert!(!body("rename_entity").contains("project_deleted"));
+        assert!(!body("delete_project").contains("rekey"));
     }
 }

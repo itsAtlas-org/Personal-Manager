@@ -193,6 +193,14 @@ pub const ROWS: &[Row] = &[
     // ...it was paused, and its session ended. These two are PM's goodbye (outbox.rs).
     event("mod.paused", None, Class::Local),
     event("session.closed", None, Class::Local),
+    // PR C's events (K3). A bare signal, no ids: the frame lists again (events.rs).
+    event("tasks.changed", Some("tasks.read"), Class::Read),
+    // The names are the project's own, after the mutation committed.
+    event("projects.renamed", Some("projects.read"), Class::Read),
+    event("projects.merged", Some("projects.read"), Class::Read),
+    event("projects.deleted", Some("projects.read"), Class::Read),
+    // PM's word to one frame before it takes it down: no permission, `{reason}`, answered `{flushed}`.
+    event("lifecycle.suspend", None, Class::Local),
 ];
 
 /// The live event row named `name` in `rows` at API `version`.

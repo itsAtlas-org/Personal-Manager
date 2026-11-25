@@ -11,7 +11,10 @@
 //   the frame's origin is opaque, and once per session: it posts `{ pm: "port", version: 1 }` to the
 //   frame with a MessagePort transferred. Both sides post with "*", because an opaque origin can't be
 //   named. Every mod's origin is "null", so the origin can't tell two mods apart; the `source` does.
-// - Over the port the frame sends a call, `{ id, method, args }`, or a height request, `{ resize }`.
+// - Over the port the frame sends a call, `{ id, method, args }`, a height request, `{ resize }`, or
+//   (once PM has told it `lifecycle.suspend`, which it needs no permission to hear) its answer,
+//   `{ flushed: true }`: what it was holding is saved, so PM may take the frame down. PM never
+//   answers that either; the page waits for it up to its own deadline (ModFrame.tsx).
 //   PM answers a call with `{ id, ok: true, result }` or `{ id, ok: false, error }`, where `error` is
 //   `{ code, message }` with a stable `MOD-####` code (ERROR_CODES.md), plus `permission` when a
 //   permission is the reason and `revision` when a stored value moved on. PM never answers a height
@@ -116,6 +119,11 @@ export const MOD_EVENTS = [
   "grants.changed",
   "mod.paused",
   "session.closed",
+  "tasks.changed",
+  "projects.renamed",
+  "projects.merged",
+  "projects.deleted",
+  "lifecycle.suspend",
 ] as const;
 
 export type ModEventName = (typeof MOD_EVENTS)[number];
@@ -156,6 +164,7 @@ export type PortMessage =
   | { kind: "call"; id: number; method: string; args: string }
   | { kind: "resize"; height: number }
   | { kind: "ack"; seq: number }
+  | { kind: "flushed" }
   | { kind: "refuse"; id: number; error: ModError }
   | { kind: "drop" };
 
@@ -291,6 +300,8 @@ export function readPortMessage(data: unknown): PortMessage {
       ? { kind: "ack", seq }
       : DROP;
   }
+  // The answer to `lifecycle.suspend`: the frame has saved what it held. Only `true` says so.
+  if ("flushed" in data) return data.flushed === true ? { kind: "flushed" } : DROP;
   const id = data.id;
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return DROP;
   const method = data.method;

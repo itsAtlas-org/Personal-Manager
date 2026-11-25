@@ -53,6 +53,7 @@ use zip::{CompressionMethod, ZipArchive};
 
 use super::headers::APP_DIR;
 use super::ids::{self, ModId, Tier};
+use super::refs;
 
 pub const MANIFEST: &str = "manifest.json";
 pub const LICENCE_FILE: &str = "LICENCE.txt";
@@ -313,8 +314,8 @@ pub struct HelpEntry {
 pub struct DataDecl {
     #[serde(default)]
     pub keys: Vec<DataKey>,
-    /// JSON paths into a key's value that hold project names (spec §4). The path grammar, with its
-    /// recursive form, is PR-2's; here a path is only shape-checked.
+    /// JSON paths into a key's value that hold project names (spec §4), in the grammar of
+    /// [`refs::parse`], which `check_data` holds every path to.
     #[serde(default)]
     pub project_refs: Vec<ProjectRef>,
 }
@@ -1651,15 +1652,23 @@ fn check_data(data: &DataDecl, granted: &BTreeSet<&str>) -> Result<(), PackageEr
                 quote(&r.key)
             )));
         }
-        let path_ok = !r.path.is_empty()
-            && r.path.len() <= 256
-            && r.path.bytes().all(|b| b.is_ascii_graphic());
-        if !path_ok {
+        // The one grammar (`refs::parse`), the same one the rewrite reads the stored column with and
+        // `pack-mod.mjs` mirrors: a path the rewriter can't read would install and never rewrite.
+        if let Err(why) = refs::parse(&r.path) {
             return Err(manifest_error(format!(
-                "projectRef path {}",
+                "projectRef path {} {why}",
                 quote(&r.path)
             )));
         }
+    }
+    // PM rewrites a mod's stored project names for it, and tells it of a rename by event: a mod that
+    // holds refs says it reads projects, so the person is shown that line at install (the rewrite's
+    // own gate, `refs::rewrite_all`, reads the same declaration).
+    if !data.project_refs.is_empty() && !granted.contains(refs::PERMISSION) {
+        return Err(manifest_error(format!(
+            "data.projectRefs needs the {} permission",
+            refs::PERMISSION
+        )));
     }
     Ok(())
 }
@@ -2605,6 +2614,42 @@ pub(crate) mod tests {
         assert_eq!(refusal(f.verify()), want, "{what}");
     }
 
+    /// The path grammar's shared vectors (`tests/mod-project-ref-paths.json`, also read by
+    /// `scripts/pack-mod.test.mjs`): the verifier accepts every valid path and refuses every invalid
+    /// one as a manifest fault, so the two verifiers can't drift apart.
+    #[test]
+    fn project_ref_paths_follow_the_shared_vector_table() {
+        let table: Value =
+            serde_json::from_str(include_str!("../../../tests/mod-project-ref-paths.json"))
+                .unwrap();
+        let build = |path: &str| {
+            with_manifest(|m| {
+                m["permissions"].as_array_mut().unwrap().push(
+                    json!({"id": "projects.read", "why": "Keeps its cards on the right project."}),
+                );
+                m["data"]["projectRefs"] = json!([{"key": "settings", "path": path}]);
+            })
+        };
+        let valid = table["valid"].as_array().unwrap();
+        let invalid = table["invalid"].as_array().unwrap();
+        assert!(
+            valid.len() >= 10 && invalid.len() >= 20,
+            "a table, not a stub"
+        );
+        for path in valid {
+            let path = path.as_str().unwrap();
+            assert!(build(path).verify().is_ok(), "{path:?} should install");
+        }
+        for case in invalid {
+            let (path, why) = (case["path"].as_str().unwrap(), &case["why"]);
+            assert_eq!(
+                refusal(build(path).verify()),
+                Refusal::Manifest,
+                "{path:?} ({why}) should be refused"
+            );
+        }
+    }
+
     #[test]
     fn the_licence_must_be_the_agpl() {
         refused_manifest("MIT", Refusal::Licence, |m| m["licence"] = json!("MIT"));
@@ -3122,17 +3167,36 @@ pub(crate) mod tests {
         refused_manifest("data key shape", Refusal::Manifest, |m| {
             m["data"]["keys"][0]["key"] = json!("Settings Key")
         });
+        // Each refusal below is for its own reason: the manifest reads projects, so the missing
+        // permission is not what refuses it.
+        let reads_projects = |m: &mut Value| {
+            m["permissions"].as_array_mut().unwrap().push(
+                json!({"id": "projects.read", "why": "Keeps its cards on the right project."}),
+            );
+        };
         refused_manifest("projectRef to an undeclared key", Refusal::Manifest, |m| {
+            reads_projects(m);
             m["data"]["projectRefs"] = json!([{"key": "board", "path": "$.items[*].project"}])
         });
         refused_manifest("projectRef path with a space", Refusal::Manifest, |m| {
+            reads_projects(m);
             m["data"]["projectRefs"] = json!([{"key": "settings", "path": "$.a b"}])
         });
         assert!(with_manifest(|m| {
+            reads_projects(m);
             m["data"]["projectRefs"] = json!([{"key": "settings", "path": "$.items[*].project"}])
         })
         .verify()
         .is_ok());
+        // Refs without the permission that says the mod reads projects are refused.
+        refused_manifest(
+            "projectRefs without projects.read",
+            Refusal::Manifest,
+            |m| {
+                m["data"]["projectRefs"] =
+                    json!([{"key": "settings", "path": "$.items[*].project"}])
+            },
+        );
         refused_manifest("unknown room", Refusal::Manifest, |m| {
             m["requires"] = json!(["pinboard"])
         });

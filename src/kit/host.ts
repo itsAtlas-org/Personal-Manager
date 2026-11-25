@@ -130,6 +130,9 @@ export interface ModHost {
   onEvent(handler: (event: HostEvent) => void): () => void;
   /** Ask PM for a frame height in CSS pixels (clamped to PM's bounds; PM never answers). */
   resize(height: number): void;
+  /** Answer `lifecycle.suspend`: what this frame was holding is saved, so PM may take it down now.
+   *  Once per suspend; PM never replies, and waits no longer than its own deadline without it. */
+  flushed(): void;
   /** Why the host is gone, once it is; null while it is there. */
   readonly closed: HostError | null;
 }
@@ -338,6 +341,13 @@ class Connection implements ModHost {
     if (this.end || clamped === this.lastHeight) return;
     this.lastHeight = clamped;
     this.post({ resize: clamped });
+  }
+
+  flushed(): void {
+    if (this.end) return;
+    // Paid for like an acknowledgement: it must not wait behind calls, since PM is waiting on it.
+    this.pacer.spend(this.env.now());
+    this.post({ flushed: true });
   }
 
   /** Send what the limits allow, and when the pace is what stops it, come back when a token exists. */

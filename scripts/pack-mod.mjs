@@ -443,6 +443,56 @@ const parseMajorMinor = (s) => {
 const SEMVER =
   /^(0|[1-9]\d{0,17})\.(0|[1-9]\d{0,17})\.(0|[1-9]\d{0,17})(-((0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/;
 
+/** The permission a mod must declare to hold `data.projectRefs` (package.rs `refs::PERMISSION`). */
+const PROJECT_REFS_PERMISSION = "projects.read";
+
+/**
+ * The `data.projectRefs` path grammar, the mirror of `refs::parse` in src-tauri/src/mods/refs.rs
+ * (both read the vectors in tests/mod-project-ref-paths.json):
+ *
+ *   path = "$" segment+ ; segment = "." key | "[*]" | ".." key ; key = [A-Za-z0-9_-]{1,64}
+ *
+ * The last segment is a key; at most 256 bytes, 8 segments and 2 `..` segments. Returns `null` for a
+ * path that parses, else a fixed phrase for the refusal.
+ */
+export function projectRefPathProblem(path) {
+  if (typeof path !== "string") return "must be a string";
+  if (Buffer.byteLength(path, "utf8") > 256) return "is too long";
+  if (!path.startsWith("$")) return "must start with $";
+  const segments = [];
+  let rest = path.slice(1);
+  const KEY = /^[A-Za-z0-9_-]{1,64}$/;
+  const splitKey = (s) => {
+    const end = s.search(/[.[]/);
+    return end === -1 ? [s, ""] : [s.slice(0, end), s.slice(end)];
+  };
+  while (rest.length > 0) {
+    let kind;
+    let key = null;
+    if (rest.startsWith("[*]")) {
+      kind = "each";
+      rest = rest.slice(3);
+    } else if (rest.startsWith("..")) {
+      kind = "deep";
+      [key, rest] = splitKey(rest.slice(2));
+    } else if (rest.startsWith(".")) {
+      kind = "key";
+      [key, rest] = splitKey(rest.slice(1));
+    } else {
+      return "has something that is not .key, [*] or ..key";
+    }
+    if (key !== null && !KEY.test(key)) {
+      return "has a key that is empty, too long or uses other characters";
+    }
+    segments.push(kind);
+  }
+  if (segments.length === 0) return "names nothing after the $";
+  if (segments.length > 8) return "has too many segments";
+  if (segments.filter((k) => k === "deep").length > 2) return "has too many ..key segments";
+  if (segments[segments.length - 1] === "each") return "must end on an object key";
+  return null;
+}
+
 /**
  * Check a parsed manifest the way package.rs does and return the fields the rest of the packer needs.
  * `files` is the set of package paths the package holds, for the paths the manifest names.
@@ -601,12 +651,11 @@ export function checkManifest(raw, files) {
           `a projectRef names ${quote(String(r.key))}, which data.keys doesn't declare`,
         );
       }
-      const ok =
-        typeof r.path === "string" &&
-        r.path.length >= 1 &&
-        r.path.length <= 256 &&
-        /^[\x21-\x7e]+$/.test(r.path);
-      if (!ok) manifestError(`projectRef path ${quote(String(r.path))}`);
+      const problem = projectRefPathProblem(r.path);
+      if (problem !== null) manifestError(`projectRef path ${quote(String(r.path))} ${problem}`);
+    }
+    if (refs.length > 0 && !granted.has(PROJECT_REFS_PERMISSION)) {
+      manifestError(`data.projectRefs needs the ${PROJECT_REFS_PERMISSION} permission`);
     }
   }
   const entry = fields(raw.entry, "entry", ["page"], ["workers"]);

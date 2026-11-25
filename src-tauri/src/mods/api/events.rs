@@ -10,6 +10,11 @@
 //! | `theme.changed` | `storage` | the snapshot `theme.get` answers with | PM's page, per frame |
 //! | `grants.changed` | none | `{}` | the writers of a grant, after their commit |
 //! | `mod.paused`, `session.closed` | none | `{}`, `{reason}` | the session's end (`runtime`, `outbox`) |
+//! | `tasks.changed` | `tasks.read` | `{}` | [`crate::tasks::announce_changed`], the one place the app announces a task change, coalesced |
+//! | `projects.renamed` | `projects.read` | `{from, to}` | a rename, after its commit |
+//! | `projects.merged` | `projects.read` | `{from, into}` | a merge, after its commit |
+//! | `projects.deleted` | `projects.read` | `{name}` | a project delete, after its commit |
+//! | `lifecycle.suspend` | none | `{reason}` | PM, to one frame, before it takes the frame down ([`lifecycle_suspend`]) |
 //!
 //! **Rust filters before anything is sent.** [`emit_with`] is the one way an event reaches a frame. For
 //! each live session it asks, in one DB guard, the questions a call would be asked: PM isn't locked, the
@@ -53,9 +58,17 @@
 //! frame; each session that may hear the event is told it `missed` that many
 //! ([`crate::mods::outbox`]'s resync notice), as it is for an event its window or the size cap dropped.
 //!
-//! **Not built here:** the Pinboard's events (`tasks.changed`, `projects.*`, `calendar.synced`,
-//! `lifecycle.suspend`, PR C). Adding one is a row in the table, a name in [`EVENTS`] and a call to
-//! [`emit_with`].
+//! **A bare signal is coalesced too.** `tasks.changed` carries nothing (core's own `tasks://changed`
+//! carries nothing, and every consumer re-reads the list), so what waits in the hub is one raised flag
+//! over a store epoch, with one timer: a ten-thousand-task import is one event. A dropped signal is
+//! harmless: the frame is told it `missed` one and lists again.
+//!
+//! **A project event is not coalesced.** A rename, a merge or a delete is one person's act, announced
+//! after its commit by the command layer ([`project_changed`]); its names were captured inside the
+//! mutation, so what is announced is what was done, not what is true by then.
+//!
+//! **Not built here:** `calendar.synced` (an MCP-only event, PR C3). Adding one is a row in the
+//! table, a name in [`EVENTS`] and a call to [`emit_with`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -63,19 +76,25 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::table::{self, Row};
 use super::{documents, grants, limits, Host, ModError};
 use crate::mods::ids::ModId;
 use crate::mods::outbox::{self, Delivery};
 use crate::mods::policy::MOD_API_VERSION;
-use crate::mods::runtime::Audience;
+use crate::mods::runtime::{Audience, ModRuntime};
+use crate::AppState;
 
 pub const DOCUMENTS_ADDED: &str = "documents.added";
 pub const DOCUMENTS_DELETED: &str = "documents.deleted";
 pub const THEME_CHANGED: &str = "theme.changed";
 pub const GRANTS_CHANGED: &str = "grants.changed";
+pub const MOD_TASKS_CHANGED: &str = "tasks.changed";
+pub const PROJECTS_RENAMED: &str = "projects.renamed";
+pub const PROJECTS_MERGED: &str = "projects.merged";
+pub const PROJECTS_DELETED: &str = "projects.deleted";
+pub const LIFECYCLE_SUSPEND: &str = "lifecycle.suspend";
 
 /// Every event this PM sends: a table row each (a test holds the two together), and the names the
 /// page lets through to a frame (`modBridge.ts`'s `MOD_EVENTS`, pinned by a test).
@@ -87,6 +106,11 @@ pub const EVENTS: &[&str] = &[
     GRANTS_CHANGED,
     outbox::MOD_PAUSED,
     outbox::SESSION_CLOSED,
+    MOD_TASKS_CHANGED,
+    PROJECTS_RENAMED,
+    PROJECTS_MERGED,
+    PROJECTS_DELETED,
+    LIFECYCLE_SUSPEND,
 ];
 
 /// How many documents one query reads for `documents.added`: a flood of landings is announced in
@@ -239,12 +263,24 @@ struct Pending {
     dropped: u64,
 }
 
-/// What is waiting for its interval to end: the documents that landed and the ids that may have
-/// gone. Managed state (`lib.rs`); a test makes its own, with a short interval.
+/// A bare signal waiting for its interval to end: one flag, one timer, and the store it was raised
+/// over (a signal raised over one store is never sent over another).
+#[derive(Default)]
+struct Raised {
+    raised: bool,
+    epoch: u64,
+    /// A flush is waiting on its timer.
+    scheduled: bool,
+}
+
+/// What is waiting for its interval to end: the documents that landed, the ids that may have gone,
+/// and the task views' bare "something changed". Managed state (`lib.rs`); a test makes its own,
+/// with a short interval.
 #[derive(Default)]
 pub struct Hub {
     landed: Mutex<Pending>,
     deleted: Mutex<Pending>,
+    tasks: Mutex<Raised>,
     /// A test's interval, in place of [`limits::EVENT_COALESCE_MS`].
     delay: Option<Duration>,
 }
@@ -300,6 +336,31 @@ impl Hub {
         )
     }
 
+    /// Raise the signal over `epoch`; true when the caller must start the timer. A signal raised over
+    /// another store is dropped first.
+    fn raise(signal: &Mutex<Raised>, epoch: u64) -> bool {
+        let mut r = signal.lock().unwrap_or_else(|e| e.into_inner());
+        r.epoch = epoch;
+        r.raised = true;
+        let start = !r.scheduled;
+        r.scheduled = true;
+        start
+    }
+
+    /// Take the signal: the store it was raised over, and whether it is up.
+    fn lower(signal: &Mutex<Raised>) -> (u64, bool) {
+        let mut r = signal.lock().unwrap_or_else(|e| e.into_inner());
+        r.scheduled = false;
+        (r.epoch, std::mem::take(&mut r.raised))
+    }
+
+    /// Whether the task signal is up, and whether its timer is running.
+    #[cfg(test)]
+    fn tasks_state(&self) -> (bool, bool) {
+        let r = self.tasks.lock().unwrap();
+        (r.raised, r.scheduled)
+    }
+
     /// Ids waiting, and ids dropped for the cap since the last take: (landed, deleted).
     #[cfg(test)]
     fn counts(&self) -> ((usize, u64), (usize, u64)) {
@@ -312,6 +373,7 @@ impl Hub {
 enum Which {
     Landed,
     Deleted,
+    Tasks,
 }
 
 /// Start the timer for one set: when it ends the set is flushed on the blocking pool. The host is
@@ -324,6 +386,7 @@ fn schedule<H: Host>(host: &H, which: Which) {
         let _ = tauri::async_runtime::spawn_blocking(move || match which {
             Which::Landed => drop(flush_landed(&host)),
             Which::Deleted => drop(settle_deleted(&host)),
+            Which::Tasks => drop(flush_tasks_changed(&host)),
         })
         .await;
     });
@@ -631,6 +694,147 @@ pub fn note_listing_change(conn: &Connection, id: i64, was_listed: bool) {
         (false, true) => note_landed(&[id]),
         _ => {}
     }
+}
+
+// ---- tasks.changed ------------------------------------------------------------------------------
+
+/// A task, a stack, or anything a task's links read changed and the DB guard is gone
+/// ([`crate::tasks::announce_changed`], the one place the app says so): tell the frames that may
+/// know, after the interval. Cheap when no frame is live. The payload is `{}`: the frame lists again.
+pub fn tasks_changed<H: Host>(host: &H) {
+    if !host.runtime().any_live() {
+        return;
+    }
+    let epoch = host.store().store_epoch();
+    if Hub::raise(&host.hub().tasks, epoch) {
+        schedule(host, Which::Tasks);
+    }
+}
+
+/// [`tasks_changed`] for the app, which may call it before the mods' state is managed (a test of
+/// task code has no app at all): then there is nobody to tell.
+pub fn app_tasks_changed(app: &AppHandle) {
+    if app.try_state::<Hub>().is_some()
+        && app.try_state::<ModRuntime>().is_some()
+        && app.try_state::<AppState>().is_some()
+    {
+        tasks_changed(app);
+    }
+}
+
+/// The end of the interval: one `tasks.changed` if the signal is still up and the store is the one it
+/// was raised over.
+pub(super) fn flush_tasks_changed<H: Host>(host: &H) -> Emitted {
+    let (epoch, raised) = Hub::lower(&host.hub().tasks);
+    if !raised {
+        return Emitted::default();
+    }
+    emit_with(host, MOD_TASKS_CHANGED, &Audience::Everyone, |_| {
+        stays_over(host, epoch)?;
+        Ok(vec![json!({})])
+    })
+}
+
+// ---- projects.renamed, projects.merged, projects.deleted ---------------------------------------------
+
+/// What a project mutation did to a project's name, as the mutation's own closure captured it (inside
+/// its transaction, before the rows moved), so what is announced is what was done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectChange {
+    Renamed { from: String, to: String },
+    Merged { from: String, into: String },
+    Deleted { name: String },
+}
+
+impl ProjectChange {
+    fn event(&self) -> (&'static str, Value) {
+        match self {
+            Self::Renamed { from, to } => (PROJECTS_RENAMED, json!({ "from": from, "to": to })),
+            Self::Merged { from, into } => (PROJECTS_MERGED, json!({ "from": from, "into": into })),
+            Self::Deleted { name } => (PROJECTS_DELETED, json!({ "name": name })),
+        }
+    }
+}
+
+/// A project mutation committed: tell every frame that holds `projects.read`. Synchronous and it
+/// takes the DB guard: call it from a blocking task, never while holding the guard
+/// ([`announce_project_change`] is the app's way).
+pub fn project_changed<H: Host>(host: &H, change: &ProjectChange) -> Emitted {
+    let (name, payload) = change.event();
+    emit_with(host, name, &Audience::Everyone, |_| Ok(vec![payload]))
+}
+
+/// [`project_changed`] from the command layer, after the mutation's commit: handed to the blocking
+/// pool, so a command's own task never waits on the DB guard for it.
+pub fn announce_project_change(app: &AppHandle, change: ProjectChange) {
+    if app.try_state::<ModRuntime>().is_none() || !app.runtime().any_live() {
+        return;
+    }
+    let app = app.clone();
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        let _ = project_changed(&app, &change);
+    }));
+}
+
+// ---- lifecycle.suspend ---------------------------------------------------------------------------------
+
+/// Why PM is about to take a frame down, as the frame is told (`{reason}`). A mod that keeps nothing
+/// unsaved can ignore it; one that debounces its saves flushes and answers `{ flushed: true }` on its
+/// port, and PM then waits no longer than its own deadline (the page's handshake, K5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))] // the page's handshake (K5) is its user
+pub enum SuspendReason {
+    /// The tab was left or the window hidden.
+    Hidden,
+    /// PM is locking.
+    Locked,
+    /// The mod is being paused.
+    Paused,
+    /// The mod is being uninstalled.
+    Uninstalled,
+    /// The mod is being updated or repaired.
+    Updated,
+    /// The vault is being switched.
+    Vault,
+    /// PM is quitting.
+    Quit,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl SuspendReason {
+    pub const ALL: [SuspendReason; 7] = [
+        Self::Hidden,
+        Self::Locked,
+        Self::Paused,
+        Self::Uninstalled,
+        Self::Updated,
+        Self::Vault,
+        Self::Quit,
+    ];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Locked => "locked",
+            Self::Paused => "paused",
+            Self::Uninstalled => "uninstalled",
+            Self::Updated => "updated",
+            Self::Vault => "vault",
+            Self::Quit => "quit",
+        }
+    }
+}
+
+/// Tell the one session `session` PM is about to take its frame down. No permission: it is PM's word
+/// about the session itself, with nothing of the user's in it, so any running mod's session hears it.
+#[cfg_attr(not(test), allow(dead_code))] // the page's handshake (K5) is its caller
+pub fn lifecycle_suspend<H: Host>(host: &H, session: &str, reason: SuspendReason) -> Emitted {
+    emit_with(
+        host,
+        LIFECYCLE_SUSPEND,
+        &Audience::Session(session.to_owned()),
+        |_| Ok(vec![json!({ "reason": reason.word() })]),
+    )
 }
 
 // ---- theme.changed ------------------------------------------------------------------------------

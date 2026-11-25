@@ -1,0 +1,152 @@
+{
+  "about": "The project-ref path grammar every verifier must agree on: package.rs (check_data, the rewrite's own parse) and scripts/pack-mod.mjs. Read by src-tauri/src/mods/refs/tests.rs and scripts/pack-mod.test.mjs.",
+  "grammar": "path = '$' segment+ ; segment = '.' key | '[*]' | '..' key ; key = [A-Za-z0-9_-]{1,64} ; the last segment is a key; at most 256 bytes, 8 segments, 2 '..' segments.",
+  "valid": [
+    "$.project",
+    "$.a.b.c",
+    "$.items[*].project",
+    "$.widgets[*].project",
+    "$.widgets[*].children[*].project",
+    "$..project",
+    "$.widgets..project",
+    "$.widgets[*]..project",
+    "$..a..b",
+    "$.a[*][*].b",
+    "$.key-with_dash.Key9",
+    "$.0",
+    "$.kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    "$.a.b.c.d.e.f.g.h",
+    "$..a..b.c",
+    "$[*].project"
+  ],
+  "invalid": [
+    {
+      "path": "",
+      "why": "empty"
+    },
+    {
+      "path": "$",
+      "why": "names nothing"
+    },
+    {
+      "path": "project",
+      "why": "no $"
+    },
+    {
+      "path": ".project",
+      "why": "no $"
+    },
+    {
+      "path": "$project",
+      "why": "no dot"
+    },
+    {
+      "path": "$.",
+      "why": "empty key"
+    },
+    {
+      "path": "$..",
+      "why": "empty deep key"
+    },
+    {
+      "path": "$...project",
+      "why": "three dots"
+    },
+    {
+      "path": "$.a.",
+      "why": "trailing dot"
+    },
+    {
+      "path": "$.a b",
+      "why": "a space"
+    },
+    {
+      "path": "$. x",
+      "why": "a space"
+    },
+    {
+      "path": "$.a[*]",
+      "why": "ends on [*]"
+    },
+    {
+      "path": "$[*]",
+      "why": "only [*]"
+    },
+    {
+      "path": "$.a[0].b",
+      "why": "an index"
+    },
+    {
+      "path": "$.a[?(@.x)].b",
+      "why": "a filter"
+    },
+    {
+      "path": "$.a['b']",
+      "why": "a bracket key"
+    },
+    {
+      "path": "$['a']",
+      "why": "a bracket key"
+    },
+    {
+      "path": "$.a[*",
+      "why": "unclosed bracket"
+    },
+    {
+      "path": "$.a[**].b",
+      "why": "not [*]"
+    },
+    {
+      "path": "$.*",
+      "why": "a wildcard key"
+    },
+    {
+      "path": "$.a.*.b",
+      "why": "a wildcard key"
+    },
+    {
+      "path": "$.a/b",
+      "why": "a slash"
+    },
+    {
+      "path": "$.a\"b",
+      "why": "a quote"
+    },
+    {
+      "path": "$.é",
+      "why": "non-ASCII"
+    },
+    {
+      "path": "$.a\u0000b",
+      "why": "a NUL"
+    },
+    {
+      "path": "$.a\nb",
+      "why": "a newline"
+    },
+    {
+      "path": "$.a.b.c.d.e.f.g.h.i",
+      "why": "nine segments"
+    },
+    {
+      "path": "$..a..b..c",
+      "why": "three deep segments"
+    },
+    {
+      "path": "$.kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "why": "a 65-byte key"
+    },
+    {
+      "path": "$.kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "why": "over 256 bytes"
+    },
+    {
+      "path": "$.a..",
+      "why": "ends on .."
+    },
+    {
+      "path": "$.a[*]..",
+      "why": "ends on .."
+    }
+  ]
+}

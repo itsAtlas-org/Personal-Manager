@@ -579,17 +579,30 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
     // 6. Drop the now-childless source triage row (all FK children moved in 2-3; conversations and the
     //    blocker pointers carry no FK, so nothing cascades).
     conn.execute("DELETE FROM projects WHERE name = ?1", params![old])?;
-    // 7. Re-key project-bound pinboard timeline widgets. The board is an opaque JSON blob under
-    //    settings['pinboard']; rewrite only the `project` bindings equal to `old` (a generic JSON walk,
-    //    so every other widget field is preserved and nothing is removed) so a renamed/merged project's
-    //    timeline widget doesn't silently go blank (#279). Inside this transaction, so it commits with
-    //    the rest. PM is single-window and the rename UI is a different tab than the Pinboard, so the
-    //    board isn't mounted during a rename; it re-reads the re-keyed blob on its next mount.
-    if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
-        if let Some(rekeyed) = rekey_pinboard_project(&blob, old, new) {
-            crate::db::set_setting(conn, "pinboard", &rekeyed)?;
+    // 7. Re-key the places a board stores project names. Two homes, one rule (the same walk, the same
+    //    transaction):
+    //    - the legacy board, `settings['pinboard']`: an opaque JSON blob; rewrite only the `project`
+    //      bindings equal to `old` (a generic walk, so every other widget field is preserved and
+    //      nothing is removed) so a renamed/merged project's timeline widget doesn't silently go blank
+    //      (#279). Only until the move to the Pinboard mod is recorded (`pinboard_moved_sha`): from
+    //      then on the row is a frozen snapshot, and rewriting it would diverge its sha from the one
+    //      the move recorded.
+    //    - every mod's declared `projectRefs` (the Pinboard mod's board lives in `mod_kv`), by the
+    //      mods' own rule (`mods::refs`), which bumps each value's revision so a frame holding the
+    //      old copy can't write it back over the rename.
+    //    PM is single-window and the rename UI is a different tab than the Pinboard, so the board
+    //    isn't mounted during a rename; it re-reads the re-keyed blob on its next mount.
+    if !pinboard_move_recorded(conn)? {
+        if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
+            if let Some(rekeyed) = rekey_pinboard_project(&blob, old, new) {
+                crate::db::set_setting(conn, "pinboard", &rekeyed)?;
+            }
         }
     }
+    crate::mods::refs::rewrite_all(
+        conn,
+        &crate::mods::refs::Change::Rename { from: old, to: new },
+    )?;
     // 8. The project's own tag (#275), carrying every membership of it — including documents HOMED
     //    somewhere else that merely list this project. A rename is one row; a merge folds into the
     //    destination tag, skipping documents already in both rather than colliding on the join's
@@ -597,6 +610,13 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
     //    what makes the fold survive a Rebuild.
     crate::tags::rename_project_tag(conn, old, new)?;
     Ok(())
+}
+
+/// Whether the Pinboard's board has moved to the mod (`pinboard_moved_sha` is recorded): the legacy
+/// row `settings['pinboard']` is then a frozen snapshot that a rename or delete leaves alone.
+fn pinboard_move_recorded(conn: &Connection) -> Result<bool> {
+    Ok(crate::db::get_setting(conn, "pinboard_moved_sha")?
+        .is_some_and(|sha| !sha.trim().is_empty()))
 }
 
 /// Re-key a pinboard blob's project-bound widget bindings from `old` to `new`, across the board's
@@ -696,12 +716,16 @@ pub fn delete_project_satellites(conn: &Connection, name: &str) -> Result<()> {
         "UPDATE projects SET blocked_by = NULL WHERE blocked_by = ?1",
         params![name],
     )?;
-    // 4. Unbind pinboard widgets rather than removing them.
-    if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
-        if let Some(unbound) = unbind_pinboard_project(&blob, name) {
-            crate::db::set_setting(conn, "pinboard", &unbound)?;
+    // 4. Unbind pinboard widgets rather than removing them: the legacy board until its move is
+    //    recorded (see `rename_project_satellites` step 7), and every mod's declared `projectRefs`.
+    if !pinboard_move_recorded(conn)? {
+        if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
+            if let Some(unbound) = unbind_pinboard_project(&blob, name) {
+                crate::db::set_setting(conn, "pinboard", &unbound)?;
+            }
         }
     }
+    crate::mods::refs::rewrite_all(conn, &crate::mods::refs::Change::Unbind { name })?;
     // 5. The triage row last — this is what cascades `project_milestones`.
     conn.execute("DELETE FROM projects WHERE name = ?1", params![name])?;
     // 6. The project's own tag (#275). The join cascades from it, so this unlinks the project from

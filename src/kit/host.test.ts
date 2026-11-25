@@ -831,6 +831,37 @@ describe("the frame's height", () => {
   });
 });
 
+describe("lifecycle.suspend", () => {
+  it("is told to the handlers like any event, and the frame answers flushed once it has saved", async () => {
+    const { pm, host } = await connected();
+    const heard: HostEvent[] = [];
+    host.onEvent((e) => heard.push(e));
+    pm.emit("lifecycle.suspend", { reason: "hidden" });
+    await pm.settle();
+    expect(heard).toEqual([{ name: "lifecycle.suspend", seq: 1, payload: { reason: "hidden" } }]);
+    // The frame saves, then says so; PM reads it as the answer and sends nothing back.
+    host.flushed();
+    await pm.settle();
+    expect(pm.stats.flushes).toBe(1);
+    expect(pm.stats.dropsRead).toBe(0);
+    // It is acknowledged with the rest of what was taken.
+    pm.clock.advance(ACK_DELAY_MS);
+    await pm.settle();
+    expect(pm.stats.acks).toEqual([1]);
+  });
+
+  it("answers nothing once the host is gone", async () => {
+    const { pm, host } = await connected();
+    host.onEvent(() => {});
+    pm.emit("session.closed", { reason: "paused" });
+    await pm.settle();
+    expect(host.closed).not.toBeNull();
+    expect(() => host.flushed()).not.toThrow();
+    await pm.settle();
+    expect(pm.stats.flushes).toBe(0);
+  });
+});
+
 describe("the real window", () => {
   function windowWith(parent: WindowLike["parent"] | "self") {
     const listeners = new Set<(e: MessageEvent) => void>();

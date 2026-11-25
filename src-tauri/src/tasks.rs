@@ -43,9 +43,13 @@ pub const TASKS_CHANGED: &str = "tasks://changed";
 /// milestone, a project's name, a calendar event). **The one place [`TASKS_CHANGED`] is emitted**:
 /// `scripts/check-tasks-emit.mjs` fails the build on any other emit of it, so a writer can't
 /// announce a change one way here and another way there. Call it once the DB guard is dropped.
+///
+/// The mods' `tasks.changed` is told from here too, for the same reason: one place, so no writer can
+/// reach the app's views and miss a mod's frame (the hub coalesces it, `mods::api::events`).
 pub fn announce_changed(app: &tauri::AppHandle) {
     use tauri::Emitter;
     let _ = app.emit(TASKS_CHANGED, ());
+    crate::mods::api::events::app_tasks_changed(app);
 }
 
 // --- the closed value sets (I-12: one owner per CHECK set; v59 mirrors these) ---------------
