@@ -34,9 +34,8 @@ impl Projection {
         calendar: false,
     };
 
-    /// A caller given exactly these scopes (the MCP server's clients, PR C3: nothing but tests builds
-    /// one until then).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A caller given exactly these scopes: the MCP server's clients (`mods::mcp::tools`), which hold
+    /// `projects.read` and `calendar.read` as scopes of their own, with no mod and no grants.
     pub const fn scoped(projects: bool, calendar: bool) -> Self {
         Self { projects, calendar }
     }

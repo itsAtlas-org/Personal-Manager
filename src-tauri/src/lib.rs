@@ -1406,6 +1406,9 @@ pub fn run() {
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
             app.manage(mods::api::Calls::default());
+            // The MCP server's core: its per-app limiter, and where this computer's own record of
+            // the switch and the paired apps lives (`mods::mcp::device`). No listener yet.
+            app.manage(mods::mcp::Supervisor::new(paths::data_dir(handle)?));
             // The events a frame is told (spec §1.5): what waits out its interval, and the one
             // place document writes are reported from (`ingest::delete_document`, the archive and
             // landing notes: `mods::api::events::Note`).

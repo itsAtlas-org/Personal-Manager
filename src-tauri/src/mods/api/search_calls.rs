@@ -189,7 +189,8 @@ pub(crate) fn hit_dto(
             "indexOnly",
             chunk.source_type.as_deref() == Some(crate::ingest::SOURCE_TYPE_INDEX_ONLY),
         )
-        .field(Needs::Projects, "project", project.map(str::to_owned))
+        // A project's name is whatever its owner typed, so it is cut like any other label.
+        .field(Needs::Projects, "project", project.map(label))
         .build()
 }
 
@@ -249,6 +250,42 @@ fn home_projects(
     Ok(out)
 }
 
+/// The whole search for `query`, shared by the frame's call and the MCP server's tool: the engine
+/// check, the heavy step, and the hits as the caller's projection allows. Blocking.
+///
+/// `check` is the caller's own "is this call still allowed" step, run under the DB guard it is handed,
+/// and answering with the projection the caller has NOW (a frame: [`recheck`] then its grants; an MCP
+/// client: the request checks, then its scopes). It runs before the engine probe, again right before
+/// the heavy step (no guard is held across the embed, the fuse or the rerank: they take it
+/// themselves, briefly), and once more after it under the guard the hits are built with, so a grant
+/// revoked while the embed ran is not spent on the answer.
+pub(crate) fn answer<H: Host>(
+    host: &H,
+    query: &Query,
+    check: impl Fn(&Connection) -> Result<Projection, ModError>,
+) -> Result<Value, ModError> {
+    {
+        let conn = host.store().conn().map_err(|_| ModError::locked())?;
+        check(&conn)?;
+    }
+    // The engine must already be set up: PM provisions nothing for a call from outside, and the
+    // check comes before any retrieval.
+    if !host.engine_ready() {
+        return Err(ModError::engine_not_ready());
+    }
+    {
+        let conn = host.store().conn().map_err(|_| ModError::locked())?;
+        check(&conn)?;
+    }
+    #[cfg(test)]
+    host.at(super::Point::Embedding);
+    let chunks = host.search(&query.text, query.limit)?;
+    let conn = host.store().conn().map_err(|_| ModError::locked())?;
+    let projection = check(&conn)?;
+    let found = hits(&conn, &chunks, query.limit, &projection)?;
+    Ok(serde_json::json!({ "hits": found }))
+}
+
 /// `documents.search({query, limit?})` → `{hits: [{documentId, title, heading, snippet, indexOnly,
 /// project?}]}`.
 pub(super) async fn search<H: Host>(
@@ -262,33 +299,12 @@ pub(super) async fn search<H: Host>(
         within_call_timeout(blocking(move || {
             #[cfg(test)]
             host.at(super::Point::BeforeData);
-            {
-                let conn = host.store().conn().map_err(|_| ModError::locked())?;
-                recheck(&host, &conn, &auth)?;
-            }
-            // The engine must already be set up: PM provisions nothing for a mod's call, and the
-            // check comes before any retrieval.
-            if !host.engine_ready() {
-                return Err(ModError::engine_not_ready());
-            }
-            // Asked again right before the heavy step, with no guard held across it (the embed, the
-            // fuse and the rerank take the guard themselves, briefly).
-            {
-                let conn = host.store().conn().map_err(|_| ModError::locked())?;
-                recheck(&host, &conn, &auth)?;
-            }
-            #[cfg(test)]
-            host.at(super::Point::Embedding);
-            let chunks = host.search(&query.text, query.limit)?;
-            // What the caller may know is read again after the heavy step, under the guard it is
-            // built with: a grant revoked while the embed ran is not spent on the answer.
-            let conn = host.store().conn().map_err(|_| ModError::locked())?;
-            let facts = recheck(&host, &conn, &auth)?;
-            let projection = Projection::of_grants(&conn, &facts, host.engine_sealed())?;
-            let found = hits(&conn, &chunks, query.limit, &projection)?;
-            drop(conn);
+            let value = answer(&host, &query, |conn| {
+                let facts = recheck(&host, conn, &auth)?;
+                Projection::of_grants(conn, &facts, host.engine_sealed())
+            })?;
             still_current(&host, &auth)?;
-            Ok(serde_json::json!({ "hits": found }))
+            Ok(value)
         }))
         .await?
     };

@@ -271,10 +271,15 @@ impl Here {
             .is_some_and(|(vault, root)| self.names(&vault, &root))
     }
 
-    /// Where this device keeps its record (`data_dir`).
-    #[cfg(test)]
+    /// Where this device keeps its record (`data_dir`). The MCP server keeps its own device file
+    /// there, keyed by the same vault and folder tag (`mods::mcp::device`).
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The tag of the folder the vault sits in on this computer ([`place_of`]).
+    pub(crate) fn place(&self) -> &str {
+        &self.place
     }
 
     /// The vault this is the device in.

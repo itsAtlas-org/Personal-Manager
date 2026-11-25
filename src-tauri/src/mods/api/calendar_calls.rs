@@ -12,7 +12,7 @@
 //! event off the page. (Past [`MAX_LIMIT`] rows in the window a page can still come up short.) It
 //! never reads the whole mirror ([`crate::calendar::list_events_between`] is deliberately unfiltered
 //! by quiet). A title or a location is cut at [`TEXT_MAX_CHARS`] characters, and a uid longer than
-//! [`UID_MAX_CHARS`] is left out (`null`).
+//! [`UID_MAX_CHARS`] is left out (`null`); a start or an end is cut at [`TIME_MAX_CHARS`].
 //!
 //! **What an event tells.** Exactly `{uid, title, start, end, allDay, location, recurring}`, built
 //! field by field. `uid` is the provider's iCal UID, or `null` when the event has none: never PM's row
@@ -86,6 +86,11 @@ pub(crate) const TEXT_MAX_CHARS: usize = 200;
 /// would otherwise look like the same event to a mod correlating by it.
 pub(crate) const UID_MAX_CHARS: usize = 512;
 
+/// The most characters of a start or an end an event shows. The columns are text a writer of the
+/// store controls, like the title; a real one ("2026-12-05T10:00:00+01:00") is far shorter, so a cut
+/// only ever touches a hostile row, which would otherwise sink a whole page.
+pub(crate) const TIME_MAX_CHARS: usize = 64;
+
 /// `text` cut to at most `max` characters, at a character boundary.
 fn clip(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
@@ -112,8 +117,12 @@ pub(crate) fn event_dto(e: &AgendaEvent, projection: &Projection) -> Value {
             "title",
             clip(&event.summary, TEXT_MAX_CHARS),
         )
-        .field(Needs::Nothing, "start", event.start.as_str())
-        .field(Needs::Nothing, "end", event.end.clone())
+        .field(Needs::Nothing, "start", clip(&event.start, TIME_MAX_CHARS))
+        .field(
+            Needs::Nothing,
+            "end",
+            event.end.as_deref().map(|t| clip(t, TIME_MAX_CHARS)),
+        )
         .field(Needs::Nothing, "allDay", event.all_day)
         .field(
             Needs::Nothing,

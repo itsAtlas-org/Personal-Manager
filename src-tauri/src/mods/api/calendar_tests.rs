@@ -321,6 +321,32 @@ async fn agenda_cuts_a_long_title_and_location() {
     }
 }
 
+/// The start and the end are text a store's writer controls as well: a hostile one is cut, so it can't
+/// make the call fail with "too large" for everyone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agenda_cuts_a_hostile_start_and_end() {
+    let (host, s) = first(CAL_MOD, READ);
+    seed_calendar(&host, "cal-me", "me@example.com", false);
+    seed_event(&host, "e1", "cal-me", "Hostile", 1, Some("u1"));
+    // Trailing spaces still parse as a date, so the row stays in the agenda's window.
+    host.sql(|c| {
+        c.execute(
+            "UPDATE calendar_events SET start = start || ?1, end = end || ?1",
+            rusqlite::params![" ".repeat(2 << 20)],
+        )
+        .unwrap();
+    });
+    let v = agenda(&host, &s, json!({})).await;
+    let event = &v["events"][0];
+    for field in ["start", "end"] {
+        assert_eq!(
+            event[field].as_str().unwrap().chars().count(),
+            super::calendar_calls::TIME_MAX_CHARS,
+            "{field}"
+        );
+    }
+}
+
 /// The uid comes uncut from the feed too: a hostile 40,000-character one is sent as no uid, and a
 /// normal one (even at the cap) is kept whole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

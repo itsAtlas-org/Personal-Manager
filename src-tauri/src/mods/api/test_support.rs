@@ -179,6 +179,8 @@ pub struct Parts {
     pub state: AppState,
     pub runtime: ModRuntime,
     pub calls: Calls,
+    /// The MCP server's core, over this host's own folder (its device file lives there).
+    pub mcp: crate::mods::mcp::Supervisor,
     pub hub: Hub,
     pub sealed: AtomicBool,
     /// PM locked, as `app_locked_for_mods` would say on a platform with a lock.
@@ -252,6 +254,7 @@ impl TestHost {
                 state: AppState::new(Some(conn), None, sidecar, None, None),
                 runtime: ModRuntime::new(Platform::Linux, vec!["tauri://localhost".into()]),
                 calls: Calls::default(),
+                mcp: crate::mods::mcp::Supervisor::new(dir.path().to_path_buf()),
                 hub: Hub::with_delay(interval),
                 sealed: AtomicBool::new(true),
                 locked: AtomicBool::new(false),
@@ -323,6 +326,10 @@ impl Host for TestHost {
 
     fn calls(&self) -> &Calls {
         &self.0.calls
+    }
+
+    fn mcp(&self) -> &crate::mods::mcp::Supervisor {
+        &self.0.mcp
     }
 
     fn hub(&self) -> &Hub {
