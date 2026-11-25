@@ -544,7 +544,7 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Task>> {
 
 /// The list's one query: the stored row, the project's archive flag, the linked event's title and,
 /// from the ledger, who made it (`l.*` are NULL for the user's own, a LEFT JOIN on a unique index, so
-/// the row count is unchanged). A test times it against the same query without the join.
+/// the row count is unchanged). A test reads its query plan, so the join stays a search of that index.
 const LOAD_SQL: &str = "SELECT t.id, t.title, t.why, t.project_name, p.archived_at IS NOT NULL, \
                 t.milestone_id, t.event_uid, t.do_start, t.do_end, t.deadline, \
                 t.deadline_kind, t.deadline_from, t.status, t.completed_at, t.lane, \

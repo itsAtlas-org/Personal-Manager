@@ -3,9 +3,7 @@
 
 //! "Made by X" on the lists the views read (K5): a task or milestone with a ledger row carries its
 //! maker, one without carries none, a deleted thing's row goes with it, a planted name is cut down, and
-//! the join costs the 20,000-task list next to nothing.
-
-use std::time::Instant;
+//! the join reaches the ledger by its unique index, so it cannot make a long list scan the ledger.
 
 use rusqlite::{params, Connection};
 
@@ -175,14 +173,42 @@ fn the_list_has_one_row_per_task_whatever_the_ledger_holds() {
     assert_eq!(by_title(&conn)[1].1, maker("Two", "second", true));
 }
 
-/// The ledger join is a LEFT JOIN on a unique index, so the 20,000-task list stays within 1.25x of what
-/// it was. Best of several runs of each, so a noisy moment on the machine decides nothing.
+/// The rows a query plan names, one line each.
+fn plan(conn: &Connection, sql: &str, bind: &[&dyn rusqlite::ToSql]) -> Vec<String> {
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let rows: Vec<String> = stmt
+        .query_map(bind, |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    rows
+}
+
+/// The made-by join, the ledger table `l`, must be reached by a SEARCH on the named unique index and
+/// never by a SCAN (or a throwaway automatic index), so a list cannot walk the ledger once per row.
+/// Pinned as a plan, not a duration: a wall-clock ratio is noise on a shared runner, and the plan is
+/// the property itself.
+fn assert_ledger_is_searched_by(plan: &[String], index: &str, column: &str) {
+    let ledger: Vec<&String> = plan
+        .iter()
+        .filter(|d| d.starts_with("SEARCH l ") || d.starts_with("SCAN l"))
+        .collect();
+    assert_eq!(ledger.len(), 1, "the ledger is read once; plan: {plan:#?}");
+    let want = format!("SEARCH l USING INDEX {index} ({column}=?)");
+    // SQLite's newer versions add " LEFT-JOIN" after the search; the search itself is the claim.
+    assert!(ledger[0].starts_with(&want), "plan: {plan:#?}");
+    assert!(
+        !plan.iter().any(|d| d.starts_with("SCAN mod_ledger")),
+        "plan: {plan:#?}"
+    );
+}
+
 #[test]
-fn the_ledger_join_costs_the_twenty_thousand_task_list_under_a_quarter() {
+fn the_task_lists_made_by_join_searches_the_ledgers_unique_index_and_every_task_is_listed() {
     let (_dir, conn) = store();
     {
         let tx = conn.unchecked_transaction().unwrap();
-        for i in 0..20_000 {
+        for i in 0..200 {
             tx.execute(
                 "INSERT INTO tasks(title, ordinal, deadline_kind, deadline_from, lane, source) \
                  VALUES (?1, ?2, 'hard', 'date', 'foreground', 'user')",
@@ -199,46 +225,37 @@ fn the_ledger_join_costs_the_twenty_thousand_task_list_under_a_quarter() {
         .unwrap();
         tx.commit().unwrap();
     }
-    // The query as it was before the join, over the same rows, read column for column the same.
-    const BEFORE: &str = "SELECT t.id, t.title, t.why, t.project_name, p.archived_at IS NOT NULL, \
-                t.milestone_id, t.event_uid, t.do_start, t.do_end, t.deadline, \
-                t.deadline_kind, t.deadline_from, t.status, t.completed_at, t.lane, \
-                t.stack_id, t.parked, t.ordinal, t.source, t.created_at, t.updated_at, \
-                (SELECT e.summary FROM calendar_events e \
-                  WHERE e.uid = t.event_uid ORDER BY e.start LIMIT 1) \
-           FROM tasks t LEFT JOIN projects p ON p.name = t.project_name \
-          WHERE ?1 IS NULL OR t.project_name = ?1 \
-          ORDER BY t.ordinal, t.id";
-    fn time(conn: &Connection, sql: &str) -> std::time::Duration {
-        let mut best = std::time::Duration::MAX;
-        for _ in 0..7 {
-            let start = Instant::now();
-            let mut stmt = conn.prepare(sql).unwrap();
-            let n = stmt
-                .query_map(params![Option::<String>::None], |r| {
-                    let mut weight = 0usize;
-                    for i in 0..r.as_ref().column_count() {
-                        if let rusqlite::types::ValueRef::Text(t) = r.get_ref(i)? {
-                            weight += t.len();
-                        }
-                    }
-                    Ok(weight)
-                })
-                .unwrap()
-                .count();
-            assert_eq!(n, 20_000);
-            best = best.min(start.elapsed());
-        }
-        best
-    }
-    let before = time(&conn, BEFORE);
-    let after = time(&conn, LOAD_SQL);
-    assert!(
-        after.as_secs_f64() <= before.as_secs_f64() * 1.25,
-        "the made-by join slowed the list: {before:?} -> {after:?}"
+    // The list's own query, for the whole list and for one project.
+    assert_ledger_is_searched_by(
+        &plan(&conn, LOAD_SQL, params![Option::<String>::None]),
+        "idx_mod_ledger_task",
+        "task_id",
+    );
+    assert_ledger_is_searched_by(
+        &plan(&conn, LOAD_SQL, params![Some("P")]),
+        "idx_mod_ledger_task",
+        "task_id",
     );
     // And the real function still reads them all, a tenth labelled.
     let tasks = list(&conn, None, TODAY).unwrap();
-    assert_eq!(tasks.len(), 20_000);
-    assert_eq!(tasks.iter().filter(|t| t.made_by.is_some()).count(), 2_000);
+    assert_eq!(tasks.len(), 200);
+    assert_eq!(tasks.iter().filter(|t| t.made_by.is_some()).count(), 20);
+}
+
+#[test]
+fn the_milestone_lists_made_by_join_searches_the_ledgers_unique_index() {
+    let (_dir, conn) = store();
+    for (sql, bind) in [
+        (
+            crate::milestones::LOAD_ALL_SQL,
+            params![] as &[&dyn rusqlite::ToSql],
+        ),
+        (crate::milestones::LOAD_ONE_SQL, params!["P"]),
+    ] {
+        assert_ledger_is_searched_by(
+            &plan(&conn, sql, bind),
+            "idx_mod_ledger_milestone",
+            "milestone_id",
+        );
+    }
 }

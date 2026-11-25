@@ -267,6 +267,28 @@ fn resolve(row: Row, uid_dates: &HashMap<String, String>) -> Milestone {
     }
 }
 
+// The maker rides on a LEFT JOIN (`idx_mod_ledger_milestone` is a unique index, so a milestone
+// matches at most one row and the list is the same length as without it). A test reads the query
+// plan of both statements, so the join stays a search of that index.
+macro_rules! load_select {
+    () => {
+        "SELECT m.id, m.project_name, m.label, m.due_date, m.event_uid, m.state, \
+                m.status, m.source_type, m.external_id, m.sort_order, \
+                l.mod_name, l.tier, l.signed \
+           FROM project_milestones m LEFT JOIN mod_ledger l ON l.milestone_id = m.id"
+    };
+}
+/// One project's milestones, in their own order.
+pub(crate) const LOAD_ONE_SQL: &str = concat!(
+    load_select!(),
+    " WHERE m.project_name = ?1 ORDER BY m.sort_order, m.id"
+);
+/// Every project's milestones.
+pub(crate) const LOAD_ALL_SQL: &str = concat!(
+    load_select!(),
+    " ORDER BY m.project_name, m.sort_order, m.id"
+);
+
 fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
     let map = |r: &rusqlite::Row| -> rusqlite::Result<Row> {
         Ok(Row {
@@ -283,27 +305,16 @@ fn load_rows(conn: &Connection, project: Option<&str>) -> Result<Vec<Row>> {
             made_by: crate::made_by::read(r, 10)?,
         })
     };
-    // The maker rides on a LEFT JOIN (`idx_mod_ledger_milestone` is a unique index, so a milestone
-    // matches at most one row and the list is the same length as without it).
-    let sql_cols = "m.id, m.project_name, m.label, m.due_date, m.event_uid, m.state, \
-                    m.status, m.source_type, m.external_id, m.sort_order, \
-                    l.mod_name, l.tier, l.signed";
-    let from = "project_milestones m LEFT JOIN mod_ledger l ON l.milestone_id = m.id";
     let rows = match project {
         Some(name) => {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM {from} WHERE m.project_name = ?1 \
-                 ORDER BY m.sort_order, m.id"
-            ))?;
+            let mut stmt = conn.prepare(LOAD_ONE_SQL)?;
             let out: Vec<Row> = stmt
                 .query_map(params![name], map)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             out
         }
         None => {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {sql_cols} FROM {from} ORDER BY m.project_name, m.sort_order, m.id"
-            ))?;
+            let mut stmt = conn.prepare(LOAD_ALL_SQL)?;
             let out: Vec<Row> = stmt
                 .query_map([], map)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
