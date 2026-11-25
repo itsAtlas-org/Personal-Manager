@@ -1117,7 +1117,7 @@ const OPEN_URL_ELSEWHERE: Record<string, string[]> = {
     'command: export const openUrl = (url: string) => invoke<void>("open_url", { url });',
   ],
   "src/kit/lib/contextMenu.ts": [
-    "type member: actions: { openUrl?: (url: string) => void; copy: (text: string) => void },",
+    "type member: openUrl?: (url: string) => void;",
     "property access: const open = actions.openUrl;",
   ],
   "src/kit/ui/ContextMenuHost.tsx": [

@@ -24,6 +24,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.188.1-alpha",
+    date: "2026-11-25",
+    highlights: [
+      "PM's right-click menu now opens from the keyboard too. Move to a card, a sidebar tab or a link and press Shift+F10 (or the Menu key, if your keyboard has one) and the same menu appears right there, with the first choice ready; the arrow keys, a letter to jump, Enter to choose and Esc to close all work. Before, the Pinboard's Duplicate and the sidebar's Pin and Hide could only be reached with a mouse. Typing in a text box still gives you your system's own menu, and so does Shift+right-click.",
+      "Choosing something in the menu puts you back where you were instead of at the top of the page, and copying from the menu is announced aloud. The arrow keys and Esc now work in a menu you opened with the mouse too.",
+      "The menu's rows and colour dots are a comfortable size to hit, and a long choice now wraps instead of being cut short.",
+    ],
+  },
+  {
     version: "3.188.0-alpha",
     date: "2026-11-25",
     highlights: [

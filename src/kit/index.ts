@@ -73,6 +73,7 @@ export {
   openContextMenu,
   useContextMenu,
   wantsAppMenu,
+  type ContextMenuOptions,
   type MenuItem,
   type OpenMenu,
 } from "./lib/contextMenu";
