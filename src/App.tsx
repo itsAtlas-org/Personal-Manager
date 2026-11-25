@@ -32,6 +32,7 @@ import { ReviewView } from "./components/ReviewView";
 import { ModsRoute } from "./components/mods/ModsRoute";
 import { ModKeyAsks } from "./components/mods/ModKeyAsk";
 import { ModNoticeStrips } from "./components/mods/ModNoticeStrips";
+import { PinboardMoveStrips } from "./components/mods/PinboardMoveStrips";
 import { ModsAppStrips } from "./components/mods/ModsStrips";
 import { TeachView } from "./components/TeachView";
 import { Sidebar } from "./components/Sidebar";
@@ -1152,6 +1153,10 @@ export default function App() {
                 covers the strips (it draws its own copy), and a second dialog would fight it for
                 focus. */}
             {!showSettings && <ModNoticeStrips />}
+            {/* What PM says about the Pinboard's move into its mod: both boards kept, a copy with
+                characters replaced, a board that can't move yet. Dormant until the move is owed;
+                Settings draws its own copy while open. */}
+            {!showSettings && <PinboardMoveStrips />}
             {!showSettings && <ModKeyAsks />}
             <div
               className={`relative flex flex-1 overflow-hidden ${leftBar.resizing ? "select-none" : ""}`}

@@ -174,6 +174,20 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     "adopt_map_prefs",
     { layoutMode: "semantic", cohesion: 0.25, labels: true },
   ],
+  [
+    "adoptPinboardPrefs",
+    () => ipc.adoptPinboardPrefs(false, null, true),
+    "adopt_pinboard_prefs",
+    { confirmDelete: false, showPast: null, showCompleted: true },
+  ],
+  ["pinboardMoveState", () => ipc.pinboardMoveState(), "pinboard_move_state", undefined],
+  ["pinboardUseOldBoard", () => ipc.pinboardUseOldBoard(), "pinboard_use_old_board", undefined],
+  [
+    "pinboardMoveDismiss",
+    () => ipc.pinboardMoveDismiss("conflict"),
+    "pinboard_move_dismiss",
+    { note: "conflict" },
+  ],
 ];
 
 describe("the Mods tab's wrappers", () => {

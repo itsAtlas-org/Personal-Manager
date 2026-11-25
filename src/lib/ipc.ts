@@ -24,6 +24,7 @@ import type {
   ModsChanged,
   ModsDisclaimerState,
   ModsHandoverState,
+  PinboardMoveState,
   ModsResetResult,
   ModsRetryResult,
   ModsSafetyStatus,
@@ -2511,6 +2512,27 @@ export const modsHandoverState = () => invoke<ModsHandoverState>("mods_handover_
  *  every vault on the device is owed them once. */
 export const adoptMapPrefs = (layoutMode: string, cohesion: number, labels: boolean) =>
   invoke<boolean>("adopt_map_prefs", { layoutMode, cohesion, labels });
+
+/** Hand this device's three Pinboard nags (null: this device never set it) to the Pinboard mod's
+ *  storage; it fills only what the mod lacks. Resolves true when it did or there was nothing left.
+ *  The device's own keys stay. Dormant until PM's move of the Pinboard has run. */
+export const adoptPinboardPrefs = (
+  confirmDelete: boolean | null,
+  showPast: boolean | null,
+  showCompleted: boolean | null,
+) => invoke<boolean>("adopt_pinboard_prefs", { confirmDelete, showPast, showCompleted });
+
+/** What PM's strips about the Pinboard's move say: both boards kept, a copy with characters
+ *  replaced, a board that cannot move yet. Booleans and a word, never the board's text. */
+export const pinboardMoveState = () => invoke<PinboardMoveState>("pinboard_move_state");
+
+/** "Use my old board": the mod's board is saved as "board before move" first, then the old one
+ *  becomes the mod's. Nothing is deleted. Rejects (nothing changed) with the reason in words. */
+export const pinboardUseOldBoard = () => invoke<void>("pinboard_use_old_board");
+
+/** Clear one of the move's notes: `conflict` ("Keep this one") or `repaired`. */
+export const pinboardMoveDismiss = (note: "conflict" | "repaired") =>
+  invoke<void>("pinboard_move_dismiss", { note });
 
 /** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an
  *  install, a pause, the safety list's pass, the startup load, a restore's recovery). Read the rows

@@ -720,7 +720,14 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
         opts: &InstallOptions<'_>,
         now: DateTime<Utc>,
     ) -> Result<Installed, LedgerError> {
-        self.install_verified_with(pkg, package_sha256, opts, now, &|_, _| Ok(()))
+        // A person's own install of a pilot (the Pinboard, which a migration may owe a board to) runs
+        // that pilot's handover in this transaction, before the row can serve: the frame must never
+        // write a board of its own first (`autoinstall::finish_manual`).
+        let from_catalogue = opts.source == Source::Catalogue;
+        let id = pkg.manifest.id.as_str().to_owned();
+        self.install_verified_with(pkg, package_sha256, opts, now, &|c, kind| {
+            super::autoinstall::finish_manual(c, &id, kind, from_catalogue)
+        })
     }
 
     fn install_verified_with(
@@ -1760,6 +1767,8 @@ mod tests {
     mod slice5;
     // The pilots' auto-install (PR B, B8).
     mod pilots;
+    // The Pinboard's move, as the install carries it out (PR C, K8).
+    mod pinboard_move;
     // An update that only adds cache keys: unattended, stored as cache, left out of a backup.
     mod enhanced_keys;
     // Which namespace the Pinboard's notes get when it is installed and signed by a dev test key.

@@ -14,12 +14,15 @@ import type { ModsChanged, ModsHandoverState } from "./modsTypes";
 import { NAV_PLACEMENT_KEY } from "./nav";
 
 const adoptMapPrefs = vi.fn();
+const adoptPinboardPrefs = vi.fn();
 const modsHandoverState = vi.fn();
 let changed: ((e: ModsChanged) => void) | null = null;
 
 vi.mock("./ipc", () => ({
   adoptMapPrefs: (mode: string, cohesion: number, labels: boolean) =>
     adoptMapPrefs(mode, cohesion, labels),
+  adoptPinboardPrefs: (a: boolean | null, b: boolean | null, c: boolean | null) =>
+    adoptPinboardPrefs(a, b, c),
   modsHandoverState: () => modsHandoverState(),
   onModsChanged: (h: (e: ModsChanged) => void) => {
     changed = h;
@@ -57,9 +60,13 @@ const {
   MAP_COHESION_KEY,
   MAP_LABELS_KEY,
   PILOT_HANDLED_KEY,
+  PINBOARD_CONFIRM_DELETE_KEY,
+  PINBOARD_SHOW_COMPLETED_KEY,
+  PINBOARD_SHOW_PAST_KEY,
+  readDevicePinboardPrefs,
 } = await import("./pilotHandover");
 
-const EMPTY: ModsHandoverState = { landed: [], adoptMapPrefs: false };
+const EMPTY: ModsHandoverState = { landed: [], adoptMapPrefs: false, adoptPinboardPrefs: false };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -68,6 +75,7 @@ beforeEach(() => {
   depth = "min";
   changed = null;
   adoptMapPrefs.mockResolvedValue(true);
+  adoptPinboardPrefs.mockResolvedValue(true);
   modsHandoverState.mockResolvedValue(EMPTY);
 });
 afterEach(cleanup);
@@ -98,7 +106,10 @@ describe("the Map's device-local prefs", () => {
     setPrefs();
     let finish: (v: boolean) => void = () => {};
     adoptMapPrefs.mockReturnValueOnce(new Promise<boolean>((r) => (finish = r)));
-    const done = applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    const done = applyHandover(
+      { landed: [], adoptMapPrefs: true, adoptPinboardPrefs: false },
+      "standard",
+    );
     await waitFor(() => expect(adoptMapPrefs).toHaveBeenCalledWith("semantic", 0.25, true));
     finish(true);
     await done;
@@ -106,7 +117,7 @@ describe("the Map's device-local prefs", () => {
       expect(localStorage.getItem(k), k).not.toBeNull();
     }
     // A second vault on this device lands later (the backend's flag is per vault): same values.
-    await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    await applyHandover({ landed: [], adoptMapPrefs: true, adoptPinboardPrefs: false }, "standard");
     expect(adoptMapPrefs).toHaveBeenCalledTimes(2);
     expect(adoptMapPrefs).toHaveBeenLastCalledWith("semantic", 0.25, true);
   });
@@ -114,9 +125,9 @@ describe("the Map's device-local prefs", () => {
   it("are sent again after PM refuses", async () => {
     setPrefs();
     adoptMapPrefs.mockRejectedValueOnce({ code: "not-installed", message: "No." });
-    await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    await applyHandover({ landed: [], adoptMapPrefs: true, adoptPinboardPrefs: false }, "standard");
     expect(localStorage.getItem(MAP_MODE_KEY)).toBe("semantic");
-    await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    await applyHandover({ landed: [], adoptMapPrefs: true, adoptPinboardPrefs: false }, "standard");
     expect(adoptMapPrefs).toHaveBeenCalledTimes(2);
   });
 
@@ -134,13 +145,75 @@ describe("the Map's device-local prefs", () => {
     expect(adoptMapPrefs).not.toHaveBeenCalled();
     expect(localStorage.getItem(MAP_MODE_KEY)).toBe("semantic");
     localStorage.clear();
-    await applyHandover({ landed: [], adoptMapPrefs: true }, "standard");
+    await applyHandover({ landed: [], adoptMapPrefs: true, adoptPinboardPrefs: false }, "standard");
     expect(adoptMapPrefs).not.toHaveBeenCalled();
   });
 });
 
+describe("the Pinboard's device-local nags", () => {
+  const owed: ModsHandoverState = { landed: [], adoptMapPrefs: false, adoptPinboardPrefs: true };
+
+  it("are read the way the core Pinboard read them: only the literal false turns one off", () => {
+    expect(readDevicePinboardPrefs()).toBeNull();
+    localStorage.setItem(PINBOARD_CONFIRM_DELETE_KEY, "false");
+    localStorage.setItem(PINBOARD_SHOW_PAST_KEY, "true");
+    expect(readDevicePinboardPrefs()).toEqual({
+      confirmDelete: false,
+      showPast: true,
+      showCompleted: null,
+    });
+    localStorage.setItem(PINBOARD_SHOW_COMPLETED_KEY, "banana");
+    expect(readDevicePinboardPrefs()?.showCompleted).toBe(true);
+  });
+
+  it("go to the mod, a nag this device never set as null, and stay on the device", async () => {
+    localStorage.setItem(PINBOARD_CONFIRM_DELETE_KEY, "false");
+    localStorage.setItem(PINBOARD_SHOW_COMPLETED_KEY, "true");
+    await applyHandover(owed, "standard");
+    expect(adoptPinboardPrefs).toHaveBeenCalledTimes(1);
+    expect(adoptPinboardPrefs).toHaveBeenCalledWith(false, null, true);
+    expect(adoptMapPrefs).not.toHaveBeenCalled();
+    expect(localStorage.getItem(PINBOARD_CONFIRM_DELETE_KEY)).toBe("false");
+    expect(localStorage.getItem(PINBOARD_SHOW_COMPLETED_KEY)).toBe("true");
+  });
+
+  it("are not touched until the backend says they are owed, and not sent when there are none", async () => {
+    localStorage.setItem(PINBOARD_CONFIRM_DELETE_KEY, "false");
+    await applyHandover(EMPTY, "standard");
+    expect(adoptPinboardPrefs).not.toHaveBeenCalled();
+    localStorage.clear();
+    await applyHandover(owed, "standard");
+    expect(adoptPinboardPrefs).not.toHaveBeenCalled();
+  });
+
+  it("are sent again after PM refuses, and a refusal never throws", async () => {
+    localStorage.setItem(PINBOARD_SHOW_PAST_KEY, "false");
+    adoptPinboardPrefs.mockRejectedValueOnce({ code: "not-installed", message: "No." });
+    await expect(applyHandover(owed, "standard")).resolves.toBeUndefined();
+    await applyHandover(owed, "standard");
+    expect(adoptPinboardPrefs).toHaveBeenCalledTimes(2);
+  });
+
+  it("survive storage that throws", async () => {
+    const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    try {
+      expect(readDevicePinboardPrefs()).toBeNull();
+      await applyHandover(owed, "standard");
+      expect(adoptPinboardPrefs).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+    }
+  });
+});
+
 describe("the sidebar rule", () => {
-  const landed: ModsHandoverState = { landed: ["atlas.map"], adoptMapPrefs: false };
+  const landed: ModsHandoverState = {
+    landed: ["atlas.map"],
+    adoptMapPrefs: false,
+    adoptPinboardPrefs: false,
+  };
 
   it("hides the new tab once on a Minimal device, and records that it ran", async () => {
     await applyHandover(landed, "min");
@@ -215,7 +288,11 @@ describe("the hook", () => {
     localStorage.setItem(MAP_MODE_KEY, "semantic");
     draw(true);
     await waitFor(() => expect(modsHandoverState).toHaveBeenCalledTimes(1));
-    modsHandoverState.mockResolvedValue({ landed: ["atlas.map"], adoptMapPrefs: true });
+    modsHandoverState.mockResolvedValue({
+      landed: ["atlas.map"],
+      adoptMapPrefs: true,
+      adoptPinboardPrefs: false,
+    });
     await waitFor(() => expect(changed).not.toBeNull());
     await act(async () => changed?.({ cause: "auto-installed" }));
     await waitFor(() => expect(adoptMapPrefs).toHaveBeenCalledWith("semantic", 0, false));

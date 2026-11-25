@@ -80,6 +80,7 @@ pub mod ledger;
 pub mod netfetch;
 pub mod outbox;
 pub mod package;
+pub mod pinboard_move;
 pub mod policy;
 pub mod refresh;
 pub mod refs;

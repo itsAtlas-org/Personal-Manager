@@ -403,4 +403,4 @@ pub fn stored_board(conn: &Connection) -> Result<Option<StoredBoard>> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

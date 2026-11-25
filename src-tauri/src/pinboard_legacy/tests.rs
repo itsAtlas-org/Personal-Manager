@@ -56,16 +56,17 @@ fn expand(v: &Value) -> Value {
     }
 }
 
-struct Case {
-    name: String,
-    raws: Vec<String>,
-    expected: Option<Vec<Entry>>,
-    count: Option<usize>,
-    first: Option<Entry>,
-    last: Option<Entry>,
+pub(crate) struct Case {
+    pub(crate) name: String,
+    pub(crate) raws: Vec<String>,
+    pub(crate) expected: Option<Vec<Entry>>,
+    pub(crate) count: Option<usize>,
+    pub(crate) first: Option<Entry>,
+    pub(crate) last: Option<Entry>,
 }
 
-fn cases() -> Vec<Case> {
+/// The shared fixtures, as the move's tests read them too (`mods::pinboard_move`).
+pub(crate) fn cases() -> Vec<Case> {
     let fixtures: Value = serde_json::from_str(FIXTURES).unwrap();
     fixtures["cases"]
         .as_array()
@@ -94,7 +95,7 @@ fn cases() -> Vec<Case> {
         .collect()
 }
 
-fn check(case: &Case, got: &[Entry], what: &str) {
+pub(crate) fn check(case: &Case, got: &[Entry], what: &str) {
     if let Some(expected) = &case.expected {
         assert_eq!(got, expected.as_slice(), "{what}: {}", case.name);
     }

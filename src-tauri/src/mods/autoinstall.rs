@@ -58,7 +58,8 @@ use super::index::Index;
 use super::index_state;
 use super::keys::TrustedKeys;
 use super::ledger::{self, LedgerError, Mint, PilotLanded};
-use super::policy::{self, ApiFit, MOD_API_OLDEST_MAJOR, MOD_API_VERSION};
+use super::pinboard_move;
+use super::policy::{self, ApiFit, InstallKind, MOD_API_OLDEST_MAJOR, MOD_API_VERSION};
 use super::refresh;
 use super::safety;
 use super::store;
@@ -80,26 +81,48 @@ pub struct Pilot {
     /// The `settings` key that records, once the install landed, that this vault's device-local
     /// leftovers (the sidebar's placement) may now be carried over. Kept: it is one short row.
     pub landed: &'static str,
+    /// A second `settings` key that says the feature's data is still owed to the mod, besides the
+    /// marker: the Pinboard's `pinboard_move_pending` (a board exists that has not been copied). A
+    /// manual install from the Mods tab settles a pilot when either is there ([`finish_manual`]).
+    /// A pilot with one runs its handover on every settle, whether or not `landed` is set: the key
+    /// is its own once-only guard ([`settle`]). The Map has none, and keeps the landed note's gate.
+    pub pending: Option<&'static str>,
     /// Runs in the install's transaction, after the row: carries the core feature's rows over.
     handover: fn(&Connection, &str) -> Result<(), LedgerError>,
 }
 
 /// The compiled table. A marker for an id that isn't here is ignored, and nothing outside this
 /// table can name a pilot.
-pub const PILOTS: [Pilot; 1] = [Pilot {
-    id: "atlas.map",
-    marker: "mods_autoinstall_map",
-    name: "Document Map",
-    tab_label: "Document Map",
-    landed: "mods_pilot_landed_map",
-    handover: hand_over_map,
-}];
+pub const PILOTS: [Pilot; 2] = [
+    Pilot {
+        id: "atlas.map",
+        marker: "mods_autoinstall_map",
+        name: "Document Map",
+        tab_label: "Document Map",
+        landed: "mods_pilot_landed_map",
+        pending: None,
+        handover: hand_over_map,
+    },
+    // The Pinboard (PR C). DORMANT in C1: no migration writes `mods_autoinstall_pinboard` or
+    // `pinboard_move_pending` yet (C2's v62 does). Only `mark_restored` can write the marker, for a
+    // restored store with a signed catalogue `atlas.pinboard` row, and that store has no pending
+    // move. The move itself (`pinboard_move`) runs only when one of them is there.
+    Pilot {
+        id: "atlas.pinboard",
+        marker: "mods_autoinstall_pinboard",
+        name: "Pinboard",
+        tab_label: "Pinboard",
+        landed: "mods_pilot_landed_pinboard",
+        pending: Some(pinboard_move::PENDING),
+        handover: pinboard_move::hand_over_pinboard,
+    },
+];
 
 /// The pilots whose marker is in the store, in table order.
 pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<&'static Pilot>> {
     let mut out = Vec::new();
     for p in &PILOTS {
-        if get(conn, p.marker)?.is_some() {
+        if has(conn, p.marker)? {
             out.push(p);
         }
     }
@@ -122,11 +145,20 @@ pub fn mark_restored(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// The text of a `settings` row, `None` for a missing row and for one that holds another type (a
+/// BLOB, an integer, bytes that are not UTF-8): a shared vault's member can plant those, and a typed
+/// read of one is an error that would stop the Map's handover and so its install. A value that can't
+/// be read carries nothing; only a database that failed is an `Err`.
 fn get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
-        r.get(0)
-    })
-    .optional()
+    match conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()
+    {
+        Err(e) if super::refs::is_wrong_type(&e) => Ok(None),
+        other => other,
+    }
 }
 
 fn to_ledger(e: crate::error::Error) -> LedgerError {
@@ -226,6 +258,16 @@ pub fn decide(
 
 // ---- What runs in the install's transaction ------------------------------------------------------
 
+/// Whether `settings` has a row for `key`, whatever its value holds (a shared vault's member can
+/// plant a BLOB, which a typed read would turn into an error that blocks every install).
+pub(super) fn has(conn: &Connection, key: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+        [key],
+        |r| r.get(0),
+    )
+}
+
 /// The pilot's marker, its handover and its landed note, in the caller's transaction. Fails (so the
 /// transaction rolls back and the marker stays) when the mod's row isn't there, and when the marker
 /// isn't there either: a pass plans against one store, then waits on a download, and "the active
@@ -233,9 +275,46 @@ pub fn decide(
 /// in this very transaction, is what says *this* store asked for the install; without it nothing
 /// is installed here and no settings are touched.
 pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError> {
-    if get(conn, pilot.marker)?.is_none() {
+    if !has(conn, pilot.marker)? {
         return Err(policy::Refusal::Changed.into());
     }
+    settle(conn, pilot)
+}
+
+/// A manual install from the Mods tab (the person's own click on a catalogue mod), in the install's
+/// own transaction: for a pilot's id, when its marker or its pending key is in the store, the same
+/// handover runs as for an auto-install, before the row commits. Without it the Pinboard's frame
+/// could start (the moment the row commits and is turned on) and write its own empty `board` before
+/// any pass settled the move, and the move would then find a board in the mod and have to keep both
+/// (`pinboard_move`, step 4). Nothing happens for any other mod, for a store owed nothing, for an
+/// update or a repair, or for a file the person picked (it is no catalogue install, and no pass would
+/// settle it either: [`decide`] leaves such a row alone).
+pub(crate) fn finish_manual(
+    conn: &Connection,
+    mod_id: &str,
+    kind: InstallKind,
+    from_catalogue: bool,
+) -> Result<(), LedgerError> {
+    if kind != InstallKind::Fresh || !from_catalogue {
+        return Ok(());
+    }
+    let Some(pilot) = PILOTS.iter().find(|p| p.id == mod_id) else {
+        return Ok(());
+    };
+    let owed = has(conn, pilot.marker)?
+        || match pilot.pending {
+            Some(key) => has(conn, key)?,
+            None => false,
+        };
+    if !owed {
+        return Ok(());
+    }
+    settle(conn, pilot)
+}
+
+/// [`finish`] without the marker's say-so: the mod's row must be here; the handover runs once per
+/// vault; the marker (if there is one) goes after it and the landed note is written.
+fn settle(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError> {
     let row: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM mods WHERE id = ?1)",
         [pilot.id],
@@ -244,9 +323,15 @@ pub(crate) fn finish(conn: &Connection, pilot: &Pilot) -> Result<(), LedgerError
     if !row {
         return Err(LedgerError::NotInstalled);
     }
-    // The handover is once per vault: a restore writes the marker again for a vault that landed
-    // before (the files are owed, not the rows), and its core rows and device prefs were dealt with.
-    if get(conn, pilot.landed)?.is_none() {
+    // The handover is once per vault for a pilot with no pending key of its own: a restore writes
+    // the marker again for a vault that landed before (the files are owed, not the rows), and its
+    // core rows and device prefs were dealt with. A pilot WITH a pending key (the Pinboard) is not
+    // gated on the landed note at all: its handover does nothing without that key, and the key is
+    // the only thing that says a copy is owed. The note survives a backup (`settings` is never
+    // stripped), so a store restored after the move, or settled once with nothing owed, still holds
+    // it when a later re-arm writes the key again (the restore of a mod-data-off backup brings the
+    // old board back this way), and a gate on the note would delete the marker and skip the move.
+    if pilot.pending.is_some() || !has(conn, pilot.landed)? {
         (pilot.handover)(conn, pilot.id)?;
     }
     // The marker goes after the handover, in the same transaction: a failure above keeps both.
@@ -275,8 +360,9 @@ const MAP_KV_KEY: &str = "settings";
 ///   `true` says nothing about who had openTSNE. Anything that is not a JSON boolean carries nothing.
 ///
 /// It does not read the venv or the `.pm-tsne` marker: the venv is per machine and this runs per
-/// vault. A pref blob that doesn't parse, or has nothing valid in it, carries nothing over and is
-/// still deleted: the core reader treated it as the default too.
+/// vault. A pref blob that doesn't parse, has nothing valid in it, or holds another SQLite type than
+/// text (planted by a shared vault's member, see [`get`]) carries nothing over and is still deleted:
+/// the core reader treated it as the default too. It never makes the handover fail.
 fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
     let old = get(conn, MAP_PREF)?;
     let old = old
@@ -297,26 +383,31 @@ fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
         carried.insert("enhanced".to_owned(), json!(false));
     }
     if !carried.is_empty() {
-        conn.execute(
+        let inserted = conn.execute(
             "INSERT OR IGNORE INTO mod_kv(mod_id, key, class, value, revision) \
              VALUES (?1, ?2, 'content', ?3, 1)",
             params![mod_id, MAP_KV_KEY, Value::Object(carried).to_string()],
         )?;
-        // Verify before anything is deleted: the mod's key is there and says an object.
-        let stored = conn
-            .query_row(
-                "SELECT value FROM mod_kv WHERE mod_id = ?1 AND key = ?2",
-                params![mod_id, MAP_KV_KEY],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        let ok = stored
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .is_some_and(|v| v.is_object());
-        if !ok {
-            return Err(LedgerError::Store(
-                "the Map's settings weren't stored, so the old ones were kept".to_owned(),
-            ));
+        // Verify before anything is deleted, but only our own row: when the insert was ignored the
+        // mod already has a `settings` row, the user's data wins whatever it holds (a BLOB or
+        // non-UTF-8 value planted by a shared vault's member included, which a typed read would
+        // fail on and so block the install), and there is nothing of ours to check.
+        if inserted > 0 {
+            let stored = conn
+                .query_row(
+                    "SELECT value FROM mod_kv WHERE mod_id = ?1 AND key = ?2",
+                    params![mod_id, MAP_KV_KEY],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let ok = stored
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .is_some_and(|v| v.is_object());
+            if !ok {
+                return Err(LedgerError::Store(
+                    "the Map's settings weren't stored, so the old ones were kept".to_owned(),
+                ));
+            }
         }
     }
     for key in MAP_DEAD_KEYS {
@@ -324,6 +415,26 @@ fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
     }
     db::set_setting(conn, ADOPT_FLAG, "1").map_err(to_ledger)?;
     Ok(())
+}
+
+/// Delete the core Map's dead rows ([`MAP_DEAD_KEYS`], and nothing else in `settings`) from a store
+/// that is not owed the Map: the launch pass's sweep. Only the Map's handover deleted them, and
+/// migration v61 writes the Map's marker only for a store that holds a document, so a store with none
+/// kept the three rows for ever. With the marker pending the rows stay until the handover, which
+/// reads `map` for the two prefs it carries. Idempotent. Returns how many rows went.
+pub fn sweep_map_leftovers(conn: &Connection) -> rusqlite::Result<usize> {
+    let map = PILOTS
+        .iter()
+        .find(|p| p.id == "atlas.map")
+        .map_or("", |p| p.marker);
+    if map.is_empty() || has(conn, map)? {
+        return Ok(0);
+    }
+    let mut gone = 0;
+    for key in MAP_DEAD_KEYS {
+        gone += conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    }
+    Ok(gone)
 }
 
 // ---- The page's half: the device-local prefs and the sidebar -----------------------------------
@@ -335,18 +446,21 @@ fn hand_over_map(conn: &Connection, mod_id: &str) -> Result<(), LedgerError> {
 pub struct HandoverState {
     pub landed: Vec<String>,
     pub adopt_map_prefs: bool,
+    /// The Pinboard's three device prefs wait to be handed over ([`pinboard_move::adopt_pinboard_prefs`]).
+    pub adopt_pinboard_prefs: bool,
 }
 
 pub fn handover_state(conn: &Connection) -> rusqlite::Result<HandoverState> {
     let mut landed = Vec::new();
     for p in &PILOTS {
-        if get(conn, p.landed)?.is_some() {
+        if has(conn, p.landed)? {
             landed.push(p.id.to_owned());
         }
     }
     Ok(HandoverState {
         landed,
-        adopt_map_prefs: get(conn, ADOPT_FLAG)?.is_some(),
+        adopt_map_prefs: has(conn, ADOPT_FLAG)?,
+        adopt_pinboard_prefs: has(conn, pinboard_move::ADOPT_FLAG)?,
     })
 }
 
@@ -382,7 +496,7 @@ pub fn adopt_map_prefs(
     }
     let cohesion = cohesion.clamp(0.0, 0.5);
     let tx = conn.transaction()?;
-    if get(&tx, ADOPT_FLAG)?.is_none() {
+    if !has(&tx, ADOPT_FLAG)? {
         return Ok(false);
     }
     // A test folder's rows are dropped at the next start, and its storage with them.
@@ -394,17 +508,27 @@ pub fn adopt_map_prefs(
     if !from_catalogue {
         return Err(AdoptRefusal::NotInstalled);
     }
-    let existing: Option<(String, i64)> = tx
+    // The value is read as a SQLite value: a BLOB or non-UTF-8 text planted by a shared vault's
+    // member reads as "not an object" (like any other non-object), not as an error that would
+    // keep the flag set for ever.
+    let existing: Option<(Option<String>, i64)> = tx
         .query_row(
             "SELECT value, revision FROM mod_kv WHERE mod_id = 'atlas.map' AND key = ?1",
             [MAP_KV_KEY],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                let text = match r.get::<_, String>(0) {
+                    Ok(t) => Some(t),
+                    Err(e) if super::refs::is_wrong_type(&e) => None,
+                    Err(e) => return Err(e),
+                };
+                Ok((text, r.get(1)?))
+            },
         )
         .optional()?;
     let (mut object, revision) = match existing {
         Some((text, revision)) => (
-            match serde_json::from_str::<Value>(&text) {
-                Ok(Value::Object(o)) => o,
+            match text.and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+                Some(Value::Object(o)) => o,
                 _ => Map::new(),
             },
             revision,
@@ -683,10 +807,25 @@ pub async fn run_cached(app: &AppHandle) {
     run(app, &transport, &endpoints, index.as_ref(), &keys).await;
 }
 
-/// After a writer's store opens: start a pass in the background. Cheap when no marker is there.
+/// After a writer's store opens: clear what the core Map left behind, then start a pass in the
+/// background. Both are cheap when no marker is there.
 pub fn spawn_after_open(app: &AppHandle) {
     let app = app.clone();
-    tauri::async_runtime::spawn(async move { run_cached(&app).await });
+    tauri::async_runtime::spawn(async move {
+        let app2 = app.clone();
+        blocking(move || {
+            if !writer_now(&app2) {
+                return;
+            }
+            let state = app2.state::<AppState>();
+            let Ok(conn) = state.conn() else { return };
+            if let Err(e) = sweep_map_leftovers(&conn) {
+                eprintln!("mods: the Map's old rows were not cleared ({e})");
+            }
+        })
+        .await;
+        run_cached(&app).await;
+    });
 }
 
 #[cfg(test)]
@@ -815,7 +954,8 @@ mod tests {
     fn only_a_marker_in_the_store_makes_a_pilot_pending() {
         let (_dir, conn) = store();
         assert!(pending(&conn).unwrap().is_empty());
-        put(&conn, "mods_autoinstall_pinboard", "1");
+        // A marker for an id that is no pilot is ignored; the Pinboard's is one now (PR C, K8).
+        put(&conn, "mods_autoinstall_nothing", "1");
         assert!(
             pending(&conn).unwrap().is_empty(),
             "a marker for no pilot here"
@@ -823,19 +963,62 @@ mod tests {
         put(&conn, "mods_autoinstall_map", "1");
         let ids: Vec<&str> = pending(&conn).unwrap().iter().map(|p| p.id).collect();
         assert_eq!(ids, ["atlas.map"]);
+        put(&conn, PILOTS[1].marker, "1");
+        let ids: Vec<&str> = pending(&conn).unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["atlas.map", "atlas.pinboard"], "in table order");
+        conn.execute("DELETE FROM settings WHERE key = ?1", [PILOTS[1].marker])
+            .unwrap();
         let state = handover_state(&conn).unwrap();
         assert_eq!(
             state,
             HandoverState {
                 landed: vec![],
-                adopt_map_prefs: false
+                adopt_map_prefs: false,
+                adopt_pinboard_prefs: false
             }
         );
         put(&conn, "mods_pilot_landed_map", "1");
         put(&conn, ADOPT_FLAG, "1");
+        put(&conn, pinboard_move::ADOPT_FLAG, "1");
         assert_eq!(
             serde_json::to_value(handover_state(&conn).unwrap()).unwrap(),
-            json!({"landed": ["atlas.map"], "adoptMapPrefs": true})
+            json!({"landed": ["atlas.map"], "adoptMapPrefs": true, "adoptPinboardPrefs": true})
+        );
+        put(&conn, PILOTS[1].landed, "1");
+        assert_eq!(
+            handover_state(&conn).unwrap().landed,
+            ["atlas.map", "atlas.pinboard"]
+        );
+    }
+
+    #[test]
+    fn a_planted_type_at_a_marker_or_a_note_never_fails_the_pass_or_the_page_state() {
+        // A shared vault's member can write any type into `settings`; a typed read of one is an
+        // error that would stop every pilot's pass and the page's handover query.
+        let (_dir, conn) = store();
+        for key in [
+            PILOTS[0].marker,
+            PILOTS[1].marker,
+            PILOTS[0].landed,
+            PILOTS[1].landed,
+            ADOPT_FLAG,
+            pinboard_move::ADOPT_FLAG,
+        ] {
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES (?1, x'00ff00')",
+                [key],
+            )
+            .unwrap();
+        }
+        let ids: Vec<&str> = pending(&conn).unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["atlas.map", "atlas.pinboard"]);
+        assert_eq!(
+            handover_state(&conn).unwrap(),
+            HandoverState {
+                landed: vec!["atlas.map".to_owned(), "atlas.pinboard".to_owned()],
+                adopt_map_prefs: true,
+                adopt_pinboard_prefs: true
+            }
         );
     }
 
@@ -910,9 +1093,9 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_key_that_does_not_read_back_as_an_object_keeps_the_old_rows() {
-        // Verify-then-delete, with no transaction round it so the order shows: the mod's key is
-        // something else (INSERT OR IGNORE leaves it), the read-back refuses, and nothing is deleted.
+    fn a_settings_key_the_mod_already_has_wins_whatever_it_holds_and_the_old_rows_go() {
+        // INSERT OR IGNORE leaves the mod's own row; there is nothing of ours to verify, and a
+        // planted row must not stop the install.
         let (_dir, conn) = store();
         mod_row(&conn, "catalogue", true);
         conn.execute(
@@ -924,10 +1107,19 @@ mod tests {
         for pref in [r#"{"nodeCap":900}"#, r#"{"tsneEnabled":false}"#] {
             put(&conn, MAP_PREF, pref);
             put(&conn, "doc_layout_meta", "{}");
-            assert!(hand_over_map(&conn, "atlas.map").is_err(), "{pref}");
-            assert_eq!(get(&conn, MAP_PREF).unwrap().as_deref(), Some(pref));
-            assert!(get(&conn, "doc_layout_meta").unwrap().is_some(), "{pref}");
-            assert!(get(&conn, ADOPT_FLAG).unwrap().is_none(), "{pref}");
+            hand_over_map(&conn, "atlas.map").unwrap_or_else(|e| panic!("{pref}: {e:?}"));
+            assert!(get(&conn, MAP_PREF).unwrap().is_none(), "{pref}");
+            assert!(get(&conn, "doc_layout_meta").unwrap().is_none(), "{pref}");
+            assert!(get(&conn, ADOPT_FLAG).unwrap().is_some(), "{pref}");
+            let (value, revision): (String, i64) = conn
+                .query_row(
+                    "SELECT value, revision FROM mod_kv WHERE key = 'settings'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((value.as_str(), revision), ("[1]", 2), "{pref}");
+            db::delete_setting(&conn, ADOPT_FLAG).unwrap();
         }
     }
 
@@ -1136,5 +1328,327 @@ mod tests {
             "v61 must write {}",
             PILOTS[0].marker
         );
+    }
+
+    #[test]
+    fn the_pilots_table_names_each_pilot_once_and_the_pinboard_is_dormant() {
+        let ids: Vec<&str> = PILOTS.iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["atlas.map", "atlas.pinboard"]);
+        let p = &PILOTS[1];
+        assert_eq!(
+            (p.marker, p.name, p.tab_label, p.landed, p.pending),
+            (
+                "mods_autoinstall_pinboard",
+                "Pinboard",
+                "Pinboard",
+                "mods_pilot_landed_pinboard",
+                Some("pinboard_move_pending")
+            )
+        );
+        // No two pilots share an id, a marker or a landed key.
+        for (i, a) in PILOTS.iter().enumerate() {
+            for b in &PILOTS[i + 1..] {
+                assert!(a.id != b.id && a.marker != b.marker && a.landed != b.landed);
+            }
+        }
+        // The Map has no second key; and a store with nothing in it is owed nothing.
+        assert_eq!(PILOTS[0].pending, None);
+        let (_dir, conn) = store();
+        assert!(pending(&conn).unwrap().is_empty());
+    }
+
+    /// Put the three dead rows and one live neighbour of each kind in a store.
+    fn plant_dead_map_rows(conn: &Connection) {
+        put(conn, "map", r#"{"nodeCap":900}"#);
+        put(conn, "doc_layout_meta", r#"{"x":1}"#);
+        put(conn, "project_layout_cache", "[1,2]");
+        for neighbour in [
+            "map_other",
+            "doc_layout",
+            "pinboard",
+            "mods_pilot_landed_pinboard",
+        ] {
+            put(conn, neighbour, "keep");
+        }
+    }
+
+    fn settings_keys(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT key FROM settings ORDER BY key")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn the_sweep_clears_the_core_maps_dead_rows_when_no_marker_is_pending_and_nothing_else() {
+        let (_dir, conn) = store();
+        plant_dead_map_rows(&conn);
+        let before = settings_keys(&conn);
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 3);
+        let after = settings_keys(&conn);
+        let gone: Vec<&String> = before.iter().filter(|k| !after.contains(k)).collect();
+        assert_eq!(gone, ["doc_layout_meta", "map", "project_layout_cache"]);
+        // Every other row is as it was, value included.
+        for key in [
+            "map_other",
+            "doc_layout",
+            "pinboard",
+            "mods_pilot_landed_pinboard",
+        ] {
+            assert_eq!(get(&conn, key).unwrap().as_deref(), Some("keep"), "{key}");
+        }
+        // Idempotent: a second sweep finds nothing and changes nothing.
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 0);
+        assert_eq!(settings_keys(&conn), after);
+    }
+
+    #[test]
+    fn the_sweep_waits_for_the_handover_while_the_maps_marker_is_pending() {
+        let (_dir, conn) = store();
+        plant_dead_map_rows(&conn);
+        put(&conn, PILOTS[0].marker, "1");
+        let before = settings_keys(&conn);
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 0);
+        assert_eq!(settings_keys(&conn), before, "nothing was deleted");
+        assert_eq!(
+            get(&conn, "map").unwrap().as_deref(),
+            Some(r#"{"nodeCap":900}"#),
+            "the handover still has the pref to carry"
+        );
+        // The handover then moves the prefs and deletes them itself, as it always did; after it the
+        // marker is gone and the sweep has nothing left to do.
+        mod_row(&conn, "catalogue", true);
+        finish(&conn, &PILOTS[0]).unwrap();
+        assert_eq!(get(&conn, "map").unwrap(), None);
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 0);
+        // Only the Map's own marker holds it back: the Pinboard's does not.
+        let (_dir, conn) = store();
+        plant_dead_map_rows(&conn);
+        put(&conn, PILOTS[1].marker, "1");
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 3);
+    }
+
+    /// The three wrong SQLite types a shared vault's member can plant in a text column.
+    const PLANTED: [(&str, &str); 3] = [
+        ("a BLOB", "x'00ff00'"),
+        ("an integer", "42"),
+        ("non-UTF-8 text", "CAST(x'c328ff' AS TEXT)"),
+    ];
+
+    fn plant_wrong_type(conn: &Connection, key: &str, literal: &str) {
+        conn.execute("DELETE FROM settings WHERE key = ?1", [key])
+            .unwrap();
+        conn.execute(
+            &format!("INSERT INTO settings(key, value) VALUES (?1, {literal})"),
+            [key],
+        )
+        .unwrap();
+    }
+
+    fn mod_kv_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM mod_kv", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_map_pref_of_another_type_carries_nothing_and_never_blocks_the_auto_pass_or_the_manual_install(
+    ) {
+        for (what, literal) in PLANTED {
+            for manual in [false, true] {
+                let label = format!("{what}, manual: {manual}");
+                let (_dir, conn) = store();
+                plant_dead_map_rows(&conn);
+                plant_wrong_type(&conn, MAP_PREF, literal);
+                put(&conn, PILOTS[0].marker, "1");
+                mod_row(&conn, "catalogue", true);
+                if manual {
+                    finish_manual(&conn, "atlas.map", InstallKind::Fresh, true)
+                        .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                } else {
+                    finish(&conn, &PILOTS[0]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                }
+                // Nothing was adopted from it.
+                assert_eq!(mod_kv_rows(&conn), 0, "{label}");
+                // The dead rows went, the pref among them, and only those.
+                for key in MAP_DEAD_KEYS {
+                    assert!(!has(&conn, key).unwrap(), "{label}: {key}");
+                }
+                for key in ["map_other", "doc_layout", "pinboard"] {
+                    assert!(has(&conn, key).unwrap(), "{label}: {key}");
+                }
+                // The install settled: marker gone, note and the page's flag written.
+                assert!(!has(&conn, PILOTS[0].marker).unwrap(), "{label}");
+                assert!(has(&conn, PILOTS[0].landed).unwrap(), "{label}");
+                assert!(has(&conn, ADOPT_FLAG).unwrap(), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_map_pref_of_another_type_reads_as_missing_and_a_real_one_still_carries() {
+        let (_dir, conn) = store();
+        for (what, literal) in PLANTED {
+            plant_wrong_type(&conn, MAP_PREF, literal);
+            // `settings.value` is TEXT, so SQLite's affinity stores an integer as its text: that one
+            // reads as "42" (not a pref object, so it carries nothing); the other two stay unreadable.
+            let stored: String = conn
+                .query_row(
+                    "SELECT typeof(value) FROM settings WHERE key = 'map'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let expected = if stored == "text" && what == "an integer" {
+                Some("42".to_owned())
+            } else {
+                None
+            };
+            assert_eq!(get(&conn, MAP_PREF).unwrap(), expected, "{what} ({stored})");
+        }
+        // The tolerance is for the wrong type only: a text pref is still carried.
+        put(&conn, MAP_PREF, r#"{"nodeCap":900}"#);
+        mod_row(&conn, "catalogue", true);
+        hand_over_map(&conn, "atlas.map").unwrap();
+        let carried: String = conn
+            .query_row("SELECT value FROM mod_kv WHERE key = 'settings'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&carried).unwrap(),
+            json!({"nodeCap": 900})
+        );
+    }
+
+    fn plant_wrong_type_kv(conn: &Connection, literal: &str) {
+        conn.execute(
+            &format!(
+                "INSERT INTO mod_kv(mod_id, key, class, value, revision) \
+                 VALUES ('atlas.map', 'settings', 'content', {literal}, 3)"
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_mod_settings_row_of_another_type_never_blocks_the_auto_pass_or_the_manual_install() {
+        for (what, literal) in PLANTED {
+            for manual in [false, true] {
+                let label = format!("{what}, manual: {manual}");
+                let (_dir, conn) = store();
+                plant_dead_map_rows(&conn);
+                put(&conn, MAP_PREF, r#"{"nodeCap":900,"tsneEnabled":false}"#);
+                put(&conn, PILOTS[0].marker, "1");
+                mod_row(&conn, "catalogue", true);
+                plant_wrong_type_kv(&conn, literal);
+                if manual {
+                    finish_manual(&conn, "atlas.map", InstallKind::Fresh, true)
+                        .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                } else {
+                    finish(&conn, &PILOTS[0]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                }
+                // The mod's own row is untouched (the user's data wins), the dead rows went.
+                let revision: i64 = conn
+                    .query_row("SELECT revision FROM mod_kv", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(revision, 3, "{label}");
+                assert_eq!(mod_kv_rows(&conn), 1, "{label}");
+                for key in MAP_DEAD_KEYS {
+                    assert!(!has(&conn, key).unwrap(), "{label}: {key}");
+                }
+                assert!(!has(&conn, PILOTS[0].marker).unwrap(), "{label}");
+                assert!(has(&conn, PILOTS[0].landed).unwrap(), "{label}");
+                assert!(has(&conn, ADOPT_FLAG).unwrap(), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn adopting_the_device_prefs_over_a_mod_settings_row_of_another_type_still_settles() {
+        for (what, literal) in PLANTED {
+            let (_dir, mut conn) = store();
+            mod_row(&conn, "catalogue", true);
+            put(&conn, ADOPT_FLAG, "1");
+            plant_wrong_type_kv(&conn, literal);
+            assert!(
+                adopt_map_prefs(&mut conn, "semantic", 0.25, true)
+                    .unwrap_or_else(|e| panic!("{what}: {e:?}")),
+                "{what}"
+            );
+            assert!(get(&conn, ADOPT_FLAG).unwrap().is_none(), "{what}");
+            let (value, revision): (String, i64) = conn
+                .query_row("SELECT value, revision FROM mod_kv", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(revision, 4, "{what}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&value).unwrap(),
+                json!({"layoutMode": "semantic", "cohesion": 0.25, "labels": true}),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dead_row_of_another_type_is_still_deleted_by_the_handover_and_the_sweep() {
+        for (what, literal) in PLANTED {
+            let (_dir, conn) = store();
+            plant_dead_map_rows(&conn);
+            mod_row(&conn, "catalogue", true);
+            for key in ["doc_layout_meta", "project_layout_cache"] {
+                plant_wrong_type(&conn, key, literal);
+            }
+            hand_over_map(&conn, "atlas.map").unwrap();
+            for key in MAP_DEAD_KEYS {
+                assert!(!has(&conn, key).unwrap(), "{what}: {key}");
+            }
+            let (_dir, conn) = store();
+            plant_dead_map_rows(&conn);
+            for key in MAP_DEAD_KEYS {
+                plant_wrong_type(&conn, key, literal);
+            }
+            assert_eq!(sweep_map_leftovers(&conn).unwrap(), 3, "{what}");
+            assert!(has(&conn, "pinboard").unwrap(), "{what}");
+        }
+    }
+
+    #[test]
+    fn a_planted_marker_of_any_type_still_holds_the_sweep_back() {
+        let (_dir, conn) = store();
+        plant_dead_map_rows(&conn);
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, x'ff')",
+            [PILOTS[0].marker],
+        )
+        .unwrap();
+        assert_eq!(sweep_map_leftovers(&conn).unwrap(), 0);
+        assert!(get(&conn, "doc_layout_meta").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_sweep_runs_after_a_writers_store_opens_and_nowhere_else() {
+        let src = include_str!("autoinstall.rs");
+        let production = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let spawn = production
+            .split("pub fn spawn_after_open(")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert!(
+            spawn.contains("writer_now(&app2)"),
+            "only the writer deletes"
+        );
+        assert!(
+            spawn.find("sweep_map_leftovers").unwrap() < spawn.find("run_cached").unwrap(),
+            "before the pass"
+        );
+        assert_eq!(production.matches("sweep_map_leftovers(").count(), 2);
     }
 }

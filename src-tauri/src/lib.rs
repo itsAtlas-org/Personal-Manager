@@ -2183,6 +2183,11 @@ pub fn run() {
             mods::tab::pilots::retry_auto_install,
             mods::tab::pilots::mods_handover_state,
             mods::tab::pilots::adopt_map_prefs,
+            // The Pinboard's move (PR C, K8): its three device prefs, and the strips about the move.
+            mods::tab::pilots::adopt_pinboard_prefs,
+            mods::tab::pilots::pinboard_move_state,
+            mods::tab::pilots::pinboard_use_old_board,
+            mods::tab::pilots::pinboard_move_dismiss,
             // Developer mode's switch, per device, and the unsigned file install's first step
             // (Mods slice 6, part 3). Not the `commands_dev` readers below: those are harmless
             // reads; these decide whether unsigned mods may be installed and run.

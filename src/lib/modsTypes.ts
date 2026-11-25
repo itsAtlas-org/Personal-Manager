@@ -675,6 +675,18 @@ export interface ModsRetryResult {
 export interface ModsHandoverState {
   landed: string[];
   adoptMapPrefs: boolean;
+  /** The Pinboard's three device nags wait to be handed to the mod (`adoptPinboardPrefs`). */
+  adoptPinboardPrefs: boolean;
+}
+
+/** What the strips about the Pinboard's move say (`pinboardMoveState`). */
+export interface PinboardMoveState {
+  /** The mod held a board with content: both kept, the person chooses. */
+  conflict: boolean;
+  /** The mod's copy had characters replaced; the old row is unchanged. */
+  repaired: boolean;
+  /** The board cannot move as it is, and the install waits: it stays safe in PM's store. */
+  refused: "unreadable" | "tooBig" | null;
 }
 
 /** Why `mods://changed` fired. The page's answer is the same for every cause: read the rows again. */
