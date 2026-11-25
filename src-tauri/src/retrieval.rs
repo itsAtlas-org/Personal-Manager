@@ -130,6 +130,11 @@ pub struct Filters {
     /// already sent VERBATIM in the recency window (everything past the summary cursor) — retrieving a
     /// chunked copy would duplicate on-screen context. `None` for a non-chat caller or an un-indexed chat.
     pub exclude_chat: Option<(i64, i64)>,
+    /// Only what a mod (or the MCP server) may be shown: no chat, no archived document, and no
+    /// index-only document that has no summary to show (its stored body is a placeholder). Applied
+    /// to BOTH branches before the pool is cut, over the scoped pool width, so the results backfill
+    /// past what is filtered instead of coming back short. Off for every existing caller.
+    pub mod_visible: bool,
 }
 
 /// The retrieval strategy — the seam for future adaptive routing and agentic retrieval. Exactly
@@ -173,6 +178,7 @@ pub fn retrieve_fused(conn: &Connection, q: &RetrieveQuery) -> Result<Vec<Retrie
             q.filters.project.as_deref(),
             &q.filters.pinned_tags,
             q.filters.exclude_chat,
+            q.filters.mod_visible,
             q.multilingual,
         ),
     }
@@ -321,6 +327,7 @@ fn hybrid_core(
     project: Option<&str>,
     pinned_tags: &[crate::tags::PinnedTag],
     exclude_chat: Option<(i64, i64)>,
+    mod_visible: bool,
     multilingual: bool,
 ) -> Result<Vec<RetrievedChunk>> {
     let branch_limit = BRANCH_LIMIT.max(k);
@@ -338,7 +345,7 @@ fn hybrid_core(
     // the branch limit. A pin needs this even in a global chat, where it adds no allow-set at all:
     // the boost can only lift candidates that are IN the pool, so fetching a bare `branch_limit`
     // would leave a pinned tag with nothing to lift and the pin doing visibly nothing.
-    let scoped = allowed.is_some() || excluded.is_some() || pinned_chunks.is_some();
+    let scoped = allowed.is_some() || excluded.is_some() || pinned_chunks.is_some() || mod_visible;
     let fetch = if scoped {
         SCOPED_POOL.max(branch_limit)
     } else {
@@ -354,6 +361,13 @@ fn hybrid_core(
         // Drop the current chat's in-window turns — the model already has them verbatim.
         vec_hits.retain(|id| !excluded.contains(id));
         fts_hits.retain(|id| !excluded.contains(id));
+    }
+    if mod_visible {
+        // What a mod may not be shown goes out of BOTH branches (an archived document stays
+        // keyword-findable, a chat chunk vector-findable), before the pool is cut to its width.
+        let hidden = mod_hidden_chunk_ids(conn, vec_hits.iter().chain(&fts_hits).copied())?;
+        vec_hits.retain(|id| !hidden.contains(id));
+        fts_hits.retain(|id| !hidden.contains(id));
     }
     if scoped {
         // One extra branch-limit's worth of candidates per pinned tag. Without it a tag pinned
@@ -492,6 +506,51 @@ fn in_window_chat_chunk_ids(
         .query_map(params![document_id, turn_floor], |row| row.get::<_, i64>(0))?
         .collect::<std::result::Result<std::collections::HashSet<i64>, _>>()?;
     Ok(ids)
+}
+
+/// Which of these candidate chunks a mod may not be shown ([`Filters::mod_visible`]): a chat chunk
+/// (the user's conversations), a chunk of an archived document (`documents.importance = 'archive'`,
+/// the shelf the mods API's own `documents.list` leaves out), and a chunk of an index-only document
+/// with no stored summary (its chunk text is a placeholder, and [`load_chunks`] would show only
+/// that). Asked of the candidates the two branches returned, not of the whole store, so the work is
+/// bounded by the pool width however many chats the user has.
+fn mod_hidden_chunk_ids(
+    conn: &Connection,
+    candidates: impl IntoIterator<Item = i64>,
+) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT d.source_type, d.importance IS 'archive', NULLIF(d.stored_summary, '') IS NULL \
+         FROM chunks c JOIN documents d ON d.id = c.document_id WHERE c.id = ?1",
+    )?;
+    let mut hidden = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in candidates {
+        if !seen.insert(id) {
+            continue;
+        }
+        let row = stmt.query_row(params![id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
+        });
+        match row {
+            Ok((source_type, archived, no_summary)) => {
+                let source_type = source_type.as_deref();
+                let chat = source_type == Some(crate::ingest::SOURCE_TYPE_CHAT);
+                let placeholder =
+                    source_type == Some(crate::ingest::SOURCE_TYPE_INDEX_ONLY) && no_summary;
+                if chat || archived || placeholder {
+                    hidden.insert(id);
+                }
+            }
+            // A chunk that vanished is dropped later by `load_chunks`; nothing to hide.
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(Error::from(e)),
+        }
+    }
+    Ok(hidden)
 }
 
 /// KNN over `chunk_vec`. Returns chunk ids best-first (nearest distance first).

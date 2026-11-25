@@ -920,7 +920,7 @@ describe("ModFrame events", () => {
     for (const bad of [
       null,
       "documents.added",
-      { name: "calendar.synced", seq: 1, payload: {} },
+      { name: "calendar.nope", seq: 1, payload: {} },
       { name: "documents.added", payload: {} },
       { name: "documents.added", seq: 0, payload: {} },
       { name: "documents.added", seq: 1.5, payload: {} },

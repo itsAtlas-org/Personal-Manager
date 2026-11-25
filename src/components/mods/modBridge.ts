@@ -124,6 +124,7 @@ export const MOD_EVENTS = [
   "projects.renamed",
   "projects.merged",
   "projects.deleted",
+  "calendar.synced",
   "lifecycle.suspend",
 ] as const;
 

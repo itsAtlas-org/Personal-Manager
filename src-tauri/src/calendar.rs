@@ -2725,6 +2725,20 @@ pub fn upcoming_events(
         .collect())
 }
 
+/// The strict forward agenda with each row's `declined` flag kept: [`upcoming_events`]' query, for a
+/// reader (the mods API's `calendar.agenda`, later the MCP server's events tool) that must leave out
+/// what the user declined, which `upcoming_events` drops the flag of. Quiet calendars are already out
+/// of the query. The page can come back shorter than `limit`: the SQL's LIMIT runs before the
+/// per-occurrence dedup, and the caller's `declined` filter runs after both.
+pub(crate) fn agenda_now(
+    conn: &Connection,
+    days: i64,
+    limit: usize,
+    today: &str,
+) -> Result<Vec<AgendaEvent>> {
+    agenda_query(conn, days, limit, today, "now")
+}
+
 /// The strict forward agenda as a plain event list (briefing + flag detection), capped for display.
 pub fn list_upcoming(conn: &Connection, days: i64, today: &str) -> Result<Vec<CalendarEvent>> {
     Ok(upcoming_events(conn, days, 250, today)?

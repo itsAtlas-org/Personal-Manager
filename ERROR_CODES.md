@@ -55,11 +55,12 @@ itself: quote it, with the mod's name, when you report a problem with a mod.
 Ranges: `1xxx` the call itself · `2xxx` permission · `3xxx` limits · `4xxx` the data · `5xxx` the
 state of PM or the mod · `6xxx` the network · `9xxx` PM's own failure.
 
-The AI, network and key calls (`ai.complete`, `net.fetch`, `secrets.set`, `notify`) are experimental:
-they are outside the mod API's stability promise, and their codes below, `MOD-3004`, `MOD-3005`,
-`MOD-5004` to `MOD-5006` and the `6xxx` range, may still change before PM's first release that
-includes them. A message never carries what a website or an AI provider said, or the address asked
-for: only PM's own sentence.
+Seven surfaces are experimental: the AI, network and key calls (`ai.complete`, `net.fetch`,
+`secrets.set`, `notify`), the document search (`documents.search`), the calendar's agenda
+(`calendar.agenda`) and its sync event (`calendar.synced`). They are outside the mod API's stability
+promise, and their codes below, `MOD-3004`, `MOD-3005`, `MOD-5004` to `MOD-5006` and the `6xxx`
+range, may still change before PM's first release that includes them. A message never carries what a
+website or an AI provider said, or the address asked for: only PM's own sentence.
 
 | Code | What it means |
 |------|---------------|
@@ -83,7 +84,7 @@ for: only PM's own sentence.
 | `MOD-5004` | PM has no AI model set up to answer with (or Background is on your own key, which mods can't use), so an AI request can't run. Choose a model in Settings. |
 | `MOD-5005` | PM can't tell what the AI model costs, so it can't be sure the request is within the mod's limit, and doesn't run it. |
 | `MOD-5006` | The AI model didn't answer (it was unreachable, refused, or failed). PM doesn't pass on why. |
-| `MOD-5007` | The call needs PM's document engine, which isn't set up yet. PM sets nothing up for a mod: set the engine up yourself, then try again. |
+| `MOD-5007` | The call needs PM's document engine, which isn't set up yet (saving a note, searching the documents). PM sets nothing up for a mod: set the engine up yourself, then try again. |
 | `MOD-6001` | The web address isn't one the mod may use: it isn't on the list of websites the mod declared, or it isn't a plain secure (https) address. |
 | `MOD-6002` | The website's address isn't on the public internet (it points at this computer or a private network), so PM won't connect. |
 | `MOD-6003` | PM couldn't find the website: its name didn't resolve. |

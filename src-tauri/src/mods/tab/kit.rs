@@ -395,10 +395,19 @@ mod tests {
         assert_eq!(info.api.version, "1.0");
         assert_eq!(info.api.oldest_major, MOD_API_OLDEST_MAJOR);
         assert!(info.api.window.contains("1.0") && info.api.window.contains("older"));
-        // The live table's experimental calls, in its order: PR B's four.
+        // The live table's experimental surfaces, in its order: PR B's four calls, then PR C3's two
+        // calls and one event.
         assert_eq!(
             info.api.experimental,
-            ["ai.complete", "net.fetch", "secrets.set", "notify"]
+            [
+                "ai.complete",
+                "net.fetch",
+                "secrets.set",
+                "notify",
+                "documents.search",
+                "calendar.agenda",
+                "calendar.synced"
+            ]
         );
         let l = &info.limits;
         assert_eq!(l.calls_per_second, limits::CALLS_PER_SECOND);

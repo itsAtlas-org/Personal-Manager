@@ -54,6 +54,9 @@ mod ai;
 mod ai_prompt_tests;
 #[cfg(test)]
 mod ai_tests;
+mod calendar_calls;
+#[cfg(test)]
+mod calendar_tests;
 #[cfg(test)]
 mod call_fixtures;
 mod calls;
@@ -92,6 +95,9 @@ mod project_calls;
 #[cfg(test)]
 mod project_tests;
 pub mod projection;
+mod search_calls;
+#[cfg(test)]
+mod search_tests;
 mod second_read;
 mod storage;
 mod surface;
@@ -189,6 +195,17 @@ pub trait Host: Clone + Send + Sync + 'static {
         body: &str,
     ) -> Result<i64, ModError>;
 
+    /// Search the user's documents for `query` (`documents.search`, and later the MCP server's
+    /// `search`): embed it, fuse, rerank when the user has that on, and return at most `limit` chunks
+    /// of what a mod may be shown (no chat, no archived document, no summary-less index-only one).
+    /// Blocking, and it holds no DB guard across the embed or the rerank. The engine is already
+    /// known to be ready.
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievedChunk>, ModError>;
+
     /// Hand `url` (a parsed, screened https address) to the system's browser, detached: it never
     /// waits for the launcher, so a desktop whose launcher blocks cannot hold a thread. Whether
     /// anything started is all PM can know.
@@ -277,6 +294,14 @@ impl Host for AppHandle {
         crate::notes::save(self.store(), namespace, key, title, body)
             .map(|document| document.id)
             .map_err(ModError::internal)
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievedChunk>, ModError> {
+        search_calls::search_store(self.store(), query, limit)
     }
 
     fn open_link(&self, url: &str) -> bool {

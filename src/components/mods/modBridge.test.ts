@@ -437,6 +437,8 @@ describe("events", () => {
     }
     // Every event PM has is one the page lets through.
     for (const name of MOD_EVENTS) expect(readEvent({ seq: 1, name, payload: {} })).not.toBeNull();
+    // ...the experimental calendar one included (PR C3).
+    expect(MOD_EVENTS).toContain("calendar.synced");
   });
 
   it("drops what isn't an event: an unknown name, no sequence, a bad one, not an object", () => {
@@ -445,7 +447,7 @@ describe("events", () => {
       undefined,
       "documents.added",
       [],
-      { seq: 1, name: "calendar.synced", payload: {} },
+      { seq: 1, name: "calendar.nope", payload: {} },
       { seq: 1, name: "constructor", payload: {} },
       { seq: 1, payload: {} },
       { name: "documents.added", payload: {} },
@@ -477,7 +479,7 @@ describe("events", () => {
     const pump = new EventPump((e) => sent.push(e.seq));
     pump.push({ seq: 1, name: "documents.added", payload: {} });
     pump.push({ seq: 2, name: "documents.added", payload: {} });
-    pump.push({ seq: 3, name: "calendar.synced", payload: {} });
+    pump.push({ seq: 3, name: "calendar.nope", payload: {} });
     expect(sent).toEqual([]);
     pump.connect();
     expect(sent).toEqual([1, 2]);

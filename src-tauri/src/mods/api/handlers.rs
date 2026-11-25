@@ -13,9 +13,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    ai, doc_storage, documents, embeddings, limits, link_calls, milestone_calls, net_fetch,
-    note_calls, overlay_calls, project_calls, storage, surface, task_calls, Authorised, Host,
-    ModError, PageAction, Reply,
+    ai, calendar_calls, doc_storage, documents, embeddings, limits, link_calls, milestone_calls,
+    net_fetch, note_calls, overlay_calls, project_calls, search_calls, storage, surface,
+    task_calls, Authorised, Host, ModError, PageAction, Reply,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,9 @@ pub enum Method {
     UiOpenTaskEditor,
     ShellOpenLink,
     CalendarOverlaySet,
+    // The two experimental calls PR C3 adds.
+    DocumentsSearch,
+    CalendarAgenda,
     /// The second-READ table test's own write call (`second_read::probe`): in no `ALL`, no dispatch
     /// table of PM's, and no build but a test's.
     #[cfg(test)]
@@ -58,7 +61,7 @@ pub enum Method {
 }
 
 impl Method {
-    pub const ALL: [Method; 31] = [
+    pub const ALL: [Method; 33] = [
         Self::ThemeGet,
         Self::StorageGet,
         Self::StorageSet,
@@ -90,6 +93,8 @@ impl Method {
         Self::UiOpenTaskEditor,
         Self::ShellOpenLink,
         Self::CalendarOverlaySet,
+        Self::DocumentsSearch,
+        Self::CalendarAgenda,
     ];
 
     pub fn name(self) -> &'static str {
@@ -125,6 +130,8 @@ impl Method {
             Self::UiOpenTaskEditor => "ui.openTaskEditor",
             Self::ShellOpenLink => "shell.openLink",
             Self::CalendarOverlaySet => "calendar.overlay.set",
+            Self::DocumentsSearch => "documents.search",
+            Self::CalendarAgenda => "calendar.agenda",
             #[cfg(test)]
             Self::SecondReadProbe => super::second_read::PROBE_CALL,
         }
@@ -184,6 +191,8 @@ pub(super) async fn run<H: Host>(
         Method::UiOpenTaskEditor => task_calls::open_editor(host, auth, args).await,
         Method::ShellOpenLink => link_calls::open_link(host, auth, args).await,
         Method::CalendarOverlaySet => overlay_calls::set(host, auth, args).await,
+        Method::DocumentsSearch => search_calls::search(host, auth, args).await,
+        Method::CalendarAgenda => calendar_calls::agenda_call(host, auth, args).await,
         #[cfg(test)]
         Method::SecondReadProbe => super::second_read::probe(host, auth, args).await,
     }
@@ -212,6 +221,16 @@ pub(super) fn no_args(args: &Value) -> Result<(), ModError> {
 /// refused rather than ignored, so a typo never silently means something else.
 pub(super) fn parse<T: DeserializeOwned>(args: &Value) -> Result<T, ModError> {
     T::deserialize(args).map_err(|e| ModError::bad_args(format!("Bad arguments: {e}.")))
+}
+
+/// [`parse`] for a call whose arguments are a named set: only a JSON object is accepted. A struct
+/// also deserializes from a JSON array, field by field in order, so `["rent"]` would otherwise mean
+/// `{query: "rent"}`; a call that names its arguments never reads them by position.
+pub(super) fn parse_object<T: DeserializeOwned>(args: &Value) -> Result<T, ModError> {
+    if !args.is_object() {
+        return Err(ModError::bad_args("A call's arguments are an object."));
+    }
+    parse(args)
 }
 
 /// Run the async part of a handler that waits on something outside PM (a model, a website) under

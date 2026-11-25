@@ -206,8 +206,8 @@ fn the_payload_is_not_built_unless_someone_may_hear_it() {
 fn a_name_with_no_row_is_never_sent() {
     let host = TestHost::new();
     let frame = open(&host, second("acme.tool", &["storage"]), &[]);
-    // `calendar.synced` is an MCP-only event (PR C3): until it has a row it is never sent.
-    let said = emit_with(&host, "calendar.synced", &Audience::Everyone, |_| {
+    // A name no row gives is never sent, whoever is live.
+    let said = emit_with(&host, "calendar.nope", &Audience::Everyone, |_| {
         Ok(vec![json!({})])
     });
     assert_eq!(said, Emitted::default());
@@ -1639,6 +1639,128 @@ fn a_task_signal_raised_over_one_store_is_never_sent_over_another() {
     assert_eq!(new_rec.names(), [MOD_TASKS_CHANGED]);
 }
 
+// ---- calendar.synced (PR C3, experimental) ----------------------------------------------------------
+
+#[test]
+fn calendar_synced_reaches_only_sessions_with_calendar_read() {
+    let host = TestHost::new();
+    let reader = holder(&host, "acme.reader", &["calendar.read"]);
+    // `calendar.details` is a neighbour, not this permission; a task reader isn't one either.
+    let details = holder(&host, "acme.details", &["calendar.details"]);
+    let tasks = holder(&host, "acme.tasks", &["tasks.read"]);
+    // Declared, never granted (second party: asked at install).
+    let ungranted = open(&host, second("acme.ungranted", &["calendar.read"]), &[]);
+    let mut paused_row = second("acme.paused", &["calendar.read"]);
+    paused_row.state = "paused";
+    let paused = open(&host, paused_row, &["calendar.read"]);
+
+    Hub::raise(&host.hub().calendar, host.store().store_epoch());
+    let said = flush_calendar_synced(&host);
+    assert_eq!((said.sent, said.refused), (1, 4));
+    // A bare signal: nothing about any event.
+    assert_eq!(reader.rec.payloads(CALENDAR_SYNCED), [json!({})]);
+    for (who, frame) in [
+        ("details only", &details),
+        ("tasks only", &tasks),
+        ("ungranted", &ungranted),
+        ("paused", &paused),
+    ] {
+        assert!(frame.rec.all().is_empty(), "{who} was told something");
+    }
+    // A signal that is not up says nothing.
+    assert_eq!(flush_calendar_synced(&host).sent, 0);
+}
+
+#[test]
+fn calendar_synced_coalesces_a_burst_into_one() {
+    let host = TestHost::with_interval(Duration::from_millis(100));
+    let f = holder(&host, "acme.reader", &["calendar.read"]);
+    for _ in 0..1_000 {
+        calendar_synced(&host);
+    }
+    wait_for(|| !f.rec.payloads(CALENDAR_SYNCED).is_empty());
+    std::thread::sleep(Duration::from_millis(250));
+    let heard = f.rec.payloads(CALENDAR_SYNCED);
+    assert!(
+        (1..=3).contains(&heard.len()),
+        "1,000 syncs made {} events",
+        heard.len()
+    );
+    assert!(heard.iter().all(|p| *p == json!({})));
+    // The task views' own signal is a different one: nothing of it came through here.
+    assert!(f.rec.payloads(MOD_TASKS_CHANGED).is_empty());
+    // The next sync starts a new interval, and a quiet hub holds nothing.
+    assert_eq!(host.hub().calendar_state(), (false, false));
+    calendar_synced(&host);
+    wait_for(|| f.rec.payloads(CALENDAR_SYNCED).len() > heard.len());
+}
+
+#[test]
+fn a_sync_is_not_even_noted_while_no_frame_is_live() {
+    let host = TestHost::new();
+    calendar_synced(&host);
+    assert_eq!(host.hub().calendar_state(), (false, false));
+}
+
+/// The sync seam raises it, after the task views are told, and only past its empty-sync early return:
+/// a sync that wrote nothing says nothing.
+#[test]
+fn announce_synced_raises_calendar_synced() {
+    let sources = sources();
+    let calendars = &sources
+        .iter()
+        .find(|s| s.0 == "commands/calendars.rs")
+        .unwrap()
+        .1;
+    let from = calendars.find("fn announce_synced").unwrap();
+    let body = &calendars[from..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let empty = body
+        .find("calendar_ids.is_empty()")
+        .expect("the empty guard");
+    let tasks = body.find("crate::tasks::announce_changed(app)").unwrap();
+    let said = body
+        .find("events::app_calendar_synced(app)")
+        .expect("announce_synced tells the mods");
+    assert!(empty < tasks && tasks < said, "{body}");
+    // And it is the only caller: the user's own edits and the quiet toggle don't raise it.
+    for (name, text) in &sources {
+        if name != "mods/api/events.rs" {
+            assert_eq!(
+                text.matches("app_calendar_synced(").count(),
+                usize::from(name == "commands/calendars.rs"),
+                "{name}"
+            );
+        }
+    }
+}
+
+/// The app's entry point may be reached before the mods' state is managed (the calendar's own tests
+/// have no app state at all): every piece of state it reads is looked up with `try_state`, before it
+/// signals anything. (An `AppHandle` can't be built here: tauri's mock runtime isn't compiled in.)
+#[test]
+fn app_calendar_synced_is_safe_without_mods_state() {
+    let live = sources()
+        .into_iter()
+        .find(|s| s.0 == "mods/api/events.rs")
+        .unwrap()
+        .1;
+    let from = live.find("pub fn app_calendar_synced").unwrap();
+    let body = &live[from..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let signals = body.find("calendar_synced(app)").expect("it signals");
+    for state in ["Hub", "ModRuntime", "AppState"] {
+        let guard = body
+            .find(&format!("app.try_state::<{state}>().is_some()"))
+            .unwrap_or_else(|| panic!("no try_state guard for {state}"));
+        assert!(guard < signals, "{state} is looked up before the signal");
+    }
+    assert!(
+        !body.contains("app.state::<") && !body.contains(".store()") && !body.contains(".hub()"),
+        "no unguarded state access"
+    );
+}
+
 #[test]
 fn lifecycle_suspend_needs_no_permission_and_reaches_only_the_named_session() {
     let host = TestHost::new();
@@ -1778,4 +1900,11 @@ fn the_events_the_page_lets_through_are_exactly_the_events_there_are() {
     assert_eq!(permission(PROJECTS_MERGED), Some("projects.read"));
     assert_eq!(permission(PROJECTS_DELETED), Some("projects.read"));
     assert_eq!(permission(LIFECYCLE_SUSPEND), None);
+    // PR C3's experimental one: the calendar read the agenda call needs.
+    assert_eq!(permission(CALENDAR_SYNCED), Some("calendar.read"));
+    assert!(
+        table::event_row(table::ROWS, CALENDAR_SYNCED, MOD_API_VERSION)
+            .unwrap()
+            .experimental
+    );
 }
