@@ -224,6 +224,15 @@ release remain the open post-v1 work.
     `isFolderScreen`), beside the kit's readouts (`settings/DeveloperKit.tsx`, all from `dev_kit_info`),
     and Settings → Storage's "Mods" fold (`StorageMods.tsx`) uninstalls through the same runtime action
     (`mods/uninstallActions.ts`), never `removeStorageComponent`.
+    A call that needs the person's yes is a question PM draws itself (`confirm.rs`, `ModConfirmDialog`,
+    INVARIANTS.md I-37); before PM takes a frame down in an orderly way it asks it to save
+    (`suspend.rs`, I-38); `refs.rs` rewrites a mod's stored project names when a project is renamed,
+    merged or deleted (`data.projectRefs`); `pinboard_move.rs` is the Pinboard's copy into its mod,
+    built and dormant until a later migration (I-36), and `pinboard_legacy.rs` is what core still
+    reads of the old board (the Calendar's dots). `mods/atlas.pinboard/` is the Pinboard as a mod, a
+    copy of the core one built on `src/kit`; core's Pinboard stays the live one. A mod's build
+    (`mods/vite.config.ts`) takes React and Tailwind, and Tailwind scans only `src/kit` and the mod's
+    own source.
     `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).

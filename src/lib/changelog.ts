@@ -24,6 +24,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.187.0-alpha",
+    date: "2026-11-25",
+    highlights: [
+      "In Documents, notes you saved from the Pinboard now sit together in a group named by what made them, and answers you saved from Chat sit under Chats, so it is clear where each one came from.",
+      "A project you name for the first time in the task editor, or when you add a milestone, now shows up in every project list straight away: the project pickers, @-mentions and the lists a mod can read.",
+      "Mods get a moment to save before PM closes them. If you switch to another tab, pause a mod, update or uninstall it, lock PM or quit, PM asks the mod to save what it was doing first. PM never waits more than about a second and a half, so a mod that does not answer can't hold PM up.",
+      "PM now asks you first before a mod deletes or creates something on your behalf, in a box PM draws itself, and what a mod makes carries a “made by” label naming the mod and what kind of mod it is. If a mod keeps asking after you say no, PM stops passing its questions on for a couple of minutes. This applies to mods you install yourself.",
+      "Under the hood: groundwork for moving the Pinboard into a mod later. Your board is untouched, and the Pinboard works exactly as it did.",
+    ],
+  },
+  {
     version: "3.186.2-alpha",
     date: "2026-11-24",
     highlights: [
