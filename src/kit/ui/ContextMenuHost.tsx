@@ -11,15 +11,22 @@
 // The fallback listens on the document in the bubble phase, so it runs after React has delivered the
 // event to every surface: a surface that opened its own menu has called preventDefault by then, and
 // is left alone. Core's Open link says in the link notice when the link didn't open (lib/linkFailure).
+//
+// The keyboard: the Menu key and Shift+F10 are caught on the document before anything else sees them
+// and turned into a `contextmenu` at the element with focus (see `openMenuFromKeyboard`). Not in text
+// you type into, which keeps the system menu on those keys as it does for the mouse.
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   closeContextMenu,
-  fallbackItems,
+  currentContextMenu,
   inEditable,
+  isMenuKey,
   openContextMenu,
+  openMenuFromKeyboard,
   placeMenu,
+  setFallbackActions,
   useContextMenu,
   type MenuItem,
 } from "../lib/contextMenu";
@@ -29,29 +36,132 @@ import {
 const keyShortcut = (hint: string) =>
   hint.replace("Ctrl+", "Control+").replace("⌘", "Meta+").replace("⇧", "Shift+");
 
-const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => {});
+/** How long a native `contextmenu` that follows our own keydown is thrown away. Some engines send
+ *  one at key-up (Windows) as well as at key-down, and the second would open the system menu. */
+const NATIVE_FOLLOW_UP_MS = 500;
+
+/** Rows are the menu's own buttons: items and the colour swatches. A disabled row keeps the native
+ *  `disabled` attribute for now, so the arrow keys pass over it (the APG allows either way). Keeping
+ *  it focusable with `aria-disabled` instead waits for the Pinboard mod's next version, whose own test
+ *  reads `.disabled` (#1136). */
+const ROWS = "[role^=menuitem]:not(:disabled)";
 
 export function ContextMenuHost({ openUrl }: { openUrl?: (url: string) => void }) {
   const menu = useContextMenu();
+  // What a screen reader hears after a copy: the menu has closed and shows nothing.
+  // `n` makes the same words twice in a row a change: a reader says nothing for text that didn't change.
+  const [said, setSaid] = useState({ text: "", n: 0 });
+  const saidTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
+    // The one place that knows how to open a link and how to copy, for the fallback below and for
+    // any surface that asks for `withFallback`.
+    const actions = {
+      openUrl,
+      copy: (text: string, spoken = "Copied") => {
+        // Said only once it has worked: with no clipboard to write to, nothing was copied.
+        navigator.clipboard?.writeText(text).then(
+          () => {
+            setSaid((s) => ({ text: spoken, n: s.n + 1 }));
+            clearTimeout(saidTimer.current);
+            saidTimer.current = setTimeout(() => setSaid((s) => ({ text: "", n: s.n })), 2000);
+          },
+          () => {},
+        );
+      },
+    };
+    setFallbackActions(actions);
+    // Windows sends its own contextmenu when the key comes UP, so a key held a while must still be
+    // covered: `keyHeld` from our key-down to the key-up, then the grace period after it. A mouse
+    // press in between means the next one is a real right-click, which is let through.
+    let swallowUntil = 0;
+    let keyHeld = false;
     const onMenu = (e: MouseEvent) => {
       if (e.defaultPrevented || e.shiftKey || inEditable(e.target)) return;
-      const items = fallbackItems(e.target, window.getSelection()?.toString() ?? "", {
-        openUrl,
-        copy,
-      });
       // With nothing to offer, still no system menu: its Back and Reload would reset PM.
-      openContextMenu(e, "Menu", items);
+      openContextMenu(e, "Menu", [], { withFallback: true });
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (!isMenuKey(e) || e.repeat) return;
+      const open = currentContextMenu();
+      if (open) {
+        // The key that asked for the menu puts it away again. Windows still sends its own contextmenu
+        // when this key comes up, which would open a menu again: swallow that one too.
+        e.preventDefault();
+        closeContextMenu();
+        open.returnFocus?.focus();
+        keyHeld = true;
+        swallowUntil = performance.now() + NATIVE_FOLLOW_UP_MS;
+        return;
+      }
+      const at = document.activeElement;
+      if (inEditable(at)) return;
+      if (openMenuFromKeyboard(at)) {
+        e.preventDefault();
+        e.stopPropagation();
+        keyHeld = true;
+        swallowUntil = performance.now() + NATIVE_FOLLOW_UP_MS;
+      }
+    };
+    const onKeyUp = (e: globalThis.KeyboardEvent) => {
+      if (!keyHeld || (e.key !== "ContextMenu" && e.key !== "F10")) return;
+      keyHeld = false;
+      swallowUntil = performance.now() + NATIVE_FOLLOW_UP_MS;
+    };
+    const onMouseDown = () => {
+      keyHeld = false;
+      swallowUntil = 0;
+    };
+    // Only a real one: our own is not trusted, and must get through.
+    const onNative = (e: MouseEvent) => {
+      if (e.isTrusted && (keyHeld || performance.now() < swallowUntil)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
     };
     document.addEventListener("contextmenu", onMenu);
-    return () => document.removeEventListener("contextmenu", onMenu);
+    document.addEventListener("contextmenu", onNative, true);
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    document.addEventListener("mousedown", onMouseDown, true);
+    return () => {
+      document.removeEventListener("contextmenu", onMenu);
+      document.removeEventListener("contextmenu", onNative, true);
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      document.removeEventListener("mousedown", onMouseDown, true);
+      setFallbackActions(null);
+      clearTimeout(saidTimer.current);
+    };
   }, [openUrl]);
 
-  if (!menu) return null;
-  // Keyed on the open, so each opening starts fresh (focus, placement) even at the same spot.
-  return createPortal(<Menu key={`${menu.x},${menu.y},${menu.label}`} />, document.body);
+  return (
+    <>
+      {/* Always there, so a change to it is announced: the menu is gone by the time a copy lands. A
+          live region and not role="status", which the page's own notices already use and tests
+          and readers look for by that name. */}
+      <div aria-live="polite" aria-atomic="true" style={SR_ONLY}>
+        <span key={said.n}>{said.text}</span>
+      </div>
+      {/* Keyed on the open, so each opening starts fresh (focus, placement) even at the same spot. */}
+      {menu && createPortal(<Menu key={`${menu.x},${menu.y},${menu.label}`} />, document.body)}
+    </>
+  );
 }
+
+/** Off-screen but read aloud. Inline, because a mod's frame has its own stylesheet and the kit
+ *  can't count on a utility class being in it. */
+const SR_ONLY = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  margin: -1,
+  padding: 0,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+} as const;
 
 function Menu() {
   const menu = useContextMenu()!;
@@ -60,13 +170,21 @@ function Menu() {
 
   // Measured before paint, so it never shows in the wrong place first.
   useLayoutEffect(() => {
-    const el = ref.current!;
-    const r = el.getBoundingClientRect();
+    const r = ref.current!.getBoundingClientRect();
     setPos(placeMenu(menu.x, menu.y, r.width, r.height, window.innerWidth, window.innerHeight));
-    // The menu itself, not its first item: the arrow keys work at once, and a menu opened with the
-    // mouse doesn't start with a row lit up that the pointer never touched.
-    el.focus();
   }, [menu.x, menu.y]);
+
+  // Focus only once it is placed and showing: until then it is `visibility: hidden`, and a browser
+  // will not focus a hidden element, so the arrow keys and Escape did nothing. Opened by key, the
+  // first item (the menu pattern's rule); with the mouse, the menu itself, so the arrow keys work at
+  // once and no row starts lit up that the pointer never touched.
+  const placed = pos !== null;
+  useLayoutEffect(() => {
+    if (!placed) return;
+    const el = ref.current!;
+    const first = menu.viaKeyboard ? el.querySelector<HTMLElement>(ROWS) : null;
+    (first ?? el).focus();
+  }, [placed, menu.viaKeyboard]);
 
   // Anything else ends it: a press outside, the window losing focus or resizing, a scroll.
   useEffect(() => {
@@ -90,8 +208,20 @@ function Menu() {
   }, []);
 
   const choose = (onSelect: () => void) => {
+    const back = menu.returnFocus;
     closeContextMenu();
+    // Back to where the user was BEFORE the action runs: a dialog the action opens remembers the
+    // focused element as its opener, and the focused row is about to be removed with the menu.
+    if (back?.isConnected) back.focus();
     onSelect();
+    // And once more after it, for an action that left focus on nothing (the row it was on went away,
+    // a field it focused was removed). Not when focus went somewhere on purpose, a dialog's own
+    // field included: that stays where the action put it.
+    queueMicrotask(() => {
+      const at = document.activeElement;
+      const lost = !at || at === document.body || ref.current?.contains(at);
+      if (lost && back?.isConnected) back.focus();
+    });
   };
 
   function onKeyDown(e: KeyboardEvent) {
@@ -114,9 +244,7 @@ function Menu() {
         : e.key === "ArrowUp" || e.key === "ArrowLeft"
           ? -1
           : 0;
-    const items = [
-      ...ref.current!.querySelectorAll<HTMLElement>("[role^=menuitem]:not(:disabled)"),
-    ];
+    const items = [...ref.current!.querySelectorAll<HTMLElement>(ROWS)];
     if (!items.length) return;
     const at = items.indexOf(document.activeElement as HTMLElement);
     if (step) {
@@ -127,6 +255,16 @@ function Menu() {
     } else if (e.key === "Home" || e.key === "End") {
       e.preventDefault();
       items[e.key === "Home" ? 0 : items.length - 1].focus();
+    } else if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Typing a letter jumps to the next row that starts with it.
+      const from = items.indexOf(document.activeElement as HTMLElement) + 1;
+      const hit = [...items.slice(from), ...items.slice(0, from)].find((el) =>
+        rowName(el).toLowerCase().startsWith(e.key.toLowerCase()),
+      );
+      if (hit) {
+        e.preventDefault();
+        hit.focus();
+      }
     }
   }
 
@@ -153,12 +291,17 @@ function Menu() {
   );
 }
 
+/** What a row is called, for jumping to it by its first letter. */
+const rowName = (el: HTMLElement) => el.dataset.label ?? el.getAttribute("aria-label") ?? "";
+
 function Row({ item, choose }: { item: MenuItem; choose: (f: () => void) => void }) {
   if (item.kind === "separator")
     return <div role="separator" className="my-1 border-t border-[var(--rule)]" />;
   if (item.kind === "swatches")
     return (
-      <div role="group" aria-label={item.label} className="flex items-center gap-1.5 px-2 py-1.5">
+      // `gap-2` between 16px dots puts their centres 24px apart, so the 24px target each one is owed
+      // (WCAG 2.5.8) never overlaps its neighbour's.
+      <div role="group" aria-label={item.label} className="flex items-center gap-2 px-2 py-1.5">
         <span className="mr-auto text-ink3">{item.label}</span>
         {item.options.map((o) => (
           <button
@@ -183,15 +326,25 @@ function Row({ item, choose }: { item: MenuItem; choose: (f: () => void) => void
   return (
     <button
       type="button"
-      role="menuitem"
+      // One choice among several (a status) is a radio; anything else an action.
+      role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+      aria-checked={item.checked}
+      // See ROWS for why this is still the native attribute.
       disabled={item.disabled}
+      data-label={item.label}
       aria-keyshortcuts={item.hint ? keyShortcut(item.hint) : undefined}
       onClick={() => choose(item.onSelect)}
-      className={`flex w-full items-center gap-4 rounded-[var(--radius-sm)] px-2 py-1 text-left hover:bg-surface focus:bg-surface focus:outline-none disabled:opacity-50 disabled:hover:bg-transparent ${
+      // `min-h-6`: a row is never under 24px tall (WCAG 2.5.8), whatever the text size.
+      className={`flex min-h-6 w-full items-center gap-4 rounded-[var(--radius-sm)] px-2 py-1 text-left hover:bg-surface focus:bg-surface focus:outline-none disabled:opacity-50 disabled:hover:bg-transparent ${
         item.danger ? "text-st-due" : "text-ink2"
       }`}
     >
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      {item.checked !== undefined && (
+        <span aria-hidden className="-mr-2 w-3 shrink-0 text-accent-text">
+          {item.checked ? "✓" : ""}
+        </span>
+      )}
+      <span className="min-w-0 flex-1 break-words">{item.label}</span>
       {/* The shortcut is for the eye; its key is named in `aria-keyshortcuts` instead, so the item's
           name stays "Undo" rather than "UndoCtrl+Z". */}
       {item.hint && (
