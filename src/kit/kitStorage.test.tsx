@@ -39,6 +39,7 @@ import {
   TaskList,
   TaskStatusButton,
   ThemeProvider,
+  Toggle,
   Tooltip,
   VisuallyHidden,
   scrollBehavior,
@@ -162,6 +163,7 @@ const COMPONENTS: Record<string, [ReactElement, string | RegExp]> = {
     />,
     "alpha text",
   ],
+  Toggle: [<Toggle key="tg" ariaLabel="toggle name" checked onChange={() => {}} />, /./],
   Collapsible: [
     <Collapsible key="co" title="fold title">
       fold body

@@ -48,6 +48,15 @@ import { isTearingDown } from "./lib/teardown";
 export interface ThemeStore {
   get: () => Promise<string | null>;
   set: (blob: string) => Promise<void>;
+  /** A store whose blob can change under the provider (a frame is told when PM's theme changes) says so
+   *  here: `cb` runs with each new blob, which the provider applies as it did the first one. Returns the
+   *  way to stop. Core's store has none: its blob changes only through the provider itself. */
+  subscribe?: (cb: (blob: string | null) => void) => () => void;
+  /** The custom properties PM itself applied, for a store that has them (a frame is handed PM's own
+   *  `--…` values by `theme.get`). They are set on the root AFTER the provider's own, so they win: the
+   *  provider derives its values from the axes alone, and PM's include what the axes cannot say (the
+   *  contrast level, the density sizes). Read at each apply; null or absent means "no override". */
+  vars?: () => Readonly<Record<string, string>> | null;
 }
 
 export interface ThemeState {
@@ -277,6 +286,10 @@ export function ThemeProvider({ store, children }: { store: ThemeStore; children
   );
   const mode = resolution.mode;
 
+  // Bumped whenever a subscribing store reports a new blob, so the apply effect below re-runs even
+  // when the axes in it did not change (the store's `vars` may have).
+  const [pushed, setPushed] = useState(0);
+
   // Was localStorage empty at boot? If so this is likely a fresh machine (or a
   // restored data folder), so the stored blob should win on hydration. Computed once,
   // before the persist effect writes anything back.
@@ -343,6 +356,23 @@ export function ThemeProvider({ store, children }: { store: ThemeStore; children
       cancelled = true;
     };
   }, [bootEmpty, store]);
+
+  // A store that can change under us (a frame's, told by PM) pushes each new blob: apply it as the
+  // hydration does, whatever localStorage holds (a frame has none).
+  useEffect(() => {
+    if (!store.subscribe) return;
+    return store.subscribe((raw) => {
+      if (raw) {
+        try {
+          applyAppearance(JSON.parse(raw));
+        } catch {
+          /* ignore a corrupt blob — keep the theme we have */
+        }
+      }
+      setPushed((n) => n + 1);
+    });
+    // `applyAppearance` closes over setters only.
+  }, [store]);
 
   // Keep the resolved Mode live. Explicit light/dark need no watchers; `system` follows the OS
   // light/dark query; `auto` re-resolves at each sunrise/sunset (a self-rescheduling timer) and,
@@ -469,6 +499,13 @@ export function ThemeProvider({ store, children }: { store: ThemeStore; children
       colorblind,
       contrast,
     });
+    // PM's own values, where the store has them, over the ones the axes derived.
+    const own = store.vars?.();
+    if (own) {
+      for (const [name, value] of Object.entries(own)) {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
     write(KEY.system, system);
     write(KEY.modePref, modePref);
     write(KEY.autoLocation, autoLocation);
@@ -514,6 +551,7 @@ export function ThemeProvider({ store, children }: { store: ThemeStore; children
     contrast,
     hydrated,
     store,
+    pushed,
   ]);
 
   const value: ThemeState = {

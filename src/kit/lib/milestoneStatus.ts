@@ -16,7 +16,8 @@ export const MILESTONE_STATUSES: readonly { value: MilestoneStatus; label: strin
 ];
 
 /** A milestone's effective status: its stored value, or — for a row predating the status column —
- *  the one implied by whether it's been ticked off, so an old row never renders blank. */
-export function milestoneStatus(m: Milestone): MilestoneStatus {
+ *  the one implied by whether it's been ticked off, so an old row never renders blank. It reads only
+ *  `state` and `status`, so a mod's own milestone type (which never says who made a milestone) fits. */
+export function milestoneStatus(m: Pick<Milestone, "state" | "status">): MilestoneStatus {
   return m.status ?? (m.state === "met" ? "done" : "not_started");
 }

@@ -26,6 +26,7 @@ export {
 export { TONE_TOKEN, TONE_TEXT_TOKEN, TONE_MIX, toneMix, toneSurface, type Tone } from "./ui/tone";
 export { Input } from "./ui/Input";
 export { Select } from "./ui/Select";
+export { Toggle, type ToggleProps } from "./ui/Toggle";
 export {
   SegmentedControl,
   type SegOption,

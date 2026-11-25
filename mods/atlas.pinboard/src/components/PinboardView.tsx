@@ -1,0 +1,3164 @@
+// SPDX-FileCopyrightText: 2026 Bobby Yu
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
+import { openContextMenu, wantsAppMenu, type MenuItem } from "../../../../src/kit/lib/contextMenu";
+import { formatDateOnly } from "../../../../src/kit/lib/format";
+import { runMutation } from "../../../../src/kit/lib/runMutation";
+import {
+  addMilestone,
+  deleteMilestone,
+  importChecklistTasks,
+  ingestNote,
+  listMilestones,
+  noteStatuses,
+  listProjects,
+  setMilestoneStatus,
+  updateMilestone,
+} from "../lib/pm";
+import { boardExtent, CELL, folderAtPointer, spaceOf, type BoardSpace } from "../lib/pinboard/grid";
+import { measureSpace } from "../lib/pinboard/measure";
+import {
+  applyLineMarker,
+  checklistItems,
+  continueList,
+  indentLines,
+  listIndentBeforeCaret,
+  outdentLines,
+  toRenderMarkdown,
+  toggleWrap,
+  type ChecklistLine,
+  type TextEdit,
+} from "../lib/pinboard/notesMarkdown";
+import { readTaskSort } from "../../../../src/kit/lib/tasks";
+import { insertTable, moveCell, tableEnter } from "../lib/pinboard/noteTables";
+import { NoteTablePicker } from "./NoteTablePicker";
+import { NoteEditor, type NoteEditorHandle } from "./NoteEditor";
+import {
+  RichNoteEditor,
+  type RichFormat,
+  type RichNoteEditorHandle,
+  type TableAction,
+} from "./RichNoteEditor";
+import { roundTrips } from "../lib/pinboard/richNote";
+import { rectToPx, useBoardDrag, type DragMode, type PxRect } from "../lib/pinboard/useBoardDrag";
+import {
+  isPastTimelineDate,
+  readConfirmDelete,
+  readShowCompletedTimelineItems,
+  readShowPastTimelineItems,
+  writeConfirmDelete,
+  writeShowCompletedTimelineItems,
+  writeShowPastTimelineItems,
+} from "../lib/pinboard/prefs";
+import { todayIso } from "../../../../src/kit/lib/dateField";
+import { isDialogOpenOutside } from "../../../../src/kit/lib/useDialogLayer";
+import { isLetterKey } from "../../../../src/kit/lib/letterKey";
+import { usePinboard } from "../lib/pinboard/usePinboard";
+import {
+  keepsNativeUndo,
+  placeConvertedTaskList,
+  taskListDeleteCost,
+} from "../lib/pinboard/taskLists";
+// The tint set + names live in one place (src/lib/pinboard/palette.ts) so the board's colours
+// stay consistent; the colour VALUES are the global `--st-*` tokens in index.css.
+import { NOTE_COLORS, TINT_NAME } from "../lib/pinboard/palette";
+import { GAME_INFO, isSpent, livePool, playsGame, pool } from "../lib/pinboard/game";
+import { FolderGame, GameGlyph, GameMenu, PopOutButton } from "./FolderGame";
+import type { CellPoint, Rect, TimelineItem, Widget } from "../lib/pinboard/types";
+
+/** Which of an opened folder's two faces is showing: its cards, or the game it plays. Transient —
+ *  a folder remembers WHICH game it plays, never that you happened to be looking at it. */
+type FolderFace = "cards" | "play";
+import type { Milestone, MilestoneStatus } from "../lib/types";
+import { scrollBehavior, useDepth } from "../../../../src/kit";
+import { DateField } from "../../../../src/kit/ui/DateField";
+// The status vocabulary + the "what does a pre-status row read as" fallback live with the project
+// milestone list, so the two surfaces can never drift into offering different options.
+import { MILESTONE_STATUSES, milestoneStatus } from "../../../../src/kit/lib/milestoneStatus";
+import { IS_MAC, MOD, SHIFT } from "../../../../src/kit/lib/setupGuide";
+import {
+  BulletIcon,
+  Button,
+  Callout,
+  ConfirmDialog,
+  Dialog,
+  Modal,
+  NumberIcon,
+  SegmentedControl,
+  Select,
+  TaskList,
+  Tooltip,
+} from "../../../../src/kit";
+
+/** The live filing state of a note's ingested document, keyed by `note:<widgetId>`. */
+type DocStatus = { reviewed: boolean; project: string };
+
+/** A cheap, stable string hash (djb2) — just to tell whether a note's text has changed since it
+ *  was last ingested. Not cryptographic and not the backend content hash. */
+function cheapHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = (((h << 5) + h) ^ s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/** Find a widget by id anywhere on the board — top level or inside a folder (folders never nest, so
+ *  a depth-1 walk reaches everything). */
+function findWidget(widgets: Widget[], id: string): Widget | undefined {
+  for (const w of widgets) {
+    if (w.id === id) return w;
+    const child = w.children?.find((c) => c.id === id);
+    if (child) return child;
+  }
+  return undefined;
+}
+
+const isDrawn = (w: unknown): w is Widget => typeof w === "object" && w !== null;
+
+/** The ids of every note on the board, top level and inside folders, that PM can be asked about: a
+ *  note's key is letters, digits, `-` and `_` (at most 200), and never starts `chat-` (those are saved
+ *  Chat answers). One id outside that makes PM refuse the whole question, so a board that carries one
+ *  (planted, or imported) asks about the rest. */
+function noteWidgetIds(widgets: Widget[]): string[] {
+  const ids: string[] = [];
+  const visit = (w: Widget) => {
+    if (w.kind === "note" && /^[A-Za-z0-9_-]{1,200}$/.test(w.id) && !w.id.startsWith("chat-")) {
+      ids.push(w.id);
+    }
+    // Only a folder holds cards, and only as a list: a `children` on anything else, or one that is
+    // not a list, is a stored value this view never draws and must not trip over.
+    if (w.kind === "folder" && Array.isArray(w.children)) {
+      for (const child of w.children) if (isDrawn(child)) visit(child);
+    }
+  };
+  for (const w of widgets) visit(w);
+  return ids;
+}
+
+/** What deleting this card actually costs — the part worth being told before you agree to it. A note
+ *  and a timeline are both just gone, but each can have left something behind that the board can't
+ *  take back with it. */
+function deleteCost(w: Widget, status?: DocStatus): string | null {
+  if (w.kind === "note" && w.ingestedAt) {
+    const where = status?.reviewed ? `filed under ${status.project}` : "waiting in Review";
+    return `You ingested this note, and that document (${where}) is its own copy in your vault — it stays there, and deleting this note won't remove it.`;
+  }
+  if (w.kind === "timeline" && !w.project && (w.items?.length ?? 0) > 0) {
+    const n = w.items?.length ?? 0;
+    const dated = w.items?.filter((it) => it.date).length ?? 0;
+    return dated > 0
+      ? `Its ${n} ${n === 1 ? "entry goes" : "entries go"} with it, and ${dated === 1 ? "the dated one disappears" : `the ${dated} dated ones disappear`} from your calendar.`
+      : `Its ${n} ${n === 1 ? "entry goes" : "entries go"} with it.`;
+  }
+  if (w.kind === "timeline" && w.project) {
+    return `This timeline is linked to ${w.project}. Only the card goes — the project's milestones stay exactly as they are.`;
+  }
+  if (w.kind === "tasklist") return taskListDeleteCost(w.project);
+  return null;
+}
+
+/** A cell rect as absolute-positioning styles — for overlays drawn over a widget's own tile. */
+function rectToPxStyle(r: Rect): CSSProperties {
+  const px = rectToPx(r);
+  return { left: px.x, top: px.y, width: px.w, height: px.h };
+}
+
+/** The tint applied to a widget tile (and its folder-panel card) — a soft wash of its colour token
+ *  over the panel surface, or a neutral panel when untinted. */
+function tintStyle(color?: string): CSSProperties {
+  return color
+    ? {
+        background: `color-mix(in oklab, var(--${color}) 14%, var(--panel))`,
+        borderColor: `color-mix(in oklab, var(--${color}) 35%, var(--border))`,
+      }
+    : { background: "var(--panel)", borderColor: "var(--border)" };
+}
+
+/** The inline (expand-in-place) folder panel's fixed size, in cells → px. */
+const PANEL_W = 24 * CELL;
+const PANEL_H = 17 * CELL;
+
+/** The share of the main board an opened folder's overlay takes up. */
+const OVERLAY_SHARE = 0.8;
+
+/** The main board scroller's padding across each axis (p-6) at the default text size, for the first
+ *  guess before the scroller is measured. */
+const BOARD_INSET = 48;
+
+/** A no-break space, written as its code so it stays visible in the source (and prettier can't turn
+ *  it into a literal one). */
+const NBSP = String.fromCharCode(0xa0);
+
+const sameSpace = (a: BoardSpace, b: BoardSpace) =>
+  a.cols === b.cols && a.rows === b.rows && a.barCols === b.barCols && a.barRows === b.barRows;
+
+/**
+ * A board canvas: the ruled grid every widget is positioned against, sized in cells. Shared by the
+ * main board and a folder's overlay board so the two can't drift apart — `ref` is what turns a
+ * viewport pointer into a board cell, so it must be THIS element (its padding box is the origin
+ * absolutely-positioned tiles resolve against).
+ */
+const BoardSurface = forwardRef<
+  HTMLDivElement,
+  {
+    bounds: { cols: number; rows: number };
+    /** Suppress text selection while a gesture is in flight. */
+    dragging?: boolean;
+    className?: string;
+    dataHelp?: string;
+    children: ReactNode;
+  }
+>(function BoardSurface({ bounds, dragging, className, dataHelp, children }, ref) {
+  return (
+    <div
+      ref={ref}
+      data-help={dataHelp}
+      className={`relative rounded-[var(--radius)] border border-border ${
+        dragging ? "select-none" : ""
+      } ${className ?? ""}`}
+      style={{
+        width: bounds.cols * CELL,
+        height: bounds.rows * CELL,
+        backgroundColor: "var(--surface)",
+        backgroundImage:
+          "linear-gradient(var(--rule) 1px, transparent 1px), linear-gradient(90deg, var(--rule) 1px, transparent 1px)",
+        backgroundSize: `${CELL}px ${CELL}px`,
+      }}
+    >
+      {children}
+    </div>
+  );
+});
+
+/** A card's right-click menu's name: its title, or what kind of card it is. */
+function cardLabel(w: Widget): string {
+  const kind =
+    w.kind === "note"
+      ? "Note"
+      : w.kind === "timeline"
+        ? "Timeline"
+        : w.kind === "tasklist"
+          ? "Task list"
+          : "Folder";
+  return w.title?.trim() || kind;
+}
+
+/** One widget's tile on a board: positioned at its cell rect, tinted, with the size strip (at power)
+ *  and the resize grip. Shared by the main board and a folder's overlay board — a card should look
+ *  and behave the same wherever it is, which is the whole point of giving a folder a real board. */
+function WidgetTile({
+  widget,
+  px,
+  showPower,
+  onStartDrag,
+  dimmed,
+  children,
+}: {
+  widget: Widget;
+  px: PxRect;
+  showPower?: boolean;
+  onStartDrag: (e: ReactPointerEvent, w: Widget, mode: DragMode) => void;
+  /** Drawn already this round, inside a game folder — recedes but stays, and stays fully usable. */
+  dimmed?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-help={
+        widget.kind === "note"
+          ? "pinboard-note"
+          : widget.kind === "timeline"
+            ? "pinboard-timeline"
+            : widget.kind === "tasklist"
+              ? "pinboard-tasklist"
+              : "pinboard-folder"
+      }
+      aria-label={dimmed ? "Already drawn this round" : undefined}
+      // Which card a right-click landed on (the board's menu).
+      data-widget-id={widget.id}
+      className={`absolute flex flex-col overflow-hidden rounded-[var(--radius-sm)] border shadow-sm transition-shadow hover:shadow-md motion-reduce:transition-none ${
+        dimmed ? "opacity-60 saturate-[0.4]" : ""
+      }`}
+      style={{ left: px.x, top: px.y, width: px.w, height: px.h, ...tintStyle(widget.color) }}
+    >
+      {children}
+
+      {/* A note shows its size inline in its own footer (see NoteBody); timeline, task list and
+          folder keep the compact coords strip. */}
+      {showPower && widget.kind !== "note" && (
+        <div className="shrink-0 border-t border-rule px-2 py-0.5 font-mono text-[0.5625rem] text-ink4">
+          {widget.rect.x},{widget.rect.y} · {widget.rect.w}×{widget.rect.h}
+        </div>
+      )}
+
+      {/* Resize handle (bottom-right) — every widget kind is resizable (folders floor at 3×3). */}
+      <div
+        onPointerDown={(e) => onStartDrag(e, widget, "resize")}
+        title="Resize"
+        aria-label="Resize widget"
+        className="absolute bottom-0 right-0 h-3.5 w-3.5 cursor-nwse-resize touch-none"
+        style={{
+          background:
+            "linear-gradient(135deg, transparent 50%, color-mix(in oklab, var(--ink4) 50%, transparent) 50%)",
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The Pinboard (spec §4): a bounded planning board of draggable, resizable widgets —
+ * post-it notes and simple dated timelines — persisted locally. Hand-rolled on pointer
+ * events + CSS transforms with grid-snap (no layout library); the snap/clamp maths live in
+ * `lib/pinboard/grid.ts`. The board is sized to the window (cell size and fonts stay fixed): a board
+ * authored on a wider screen reflows to fit the current width on load, and the canvas grows only
+ * downward to hold content that doesn't fit — so it scrolls vertically when full but never overflows
+ * the window horizontally. Notes, timelines and
+ * folders are available at every
+ * depth; per-widget metadata shows at `power`. Notes are Markdown, formatted as you type (NoteEditor's
+ * live preview), with a formatting toolbar, keyboard shortcuts, tables, and smart list continuation
+ * (`lib/pinboard/notesMarkdown.ts`).
+ */
+export function PinboardView() {
+  const { showMeta, showPower } = useDepth();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // The board is sized to the WINDOW, not the whole device screen. It used to be a fixed canvas the
+  // size of `screen.avail*`; on a window that isn't maximised (common on macOS/Linux) that overflowed
+  // the viewport and showed scrollbars — the board read as "bigger than the screen". Measure the
+  // scroller instead, less its padding as rendered (`measureSpace`), floored on the CELL grid, and seed
+  // from the window so the first load reflow has a sane width before the layout effect measures.
+  //
+  // The scroller's OWN box (`getBoundingClientRect`, to the subpixel), not `clientWidth`, which is the
+  // box less whatever scrollbar is showing: the board's size fed its scrollbars and its scrollbars fed
+  // its size, so the board shook, scrollbars came and went, and at some window sizes (often a
+  // maximised one) it never settled. `boardExtent` leaves room for a scrollbar only where the
+  // widgets will actually scroll.
+  const [measured, setMeasured] = useState(() =>
+    spaceOf(window.innerWidth, window.innerHeight, BOARD_INSET),
+  );
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      const next = measureSpace(el);
+      // Same cells, same object: no render for a resize that moved nothing.
+      setMeasured((was) => (sameSpace(was, next) ? was : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // usePinboard grows the measured window to contain the board's content and hands the result back as
+  // `bounds` — the canvas sizes to it, and the drag clamp (below) reads it, so nothing overflows.
+  const {
+    board,
+    bounds: boardBounds,
+    load,
+    retryLoad,
+    saveFailed,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    addNote,
+    addTimeline,
+    addFolder,
+    addTaskList,
+    duplicateWidget,
+    updateWidget,
+    moveWidget,
+    dropWidget,
+    removeWidget,
+    raiseWidget,
+    raiseChild,
+    popOutChild,
+    drawCard,
+    addTimelineItem,
+    updateTimelineItem,
+    removeTimelineItem,
+  } = usePinboard(measured);
+
+  // The drag effect reads the bounds through a ref, so it never re-subscribes its pointer listeners to
+  // pick up a new value (the board grows/shrinks as the window resizes and content is added or filed).
+  const boardBoundsRef = useRef(boardBounds);
+  boardBoundsRef.current = boardBounds;
+
+  // The board element itself (scrollRef is its scroller) — needed to turn a viewport pointer
+  // position into a board cell, which is what decides whether a drop files into a folder.
+  const boardRef = useRef<HTMLDivElement>(null);
+  // The folder the pointer is currently over mid-drag (highlighted, and the one a release would file
+  // into). Pointer targeting is otherwise invisible — nothing about the dragged rect shows intent.
+  const [dropFolderId, setDropFolderId] = useState<string | null>(null);
+  // Which folder is open, and which of its two faces it is showing (transient — not persisted). At
+  // most one at a time. ONE piece of state, not two: the id and the face have to move together, and
+  // a second `useState` beside this one is a second thing to remember to clear — close a game, open
+  // a plain folder, and it would still be showing the game.
+  const [expanded, setExpanded] = useState<{ id: string; view: FolderFace } | null>(null);
+  const closeFolder = useCallback(() => setExpanded(null), []);
+  /** Flip the open folder between its cards and its game. The id comes from the open folder rather
+   *  than the caller, so a face can never be set on a folder that isn't the one on screen. */
+  const setFolderFace = useCallback(
+    (view: FolderFace) => setExpanded((e) => (e ? { ...e, view } : e)),
+    [],
+  );
+  // A just-added widget id to scroll into view (set by the add buttons; cleared once scrolled).
+  const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
+  // A card already on the board that an action pointed at rather than adding a twin — today, the
+  // task list a repeat "To tasks" reuses. Ringed briefly so it reads as "here it is" even when it was
+  // already in view and nothing scrolled.
+  const [flashId, setFlashId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!flashId) return;
+    const t = setTimeout(() => setFlashId(null), 1600);
+    return () => clearTimeout(t);
+  }, [flashId]);
+
+  // The widget list, which the drag reads to find the folder under the pointer, is likewise read
+  // through a ref: as a dep it would re-subscribe the pointer listeners on every keystroke (a note's
+  // text lives in the board).
+  const widgetsRef = useRef(board.widgets);
+  widgetsRef.current = board.widgets;
+
+  // Live filing state of any ingested notes, so a note can show "in review" / "filed to X" and
+  // reflect a later review made in the Review tab. One list_documents read on mount + on focus.
+  const [docStatus, setDocStatus] = useState<Map<string, DocStatus>>(new Map());
+  const refreshDocs = useCallback(() => {
+    // Every note on the board is asked about, by widget id: PM answers for this mod's own notes
+    // (`documents.statusOf`) and has no whole-library list to give. A note whose document was deleted
+    // comes back absent, so it reads as "not ingested".
+    const keys = noteWidgetIds(widgetsRef.current);
+    if (keys.length === 0) {
+      setDocStatus(new Map());
+      return;
+    }
+    noteStatuses(keys)
+      .then((found) => {
+        const map = new Map<string, DocStatus>();
+        for (const [id, status] of found) map.set(`note:${id}`, status);
+        setDocStatus(map);
+      })
+      .catch(() => {
+        /* leave the last known statuses */
+      });
+  }, []);
+  // Once the board has arrived (before that there is no note to ask about), and on focus.
+  useEffect(() => {
+    if (load === "ready") refreshDocs();
+  }, [load, refreshDocs]);
+  useEffect(() => {
+    const onFocus = () => refreshDocs();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshDocs]);
+
+  // Undo/redo for the whole board. Scope is simply "the Pinboard is open": this view is mounted only
+  // while it's the current tab, so a window listener is already scoped to it. (Do NOT gate on focus
+  // being inside the board — deleting a card leaves focus on <body>, i.e. "outside", which would kill
+  // Ctrl+Z exactly when it's most wanted.)
+  //
+  // We must OWN the shortcut rather than let a note's editor undo on its own: every note edit already
+  // lands in board state through onChange, so one board history covers notes, cards and moves alike
+  // (NoteEditor deliberately has no history of its own, and applies an undo as a new value). Two
+  // listeners because keydown alone misses the WebView's own Edit ▸ Undo (context menu): `beforeinput`
+  // catches the resulting `historyUndo`. `beforeinput` is scoped to the board element so we never
+  // interfere with native undo in the rest of the app.
+  //
+  // It stands down under any dialog outside the board surface: Settings or the command palette opened
+  // over this tab, where Ctrl+Z belongs to that dialog's fields (it used to undo the board behind
+  // it), and the board's own delete confirmation, where it undid a change unseen behind the scrim and
+  // the Delete then cleared the redo. The folder overlay is a dialog inside the board surface, so the
+  // board's Undo still works in it.
+  useEffect(() => {
+    // A text field whose text is NOT board state keeps its own native undo — a task list's add row
+    // and inline edit fields, whose typing reaches the board's history nowhere (tasks are backend
+    // rows). The list's ticks and buttons have no undo of their own, so there the board keeps it
+    // (`keepsNativeUndo`).
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (isDialogOpenOutside(boardRef.current)) return;
+      if (keepsNativeUndo(e.target)) return;
+      // The letter the layout types (a German Z sits where QWERTY has Y), falling back to the
+      // physical key on a layout with no Latin letters.
+      const isZ = isLetterKey(e, "z");
+      const isY = isLetterKey(e, "y");
+      if (!isZ && !isY) return;
+      // Ctrl+Y and Ctrl/Cmd+Shift+Z both redo — Windows and mac conventions respectively, and both
+      // are common on Linux.
+      const wantRedo = isY || e.shiftKey;
+      if (isY && e.shiftKey) return;
+      e.preventDefault();
+      if (wantRedo) redo();
+      else undo();
+    };
+    const onBeforeInput = (e: Event) => {
+      const t = (e as InputEvent).inputType;
+      if (t !== "historyUndo" && t !== "historyRedo") return;
+      if (keepsNativeUndo(e.target)) return;
+      e.preventDefault();
+      if (t === "historyRedo") redo();
+      else undo();
+    };
+    window.addEventListener("keydown", onKey);
+    const el = boardRef.current;
+    el?.addEventListener("beforeinput", onBeforeInput);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      el?.removeEventListener("beforeinput", onBeforeInput);
+    };
+  }, [undo, redo]);
+
+  // Track the folder under the pointer so it can be ringed — on THIS board a drop may file into one.
+  // (The folder overlay's board passes no equivalent: folders don't nest, so nothing files in there.)
+  const trackDropFolder = useCallback(
+    (id: string, pointer: CellPoint | null) =>
+      setDropFolderId(folderAtPointer(widgetsRef.current, id, pointer)?.id ?? null),
+    [],
+  );
+  // The board's drag/resize gesture — the same hook the folder overlay's board uses.
+  const { draggingId, livePx, startDrag } = useBoardDrag({
+    boundsRef: boardBoundsRef,
+    surfaceRef: boardRef,
+    onGrab: raiseWidget,
+    onMoveEnd: dropWidget,
+    onResizeEnd: moveWidget,
+    onPointerCell: trackDropFolder,
+  });
+
+  // Add buttons remember the new widget so it can be scrolled into view (a note placed on a lower
+  // row would otherwise be created off-screen).
+  const handleAddNote = useCallback(() => setPendingScrollId(addNote()), [addNote]);
+  const handleAddTimeline = useCallback(() => setPendingScrollId(addTimeline()), [addTimeline]);
+  const handleAddFolder = useCallback(() => setPendingScrollId(addFolder()), [addFolder]);
+  const handleAddTaskList = useCallback(() => setPendingScrollId(addTaskList()), [addTaskList]);
+
+  // What the board just did that has no card of its own to show it — today, the result of turning a
+  // note into a task list. Shown in the header (a live region, so it is read out too) and cleared after
+  // a while. `sayAgain`'s trick: the same words twice differ by a no-break space, so they're re-read.
+  const [notice, setNotice] = useState("");
+  const announce = useCallback(
+    (text: string) => setNotice((was) => (was === text ? `${text}${NBSP}` : text)),
+    [],
+  );
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 8000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // "Make this a task list": the note whose checklist is being converted, read when the note's "To
+  // tasks" is pressed. The items are taken THEN, not at Convert, so the dialog's count is the count
+  // that gets imported even if the note is edited behind it.
+  const [converting, setConverting] = useState<{ noteId: string; items: ChecklistLine[] } | null>(
+    null,
+  );
+  // Stable (reads the board through its ref), so every NoteBody's memo survives a drag.
+  const requestTaskList = useCallback((id: string) => {
+    const w = findWidget(widgetsRef.current, id);
+    const items = w?.kind === "note" ? checklistItems(w.text ?? "") : [];
+    if (items.length > 0) setConverting({ noteId: id, items });
+  }, []);
+  /** The task list lands on the board's top level, beside the note — or beside the note's folder
+   *  when it is inside one, since a task list never goes into a folder (`isFileable`). When a card
+   *  with the same filter is already on the board, that one is shown instead and the board is left
+   *  alone; a new card is a history barrier only when tasks were written (`placeConvertedTaskList`). */
+  const finishTaskList = useCallback(
+    (noteId: string, project: string | null, created: number, skipped: number) => {
+      const ws = widgetsRef.current;
+      const place = placeConvertedTaskList(ws, project, created);
+      if ("reuse" in place) {
+        setPendingScrollId(place.reuse);
+        setFlashId(place.reuse);
+      } else {
+        const near =
+          ws.find((w) => w.id === noteId)?.rect ??
+          ws.find((w) => w.children?.some((c) => c.id === noteId))?.rect;
+        setPendingScrollId(addTaskList(project ?? undefined, near, place.add === "barrier"));
+      }
+      setConverting(null);
+      const added =
+        created === 0 ? "No new tasks" : `${created} task${created === 1 ? "" : "s"} added`;
+      announce(skipped > 0 ? `${added}, ${skipped} already there` : added);
+    },
+    [addTaskList, announce],
+  );
+
+  useLayoutEffect(() => {
+    if (!pendingScrollId) return;
+    const el = scrollRef.current;
+    const w = board.widgets.find((x) => x.id === pendingScrollId);
+    if (el && w) {
+      const PAD = 24; // matches the scroller's p-6
+      const px = rectToPx(w.rect);
+      const top = el.scrollTop;
+      const left = el.scrollLeft;
+      // Only scroll when the new widget isn't already fully in view, to avoid a jarring jump.
+      const nextTop =
+        px.y - PAD < top || px.y + px.h + PAD > top + el.clientHeight
+          ? Math.max(0, px.y - PAD)
+          : top;
+      const nextLeft =
+        px.x - PAD < left || px.x + px.w + PAD > left + el.clientWidth
+          ? Math.max(0, px.x - PAD)
+          : left;
+      if (nextTop !== top || nextLeft !== left) {
+        el.scrollTo({ top: nextTop, left: nextLeft, behavior: scrollBehavior() });
+      }
+    }
+    setPendingScrollId(null);
+  }, [pendingScrollId, board.widgets]);
+
+  // If the expanded folder goes away (ungrouped while open), close the panel. Emptying a folder no
+  // longer removes it, so this no longer fires on the last child leaving — the panel stays open on
+  // "This folder is empty.", ready to take something back.
+  useEffect(() => {
+    if (expanded && !board.widgets.some((w) => w.id === expanded.id && w.kind === "folder")) {
+      setExpanded(null);
+    }
+  }, [expanded, board.widgets]);
+
+  const expandedFolder = expanded
+    ? board.widgets.find((w) => w.id === expanded.id && w.kind === "folder")
+    : undefined;
+  // Which face to draw. Derived from the folder as well as the request, so a game switched off
+  // while it was open (or a folder whose game was cleared) falls back to its cards instead of
+  // rendering a game that isn't there — the same "derive it, don't mirror it" rule that keeps
+  // `expandedFolder` itself honest.
+  const expandedFace: FolderFace =
+    expanded?.view === "play" && expandedFolder && playsGame(expandedFolder) ? "play" : "cards";
+
+  const flashed = flashId ? board.widgets.find((w) => w.id === flashId) : undefined;
+  const dropFolder = dropFolderId
+    ? board.widgets.find((w) => w.id === dropFolderId && w.kind === "folder")
+    : undefined;
+
+  // Deleting a note or timeline asks first, unless the user has turned that off. ONE interception
+  // point for all four call sites (board tiles + both folder views), because it's the same
+  // removeWidget underneath. A FOLDER's ✕ is deliberately not routed through here: it ungroups,
+  // spilling its cards back onto the board, so there's nothing to lose — and undo covers it.
+  const [pendingDelete, setPendingDelete] = useState<Widget | null>(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  // The "ask before deleting" choice. In core it was a switch in PM's Settings; a mod has no Settings
+  // tab, so the header carries it (the pref itself is read fresh at the click, as before).
+  const [askBeforeDelete, setAskBeforeDelete] = useState(readConfirmDelete);
+  const requestDelete = useCallback(
+    (id: string) => {
+      const w = findWidget(board.widgets, id);
+      // Read the pref here, not on mount, so the click always sees the choice as it is now.
+      if (!w || !readConfirmDelete()) {
+        removeWidget(id);
+        return;
+      }
+      setDontAskAgain(false);
+      setPendingDelete(w);
+    },
+    [board.widgets, removeWidget],
+  );
+  const confirmDelete = useCallback(() => {
+    if (!pendingDelete) return;
+    if (dontAskAgain) {
+      writeConfirmDelete(false);
+      setAskBeforeDelete(false);
+    }
+    removeWidget(pendingDelete.id);
+    setPendingDelete(null);
+  }, [pendingDelete, dontAskAgain, removeWidget]);
+
+  // Right-click (#1038). On the board's empty grid: a new card where you clicked, and undo/redo. On a
+  // card: its own actions. Text you type into (a note's words, a title) keeps the system menu, and a
+  // note's table has its own (RichNoteEditor). A card inside an open folder has no menu of its own.
+  const onBoardMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e) || load !== "ready") return;
+    const target = e.target as Element;
+    const tile = target.closest<HTMLElement>("[data-widget-id]");
+    if (tile && boardRef.current?.contains(tile)) {
+      const w = board.widgets.find((x) => x.id === tile.dataset.widgetId);
+      if (w) openContextMenu(e, cardLabel(w), cardMenu(w));
+      return;
+    }
+    // Only the grid itself (or the scroller's margin round it): never a folder's open panel.
+    if (target !== boardRef.current && target !== scrollRef.current) return;
+    const box = boardRef.current!.getBoundingClientRect();
+    const at: CellPoint = {
+      x: Math.max(0, Math.floor((e.clientX - box.left) / CELL)),
+      y: Math.max(0, Math.floor((e.clientY - box.top) / CELL)),
+    };
+    openContextMenu(e, "Pinboard", [
+      { label: "New note here", onSelect: () => setPendingScrollId(addNote(at)) },
+      { label: "New timeline here", onSelect: () => setPendingScrollId(addTimeline(at)) },
+      {
+        label: "New task list here",
+        onSelect: () => setPendingScrollId(addTaskList(undefined, undefined, false, at)),
+      },
+      { label: "New folder here", onSelect: () => setPendingScrollId(addFolder(at)) },
+      { kind: "separator" },
+      { label: "Undo", hint: `${MOD}Z`, disabled: !canUndo, onSelect: undo },
+      { label: "Redo", hint: IS_MAC ? "⌘⇧Z" : "Ctrl+Y", disabled: !canRedo, onSelect: redo },
+    ]);
+  };
+
+  const cardMenu = (w: Widget): MenuItem[] => {
+    const rename = () =>
+      boardRef.current
+        ?.querySelector<HTMLInputElement>(`[data-widget-id="${w.id}"] input`)
+        ?.select();
+    if (w.kind === "folder")
+      return [
+        {
+          label: "Open",
+          onSelect: () => setExpanded({ id: w.id, view: playsGame(w) ? "play" : "cards" }),
+        },
+        { label: "Rename", onSelect: rename },
+        { kind: "separator" },
+        // A folder's ✕ does the same: its cards go back onto the board, and nothing is lost.
+        { label: "Ungroup", onSelect: () => removeWidget(w.id) },
+      ];
+    return [
+      { label: "Rename", onSelect: rename },
+      {
+        label: "Duplicate",
+        onSelect: () => {
+          const copy = duplicateWidget(w.id);
+          if (copy) setPendingScrollId(copy);
+        },
+      },
+      ...(w.kind === "note"
+        ? [
+            {
+              kind: "swatches" as const,
+              label: "Colour",
+              options: NOTE_COLORS.map((c) => ({
+                name: TINT_NAME[c] ?? c.replace("st-", ""),
+                color: c,
+                active: w.color === c,
+                onSelect: () => updateWidget(w.id, { color: c }),
+              })),
+            },
+          ]
+        : []),
+      { kind: "separator" },
+      { label: "Delete", danger: true, onSelect: () => requestDelete(w.id) },
+    ];
+  };
+
+  // An opened folder's overlay is 80% of the board (now window-sized), clamped to the scrim's own box
+  // — which starts below the h-9 title bar and is inset by its p-6 — so it always fits the window.
+  const overlaySize = useMemo(() => {
+    const SCRIM_PAD = 24; // the scrim's p-6
+    const TITLE_BAR = 36; // the scrim's top-9
+    return {
+      width: Math.min(boardBounds.cols * CELL * OVERLAY_SHARE, window.innerWidth - SCRIM_PAD * 2),
+      height: Math.min(
+        boardBounds.rows * CELL * OVERLAY_SHARE,
+        window.innerHeight - TITLE_BAR - SCRIM_PAD * 2,
+      ),
+    };
+  }, [boardBounds]);
+
+  return (
+    // min-w-0 / min-h-0 keep the oversized board penned inside its own overflow-auto scroller
+    // (below) instead of inflating this column and pushing the header's buttons off-screen.
+    <div className="flex h-full min-w-0 min-h-0 flex-1 flex-col">
+      <header className="flex items-center justify-between gap-3 border-b border-rule px-6 py-3">
+        <div className="min-w-0">
+          <h1 className="font-head text-lg font-semibold text-ink">Pinboard</h1>
+          {/* The save warning is NOT gated on `showMeta`: the prose below it is chrome and folds away
+              at min Depth, but "your work isn't being saved" is a loss warning, and those show at
+              every Depth. It also replaces the prose rather than sitting under it — the last line of
+              that sentence is the very promise being broken. */}
+          {saveFailed ? (
+            <p className="text-xs text-st-due">
+              Couldn&rsquo;t save your board to this device — recent changes may be lost. Your next
+              change will try again.
+            </p>
+          ) : (
+            showMeta && (
+              <p className="text-xs text-ink4">
+                A space to think — drag to arrange, resize from the corner. {MOD}Z undoes.{" "}
+                {load === "ready" && "Saved on this device."}
+              </p>
+            )
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span role="status" aria-live="polite" className="text-xs text-ink3">
+            {notice}
+          </span>
+          {showPower && board.widgets.length > 0 && (
+            <span className="mr-1 font-mono text-[0.625rem] uppercase tracking-wide text-ink4">
+              {board.widgets.length} item{board.widgets.length === 1 ? "" : "s"}
+            </span>
+          )}
+          <TimelineFilterToggle
+            label="Ask before deleting"
+            title="Ask before a note or timeline is deleted from the Pinboard, so an important one can't go with a stray click. It doesn't apply to a folder's ✕, which only ungroups it. Ctrl+Z (⌘Z on a Mac) undoes a deletion either way."
+            checked={askBeforeDelete}
+            onChange={(v) => {
+              writeConfirmDelete(v);
+              setAskBeforeDelete(v);
+            }}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleAddNote}
+            disabled={load !== "ready"}
+            data-help="pinboard-add-note"
+          >
+            + Note
+          </Button>
+          {/* Notes and timelines are both available at every density. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleAddTimeline}
+            disabled={load !== "ready"}
+            data-help="pinboard-add-timeline"
+          >
+            + Timeline
+          </Button>
+          {/* An empty folder, made deliberately — the counterpart to stacking two cards to fold them. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleAddFolder}
+            disabled={load !== "ready"}
+            data-help="pinboard-add-folder"
+          >
+            + Folder
+          </Button>
+          {/* A live view of your tasks — the same list as the project page and the Runway. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleAddTaskList}
+            disabled={load !== "ready"}
+            data-help="pinboard-add-tasklist"
+          >
+            + Task list
+          </Button>
+        </div>
+      </header>
+
+      <div
+        ref={scrollRef}
+        onContextMenu={onBoardMenu}
+        className="pm-scrollbars min-h-0 min-w-0 flex-1 overflow-auto p-6"
+      >
+        <BoardSurface
+          ref={boardRef}
+          bounds={boardBounds}
+          dragging={!!draggingId}
+          dataHelp="pinboard-board"
+        >
+          {/* A failed load leaves the SAME empty board on screen as a fresh install, so it must say
+              which one this is. "Add a note to start planning" would be two lies at once: that the
+              board is empty, and that what you add to it stays. */}
+          {load === "failed" ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="max-w-sm px-6 text-center">
+                <p className="text-sm text-st-due">Couldn&rsquo;t open your pinboard.</p>
+                <p className="mt-1 text-xs text-ink4">
+                  Your board is still saved — PM just couldn&rsquo;t read it, so it won&rsquo;t
+                  change anything until it can.
+                </p>
+                <Button variant="secondary" size="sm" onClick={retryLoad} className="mt-3">
+                  Retry
+                </Button>
+              </div>
+            </div>
+          ) : (
+            board.widgets.length === 0 && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <p className="text-sm text-ink4">
+                  Add a note to start planning — it stays here between visits.
+                </p>
+              </div>
+            )
+          )}
+
+          {board.widgets.map((w) => (
+            <WidgetTile
+              key={w.id}
+              widget={w}
+              px={draggingId === w.id && livePx ? livePx : rectToPx(w.rect)}
+              showPower={showPower}
+              onStartDrag={startDrag}
+            >
+              {/* The widget owns its own header + body, so note-specific controls (Ingest) can sit
+                  in the top bar while their state stays inside the memoised body. */}
+              {w.kind === "note" ? (
+                <NoteBody
+                  widget={w}
+                  showPower={showPower}
+                  onChange={updateWidget}
+                  onDelete={requestDelete}
+                  onStartDrag={startDrag}
+                  status={docStatus.get(`note:${w.id}`)}
+                  onIngested={refreshDocs}
+                  onMakeTaskList={requestTaskList}
+                />
+              ) : w.kind === "timeline" ? (
+                <TimelineBody
+                  widget={w}
+                  showPower={showPower}
+                  onChange={updateWidget}
+                  onDelete={requestDelete}
+                  onStartDrag={startDrag}
+                  onAddItem={addTimelineItem}
+                  onUpdateItem={updateTimelineItem}
+                  onRemoveItem={removeTimelineItem}
+                />
+              ) : w.kind === "tasklist" ? (
+                <TaskListBody
+                  widget={w}
+                  onChange={updateWidget}
+                  onDelete={requestDelete}
+                  onStartDrag={startDrag}
+                />
+              ) : (
+                <FolderTile
+                  widget={w}
+                  onChange={updateWidget}
+                  onUngroup={removeWidget}
+                  onStartDrag={startDrag}
+                  // A game folder's tile plays; a plain one opens its cards. Either way this is the
+                  // ONLY opener on the board, which is exactly why the game's own bar carries a way
+                  // back to the cards — see FolderPanelHeader.
+                  onOpen={() => setExpanded({ id: w.id, view: playsGame(w) ? "play" : "cards" })}
+                />
+              )}
+            </WidgetTile>
+          ))}
+
+          {/* The folder the pointer is over mid-drag: releasing here files the card INTO it, instead
+              of leaving it lying on top. Drawn as an overlay rather than a ring on the folder's own
+              tile because the dragged widget is raised above it and would hide the cue. */}
+          {dropFolder && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute z-20 rounded-[var(--radius-sm)] ring-2 ring-accent"
+              style={rectToPxStyle(dropFolder.rect)}
+            />
+          )}
+
+          {/* The existing card a repeat "To tasks" pointed at (`flashId`), ringed for a moment. An
+              overlay for the same reason as the folder cue: a raised card would hide a tile's ring. */}
+          {flashed && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute z-20 rounded-[var(--radius-sm)] ring-2 ring-accent"
+              style={rectToPxStyle(flashed.rect)}
+            />
+          )}
+
+          {/* Expanded folder (transient UI, at most one). Rendered as a board sibling so the inline
+              panel escapes the tiles' overflow-hidden and paints above them; the tile's rect never moves. */}
+          {expandedFolder &&
+            ((expandedFolder.expandMode ?? "inline") === "overlay" ? (
+              <Modal
+                open
+                onClose={closeFolder}
+                // The one dialog that names itself with `label` rather than `labelledBy`: its title
+                // is an editable <input>, not a heading, so there is no element whose text stays
+                // the name. Falls back to the placeholder the input shows when it is empty.
+                label={expandedFolder.title?.trim() || "Folder"}
+                // A share of the board, replacing Modal's own width/height/overflow defaults rather
+                // than competing with them. `overlaySize` (above) is 80% of the window-sized board,
+                // clamped to the scrim so it always fits.
+                widthClassName=""
+                heightClassName=""
+                overflowClassName="overflow-hidden"
+                className="flex flex-col"
+                style={overlaySize}
+              >
+                <FolderBoard
+                  folder={expandedFolder}
+                  face={expandedFace}
+                  onFace={setFolderFace}
+                  showPower={showPower}
+                  onChange={updateWidget}
+                  onDelete={requestDelete}
+                  onPopOut={popOutChild}
+                  onDraw={drawCard}
+                  onRaiseChild={raiseChild}
+                  onAddItem={addTimelineItem}
+                  onUpdateItem={updateTimelineItem}
+                  onRemoveItem={removeTimelineItem}
+                  docStatus={docStatus}
+                  onIngested={refreshDocs}
+                  onMakeTaskList={requestTaskList}
+                  onClose={closeFolder}
+                />
+              </Modal>
+            ) : (
+              <div
+                className="absolute z-30 flex flex-col overflow-hidden rounded-[var(--radius)] border border-border2 bg-panel shadow-2xl"
+                style={{
+                  left: Math.max(
+                    0,
+                    Math.min(expandedFolder.rect.x * CELL, boardBounds.cols * CELL - PANEL_W),
+                  ),
+                  top: Math.max(
+                    0,
+                    Math.min(expandedFolder.rect.y * CELL, boardBounds.rows * CELL - PANEL_H),
+                  ),
+                  width: PANEL_W,
+                  height: PANEL_H,
+                }}
+              >
+                <FolderPanel
+                  folder={expandedFolder}
+                  face={expandedFace}
+                  onFace={setFolderFace}
+                  onChange={updateWidget}
+                  onDelete={requestDelete}
+                  onPopOut={popOutChild}
+                  onDraw={drawCard}
+                  onAddItem={addTimelineItem}
+                  onUpdateItem={updateTimelineItem}
+                  onRemoveItem={removeTimelineItem}
+                  docStatus={docStatus}
+                  onIngested={refreshDocs}
+                  onMakeTaskList={requestTaskList}
+                  onClose={closeFolder}
+                />
+              </div>
+            ))}
+        </BoardSurface>
+      </div>
+
+      {/* Deleting a card is the one thing on the board you can't get back by dragging. Ctrl+Z covers
+          it now, but that only helps someone who knows about Ctrl+Z and notices in time. */}
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={
+          pendingDelete?.kind === "timeline"
+            ? "Delete this timeline?"
+            : pendingDelete?.kind === "tasklist"
+              ? "Delete this task list?"
+              : "Delete this note?"
+        }
+        danger
+        confirmLabel="Delete"
+        onConfirm={confirmDelete}
+        onClose={() => setPendingDelete(null)}
+      >
+        {pendingDelete && (
+          <>
+            <p>
+              {pendingDelete.title?.trim() ? (
+                <>
+                  “<span className="text-ink2">{pendingDelete.title.trim()}</span>” will be removed
+                  from the board.
+                </>
+              ) : (
+                <>This card will be removed from the board.</>
+              )}{" "}
+              {deleteCost(pendingDelete, docStatus.get(`note:${pendingDelete.id}`))}
+            </p>
+            <label className="mt-3 flex items-center gap-2 text-xs text-ink3">
+              <input
+                type="checkbox"
+                checked={dontAskAgain}
+                onChange={(e) => setDontAskAgain(e.target.checked)}
+                className="h-3.5 w-3.5 accent-[var(--accent)]"
+              />
+              Don&apos;t ask again (you can turn this back on in the header)
+            </label>
+          </>
+        )}
+      </ConfirmDialog>
+
+      {converting && (
+        <MakeTaskListDialog
+          key={converting.noteId}
+          noteId={converting.noteId}
+          items={converting.items}
+          onDone={finishTaskList}
+          onClose={() => setConverting(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Make this a task list": a note's checklist becomes real tasks, and a Task list card lands beside
+ * the note. The card is the ordinary filtered list — the chosen project's tasks, or all your tasks for
+ * No project — not just the imported ones, and the copy says so. The note is left exactly as it was.
+ *
+ * The tasks are written FIRST, and only once they're in does the card go on the board (as a history
+ * barrier when any were written — see `addTaskList`). A failed import puts nothing on the board and
+ * keeps the dialog open with the reason. Importing skips any item already a task with the same title
+ * in the same project, and a card with the same filter already on the board is reused, so converting
+ * the same note twice never doubles up.
+ */
+function MakeTaskListDialog({
+  noteId,
+  items,
+  onDone,
+  onClose,
+}: {
+  noteId: string;
+  items: ChecklistLine[];
+  onDone: (noteId: string, project: string | null, created: number, skipped: number) => void;
+  onClose: () => void;
+}) {
+  const [projects, setProjects] = useState<string[]>([]);
+  const [project, setProject] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const selectId = `pm-tasklist-project-${noteId}`;
+  useEffect(() => {
+    listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, []);
+  const n = items.length;
+  const done = items.filter((i) => i.checked).length;
+  const ticked =
+    done === 0
+      ? `${n === 1 ? "It becomes a task" : "Each item becomes a task"}. `
+      : done === n
+        ? `${n === 1 ? "It's ticked, so it arrives" : "They're all ticked, so each arrives"} as a done task. `
+        : `Each item becomes a task, and the ${done === 1 ? "ticked one arrives" : `${done} ticked ones arrive`} done. `;
+
+  const convert = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const scope = project || null;
+      const res = await importChecklistTasks(
+        scope,
+        items.map((i) => ({ title: i.title, done: i.checked })),
+      );
+      onDone(noteId, scope, res.created.length, res.skipped);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={busy ? () => {} : onClose}
+      title={`Make a task list from ${n} checklist item${n === 1 ? "" : "s"}`}
+      widthClassName="max-w-md"
+      footer={
+        <>
+          <Button variant="tertiary" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void convert()} disabled={busy}>
+            {busy ? "Converting…" : "Convert"}
+          </Button>
+        </>
+      }
+    >
+      <p className="mt-2 text-sm text-ink3">
+        {ticked}A task list card of {project ? `${project}'s tasks` : "all your tasks"} goes beside
+        the note (or the one already on the board is shown), and the note stays as it is.
+      </p>
+      <div className="mt-4 flex items-center gap-2">
+        <label htmlFor={selectId} className="text-sm text-ink3">
+          Project
+        </label>
+        <Select
+          id={selectId}
+          value={project}
+          onChange={(e) => setProject(e.target.value)}
+          disabled={busy}
+          className="min-w-0 flex-1"
+        >
+          <option value="">No project</option>
+          {projects.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </Select>
+      </div>
+      {error && (
+        <Callout as="p" className="mt-3">
+          {error}
+        </Callout>
+      )}
+    </Dialog>
+  );
+}
+
+// Each formatting tooltip names the real shortcut through the platform's modifier glyphs (MOD,
+// SHIFT), shared with the event description's toolbar.
+
+/** One formatting-toolbar button: a pictogram, a label, the keyboard shortcut it mirrors (shown in
+ *  the tooltip and wired in NoteBody's onKeyDown), and the pure edit it applies. */
+interface FormatAction {
+  key: string;
+  label: string;
+  hint: string;
+  icon: ReactNode;
+  apply: (value: string, selStart: number, selEnd: number) => TextEdit;
+}
+
+const FORMAT_ACTIONS: FormatAction[] = [
+  {
+    key: "bold",
+    label: "Bold",
+    hint: `${MOD}B`,
+    icon: <span className="text-[0.6875rem] font-bold leading-none">B</span>,
+    apply: (v, s, e) => toggleWrap(v, s, e, "**"),
+  },
+  {
+    key: "italic",
+    label: "Italic",
+    hint: `${MOD}I`,
+    icon: <span className="font-serif text-[0.6875rem] italic leading-none">I</span>,
+    apply: (v, s, e) => toggleWrap(v, s, e, "*"),
+  },
+  {
+    key: "heading",
+    label: "Heading",
+    hint: `${MOD}${SHIFT}H`,
+    icon: <span className="text-[0.6875rem] font-bold leading-none">H</span>,
+    apply: (v, s, e) => applyLineMarker(v, s, e, "heading"),
+  },
+  {
+    key: "bullet",
+    label: "Bullet list",
+    hint: `${MOD}${SHIFT}8`,
+    icon: <BulletIcon />,
+    apply: (v, s, e) => applyLineMarker(v, s, e, "bullet"),
+  },
+  {
+    key: "number",
+    label: "Numbered list",
+    hint: `${MOD}${SHIFT}7`,
+    icon: <NumberIcon />,
+    apply: (v, s, e) => applyLineMarker(v, s, e, "number"),
+  },
+  {
+    key: "checkbox",
+    label: "Checklist",
+    hint: `${MOD}${SHIFT}9`,
+    icon: <CheckboxIcon />,
+    apply: (v, s, e) => applyLineMarker(v, s, e, "checkbox"),
+  },
+];
+
+const FORMAT_BUTTON_CLASS =
+  "flex h-5 w-5 min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] text-ink4 hover:bg-surface hover:text-ink2";
+
+/** Map a keydown to its formatting action, or null. Kept beside FORMAT_ACTIONS so the shortcuts
+ *  and the tooltip hints can't drift apart. */
+function formatForKey(
+  e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "shiftKey" | "code">,
+): FormatAction | null {
+  if (!(e.metaKey || e.ctrlKey)) return null;
+  if (e.shiftKey) {
+    if (e.code === "Digit8") return FORMAT_ACTIONS.find((a) => a.key === "bullet") ?? null;
+    if (e.code === "Digit7") return FORMAT_ACTIONS.find((a) => a.key === "number") ?? null;
+    if (e.code === "Digit9") return FORMAT_ACTIONS.find((a) => a.key === "checkbox") ?? null;
+    if (e.code === "KeyH") return FORMAT_ACTIONS.find((a) => a.key === "heading") ?? null;
+    return null;
+  }
+  if (e.code === "KeyB") return FORMAT_ACTIONS.find((a) => a.key === "bold") ?? null;
+  if (e.code === "KeyI") return FORMAT_ACTIONS.find((a) => a.key === "italic") ?? null;
+  return null;
+}
+
+/** A keypress the note handles itself, as the edit it makes, or null to let the editor have it.
+ *  Cmd/Ctrl formatting shortcuts win first. Tab / Shift+Tab move between a table's cells, or else
+ *  indent / outdent the line(s) — indenting a checkbox nests it under the item above, and
+ *  continueList carries that indent on. Backspace inside a list item's leading indent outdents rather
+ *  than nibbling one space. Enter adds a table row, or continues the current list (next bullet /
+ *  number / roman / checkbox) or exits it on an empty item; Shift+Enter stays a plain newline. */
+function noteKeyEdit(
+  e: KeyboardEvent,
+  value: string,
+  selStart: number,
+  selEnd: number,
+): TextEdit | null {
+  if (e.isComposing) return null;
+  const fmt = formatForKey(e);
+  if (fmt) return fmt.apply(value, selStart, selEnd);
+  if (e.key === "Tab") {
+    return (
+      moveCell(value, selStart, e.shiftKey ? -1 : 1) ??
+      (e.shiftKey ? outdentLines : indentLines)(value, selStart, selEnd)
+    );
+  }
+  const plain = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+  if (
+    e.key === "Backspace" &&
+    plain &&
+    selStart === selEnd &&
+    listIndentBeforeCaret(value, selStart) != null
+  ) {
+    return outdentLines(value, selStart, selEnd);
+  }
+  if (e.key !== "Enter" || e.shiftKey || selStart !== selEnd) return null;
+  const row = tableEnter(value, selStart);
+  if (row) return row;
+  const res = continueList(value, selStart);
+  return res ? { text: res.text, selStart: res.caret, selEnd: res.caret } : null;
+}
+
+/** The shared top bar for every widget: an editable title, an optional right-side `actions` slot,
+ *  and the delete/✕ control. It is the drag handle when `onStartDrag` is given (board widgets);
+ *  folder-panel children pass none, so their card header is a plain, non-draggable bar. */
+function WidgetHeader({
+  widget,
+  placeholder,
+  onRename,
+  onDelete,
+  onStartDrag,
+  deleteLabel = "Delete",
+  actions,
+}: {
+  widget: Widget;
+  placeholder: string;
+  onRename: (title: string) => void;
+  onDelete: () => void;
+  onStartDrag?: (e: ReactPointerEvent) => void;
+  deleteLabel?: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <div
+      onPointerDown={onStartDrag}
+      className={`flex shrink-0 items-center justify-between gap-1 border-b border-rule px-2 py-1 ${
+        onStartDrag ? "cursor-grab touch-none active:cursor-grabbing" : ""
+      }`}
+    >
+      {/* stopPropagation on pointerdown so a click edits the title instead of starting a drag
+          (mirrors the ✕ button). `basis-12 grow shrink` — NOT `flex-1`, whose `flex-basis: 0` means
+          the title only ever gets *leftover* space, and so collapses to nothing on a narrow card
+          (a folder-panel one) where there is none. A real basis reserves it a floor first. */}
+      <input
+        value={widget.title ?? ""}
+        onChange={(e) => onRename(e.target.value)}
+        onPointerDown={(e) => e.stopPropagation()}
+        placeholder={placeholder}
+        aria-label={`${placeholder} title`}
+        className="min-w-0 shrink grow basis-12 truncate border-0 bg-transparent px-0 text-xs font-medium text-ink3 placeholder:text-ink4 focus:text-ink2 focus:outline-none focus:ring-0"
+      />
+      {/* A drag grip so a long title still leaves somewhere to grab the header — only where the
+          header IS a handle. Folder-panel cards aren't draggable, so the spacer was 24px of a narrow
+          card's budget spent on nothing. It used to be blank space: the whole bar drags, but with
+          nothing drawn there you had to hunt for a spot that wasn't the title or a button. The dots
+          just SHOW where the reliable grab point is — the handler still lives on the bar, so this
+          needs no pointer logic of its own. */}
+      {onStartDrag && <DragGrip />}
+      {/* min-w-0 shrink, not shrink-0: the actions must be able to give, or they overflow the card
+          (which is overflow-hidden) and the ✕ on the end is what gets clipped away. */}
+      <div className="flex min-w-0 shrink items-center gap-1">
+        {actions}
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={onDelete}
+          aria-label={deleteLabel}
+          title={deleteLabel}
+          className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-xs text-ink4 hover:bg-surface hover:text-st-due"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** One of a timeline card's filter checkboxes — "Past" (by date) or "Done" (by status). One
+ *  component rather than two near-identical ones, so the two read and behave identically; the
+ *  caller owns the pref write, since each answers a different question and they persist separately.
+ *
+ *  `onChange` is expected to write through as well as set state, so every timeline card on the board
+ *  agrees and the choice survives a remount (a tab switch unmounts the whole board). */
+function TimelineFilterToggle({
+  label,
+  title,
+  checked,
+  onChange,
+}: {
+  label: string;
+  title: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      className="flex shrink-0 items-center gap-1 text-[0.625rem] uppercase tracking-wide text-ink4"
+      title={title}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.currentTarget.checked)}
+        className="accent-[var(--accent)]"
+      />
+      {label}
+    </label>
+  );
+}
+
+/** The 2×3 dot grip drawn in a draggable widget header, immediately left of the header's actions —
+ *  so on a note it sits beside the ingest control, and on a folder-overlay child beside its pop-out.
+ *  Purely a visual affordance: `aria-hidden` and `pointer-events-none` so it neither appears to
+ *  assistive tech as a control nor intercepts the pointerdown the header itself is listening for. */
+function DragGrip() {
+  return (
+    <svg
+      viewBox="0 0 6 10"
+      aria-hidden="true"
+      className="pointer-events-none w-1.5 shrink-0 self-center text-ink4"
+      fill="currentColor"
+    >
+      {[1, 5].map((cx) =>
+        [1, 5, 9].map((cy) => <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r="1" />),
+      )}
+    </svg>
+  );
+}
+
+// Memoised: a drag/resize sets state on every pointermove, re-rendering the whole board — without
+// memo each note would re-render its editor per tick. All props are stable across a
+// board drag: widget objects are only replaced when edited; `onChange`/`onDelete`/`onIngested` and
+// the memoised `onStartDrag` are stable useCallbacks; `onPopOut` is absent for board tiles; `status`
+// comes out of a map rebuilt only on refetch.
+const NoteBody = memo(function NoteBody({
+  widget,
+  showPower,
+  onChange,
+  onDelete,
+  onStartDrag,
+  onPopOut,
+  status,
+  onIngested,
+  onMakeTaskList,
+}: {
+  widget: Widget;
+  /** At `power` depth, show the note's size (w×h) at the right of its footer. */
+  showPower?: boolean;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onDelete: (id: string) => void;
+  /** The board drag handle. Absent for folder-panel children (they aren't board-positioned). */
+  onStartDrag?: (e: ReactPointerEvent, w: Widget, mode: "move" | "resize") => void;
+  /** When set (a folder's child), a "move out to the board" control shows in the header. Takes the
+   *  child's id so the parent can pass ONE stable callback rather than a fresh arrow per render,
+   *  which would defeat this component's memo and re-render on every drag tick. */
+  onPopOut?: (id: string) => void;
+  status?: DocStatus;
+  onIngested: () => void;
+  /** "To tasks": turn this note's checklist into real tasks (PinboardView asks which project, then
+   *  imports them and puts a Task list card beside the note). Takes the id, so the board passes one
+   *  stable callback and the memo holds. */
+  onMakeTaskList: (id: string) => void;
+}) {
+  const text = widget.text ?? "";
+  // Only offered when the note HAS a checklist — the boxes the note renders, nothing else.
+  const hasChecklist = useMemo(() => checklistItems(text).length > 0, [text]);
+  const editorRef = useRef<NoteEditorHandle>(null);
+  const richRef = useRef<RichNoteEditorHandle>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // The note is always an editor: the rich one (Docs-style, no Markdown on screen), or the Markdown
+  // one (the text, formatted as you type) for a note the rich one can't hold exactly. `editing` is
+  // whether you're working in it, which brings up the format toolbar and the colours; an empty note
+  // shows them too, as it always has.
+  const [editing, setEditing] = useState(false);
+  const showEditor = editing || !text.trim();
+  const [inTable, setInTable] = useState(false);
+
+  // A note opens rich only when the rich editor can hold its text exactly (richNote's `roundTrips`);
+  // anything else stays Markdown, so nothing it can't express is ever rewritten. Text the rich editor
+  // wrote itself is taken as read, so a note never flips editor under someone mid-sentence.
+  const richWrote = useRef<string | null>(null);
+  const rich = useMemo(() => text === richWrote.current || roundTrips(text), [text]);
+
+  const editText = useCallback(
+    (next: string) => onChange(widget.id, { text: next }),
+    [onChange, widget.id],
+  );
+  const editRich = useCallback(
+    (next: string) => {
+      richWrote.current = next;
+      onChange(widget.id, { text: next });
+    },
+    [onChange, widget.id],
+  );
+
+  // Stay in edit mode until the user clicks elsewhere on the board — NOT when the window merely
+  // loses OS focus (tabbing out of the app used to collapse the note, because the textarea blurred).
+  // Exit only on a pointer-down outside this note; re-focus the editor when the window returns
+  // while we're still editing, so the caret picks back up.
+  useEffect(() => {
+    if (!editing) return;
+    const onDown = (e: PointerEvent) => {
+      // A popover the note opened (the table size grid) is portalled out of the note, but a press in
+      // it is still a press in the note.
+      if ((e.target as Element).closest?.("[data-popover-panel]")) return;
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setEditing(false);
+    };
+    const onWinFocus = () => (richRef.current ?? editorRef.current)?.focus();
+    document.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("focus", onWinFocus);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("focus", onWinFocus);
+    };
+  }, [editing]);
+
+  const [ingesting, setIngesting] = useState(false);
+  const [ingestErr, setIngestErr] = useState<string | null>(null);
+  const ingested = !!widget.ingestedAt;
+  // The note has diverged from what was last ingested → offer a re-ingest.
+  const edited = ingested && widget.ingestedHash !== cheapHash(text);
+
+  async function ingest() {
+    if (!text.trim() || ingesting) return;
+    setIngesting(true);
+    setIngestErr(null);
+    try {
+      // Ingest the rendered markdown, not the pinboard shorthand dialect: the vault copy is read
+      // everywhere outside the board (reader, retrieval, chat citations), where the raw dialect
+      // markers render degraded and get indexed as noise. The widget keeps the raw `text`, and the
+      // edit-detection hash still tracks it, so "edited since last ingest" is unaffected.
+      await ingestNote(widget.id, widget.title ?? "", toRenderMarkdown(text));
+      onChange(widget.id, { ingestedAt: new Date().toISOString(), ingestedHash: cheapHash(text) });
+      onIngested();
+    } catch (e) {
+      setIngestErr(String(e));
+    } finally {
+      setIngesting(false);
+    }
+  }
+
+  // A toolbar button: the rich editor's own command, or in the Markdown editor the pure text edit at
+  // its selection, as one change.
+  const format = (a: FormatAction) => {
+    if (rich) richRef.current?.format(a.key as RichFormat);
+    else editorRef.current?.apply(a.apply);
+    setEditing(true);
+  };
+  const addTable = (cols: number, rows: number) => {
+    if (rich) richRef.current?.insertTable(cols, rows);
+    else editorRef.current?.apply((v, s, end) => insertTable(v, s, end, cols, rows));
+    setEditing(true);
+  };
+  // While the cursor is in a table, the Table button offers that table's rows, columns and removal.
+  const tableMenu =
+    rich && inTable
+      ? {
+          act: (a: TableAction) => {
+            richRef.current?.table(a);
+            setEditing(true);
+          },
+          can: (a: TableAction) => richRef.current?.canTable(a) ?? false,
+        }
+      : undefined;
+
+  // The Ingest / filing-status control sits in the top bar (right of the title, left of ✕).
+  const ingestControl = !ingested ? (
+    <button
+      type="button"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={ingest}
+      disabled={ingesting || !text.trim()}
+      className="shrink-0 rounded-[var(--radius-sm)] px-1 text-[0.625rem] uppercase tracking-wide text-accent-text hover:bg-surface disabled:opacity-40"
+      title="Save this note to your vault as a document (it goes through Review)"
+    >
+      {ingesting ? "Saving…" : "Ingest"}
+    </button>
+  ) : (
+    <>
+      <span
+        // Shrinkable and capped short: this span is the widest thing in the bar on an ingested note
+        // ("Filed · <project>"), and on a folder-panel card it would otherwise push the ✕ out. The
+        // full text is on the tooltip, so truncating hard costs nothing.
+        className="min-w-0 shrink truncate text-[0.625rem] text-ink4"
+        title={
+          status
+            ? status.reviewed
+              ? `Filed under ${status.project}`
+              : "Waiting in the Review queue"
+            : "Saved to your vault as a document"
+        }
+      >
+        {status ? (status.reviewed ? `Filed · ${status.project}` : "In review") : "Ingested"}
+      </span>
+      {edited && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={ingest}
+          disabled={ingesting}
+          className="shrink-0 rounded-[var(--radius-sm)] px-1 text-[0.625rem] uppercase tracking-wide text-accent-text hover:bg-surface disabled:opacity-40"
+          title="Update the saved document with your latest edits"
+        >
+          {ingesting ? "…" : "Re-ingest"}
+        </button>
+      )}
+    </>
+  );
+
+  return (
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col" data-help="pinboard-note-ingest">
+      <WidgetHeader
+        widget={widget}
+        placeholder="Note"
+        onRename={(t) => onChange(widget.id, { title: t })}
+        onDelete={() => onDelete(widget.id)}
+        onStartDrag={onStartDrag ? (e) => onStartDrag(e, widget, "move") : undefined}
+        actions={
+          <>
+            {onPopOut && <PopOutButton onClick={() => onPopOut(widget.id)} />}
+            {hasChecklist && (
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => onMakeTaskList(widget.id)}
+                data-help="pinboard-note-tasks"
+                className="shrink-0 rounded-[var(--radius-sm)] px-1 text-[0.625rem] uppercase tracking-wide text-accent-text hover:bg-surface"
+                title="Make this note's checklist into tasks, with a task list beside it"
+              >
+                To tasks
+              </button>
+            )}
+            {ingestControl}
+          </>
+        }
+      />
+      {ingestErr && <p className="shrink-0 px-2 pt-1 text-[0.625rem] text-st-due">{ingestErr}</p>}
+      {rich ? (
+        <RichNoteEditor
+          key="rich"
+          ref={richRef}
+          value={text}
+          onChange={editRich}
+          onFocus={() => setEditing(true)}
+          onInTable={setInTable}
+          placeholder="Jot something down…"
+        />
+      ) : (
+        <NoteEditor
+          key="markdown"
+          ref={editorRef}
+          value={text}
+          onChange={editText}
+          onFocus={() => setEditing(true)}
+          keyEdit={noteKeyEdit}
+          placeholder="Jot something down…"
+        />
+      )}
+      {/* Footer: only render when it has something to show — the format toolbar + colour swatches
+          appear while editing, and the size (w×h) at power depth. An idle filled note has neither,
+          so the footer vanishes and the note gains that space. */}
+      {(showEditor || showPower) && (
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 pb-1">
+          {showEditor && (
+            <div className="flex items-center gap-0.5" data-help="pinboard-note-format">
+              {FORMAT_ACTIONS.map((a) => (
+                <Tooltip key={a.key} label={`${a.label} · ${a.hint}`}>
+                  <button
+                    type="button"
+                    aria-label={`${a.label} (${a.hint})`}
+                    // Keep the editor focused/selected so the edit (and its shortcut) lands where
+                    // the caret is.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => format(a)}
+                    className={FORMAT_BUTTON_CLASS}
+                  >
+                    {a.icon}
+                  </button>
+                </Tooltip>
+              ))}
+              <NoteTablePicker
+                buttonClassName={FORMAT_BUTTON_CLASS}
+                onPick={addTable}
+                table={tableMenu}
+              />
+            </div>
+          )}
+          {/* Right-aligned: colour swatches (edit only) then the size (power). */}
+          <div className="ml-auto flex items-center gap-2">
+            {showEditor && (
+              <div className="flex items-center gap-1" data-help="pinboard-note-tint">
+                {NOTE_COLORS.map((c) => {
+                  const name = TINT_NAME[c] ?? c.replace("st-", "");
+                  return (
+                    <Tooltip key={c} label={name}>
+                      <button
+                        // Don't blur the editor's caret when picking a colour (mirrors the format
+                        // buttons) so edit mode and the selection survive.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => onChange(widget.id, { color: c })}
+                        aria-label={`Colour: ${name}`}
+                        className={`h-3 w-3 rounded-full border ${
+                          widget.color === c ? "ring-1 ring-ink3" : ""
+                        }`}
+                        style={{
+                          background: `var(--${c})`,
+                          borderColor: "color-mix(in oklab, var(--ink) 20%, transparent)",
+                        }}
+                      />
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            )}
+            {showPower && (
+              <span className="font-mono text-[0.5625rem] text-ink4">
+                {widget.rect.w}×{widget.rect.h}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// The bulleted and numbered list icons are shared with the event description's toolbar
+// (ui/FormatIcons.tsx); the checklist is the note's alone.
+function CheckboxIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="4" width="16" height="16" rx="3" />
+      <path d="M8 12l3 3 5-6" />
+    </svg>
+  );
+}
+
+interface TimelineBodyProps {
+  widget: Widget;
+  showPower: boolean;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onDelete: (id: string) => void;
+  /** The board drag handle. Absent in the in-place folder panel, which lays cards out itself. */
+  onStartDrag?: (e: ReactPointerEvent, w: Widget, mode: "move" | "resize") => void;
+  /** When set (a folder's child), a "move out to the board" control shows in the header. Takes the
+   *  child's id so the parent can pass one stable callback (see NoteBody). */
+  onPopOut?: (id: string) => void;
+  onAddItem: (id: string) => void;
+  onUpdateItem: (id: string, itemId: string, patch: { date?: string; label?: string }) => void;
+  onRemoveItem: (id: string, itemId: string) => void;
+}
+
+/** A timeline is either *bound* to a real project — showing and editing that project's live
+ *  milestones, which flow to the brief + Focus — or a freeform scratch list (the default). The
+ *  shared header (editable title, drag, delete) wraps either body. Memoised for the same board-wide
+ *  drag re-renders as NoteBody (all board-tile props are stable). */
+const TimelineBody = memo(function TimelineBody(props: TimelineBodyProps) {
+  const { widget, onChange, onDelete, onStartDrag, onPopOut, showPower } = props;
+  // Effective layout: an explicit `widget.view`, else each kind's historical default (freeform →
+  // list, bound → row) so pre-existing boards look identical until the user toggles.
+  const view: TimelineView = widget.view ?? (widget.project ? "row" : "list");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <WidgetHeader
+        widget={widget}
+        placeholder="Timeline"
+        onRename={(t) => onChange(widget.id, { title: t })}
+        onDelete={() => onDelete(widget.id)}
+        onStartDrag={onStartDrag ? (e) => onStartDrag(e, widget, "move") : undefined}
+        actions={
+          <>
+            <TimelineViewToggle value={view} onChange={(v) => onChange(widget.id, { view: v })} />
+            {onPopOut && <PopOutButton onClick={() => onPopOut(widget.id)} />}
+          </>
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        {widget.project ? (
+          <BoundTimeline
+            project={widget.project}
+            view={view}
+            showPower={showPower}
+            // Unbind, and drop any freeform entries the widget still carries. Linking consumes them
+            // now, so post-fix this is a no-op — but a board linked by an older build kept its copy,
+            // and without this those stale entries would spring back onto the calendar's pinboard
+            // overlay beside the milestones they already became. The milestones stay in the project
+            // either way, which is exactly what the button promises.
+            onUnlink={() => onChange(widget.id, { project: undefined, items: [] })}
+          />
+        ) : (
+          <FreeformTimeline {...props} view={view} />
+        )}
+      </div>
+    </div>
+  );
+});
+
+/** The header Select's value for a list whose project was deleted — not a project name a user could
+ *  have (it starts with a NUL), so it can't collide with one. */
+const DELETED_PROJECT = "\u0000deleted";
+
+interface TaskListBodyProps {
+  widget: Widget;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onDelete: (id: string) => void;
+  /** The board drag handle. Absent in the in-place folder panel. */
+  onStartDrag?: (e: ReactPointerEvent, w: Widget, mode: "move" | "resize") => void;
+  /** Set for a folder child (which a task list normally never is — see `isFileable` — but a board
+   *  from elsewhere might hold one, and it should still work and still be able to leave). */
+  onPopOut?: (id: string) => void;
+}
+
+/**
+ * A Task list card (PA-1): a live view of the global task list, not a copy of it. The card keeps only
+ * its filter (`widget.project`: unset → every task, a name → that project's); the list is the shared
+ * `TaskList` (through `CoreTaskList`), which reads the tasks table and re-reads on every `tasks://changed`, so a tick here is a
+ * tick on the project page and the Runway, and the other way round. Task edits go straight to the
+ * backend and never through the board's history — Ctrl+Z on the board can't un-tick a task.
+ *
+ * A deleted project leaves the filter `null` (the backend's unbind), and the card says so instead of
+ * quietly widening to every task. Memoised, with stable props, for the same board-wide drag
+ * re-renders as NoteBody.
+ */
+const TaskListBody = memo(function TaskListBody({
+  widget,
+  onChange,
+  onDelete,
+  onStartDrag,
+  onPopOut,
+}: TaskListBodyProps) {
+  const project = widget.project;
+  const [projects, setProjects] = useState<string[]>([]);
+  const loadProjects = useCallback(() => {
+    listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, []);
+  useEffect(() => {
+    loadProjects();
+    window.addEventListener("focus", loadProjects);
+    return () => window.removeEventListener("focus", loadProjects);
+  }, [loadProjects]);
+  const selectId = `pm-tasklist-filter-${widget.id}`;
+  // The current filter always has an option, even when it isn't in the list (archived since, or the
+  // list hasn't arrived yet), so the Select never shows a value it doesn't hold.
+  const options =
+    typeof project === "string" && !projects.includes(project) ? [project, ...projects] : projects;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <WidgetHeader
+        widget={widget}
+        placeholder="Tasks"
+        onRename={(t) => onChange(widget.id, { title: t })}
+        onDelete={() => onDelete(widget.id)}
+        onStartDrag={onStartDrag ? (e) => onStartDrag(e, widget, "move") : undefined}
+        actions={
+          <>
+            <Select
+              id={selectId}
+              compact
+              value={project === null ? DELETED_PROJECT : (project ?? "")}
+              aria-label="Which tasks this list shows"
+              title="Which tasks this list shows"
+              onPointerDown={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const v = e.target.value;
+                onChange(widget.id, { project: v === "" ? undefined : v });
+              }}
+              className="min-w-0 max-w-[9rem] shrink text-[0.625rem]"
+            >
+              <option value="">All tasks</option>
+              {project === null && (
+                <option value={DELETED_PROJECT} disabled>
+                  Deleted project
+                </option>
+              )}
+              {options.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </Select>
+            {onPopOut && <PopOutButton onClick={() => onPopOut(widget.id)} />}
+          </>
+        }
+      />
+      {/* `data-native-undo`: Ctrl+Z in the add row or an edit field undoes the typing, not the
+          board. Only text fields opt out (`keepsNativeUndo`): on a tick or a button it still undoes
+          the board. */}
+      <div className="min-h-0 flex-1 overflow-auto px-2 py-1" data-native-undo="">
+        {project === null ? (
+          <div className="flex flex-col items-start gap-2 py-2">
+            <p className="text-xs text-ink3">This list&rsquo;s project was deleted.</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="xs"
+                onClick={() => onChange(widget.id, { project: undefined })}
+              >
+                Show all tasks
+              </Button>
+              <Button variant="tertiary" size="xs" onClick={() => onDelete(widget.id)}>
+                Remove list
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <TaskList
+            project={project}
+            compact
+            showProject={project === undefined}
+            sort={readTaskSort(widget.taskSort)}
+            onSortChange={(taskSort) => onChange(widget.id, { taskSort })}
+          />
+        )}
+      </div>
+    </div>
+  );
+});
+
+type TimelineView = "list" | "row";
+
+/** A compact list ⇄ row toggle for a timeline widget, sitting in its header. stopPropagation so a
+ *  click switches views instead of starting a board drag (the header is the drag handle). */
+function TimelineViewToggle({
+  value,
+  onChange,
+}: {
+  value: TimelineView;
+  onChange: (v: TimelineView) => void;
+}) {
+  const opt = (v: TimelineView, label: string, icon: ReactNode) => (
+    <button
+      type="button"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={() => onChange(v)}
+      aria-pressed={value === v}
+      aria-label={label}
+      title={label}
+      className={`flex h-5 w-5 min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] ${
+        value === v
+          ? "bg-accent text-accent-ink shadow-[inset_0_0_0_1px_var(--ink4)]"
+          : "text-ink4 hover:bg-surface hover:text-ink2"
+      }`}
+    >
+      {icon}
+    </button>
+  );
+  return (
+    <div className="flex items-center gap-0.5" data-help="pinboard-timeline-view">
+      {opt("list", "List view", <ListViewIcon />)}
+      {opt("row", "Timeline view", <RowViewIcon />)}
+    </div>
+  );
+}
+
+function ListViewIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+    >
+      <line x1="5" y1="7" x2="19" y2="7" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+      <line x1="5" y1="17" x2="19" y2="17" />
+    </svg>
+  );
+}
+
+function RowViewIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <line x1="3" y1="12" x2="21" y2="12" strokeLinecap="round" />
+      <circle cx="7" cy="12" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="13" cy="12" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.8" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** The horizontal-track chrome shared by both row-view timelines: a baseline line under
+ *  date-ordered columns that scroll horizontally. */
+function TimelineTrack({ children }: { children: ReactNode }) {
+  return (
+    <div className="relative min-h-0 flex-1 overflow-x-auto" data-help="pinboard-timeline-line">
+      {/* the line the dots sit on */}
+      <div className="pointer-events-none absolute inset-x-2 top-8 h-px bg-border2" />
+      <div className="flex items-start gap-1 pb-1">{children}</div>
+    </div>
+  );
+}
+
+/** The stacked-rows chrome shared by both list-view timelines. */
+function TimelineList({ children }: { children: ReactNode }) {
+  return <div className="min-h-0 flex-1 space-y-1 overflow-auto">{children}</div>;
+}
+
+/** A collapsed folder tile (3×3 by default, resizable like every kind): the shared header (editable
+ *  title + Ungroup) over a big button showing the child count, which opens the folder. */
+function FolderTile({
+  widget,
+  onChange,
+  onUngroup,
+  onStartDrag,
+  onOpen,
+}: {
+  widget: Widget;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onUngroup: (id: string) => void;
+  onStartDrag: (e: ReactPointerEvent, w: Widget, mode: "move" | "resize") => void;
+  onOpen: () => void;
+}) {
+  const n = widget.children?.length ?? 0;
+  // A game folder wears its game's face, and says what is still in play rather than how much is
+  // inside — "3 left" is the number you want before deciding to click it. NO extra button goes on
+  // this tile: it is 72px wide at its floor, and the header's ✕ is what a second one would clip.
+  const game = playsGame(widget) ? widget.game : undefined;
+  const left = game ? livePool(widget).length : 0;
+  const total = game ? pool(widget).length : 0;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <WidgetHeader
+        widget={widget}
+        placeholder={game ? GAME_INFO[game].label : "Folder"}
+        deleteLabel="Ungroup (spill notes back onto the board)"
+        onRename={(t) => onChange(widget.id, { title: t })}
+        onDelete={() => onUngroup(widget.id)}
+        onStartDrag={(e) => onStartDrag(e, widget, "move")}
+      />
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={onOpen}
+        title={game ? `Play ${GAME_INFO[game].label}` : "Open folder"}
+        // Named for what it DOES. Without this the accessible name computes from the content below
+        // and announces "3 items, button", which says nothing about a tile that now plays a game.
+        aria-label={
+          game
+            ? `Play ${GAME_INFO[game].label} — ${left} of ${total} cards still in`
+            : `Open folder — ${n} item${n === 1 ? "" : "s"}`
+        }
+        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-0.5 text-ink3 hover:bg-surface"
+      >
+        {game ? <GameGlyph game={game} /> : <FolderGlyph />}
+        <span aria-hidden="true" className="font-mono text-[0.625rem]">
+          {game ? `${left} left` : `${n} item${n === 1 ? "" : "s"}`}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+function FolderGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-6 w-6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+    >
+      <path
+        d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * The bar both expanded-folder presentations share: editable title, the dice, the Cards / Play
+ * choice, the In place / Overlay choice, and close.
+ *
+ * THIS BAR IS THE WAY BACK. A game folder's tile plays instead of opening, and the tile is the only
+ * opener on the board — there is no context menu and no keyboard route to a widget — so without the
+ * Cards switch here a folder that had been given a game would have no path left to its own notes.
+ * That is why the header renders on the game face too. The presentation toggle stays put beside it:
+ * a game folder is still a folder, and taking away its In place / Overlay choice would be lifting
+ * one thing at the cost of another. The title is `flex-1 min-w-0 truncate`, so it is what gives.
+ */
+function FolderPanelHeader({
+  folder,
+  face,
+  onFace,
+  onChange,
+  onClose,
+}: {
+  folder: Widget;
+  face: FolderFace;
+  onFace: (face: FolderFace) => void;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onClose: () => void;
+}) {
+  const hasGame = playsGame(folder);
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-rule px-3 py-2">
+      <input
+        value={folder.title ?? ""}
+        onChange={(e) => onChange(folder.id, { title: e.target.value })}
+        placeholder={hasGame && folder.game ? GAME_INFO[folder.game].label : "Folder"}
+        aria-label="Folder title"
+        className="min-w-0 flex-1 truncate border-0 bg-transparent px-0 text-sm font-medium text-ink2 placeholder:text-ink4 focus:outline-none focus:ring-0"
+      />
+      <GameMenu folder={folder} onChange={(patch) => onChange(folder.id, patch)} />
+      {hasGame && (
+        <SegmentedControl
+          ariaLabel="What this folder is showing"
+          value={face}
+          onChange={onFace}
+          options={[
+            { value: "cards", label: "Cards", title: "The notes in this folder" },
+            { value: "play", label: "Play", title: "Play this folder's game" },
+          ]}
+        />
+      )}
+      <SegmentedControl
+        ariaLabel="How this folder opens"
+        value={folder.expandMode ?? "inline"}
+        onChange={(m) => onChange(folder.id, { expandMode: m })}
+        options={[
+          { value: "inline", label: "In place" },
+          { value: "overlay", label: "Overlay" },
+        ]}
+      />
+      <button
+        type="button"
+        onClick={onClose}
+        title="Close folder"
+        aria-label="Close folder"
+        className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-sm text-ink4 hover:bg-surface hover:text-ink2"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The OVERLAY presentation: the folder's own pinboard.
+ *
+ * Cards keep the shape and size they had outside, and are dragged and resized in here with the same
+ * gesture, the same grid and the same tile as the main board — a folder is a place to put things,
+ * not a different kind of thing. Folders never nest, so a drop in here can't fold or file anything:
+ * it is always a plain move, and cards simply overlap. That's why there's no resolveDrop, no pointer
+ * cell and no drop highlight — none of them would have anything to decide.
+ */
+function FolderBoard({
+  folder,
+  showPower,
+  onChange,
+  onDelete,
+  onPopOut,
+  onDraw,
+  onRaiseChild,
+  onAddItem,
+  onUpdateItem,
+  onRemoveItem,
+  docStatus,
+  onIngested,
+  onMakeTaskList,
+  onClose,
+  face,
+  onFace,
+}: {
+  folder: Widget;
+  face: FolderFace;
+  onFace: (face: FolderFace) => void;
+  showPower: boolean;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onDelete: (id: string) => void;
+  onPopOut: (folderId: string, childId: string) => void;
+  onDraw: (folderId: string, childId: string, assigned: boolean) => void;
+  onRaiseChild: (folderId: string, childId: string) => void;
+  onAddItem: (id: string) => void;
+  onUpdateItem: (id: string, itemId: string, patch: { date?: string; label?: string }) => void;
+  onRemoveItem: (id: string, itemId: string) => void;
+  docStatus: Map<string, DocStatus>;
+  onIngested: () => void;
+  onMakeTaskList: (id: string) => void;
+  onClose: () => void;
+}) {
+  const children = useMemo(() => folder.children ?? [], [folder.children]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+
+  // Measure the body so the canvas fills it. p-3 on the scroller, hence the 12px inset.
+  //
+  // `face` is a real dependency, not a defensive one: the game face returns before the scroller is
+  // rendered at all, so on the mount of a folder that opens straight into its game there is no
+  // element to measure and no element to observe. Coming back to the cards then left the canvas at
+  // its 1×1 seed, sized only to whatever the cards themselves reached — a board with no ruled grid
+  // showing anywhere they weren't. Re-running when the face changes is what puts the ruling back.
+  //
+  // The scroller's own box, as the main board measures it, so this board's scrollbars can't feed
+  // back into its size either.
+  const [measured, setMeasured] = useState<BoardSpace>({ cols: 1, rows: 1 });
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      const next = measureSpace(el);
+      setMeasured((was) => (sameSpace(was, next) ? was : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [face]);
+
+  // The canvas fills the body, then grows to contain any card sitting past it — cards are never
+  // re-flowed to fit (that would resize them, which is exactly what this view exists to preserve),
+  // so the board scrolls to reach them instead.
+  const bounds = useMemo(() => boardExtent(measured, children), [measured, children]);
+  const boundsRef = useRef(bounds);
+  boundsRef.current = bounds;
+
+  // Stable, so the memoised card bodies survive the per-tick re-renders of a drag.
+  const popOut = useCallback(
+    (childId: string) => onPopOut(folder.id, childId),
+    [onPopOut, folder.id],
+  );
+  // `assigned` is forwarded, not dropped: a verdict game reports a card you DODGED with `false`,
+  // and swallowing it here popped that card onto the board while the screen said you were off the
+  // hook. It is a required parameter on the hook now, so an adapter that forgets it fails to build.
+  const drawCard = useCallback(
+    (childId: string, assigned: boolean) => onDraw(folder.id, childId, assigned),
+    [onDraw, folder.id],
+  );
+  const resetRound = useCallback(() => onChange(folder.id, { spent: [] }), [onChange, folder.id]);
+  // Whether a drawn card leaves the folder. It sits in the game's own bottom bar, beside "start the
+  // round over" — both are about the round in front of you rather than about which game this is.
+  const setAutoPopOut = useCallback(
+    (next: boolean) => onChange(folder.id, { autoPopOut: next }),
+    [onChange, folder.id],
+  );
+  // Whether the game keeps a round at all. Either way the round in progress is dropped: switching
+  // it off means nothing should be left greyed, and switching it back on should start clean rather
+  // than resume a round from before the folder stopped keeping one.
+  const setRepeat = useCallback(
+    (next: boolean) => onChange(folder.id, { repeat: next, spent: [] }),
+    [onChange, folder.id],
+  );
+  // A child's share. `updateWidget` walks one level down, so the same call reaches a folder child.
+  const setWeight = useCallback(
+    (childId: string, weight: number) => onChange(childId, { weight }),
+    [onChange],
+  );
+  const commitRect = useCallback((id: string, rect: Rect) => onChange(id, { rect }), [onChange]);
+  const { draggingId, livePx, startDrag } = useBoardDrag({
+    boundsRef,
+    surfaceRef,
+    onGrab: useCallback((id: string) => onRaiseChild(folder.id, id), [onRaiseChild, folder.id]),
+    onMoveEnd: commitRect,
+    onResizeEnd: commitRect,
+  });
+
+  if (face === "play" && folder.game) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <FolderPanelHeader
+          folder={folder}
+          face={face}
+          onFace={onFace}
+          onChange={onChange}
+          onClose={onClose}
+        />
+        <FolderGame
+          folder={folder}
+          game={folder.game}
+          roomy
+          onDraw={drawCard}
+          onPopOut={popOut}
+          onWeight={setWeight}
+          onResetRound={resetRound}
+          onAutoPopOut={setAutoPopOut}
+          onRepeat={setRepeat}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <FolderPanelHeader
+        folder={folder}
+        face={face}
+        onFace={onFace}
+        onChange={onChange}
+        onClose={onClose}
+      />
+      <div ref={scrollRef} className="pm-scrollbars min-h-0 min-w-0 flex-1 overflow-auto p-3">
+        <BoardSurface
+          ref={surfaceRef}
+          bounds={bounds}
+          dragging={!!draggingId}
+          dataHelp="pinboard-folder-board"
+        >
+          {children.length === 0 && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <p className="text-sm text-ink4">
+                This folder is empty — drag a note or timeline onto it to file it here.
+              </p>
+            </div>
+          )}
+          {children.map((c) => (
+            <WidgetTile
+              key={c.id}
+              widget={c}
+              px={draggingId === c.id && livePx ? livePx : rectToPx(c.rect)}
+              showPower={showPower}
+              onStartDrag={startDrag}
+              dimmed={isSpent(folder, c.id)}
+            >
+              {c.kind === "note" ? (
+                <NoteBody
+                  widget={c}
+                  showPower={showPower}
+                  onChange={onChange}
+                  onDelete={onDelete}
+                  onStartDrag={startDrag}
+                  onPopOut={popOut}
+                  status={docStatus.get(`note:${c.id}`)}
+                  onIngested={onIngested}
+                  onMakeTaskList={onMakeTaskList}
+                />
+              ) : c.kind === "tasklist" ? (
+                // Never filed in here by this build (`isFileable`); drawn properly if met anyway.
+                <TaskListBody
+                  widget={c}
+                  onChange={onChange}
+                  onDelete={onDelete}
+                  onStartDrag={startDrag}
+                  onPopOut={popOut}
+                />
+              ) : (
+                <TimelineBody
+                  widget={c}
+                  showPower={showPower}
+                  onChange={onChange}
+                  onDelete={onDelete}
+                  onStartDrag={startDrag}
+                  onPopOut={popOut}
+                  onAddItem={onAddItem}
+                  onUpdateItem={onUpdateItem}
+                  onRemoveItem={onRemoveItem}
+                />
+              )}
+            </WidgetTile>
+          ))}
+        </BoardSurface>
+      </div>
+    </div>
+  );
+}
+
+/** The expanded folder view IN PLACE: editable title, a presentation toggle, and a grid of the
+ *  contained cards — each the SAME NoteBody/TimelineBody, so children edit/ingest just like board
+ *  widgets. Children carry no drag handle here (this view lays them out itself; the Overlay
+ *  presentation is the one that keeps their board shape) but get a pop-out control; a child's ✕
+ *  deletes it. The folder itself stays however few cards are left — emptying it is not the same as
+ *  wanting it gone. */
+function FolderPanel({
+  folder,
+  face,
+  onFace,
+  onChange,
+  onDelete,
+  onPopOut,
+  onDraw,
+  onAddItem,
+  onUpdateItem,
+  onRemoveItem,
+  docStatus,
+  onIngested,
+  onMakeTaskList,
+  onClose,
+}: {
+  folder: Widget;
+  face: FolderFace;
+  onFace: (face: FolderFace) => void;
+  onChange: (id: string, patch: Partial<Widget>) => void;
+  onDelete: (id: string) => void;
+  onPopOut: (folderId: string, childId: string) => void;
+  onDraw: (folderId: string, childId: string, assigned: boolean) => void;
+  onAddItem: (id: string) => void;
+  onUpdateItem: (id: string, itemId: string, patch: { date?: string; label?: string }) => void;
+  onRemoveItem: (id: string, itemId: string) => void;
+  docStatus: Map<string, DocStatus>;
+  onIngested: () => void;
+  onMakeTaskList: (id: string) => void;
+  onClose: () => void;
+}) {
+  const children = folder.children ?? [];
+  // Stable, so a card body's memo isn't defeated by a fresh arrow on every render.
+  const popOut = useCallback(
+    (childId: string) => onPopOut(folder.id, childId),
+    [onPopOut, folder.id],
+  );
+  // `assigned` is forwarded, not dropped: a verdict game reports a card you DODGED with `false`,
+  // and swallowing it here popped that card onto the board while the screen said you were off the
+  // hook. It is a required parameter on the hook now, so an adapter that forgets it fails to build.
+  const drawCard = useCallback(
+    (childId: string, assigned: boolean) => onDraw(folder.id, childId, assigned),
+    [onDraw, folder.id],
+  );
+  const resetRound = useCallback(() => onChange(folder.id, { spent: [] }), [onChange, folder.id]);
+  // Whether a drawn card leaves the folder. It sits in the game's own bottom bar, beside "start the
+  // round over" — both are about the round in front of you rather than about which game this is.
+  const setAutoPopOut = useCallback(
+    (next: boolean) => onChange(folder.id, { autoPopOut: next }),
+    [onChange, folder.id],
+  );
+  // Whether the game keeps a round at all. Either way the round in progress is dropped: switching
+  // it off means nothing should be left greyed, and switching it back on should start clean rather
+  // than resume a round from before the folder stopped keeping one.
+  const setRepeat = useCallback(
+    (next: boolean) => onChange(folder.id, { repeat: next, spent: [] }),
+    [onChange, folder.id],
+  );
+  // A child's share. `updateWidget` walks one level down, so the same call reaches a folder child.
+  const setWeight = useCallback(
+    (childId: string, weight: number) => onChange(childId, { weight }),
+    [onChange],
+  );
+  if (face === "play" && folder.game) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <FolderPanelHeader
+          folder={folder}
+          face={face}
+          onFace={onFace}
+          onChange={onChange}
+          onClose={onClose}
+        />
+        <FolderGame
+          folder={folder}
+          game={folder.game}
+          roomy={false}
+          onDraw={drawCard}
+          onPopOut={popOut}
+          onWeight={setWeight}
+          onResetRound={resetRound}
+          onAutoPopOut={setAutoPopOut}
+          onRepeat={setRepeat}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <FolderPanelHeader
+        folder={folder}
+        face={face}
+        onFace={onFace}
+        onChange={onChange}
+        onClose={onClose}
+      />
+      <div className="min-h-0 flex-1 overflow-auto p-3">
+        {children.length === 0 ? (
+          <p className="text-xs text-ink4">This folder is empty.</p>
+        ) : (
+          /* Always two columns. `lg:grid-cols-3` was a VIEWPORT query on a panel that is a fixed
+             576px wide: on any window past 1024px it squeezed three ~175px cards in, which is what
+             pushed each card's ✕ out of sight. The panel's width doesn't depend on the window, so
+             neither should its column count. */
+          <div className="grid grid-cols-2 gap-3">
+            {children.map((c) => (
+              <div
+                key={c.id}
+                // A card already drawn this round recedes but stays: the whole point of the round is
+                // that you can still see what you've been given. `aria-describedby` isn't available
+                // on a plain div the card owns, so the state is said in plain words instead —
+                // dimming alone reaches nobody who can't see it.
+                aria-label={isSpent(folder, c.id) ? "Already drawn this round" : undefined}
+                className={`flex h-64 flex-col overflow-hidden rounded-[var(--radius-sm)] border ${
+                  isSpent(folder, c.id) ? "opacity-60 saturate-[0.4]" : ""
+                }`}
+                style={tintStyle(c.color)}
+              >
+                {c.kind === "note" ? (
+                  <NoteBody
+                    widget={c}
+                    onChange={onChange}
+                    onDelete={onDelete}
+                    onPopOut={popOut}
+                    status={docStatus.get(`note:${c.id}`)}
+                    onIngested={onIngested}
+                    onMakeTaskList={onMakeTaskList}
+                  />
+                ) : c.kind === "tasklist" ? (
+                  // Never filed in here by this build (`isFileable`); drawn properly if met anyway.
+                  <TaskListBody
+                    widget={c}
+                    onChange={onChange}
+                    onDelete={onDelete}
+                    onPopOut={popOut}
+                  />
+                ) : (
+                  <TimelineBody
+                    widget={c}
+                    showPower={false}
+                    onChange={onChange}
+                    onDelete={onDelete}
+                    onPopOut={popOut}
+                    onAddItem={onAddItem}
+                    onUpdateItem={onUpdateItem}
+                    onRemoveItem={onRemoveItem}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A milestone's effective date as YYYY-MM-DD, or "" when undated. */
+function msDate(m: Milestone): string {
+  return m.due_date?.slice(0, 10) ?? "";
+}
+
+/** A project-bound timeline: reads the project's real milestones and lays them out earliest→latest
+ *  on a line. Every add/edit/remove writes straight through the milestone commands, so it stays in
+ *  step with the daily brief and the project's Focus/sidebar (and refetches on window focus, so a
+ *  milestone added elsewhere shows up here). */
+function BoundTimeline({
+  project,
+  view,
+  showPower,
+  onUnlink,
+}: {
+  project: string;
+  view: TimelineView;
+  showPower: boolean;
+  onUnlink: () => void;
+}) {
+  const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showPast, setShowPast] = useState(readShowPastTimelineItems);
+  const [showCompleted, setShowCompleted] = useState(readShowCompletedTimelineItems);
+  const today = todayIso();
+
+  const refresh = useCallback(() => {
+    let cancelled = false;
+    listMilestones(project)
+      .then((ms) => !cancelled && setMilestones(ms))
+      .catch(() => !cancelled && setMilestones([]))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
+
+  useEffect(() => refresh(), [refresh]);
+
+  useEffect(() => {
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refresh]);
+
+  // Earliest→latest by effective date; undated sink to the end.
+  const sorted = [...milestones].sort((a, b) => {
+    const da = msDate(a);
+    const db = msDate(b);
+    if (!da) return 1;
+    if (!db) return -1;
+    return da.localeCompare(db);
+  });
+  // Each filter is offered only when it has something to hide — on a card this size a checkbox that
+  // does nothing is worse than no checkbox (the same rule the Past toggle already followed).
+  const hasPast = sorted.some((m) => isPastTimelineDate(msDate(m), today));
+  const hasCompleted = sorted.some((m) => m.state === "met");
+  const ordered = sorted
+    .filter((m) => showPast || !isPastTimelineDate(msDate(m), today))
+    .filter((m) => showCompleted || m.state !== "met");
+
+  async function add() {
+    await runMutation(async () => {
+      await addMilestone(project, "deadline", null);
+      refresh();
+    }, setError);
+  }
+
+  return (
+    <div className="flex h-full flex-col px-2 py-1">
+      <div className="mb-1 flex items-center justify-between gap-1">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink2" title={project}>
+          {project}
+        </span>
+        {/* Only offered when there is something to hide — on a card this size an always-present
+            checkbox that does nothing is worse than no checkbox. */}
+        {hasPast && (
+          <TimelineFilterToggle
+            label="Past"
+            title="Show entries whose date has already passed"
+            checked={showPast}
+            onChange={(v) => {
+              setShowPast(v);
+              writeShowPastTimelineItems(v);
+            }}
+          />
+        )}
+        {hasCompleted && (
+          <TimelineFilterToggle
+            label="Done"
+            title="Show milestones already marked Done"
+            checked={showCompleted}
+            onChange={(v) => {
+              setShowCompleted(v);
+              writeShowCompletedTimelineItems(v);
+            }}
+          />
+        )}
+        <button
+          onClick={onUnlink}
+          title="Unlink this project (its milestones stay in the project)"
+          data-help="pinboard-timeline-unlink"
+          className="shrink-0 rounded-[var(--radius-sm)] px-1 text-[0.625rem] uppercase tracking-wide text-ink4 hover:text-ink2"
+        >
+          Unlink
+        </button>
+      </div>
+
+      {loading ? (
+        <p className="text-[0.6875rem] text-ink4">Loading…</p>
+      ) : ordered.length === 0 ? (
+        <p className="text-[0.6875rem] text-ink4">
+          {milestones.length === 0
+            ? "No milestones yet — add one below."
+            : "Everything here has already passed — tick “Past” to see it."}
+        </p>
+      ) : view === "row" ? (
+        <TimelineTrack>
+          {ordered.map((m) => (
+            <MilestoneColumn
+              key={m.id}
+              m={m}
+              onChanged={refresh}
+              onError={setError}
+              showPower={showPower}
+            />
+          ))}
+        </TimelineTrack>
+      ) : (
+        <TimelineList>
+          {ordered.map((m) => (
+            <MilestoneRow
+              key={m.id}
+              m={m}
+              onChanged={refresh}
+              onError={setError}
+              showPower={showPower}
+            />
+          ))}
+        </TimelineList>
+      )}
+
+      <button
+        onClick={add}
+        className="mt-1 shrink-0 self-start rounded-[var(--radius-sm)] px-1 py-0.5 text-[0.6875rem] text-accent-text hover:bg-surface"
+      >
+        + Milestone
+      </button>
+      {error && (
+        <p role="alert" className="mt-1 shrink-0 px-1 text-[0.625rem] text-st-due">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Shared editing state + mutations for one milestone, so the column (row-view) and row (list-view)
+ *  presentations stay in lock-step. Every edit persists through the milestone commands; a
+ *  calendar-linked milestone keeps its synced date read-only. */
+function useMilestoneEditor(
+  m: Milestone,
+  onChanged: () => void,
+  onError: (message: string | null) => void,
+) {
+  const [label, setLabel] = useState(m.label);
+  const [date, setDate] = useState(msDate(m));
+  const met = m.state === "met";
+
+  // Adopt fresh values when a refetch brings them in (e.g. a calendar-linked date syncing).
+  useEffect(() => setLabel(m.label), [m.label]);
+  useEffect(() => setDate(m.due_date?.slice(0, 10) ?? ""), [m.due_date]);
+
+  // `dateOverride` is how DateField commits — it hands the new value straight in, because reading
+  // `date` right after a `setDate` in the same tick still sees the previous render's value. Reports
+  // whether the write landed, so an optimistic caller can put its field back; a no-op counts as
+  // success, or a legitimate nothing-to-do would read as a refusal.
+  const persist = async (dateOverride?: string): Promise<boolean> => {
+    const nextLabel = label.trim() || "deadline";
+    const effectiveDate = dateOverride ?? date;
+    const nextDate = m.calendar_linked ? null : effectiveDate || null;
+    const curDate = m.calendar_linked ? null : msDate(m) || null;
+    if (nextLabel === m.label && nextDate === curDate) return true;
+    return await runMutation(async () => {
+      await updateMilestone(m.id, nextLabel, nextDate);
+      onChanged();
+    }, onError);
+  };
+  const setStatus = (next: MilestoneStatus) =>
+    void runMutation(async () => {
+      await setMilestoneStatus(m.id, next);
+      onChanged();
+    }, onError);
+  const remove = () =>
+    void runMutation(async () => {
+      await deleteMilestone(m.id);
+      onChanged();
+    }, onError);
+
+  return {
+    label,
+    setLabel,
+    date,
+    setDate,
+    met,
+    status: milestoneStatus(m),
+    persist,
+    setStatus,
+    remove,
+  };
+}
+
+interface MilestoneItemProps {
+  m: Milestone;
+  onChanged: () => void;
+  onError: (message: string | null) => void;
+  showPower: boolean;
+}
+
+/** How full a milestone's dot reads at each status. Progress is shown by FILL along one hue rather
+ *  than by four different colours: the `--st-*` tokens already carry project-status meanings, and
+ *  borrowing them here would say something PM doesn't mean. Done alone changes hue, to the same
+ *  muted `--st-track` that has always marked a finished milestone. */
+const DOT_FILL: Record<MilestoneStatus, string> = {
+  not_started: "transparent",
+  in_progress: "color-mix(in oklab, var(--accent) 45%, transparent)",
+  almost_done: "var(--accent)",
+  done: "var(--st-track)",
+};
+
+/** A milestone's status as a dot on the track — a READOUT, not a control.
+ *
+ *  It used to be the done toggle, which made it the second control writing the same fact as the
+ *  progress dropdown. The dot stays because the track view needs a marker ON the line to show where
+ *  a milestone sits; it just no longer does anything when clicked. It carries an accessible label
+ *  because in the track view it is the only place the status is stated. */
+function MilestoneDot({ status }: { status: MilestoneStatus }) {
+  const label = MILESTONE_STATUSES.find((s) => s.value === status)?.label ?? status;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="h-2.5 w-2.5 shrink-0 rounded-full border"
+      style={{
+        background: DOT_FILL[status],
+        // Not-started reads as an outline, so its ring has to be the accent rather than the panel
+        // colour it would otherwise vanish against.
+        borderColor: status === "not_started" ? "var(--accent)" : "var(--panel)",
+      }}
+    />
+  );
+}
+
+/** One milestone as a column on the row/track view: date on top, a dot on the line, its label
+ *  below, and a remove ✕. Calendar-linked milestones show their synced date read-only.
+ *
+ *  Status is READ-ONLY here. A four-option dropdown does not fit an 5.5rem column, and shortening
+ *  the labels to make it fit would mean the same control reading differently in two places. The
+ *  track is the overview; switch the card to list view to change a status. */
+function MilestoneColumn({ m, onChanged, onError, showPower }: MilestoneItemProps) {
+  const { label, setLabel, date, setDate, met, status, persist, remove } = useMilestoneEditor(
+    m,
+    onChanged,
+    onError,
+  );
+  return (
+    <div className="flex w-[5.5rem] shrink-0 flex-col items-center gap-1 text-center">
+      {m.calendar_linked ? (
+        <span
+          className="flex h-6 items-center font-mono text-[0.5625rem] text-accent-text"
+          title={
+            m.event_missing ? "Linked event not found in your calendars" : "Synced from calendar"
+          }
+        >
+          📅 {m.due_date ? formatDateOnly(msDate(m)) : "—"}
+        </span>
+      ) : (
+        <DateField
+          value={date}
+          onCommit={(iso) => {
+            const prev = date;
+            setDate(iso);
+            // A refused write triggers no refetch, so `m.due_date` never changes and the adopt
+            // effect cannot undo this — roll the field back instead of leaving it showing, and
+            // later silently re-committing, a date the backend rejected.
+            void persist(iso).then((ok) => {
+              if (!ok) setDate(prev);
+            });
+          }}
+          ariaLabel="Milestone deadline"
+          wrapperClassName="w-full"
+          className="h-6 px-0.5 font-mono text-[0.5625rem] text-ink3"
+        />
+      )}
+      <MilestoneDot status={status} />
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        onBlur={() => void persist()}
+        placeholder="label"
+        className={`w-full rounded-[var(--radius-sm)] bg-transparent px-0.5 text-center text-[0.625rem] text-ink2 focus:outline-none ${
+          met ? "text-ink4 line-through" : ""
+        }`}
+      />
+      <button
+        onClick={remove}
+        aria-label="Remove milestone"
+        className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center text-[0.625rem] text-ink4 hover:text-st-due"
+      >
+        ✕
+      </button>
+      {showPower && m.event_missing && (
+        <span className="text-[0.5625rem] text-st-due">⚠ unsynced</span>
+      )}
+    </div>
+  );
+}
+
+/** One milestone as a list row: date · label · progress · remove — the same edits as the column
+ *  view, laid out horizontally, plus the progress dropdown the narrow track can't hold. This is
+ *  where a status is CHANGED.
+ *
+ *  No status dot here. The track view keeps one because it is the marker showing where a milestone
+ *  sits on the line and the only place its status is stated; in a list row the dropdown right there
+ *  already says it in words, so the dot was a second, vaguer copy of the same fact. */
+function MilestoneRow({ m, onChanged, onError, showPower }: MilestoneItemProps) {
+  const { label, setLabel, date, setDate, met, status, persist, setStatus, remove } =
+    useMilestoneEditor(m, onChanged, onError);
+  return (
+    <div className="flex items-center gap-1">
+      {m.calendar_linked ? (
+        <span
+          className="flex h-6 w-[6.25rem] shrink-0 items-center gap-0.5 font-mono text-[0.5625rem] text-accent-text"
+          title={
+            m.event_missing ? "Linked event not found in your calendars" : "Synced from calendar"
+          }
+        >
+          📅 {m.due_date ? formatDateOnly(msDate(m)) : "—"}
+        </span>
+      ) : (
+        <DateField
+          value={date}
+          onCommit={(iso) => {
+            const prev = date;
+            setDate(iso);
+            // Same rollback as the column view above: no refetch follows a refusal, so the adopt
+            // effect never fires and the field would keep — and re-commit — the rejected date.
+            void persist(iso).then((ok) => {
+              if (!ok) setDate(prev);
+            });
+          }}
+          ariaLabel="Milestone deadline"
+          wrapperClassName="w-[7.5rem] shrink-0"
+          className="px-1 py-0.5 font-mono text-[0.625rem] text-ink3"
+        />
+      )}
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        onBlur={() => void persist()}
+        placeholder="label"
+        className={`min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none ${
+          met ? "text-ink4 line-through" : ""
+        }`}
+      />
+      {showPower && m.event_missing && (
+        <span className="shrink-0 text-[0.5625rem] text-st-due" title="Linked event not found">
+          ⚠
+        </span>
+      )}
+      <Select
+        compact
+        value={status}
+        aria-label={`Progress for ${m.label || "milestone"}`}
+        title="How far along this milestone is"
+        onChange={(e) => setStatus(e.target.value as MilestoneStatus)}
+        className="shrink-0 text-[0.625rem]"
+      >
+        {MILESTONE_STATUSES.map((s) => (
+          <option key={s.value} value={s.value}>
+            {s.label}
+          </option>
+        ))}
+      </Select>
+      <button
+        onClick={remove}
+        aria-label="Remove milestone"
+        className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center text-[0.6875rem] text-ink4 hover:text-st-due"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+/** The default freeform timeline: type-in dated entries that live in the widget, shown as a list or
+ *  a horizontal track, plus a picker to bind the card to a real project (which switches it to
+ *  {@link BoundTimeline}). */
+function FreeformTimeline({
+  widget,
+  view,
+  onChange,
+  onAddItem,
+  onUpdateItem,
+  onRemoveItem,
+}: TimelineBodyProps & { view: TimelineView }) {
+  const [projects, setProjects] = useState<string[]>([]);
+  const [projDraft, setProjDraft] = useState("");
+  const [linkErr, setLinkErr] = useState<string | null>(null);
+  const [showPast, setShowPast] = useState(readShowPastTimelineItems);
+  const today = todayIso();
+  useEffect(() => {
+    listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, []);
+  const listId = `pm-projects-${widget.id}`;
+
+  // Show items in date order; undated items sink to the bottom.
+  const sortedItems = [...(widget.items ?? [])].sort((a, b) => {
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return a.date.localeCompare(b.date);
+  });
+  const hasPast = sortedItems.some((it) => isPastTimelineDate(it.date, today));
+  const items = showPast
+    ? sortedItems
+    : sortedItems.filter((it) => !isPastTimelineDate(it.date, today));
+
+  // Bind to a project — but first MERGE the freeform entries into that project's real milestones, so
+  // what you typed becomes the project's milestones instead of vanishing behind the bound view. Dedup
+  // against what's already there (by label + date) so re-linking after an Unlink can't duplicate. A
+  // new project name is allowed, but PM asks first: the first milestones.add for it is answered with
+  // PM's own question (the bridge shows it: "Create a new project with this name?" and the name), and
+  // a decline throws, so runMutation shows the error and the entries stay untouched.
+  //
+  // The merge CONSUMES the entries, so they're cleared in the same commit: each one is now a real
+  // milestone (or already matched one), so nothing is lost — and a widget that kept a private copy
+  // would re-emit it onto the calendar's pinboard overlay the moment it was unlinked, drawing that
+  // deadline twice (once as the entry, once as the milestone it became). Both writes land together,
+  // after the milestones are safely persisted, so a failed merge leaves the entries untouched.
+  async function linkProject(project: string) {
+    await runMutation(async () => {
+      const existing = await listMilestones(project);
+      const seen = new Set(
+        existing.map((m) => `${m.label.trim()} ${m.due_date?.slice(0, 10) ?? ""}`),
+      );
+      for (const it of widget.items ?? []) {
+        const label = it.label.trim() || "deadline";
+        const date = it.date || null;
+        const key = `${label} ${date ?? ""}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        await addMilestone(project, label, date);
+      }
+      onChange(widget.id, { project, items: [] });
+    }, setLinkErr);
+  }
+
+  return (
+    <div className="flex h-full flex-col px-2 py-1">
+      {hasPast && (
+        <div className="mb-1 flex shrink-0 justify-end">
+          {/* Freeform entries have no notion of "done", so this card gets the date filter only. */}
+          <TimelineFilterToggle
+            label="Past"
+            title="Show entries whose date has already passed"
+            checked={showPast}
+            onChange={(v) => {
+              setShowPast(v);
+              writeShowPastTimelineItems(v);
+            }}
+          />
+        </div>
+      )}
+      {items.length === 0 ? (
+        <div className="min-h-0 flex-1">
+          <p className="text-[0.6875rem] text-ink4">
+            {sortedItems.length === 0
+              ? "No milestones yet."
+              : "Everything here has already passed — tick “Past” to see it."}
+          </p>
+        </div>
+      ) : view === "row" ? (
+        <TimelineTrack>
+          {items.map((it) => (
+            <FreeformColumn
+              key={it.id}
+              widgetId={widget.id}
+              item={it}
+              onUpdateItem={onUpdateItem}
+              onRemoveItem={onRemoveItem}
+            />
+          ))}
+        </TimelineTrack>
+      ) : (
+        <TimelineList>
+          {items.map((it) => (
+            <div key={it.id} className="flex items-center gap-1">
+              <DateField
+                value={it.date ?? ""}
+                onCommit={(iso) => onUpdateItem(widget.id, it.id, { date: iso })}
+                ariaLabel="Timeline date"
+                title={it.date ? formatDateOnly(it.date) : "Set a date"}
+                wrapperClassName="w-[7.5rem] shrink-0"
+                className="px-1 py-0.5 font-mono text-[0.625rem] text-ink3"
+              />
+              <input
+                value={it.label ?? ""}
+                onChange={(e) => onUpdateItem(widget.id, it.id, { label: e.target.value })}
+                placeholder="what happens"
+                className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-transparent bg-transparent px-1 py-0.5 text-xs text-ink2 focus:border-accent-text focus:outline-none"
+              />
+              <button
+                onClick={() => onRemoveItem(widget.id, it.id)}
+                aria-label="Remove milestone"
+                className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center text-[0.6875rem] text-ink4 hover:text-st-due"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </TimelineList>
+      )}
+      {/* Add-a-milestone and bind-to-a-project share one row: + Milestone on the left, the project
+          picker filling the middle, Link on the right. Linking first merges the freeform entries above
+          into that project's milestones (so they don't vanish behind the bound view), then switches to
+          it. Typing a new name is allowed — the project is created when the first milestone is added. */}
+      <div className="mt-1 flex shrink-0 items-center gap-1" data-help="pinboard-timeline-project">
+        <button
+          onClick={() => onAddItem(widget.id)}
+          className="shrink-0 rounded-[var(--radius-sm)] px-1 py-0.5 text-[0.6875rem] text-accent-text hover:bg-surface"
+        >
+          + Milestone
+        </button>
+        <input
+          list={listId}
+          value={projDraft}
+          onChange={(e) => setProjDraft(e.target.value)}
+          placeholder="Link a project…"
+          className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-1 py-0.5 text-[0.6875rem] text-ink3 focus:border-accent-text focus:outline-none"
+        />
+        <datalist id={listId}>
+          {projects.map((p) => (
+            <option key={p} value={p} />
+          ))}
+        </datalist>
+        <button
+          onClick={() => projDraft.trim() && void linkProject(projDraft.trim())}
+          disabled={!projDraft.trim()}
+          className="shrink-0 rounded-[var(--radius-sm)] px-1 py-0.5 text-[0.6875rem] text-accent-text hover:bg-surface disabled:opacity-40"
+        >
+          Link
+        </button>
+      </div>
+      {/* Dated entries ride the calendar's pinboard overlay by default; this opts THIS timeline out.
+          Deliberately freeform-only: once a timeline is linked to a project its entries are real
+          milestones, and the calendar's own Milestones toggle governs them — so a second, conflicting
+          switch here would just be a lie. */}
+      <label className="mt-1 flex shrink-0 cursor-pointer items-center gap-1 text-[0.625rem] text-ink4">
+        <input
+          type="checkbox"
+          checked={widget.showOnCalendar !== false}
+          onChange={(e) => onChange(widget.id, { showOnCalendar: e.target.checked })}
+          className="accent-[var(--accent)]"
+        />
+        Show on calendar
+      </label>
+      {linkErr && <p className="mt-1 shrink-0 text-[0.625rem] text-st-due">{linkErr}</p>}
+    </div>
+  );
+}
+
+/** One freeform entry as a track column: date on top, a dot on the line, its label below, remove ✕
+ *  — the row-view counterpart of the list row above. */
+function FreeformColumn({
+  widgetId,
+  item,
+  onUpdateItem,
+  onRemoveItem,
+}: {
+  widgetId: string;
+  item: TimelineItem;
+  onUpdateItem: (id: string, itemId: string, patch: { date?: string; label?: string }) => void;
+  onRemoveItem: (id: string, itemId: string) => void;
+}) {
+  return (
+    <div className="flex w-[5.5rem] shrink-0 flex-col items-center gap-1 text-center">
+      <DateField
+        value={item.date ?? ""}
+        onCommit={(iso) => onUpdateItem(widgetId, item.id, { date: iso })}
+        ariaLabel="Timeline date"
+        title={item.date ? formatDateOnly(item.date) : "Set a date"}
+        wrapperClassName="w-full"
+        className="h-6 px-0.5 font-mono text-[0.5625rem] text-ink3"
+      />
+      <span
+        className="h-2.5 w-2.5 shrink-0 rounded-full border"
+        style={{ background: "var(--accent)", borderColor: "var(--panel)" }}
+      />
+      <input
+        value={item.label ?? ""}
+        onChange={(e) => onUpdateItem(widgetId, item.id, { label: e.target.value })}
+        placeholder="what happens"
+        className="w-full rounded-[var(--radius-sm)] bg-transparent px-0.5 text-center text-[0.625rem] text-ink2 focus:outline-none"
+      />
+      <button
+        onClick={() => onRemoveItem(widgetId, item.id)}
+        aria-label="Remove milestone"
+        className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center text-[0.625rem] text-ink4 hover:text-st-due"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}

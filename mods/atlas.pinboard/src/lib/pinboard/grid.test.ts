@@ -1,0 +1,425 @@
+// SPDX-FileCopyrightText: 2026 Bobby Yu
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import { describe, it, expect } from "vitest";
+import {
+  besideRect,
+  boardExtent,
+  clampRect,
+  FOLDER_MIN,
+  folderAtPointer,
+  isFileable,
+  minSize,
+  placeAt,
+  rectContains,
+  rectsOverlap,
+  reflowToWidth,
+  resolveDrop,
+  spaceOf,
+} from "./grid";
+import type { Rect, Widget } from "./types";
+
+// Deterministic id stub so resolveDrop's new-folder id is assertable.
+const stubId = () => "F";
+
+const note = (id: string, rect: Rect, extra: Partial<Widget> = {}): Widget => ({
+  id,
+  kind: "note",
+  rect,
+  ...extra,
+});
+const folder = (id: string, rect: Rect, children: Widget[]): Widget => ({
+  id,
+  kind: "folder",
+  rect,
+  children,
+});
+
+describe("clampRect — per-kind minimum size", () => {
+  it("floors notes/timelines at 4×3 (default min)", () => {
+    expect(clampRect({ x: 0, y: 0, w: 1, h: 1 }, 44, 28)).toMatchObject({ w: 4, h: 3 });
+  });
+
+  it("lets a folder tile stay 3×3 when the folder min is passed", () => {
+    const r = clampRect({ x: 5, y: 5, w: 3, h: 3 }, 44, 28, FOLDER_MIN);
+    expect(r).toEqual({ x: 5, y: 5, w: 3, h: 3 });
+  });
+
+  it("minSize picks the folder floor by kind", () => {
+    expect(minSize("folder")).toEqual({ w: 3, h: 3 });
+    expect(minSize("note")).toEqual({ w: 4, h: 3 });
+  });
+});
+
+describe("reflowToWidth — fixed-width board wraps overflow to new rows", () => {
+  it("leaves widgets that already fit the width exactly where they are", () => {
+    const ws = [note("a", { x: 0, y: 0, w: 4, h: 3 }), note("b", { x: 4, y: 0, w: 4, h: 3 })];
+    expect(reflowToWidth(ws, 10, 20)).toEqual(ws);
+  });
+
+  it("leaves a widget sitting FLUSH with the right edge alone", () => {
+    const ws = [note("a", { x: 6, y: 0, w: 4, h: 3 })];
+    expect(reflowToWidth(ws, 10, 20)).toEqual(ws);
+  });
+
+  it("slides a partly-overhanging widget left instead of teleporting it", () => {
+    // The measured board width comes from a scroller's clientWidth, which EXCLUDES a vertical
+    // scrollbar — so a tab switch that adds or removes one can report a width a cell different.
+    // This used to send a card the user had deliberately placed at the right edge off to the first
+    // free slot near the top-left. Sliding keeps the placement and the size.
+    const out = reflowToWidth(
+      [note("a", { x: 0, y: 0, w: 4, h: 3 }), note("b", { x: 8, y: 0, w: 4, h: 3 })],
+      10,
+      20,
+    );
+    expect(out[0].rect).toEqual({ x: 0, y: 0, w: 4, h: 3 }); // fitter untouched
+    expect(out[1].rect).toEqual({ x: 6, y: 0, w: 4, h: 3 }); // slid flush, NOT re-slotted
+  });
+
+  it("slides even when that overlaps a neighbour — this board allows overlap", () => {
+    const out = reflowToWidth(
+      [note("a", { x: 4, y: 0, w: 4, h: 3 }), note("b", { x: 7, y: 0, w: 4, h: 3 })],
+      9,
+      20,
+    );
+    expect(out[1].rect).toEqual({ x: 5, y: 0, w: 4, h: 3 });
+  });
+
+  it("still wraps a widget whose LEFT edge is off-screen — that one is genuinely lost", () => {
+    const out = reflowToWidth([note("a", { x: 30, y: 0, w: 4, h: 3 })], 10, 20);
+    expect(out[0].rect).toEqual({ x: 0, y: 0, w: 4, h: 3 });
+  });
+
+  it("still re-slots a widget wider than the whole board", () => {
+    const out = reflowToWidth([note("a", { x: 2, y: 0, w: 20, h: 3 })], 10, 20);
+    expect(out[0].rect).toEqual({ x: 0, y: 0, w: 10, h: 3 });
+  });
+
+  it("wraps an overflowing widget onto a new row when the first row is full", () => {
+    const out = reflowToWidth(
+      [
+        note("a", { x: 0, y: 0, w: 4, h: 3 }),
+        note("b", { x: 4, y: 0, w: 4, h: 3 }),
+        note("c", { x: 10, y: 0, w: 4, h: 3 }), // overhangs width 8 → must wrap down
+      ],
+      8,
+      20,
+    );
+    expect(out[2].rect).toEqual({ x: 0, y: 3, w: 4, h: 3 });
+  });
+});
+
+describe("rectContains — a cell point inside a rect", () => {
+  const r: Rect = { x: 4, y: 4, w: 3, h: 3 };
+
+  it("contains its own origin", () => {
+    expect(rectContains(r, { x: 4, y: 4 })).toBe(true);
+  });
+
+  it("contains an interior cell", () => {
+    expect(rectContains(r, { x: 5, y: 6 })).toBe(true);
+  });
+
+  it("is half-open: the far edge belongs to the neighbour", () => {
+    expect(rectContains(r, { x: 6, y: 6 })).toBe(true); // last cell inside
+    expect(rectContains(r, { x: 7, y: 6 })).toBe(false); // x + w
+    expect(rectContains(r, { x: 6, y: 7 })).toBe(false); // y + h
+  });
+
+  it("excludes cells before the origin", () => {
+    expect(rectContains(r, { x: 3, y: 4 })).toBe(false);
+    expect(rectContains(r, { x: 4, y: 3 })).toBe(false);
+  });
+});
+
+describe("folderAtPointer — the pointer decides, not the dragged rect", () => {
+  const size: Rect = { x: 0, y: 0, w: 7, h: 5 };
+
+  it("finds the folder the pointer is inside", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const ws = [f, note("c", size)];
+    expect(folderAtPointer(ws, "c", { x: 5, y: 5 })?.id).toBe("f");
+  });
+
+  it("finds nothing when the pointer is outside every folder", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    expect(folderAtPointer([f, note("c", size)], "c", { x: 20, y: 20 })).toBeUndefined();
+  });
+
+  it("finds nothing without a pointer — an unknown pointer must never file", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    expect(folderAtPointer([f, note("c", size)], "c", null)).toBeUndefined();
+  });
+
+  it("never targets a folder for a moving FOLDER — folders don't nest", () => {
+    const target = folder("t", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const moved = folder("m", { x: 4, y: 4, w: 3, h: 3 }, [note("b", size)]);
+    expect(folderAtPointer([target, moved], "m", { x: 5, y: 5 })).toBeUndefined();
+  });
+
+  it("ignores notes and timelines under the pointer", () => {
+    const ws = [note("a", { x: 4, y: 4, w: 7, h: 5 }), note("c", { x: 20, y: 0, w: 7, h: 5 })];
+    expect(folderAtPointer(ws, "c", { x: 5, y: 5 })).toBeUndefined();
+  });
+
+  it("never targets a folder for a moving TASK LIST — it isn't fileable", () => {
+    // A build from before task lists dropped a whole folder over one child it didn't know, so a task
+    // list stays on the board: an older build can then lose at most that card, never the notes.
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const list = note("t", { x: 20, y: 0, w: 9, h: 8 }, { kind: "tasklist" });
+    expect(folderAtPointer([f, list], "t", { x: 5, y: 5 })).toBeUndefined();
+    expect(isFileable("tasklist")).toBe(false);
+    expect(isFileable("folder")).toBe(false);
+    expect(isFileable("note")).toBe(true);
+    expect(isFileable("timeline")).toBe(true);
+  });
+
+  it("picks the TOP-most folder when two stack (array order is paint order)", () => {
+    const under = folder("under", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const over = folder("over", { x: 4, y: 4, w: 3, h: 3 }, [note("b", size)]);
+    // `over` is later in the array ⇒ painted on top ⇒ it is the one the user sees and aims at.
+    expect(folderAtPointer([under, over, note("c", size)], "c", { x: 5, y: 5 })?.id).toBe("over");
+  });
+});
+
+describe("resolveDrop — file / fold / move", () => {
+  const size: Rect = { x: 4, y: 4, w: 7, h: 5 };
+
+  it("plain-moves when nothing else is at the drop", () => {
+    const widgets = [note("a", { x: 0, y: 0, w: 7, h: 5 }), note("b", { x: 20, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "a", size, 44, 28, stubId, null);
+    expect(out.find((w) => w.id === "a")!.rect).toEqual(size);
+    expect(out).toHaveLength(2);
+  });
+
+  it("returns the SAME array when the landing is unchanged (a click without a move)", () => {
+    const widgets = [note("a", size), note("b", { x: 20, y: 0, w: 7, h: 5 })];
+    expect(resolveDrop(widgets, "a", size, 44, 28, stubId, null)).toBe(widgets);
+  });
+
+  it("folds two identically-placed widgets into a new 3×3 folder", () => {
+    const widgets = [note("a", size), note("b", { x: 0, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "b", size, 44, 28, stubId, null); // drop b exactly onto a
+    expect(out).toHaveLength(1);
+    const f = out[0];
+    expect(f.kind).toBe("folder");
+    expect(f.id).toBe("F");
+    expect(f.rect).toMatchObject({ x: 4, y: 4, w: 3, h: 3 });
+    expect(f.children?.map((c) => c.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("files a widget into the folder under the POINTER", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size), note("b", size)]);
+    const widgets = [f, note("c", { x: 0, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "c", { x: 4, y: 4, w: 7, h: 5 }, 44, 28, stubId, {
+      x: 5,
+      y: 5,
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].children?.map((c) => c.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("lays a filed card out clear of its new siblings, at its exact size", () => {
+    // A child's rect is its spot on the folder's own board, so filing has to choose one: the card's
+    // board rect means nothing in there. Size must survive untouched — that's the folder board's job.
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", { x: 0, y: 0, w: 7, h: 5 })]);
+    const widgets = [f, note("c", { x: 30, y: 20, w: 9, h: 8 })];
+    const out = resolveDrop(widgets, "c", { x: 4, y: 4, w: 9, h: 8 }, 44, 28, stubId, {
+      x: 5,
+      y: 5,
+    });
+    const kids = out[0].children!;
+    expect(kids.map((c) => c.id)).toEqual(["a", "c"]);
+    expect(kids[0].rect).toEqual({ x: 0, y: 0, w: 7, h: 5 }); // sibling untouched
+    expect(kids[1].rect).toMatchObject({ w: 9, h: 8 }); // size preserved exactly
+    expect(rectsOverlap(kids[0].rect, kids[1].rect)).toBe(false); // and it doesn't sit on top of it
+  });
+
+  it("never files or folds a task list — pointer over a folder, or exact twins, it just moves", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const list = note("t", { x: 20, y: 0, w: 9, h: 8 }, { kind: "tasklist" });
+    const filed = resolveDrop([f, list], "t", { x: 4, y: 4, w: 9, h: 8 }, 44, 28, stubId, {
+      x: 5,
+      y: 5,
+    });
+    expect(filed.map((w) => w.id)).toEqual(["f", "t"]);
+    expect(filed[0].children?.map((c) => c.id)).toEqual(["a"]);
+    expect(filed[1].rect).toEqual({ x: 4, y: 4, w: 9, h: 8 });
+
+    // Exact-rect twins fold only when BOTH are fileable: a note dropped on a task list, or a task
+    // list on a note, is a plain move.
+    const twinRect: Rect = { x: 4, y: 4, w: 9, h: 8 };
+    const n = note("n", { x: 0, y: 0, w: 9, h: 8 });
+    const onList = resolveDrop(
+      [note("t", twinRect, { kind: "tasklist" }), n],
+      "n",
+      twinRect,
+      44,
+      28,
+      stubId,
+      null,
+    );
+    expect(onList.every((w) => w.kind !== "folder")).toBe(true);
+    const onNote = resolveDrop(
+      [note("n", twinRect), note("t", { x: 0, y: 0, w: 9, h: 8 }, { kind: "tasklist" })],
+      "t",
+      twinRect,
+      44,
+      28,
+      stubId,
+      null,
+    );
+    expect(onNote.every((w) => w.kind !== "folder")).toBe(true);
+    expect(onNote).toHaveLength(2);
+  });
+
+  it("lays BOTH twins out when folding, so one isn't hidden under the other", () => {
+    // The fold gesture is "drop one card exactly on another", so the two share a rect by definition.
+    // Keeping it would put them at the same spot on the folder's board — one invisible.
+    const widgets = [note("a", size), note("b", { x: 0, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "b", size, 44, 28, stubId, null);
+    const kids = out[0].children!;
+    expect(kids).toHaveLength(2);
+    expect(kids[0].rect).toMatchObject({ w: 7, h: 5 });
+    expect(kids[1].rect).toMatchObject({ w: 7, h: 5 });
+    expect(rectsOverlap(kids[0].rect, kids[1].rect)).toBe(false);
+  });
+
+  it("does NOT file when the rect merely OVERLAPS the folder and the pointer is elsewhere", () => {
+    // The old rule filed on any overlap, so a big note grazing a folder was swallowed by it.
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size), note("b", size)]);
+    const drop: Rect = { x: 6, y: 4, w: 7, h: 5 }; // overlaps the folder's last column
+    const widgets = [f, note("c", { x: 0, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "c", drop, 44, 28, stubId, { x: 11, y: 6 }); // pointer clear of it
+    expect(out).toHaveLength(2);
+    expect(out.find((w) => w.id === "f")!.children?.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(out.find((w) => w.id === "c")!.rect).toEqual(drop);
+  });
+
+  it("stacks folder-onto-folder instead of merging (no nesting, no notes moved)", () => {
+    const target = folder("t", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const moved = folder("m", { x: 20, y: 4, w: 3, h: 3 }, [note("b", size), note("c", size)]);
+    const out = resolveDrop([target, moved], "m", { x: 4, y: 5, w: 3, h: 3 }, 44, 28, stubId, {
+      x: 5,
+      y: 5,
+    });
+    expect(out).toHaveLength(2); // both folders survive
+    expect(out.find((w) => w.id === "t")!.children?.map((c) => c.id)).toEqual(["a"]);
+    expect(out.find((w) => w.id === "m")!.children?.map((c) => c.id)).toEqual(["b", "c"]);
+    expect(out.find((w) => w.id === "m")!.rect).toEqual({ x: 4, y: 5, w: 3, h: 3 });
+  });
+
+  it("nudges a folder dropped EXACTLY on another so the one underneath stays reachable", () => {
+    const target = folder("t", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const moved = folder("m", { x: 20, y: 4, w: 3, h: 3 }, [note("b", size)]);
+    const out = resolveDrop([target, moved], "m", { x: 4, y: 4, w: 3, h: 3 }, 44, 28, stubId, {
+      x: 5,
+      y: 5,
+    });
+    expect(out).toHaveLength(2);
+    expect(out.find((w) => w.id === "t")!.rect).toEqual({ x: 4, y: 4, w: 3, h: 3 });
+    expect(out.find((w) => w.id === "m")!.rect).toEqual({ x: 5, y: 5, w: 3, h: 3 });
+  });
+
+  it("never folds a NOTE with a same-rect folder into a new folder", () => {
+    // Folders are resizable, so a folder and a note can share a rect exactly. Folding them would
+    // destroy the folder shell and swallow its notes — the twin rule is for loose cards only.
+    const f = folder("f", size, [note("a", { x: 0, y: 0, w: 7, h: 5 })]);
+    const widgets = [f, note("b", { x: 0, y: 0, w: 7, h: 5 })];
+    const out = resolveDrop(widgets, "b", size, 44, 28, stubId, null); // pointer not over it
+    expect(out).toHaveLength(2);
+    expect(out.find((w) => w.id === "f")!.children?.map((c) => c.id)).toEqual(["a"]);
+    expect(out.find((w) => w.id === "b")!.rect).toEqual(size);
+  });
+
+  it("never folds a moving FOLDER with a same-rect note", () => {
+    const widgets = [note("a", size), folder("m", { x: 20, y: 0, w: 7, h: 5 }, [note("b", size)])];
+    const out = resolveDrop(widgets, "m", size, 44, 28, stubId, null);
+    expect(out).toHaveLength(2);
+    expect(out.find((w) => w.id === "m")!.kind).toBe("folder");
+    expect(out.find((w) => w.id === "m")!.rect).toEqual(size);
+  });
+
+  it("returns the list unchanged when the moving id is absent", () => {
+    const widgets = [note("a", size)];
+    expect(resolveDrop(widgets, "ghost", size, 44, 28, stubId, null)).toBe(widgets);
+  });
+});
+
+describe("the space a board has, and its extent", () => {
+  // 1000×600 px less a 48 px inset: 39 columns (952 / 24) and 23 rows (552 / 24); with a 12 px
+  // scrollbar across the other axis, 39 columns still (940 / 24) and 22 rows (540 / 24).
+  const space = spaceOf(1000, 600, 48);
+
+  it("counts whole cells inside the inset, with and without a scrollbar's width", () => {
+    expect(space).toEqual({ cols: 39, rows: 23, barCols: 39, barRows: 22 });
+    // 12 px of slack: the scrollbar takes the last column.
+    expect(spaceOf(1008, 600, 48)).toEqual({ cols: 40, rows: 23, barCols: 39, barRows: 22 });
+    // Never below one cell.
+    expect(spaceOf(0, 0, 48)).toEqual({ cols: 1, rows: 1, barCols: 1, barRows: 1 });
+  });
+
+  it("is the space when the widgets fit, whatever the page shows", () => {
+    expect(boardExtent(space, [])).toEqual({ cols: 39, rows: 23 });
+    expect(boardExtent(space, [note("a", { x: 35, y: 20, w: 4, h: 3 })])).toEqual({
+      cols: 39,
+      rows: 23,
+    });
+  });
+
+  it("grows to the widgets, leaving the scrollbar's room on the other axis", () => {
+    const wide = spaceOf(1008, 600, 48);
+    // Below the bottom: it scrolls down, so the columns lose the scrollbar's width.
+    expect(boardExtent(wide, [note("a", { x: 0, y: 22, w: 4, h: 4 })])).toEqual({
+      cols: 39,
+      rows: 26,
+    });
+    // Past the right: it scrolls across, so the rows do.
+    expect(boardExtent(space, [note("a", { x: 37, y: 0, w: 4, h: 3 })])).toEqual({
+      cols: 41,
+      rows: 22,
+    });
+    // Across that pushes a widget on the last row past the bottom: both scroll.
+    expect(
+      boardExtent(wide, [
+        note("a", { x: 37, y: 0, w: 4, h: 3 }),
+        note("b", { x: 0, y: 20, w: 4, h: 3 }),
+      ]),
+    ).toEqual({ cols: 41, rows: 23 });
+  });
+
+  it("takes a plain cols×rows as the space with no scrollbar to allow for", () => {
+    expect(boardExtent({ cols: 10, rows: 5 }, [note("a", { x: 0, y: 4, w: 2, h: 3 })])).toEqual({
+      cols: 10,
+      rows: 7,
+    });
+  });
+});
+
+describe("placeAt (a new card where the right-click menu opened)", () => {
+  const board = [note("a", { x: 0, y: 0, w: 7, h: 5 })];
+  it("puts it at the spot when that's clear", () => {
+    expect(placeAt(board, 7, 5, 40, 20, { x: 10, y: 3 })).toEqual({ x: 10, y: 3, w: 7, h: 5 });
+  });
+  it("pulls it left to fit the board's width", () => {
+    expect(placeAt(board, 7, 5, 40, 20, { x: 38, y: 8 })).toEqual({ x: 33, y: 8, w: 7, h: 5 });
+  });
+  it("takes the first free slot when the spot overlaps a card, or when there's no spot", () => {
+    expect(placeAt(board, 7, 5, 40, 20, { x: 2, y: 2 })).toEqual({ x: 7, y: 0, w: 7, h: 5 });
+    expect(placeAt(board, 7, 5, 40, 20)).toEqual({ x: 7, y: 0, w: 7, h: 5 });
+  });
+  it("may run past the bottom: the board grows to hold it", () => {
+    expect(placeAt(board, 7, 5, 40, 20, { x: 0, y: 18 })).toEqual({ x: 0, y: 18, w: 7, h: 5 });
+  });
+});
+
+describe("besideRect", () => {
+  const a = note("a", { x: 0, y: 0, w: 7, h: 5 });
+  it("goes right of the card, else under it, else nowhere", () => {
+    expect(besideRect([a], a.rect, 7, 5, 40)).toEqual({ x: 7, y: 0, w: 7, h: 5 });
+    expect(besideRect([a], a.rect, 7, 5, 10)).toEqual({ x: 0, y: 5, w: 7, h: 5 });
+    const b = note("b", { x: 7, y: 0, w: 7, h: 5 });
+    const c = note("c", { x: 0, y: 5, w: 7, h: 5 });
+    expect(besideRect([a, b, c], a.rect, 7, 5, 40)).toBeNull();
+  });
+});

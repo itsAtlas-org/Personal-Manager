@@ -134,3 +134,81 @@ describe("ThemeProvider with a ThemeStore", () => {
     quiet.mockRestore();
   });
 });
+
+describe("a ThemeStore that changes under the provider (a frame's)", () => {
+  /** A store the test pushes blobs through, with PM's own variables. */
+  function pushing() {
+    const subs = new Set<(blob: string | null) => void>();
+    let vars: Record<string, string> | null = null;
+    return {
+      get: vi.fn(async () => null as string | null),
+      set: vi.fn(async () => {}),
+      subscribe: (cb: (blob: string | null) => void) => {
+        subs.add(cb);
+        return () => void subs.delete(cb);
+      },
+      vars: () => vars,
+      push: (blob: string | null, next?: Record<string, string> | null) => {
+        if (next !== undefined) vars = next;
+        for (const cb of [...subs]) cb(blob);
+      },
+      live: () => subs.size,
+    };
+  }
+
+  it("applies each blob it is told of, and stops listening when the provider goes", async () => {
+    const s = pushing();
+    const { unmount } = render(
+      <ThemeProvider store={s}>
+        <Show />
+      </ThemeProvider>,
+    );
+    await settle();
+    expect(s.live()).toBe(1);
+    await act(async () => s.push(JSON.stringify({ system: "terminal", modePref: "light" })));
+    expect(screen.getByRole("button").textContent).toMatch(/^terminal:light:/);
+    unmount();
+    expect(s.live()).toBe(0);
+  });
+
+  it("sets the store's own variables on the root after the provider's, and again when they change", async () => {
+    const s = pushing();
+    document.documentElement.style.removeProperty("--ink3");
+    render(
+      <ThemeProvider store={s}>
+        <Show />
+      </ThemeProvider>,
+    );
+    await settle();
+    const derived = document.documentElement.style.getPropertyValue("--ink3");
+    expect(derived).not.toBe("");
+    // The same axes, new variables: nothing in the blob changes, the variables do.
+    await act(async () => s.push(null, { "--ink3": "oklch(0.9 0 0)" }));
+    expect(document.documentElement.style.getPropertyValue("--ink3")).toBe("oklch(0.9 0 0)");
+    await act(async () => s.push(null, { "--ink3": "oklch(0.8 0 0)" }));
+    expect(document.documentElement.style.getPropertyValue("--ink3")).toBe("oklch(0.8 0 0)");
+  });
+
+  it("keeps the theme it has when a pushed blob is not JSON", async () => {
+    const s = pushing();
+    render(
+      <ThemeProvider store={s}>
+        <Show />
+      </ThemeProvider>,
+    );
+    await settle();
+    await act(async () => s.push("{nope"));
+    expect(screen.getByRole("button").textContent).toMatch(/^slate:dark:/);
+  });
+
+  it("a store with neither is core's: nothing is subscribed and nothing is overridden", async () => {
+    const s = store(null);
+    render(
+      <ThemeProvider store={s}>
+        <Show />
+      </ThemeProvider>,
+    );
+    await settle();
+    expect(screen.getByRole("button").textContent).toMatch(/^slate:dark:/);
+  });
+});
