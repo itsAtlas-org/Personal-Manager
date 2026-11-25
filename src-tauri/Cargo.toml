@@ -138,7 +138,9 @@ sysinfo = { version = "0.40", default-features = false, features = ["system", "d
 # OpenRouter streaming chat client. rustls keeps TLS independent of SQLCipher's crypto.
 # `blocking` is used by python_fetch (macOS interpreter download) from inside spawn_blocking.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "blocking"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+# `net` and `io-util` are the MCP server's local socket and its bounded line reader (`mods::mcp`);
+# mio and socket2 are already in the lock through tauri and reqwest, so no package is added.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util"] }
 futures-util = "0.3"
 tauri-plugin-single-instance = "2"
 

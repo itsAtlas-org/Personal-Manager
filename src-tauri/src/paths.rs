@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 /// Read a dev-only env override. Honoured only in debug builds; a release build
 /// ignores it, so a poisoned environment can't relocate the store or point the
 /// sidecar interpreter at an attacker-chosen script directory.
-fn dev_override(var: &str) -> Option<std::ffi::OsString> {
+pub(crate) fn dev_override(var: &str) -> Option<std::ffi::OsString> {
     #[cfg(debug_assertions)]
     {
         std::env::var_os(var)
@@ -116,15 +116,28 @@ fn guard_outcome(
 /// (`org.itsatlas.pm`) — the identifier stays fixed because the keychain service is
 /// keyed to it (`secrets.rs`), so it must never be renamed.
 pub fn data_dir(app: &AppHandle) -> Result<PathBuf> {
-    let dir = match data_dir_override() {
-        Some(value) => PathBuf::from(value),
-        None => app
-            .path()
+    let dir = resolve_data_dir(data_dir_override(), || {
+        app.path()
             .local_data_dir()
-            .map_err(|e| Error::Other(format!("could not resolve local data dir: {e}")))?
-            .join("Personal Manager"),
-    };
+            .map_err(|e| Error::Other(format!("could not resolve local data dir: {e}")))
+    })?;
     prepare_data_dir(dir, data_dir_is_purged())
+}
+
+/// The data folder's rule, pure: the dev override when there is one (set and non-empty, the same
+/// rule as [`data_dir_override`]: an empty `PM_DATA_DIR` is no override), else `"Personal Manager"`
+/// inside the machine-local base. [`data_dir`] and the `--mcp` shim (`mcp_shim`, which runs before
+/// any app exists and so can't ask Tauri for the base) both go through it, so the folder the shim
+/// looks in is the folder PM made. The shim never runs [`guard_real_data_folder`]: it only reads the
+/// folder's path, and opens nothing in it.
+pub(crate) fn resolve_data_dir<E>(
+    dev: Option<std::ffi::OsString>,
+    local_base: impl FnOnce() -> std::result::Result<PathBuf, E>,
+) -> std::result::Result<PathBuf, E> {
+    match non_empty_override(dev) {
+        Some(value) => Ok(PathBuf::from(value)),
+        None => Ok(local_base()?.join("Personal Manager")),
+    }
 }
 
 /// Whether `PM_DATA_DIR` points this dev build at another data folder, usually a copy of the real

@@ -1718,7 +1718,11 @@ pub fn after_settle(app: &AppHandle, writes: impl FnOnce() -> bool) {
     let Some(runtime) = app.try_state::<ModRuntime>() else {
         return;
     };
-    if settle_registry(runtime.inner(), writes) {
+    let writes = settle_registry(runtime.inner(), writes);
+    // The MCP socket follows the same answer: up for the writer's open vault (when this device's
+    // file says on), down for anything else. After the registry's step, outside the ledger lock.
+    super::mcp::supervisor::after_settle(app, writes);
+    if writes {
         after_writer_open(app);
         // A pilot owed to this store (a marker; nothing without one) with the index held on this
         // machine. After the load, not inside it: `after_writer_open` returns early for a store with
@@ -1745,6 +1749,8 @@ fn settle_registry(runtime: &ModRuntime, writes: impl FnOnce() -> bool) -> bool 
 /// The store closed under this instance (another profile became the writer, or a vault command
 /// took the connection): serve nothing.
 pub fn on_store_closed(app: &AppHandle) {
+    // The MCP socket goes with the store: its connections end and the listener comes down.
+    super::mcp::supervisor::on_store_closed(app);
     if let Some(runtime) = app.try_state::<ModRuntime>() {
         {
             let _ledger = runtime.ledger_lock();
@@ -1758,6 +1764,8 @@ pub fn on_store_closed(app: &AppHandle) {
 /// For "Remove PM data" (`wipe.rs`): nothing is served, and no ledger change runs, while the guard
 /// lives. Synchronous only: drop it before any `.await`.
 pub fn quiesce(app: &AppHandle) -> Option<MutexGuard<'_, ()>> {
+    // Nothing is served over the MCP socket either, and its folder is about to go.
+    super::mcp::supervisor::shutdown(app);
     let runtime: &ModRuntime = app.try_state::<ModRuntime>()?.inner();
     let guard = runtime.ledger_lock();
     runtime.clear();

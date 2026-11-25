@@ -83,6 +83,9 @@ mod localfolder;
 mod locations;
 mod lock_session;
 mod made_by;
+// `PM --mcp`: the pipe a connected app's MCP client talks through. Answered by `main` before `run()`.
+mod mcp_shim;
+pub use mcp_shim::run_mcp_shim;
 mod microsoft;
 mod milestones;
 mod model_gateway;
@@ -2270,6 +2273,9 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.calendar_edit.abandon_held_deletes();
                 }
+                // The MCP socket and its pid file go by hand: `process::exit` follows, so no
+                // destructor runs, and a leftover socket would only be recovered at the next start.
+                mods::mcp::supervisor::shutdown(app);
                 if paths::data_dir_is_purged() {
                     wipe::final_sweep_after_purge(app);
                 }

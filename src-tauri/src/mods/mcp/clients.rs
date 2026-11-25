@@ -129,6 +129,12 @@ fn parse_token(token: &str) -> Option<(i64, String)> {
     Some((id, sha256_hex(&[token.as_bytes()])))
 }
 
+/// Whether `token` is shaped like one PM mints, so the server can turn a connection away before it
+/// costs the DB guard.
+pub(super) fn looks_like_token(token: &str) -> bool {
+    parse_token(token).is_some()
+}
+
 /// Make an app: a row, a token and this device's pairing. Returns the app's id and its token, which
 /// this call alone ever holds. `scopes` must be a non-empty set of offered ids; `name` is tidied like
 /// any line of the person's words and must be 1 to [`NAME_MAX_CHARS`] characters. At most
@@ -304,6 +310,22 @@ pub fn verify(conn: &Connection, here: &Here, token: &str) -> Option<VerifiedCli
         return None;
     }
     pairing_matches(conn, &state.clients, id, Some(&hash))
+}
+
+/// Whether this device holds a pairing for the app `token` names, switched on, with that token's hash:
+/// the cheap half of [`verify`], one small file read and no store. The server asks it first, so a guess
+/// at a token (an unknown id, a wrong secret) costs the store's single connection guard nothing. A
+/// `true` proves nothing by itself: [`verify`] still checks the row.
+pub fn pair_matches_token(here: &Here, token: &str) -> bool {
+    let Some((id, hash)) = parse_token(token) else {
+        return false;
+    };
+    let state = device::device_state(here);
+    state.on
+        && state
+            .clients
+            .iter()
+            .any(|pair| pair.id == id && ct_eq(&hash, &pair.hash))
 }
 
 /// [`verify`] for an app a connection already authenticated as: the same checks, with nothing

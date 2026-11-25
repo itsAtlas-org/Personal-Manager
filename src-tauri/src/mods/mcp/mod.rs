@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The read-only MCP server's core (Mods spec 1.16, PR C3): everything that decides what a connected
-//! app may ask and be told, with no transport. The socket feeds [`jsonrpc::handle`] one line at a
-//! time, bound to the app that authenticated and the store it authenticated against ([`Bound`]).
+//! The read-only MCP server (Mods spec 1.16, PR C3): everything that decides what a connected app may
+//! ask and be told, and the local socket that carries it. A connection ([`serve`]) feeds
+//! [`jsonrpc::handle`] one line at a time, bound to the app that authenticated and the store it
+//! authenticated against ([`Bound`]).
 //!
+//! - [`transport`]: the Unix socket, in a verified 0700 folder.
+//! - [`serve`]: one connection's rules (first frame, caps, idle clock).
+//! - [`supervisor`]: when the socket exists, and the hooks that close it.
 //! - [`device`]: this computer's own record of whether the server is on for a vault and which apps it
 //!   paired (a file, never the store: a restore or a shared vault can never switch it on).
 //! - [`clients`]: minting, listing, revoking and verifying an app.
@@ -44,9 +48,9 @@
 //! projection and one core per call, and `Authorised`, `calls::read` and `ModFacts` are never reused
 //! for an app.
 
-// Built before its callers: the socket transport and its lifecycle and the commands behind Settings
-// are what call most of this, and until they land only the restore reset (`device::all_off`)
-// does. Tests cover every function.
+// Built before its callers: the commands behind Settings (slice M1c) are what call the clients' and
+// the device file's functions, and until they land only the restore reset (`device::all_off`) and the
+// socket's connections (`serve`) do. Tests cover every function.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::io;
@@ -64,7 +68,10 @@ pub mod clients;
 pub mod device;
 pub mod jsonrpc;
 pub mod limits;
+pub mod serve;
+pub mod supervisor;
 pub mod tools;
+pub mod transport;
 
 #[cfg(test)]
 mod clients_tests;
@@ -75,7 +82,13 @@ mod dispatch_tests;
 #[cfg(test)]
 mod jsonrpc_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
+mod serve_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod transport_tests;
 
 use clients::{LastUsed, VerifiedClient};
 
@@ -131,12 +144,13 @@ impl From<io::Error> for Fault {
 }
 
 /// What the server keeps for the life of the process: where this computer's files are, the per-app
-/// limiter and the clock of `last_used_at`. The socket transport and its lifecycle are built around it.
+/// limiter, the clock of `last_used_at`, and the listener with its connections ([`supervisor`]).
 #[derive(Debug)]
 pub struct Supervisor {
     data_dir: PathBuf,
     limits: limits::McpLimits,
     last_used: LastUsed,
+    life: supervisor::Lifecycle,
 }
 
 impl Supervisor {
@@ -145,7 +159,13 @@ impl Supervisor {
             data_dir,
             limits: limits::McpLimits::default(),
             last_used: LastUsed::default(),
+            life: supervisor::Lifecycle::default(),
         }
+    }
+
+    /// The listener and its connections.
+    pub fn life(&self) -> &supervisor::Lifecycle {
+        &self.life
     }
 
     pub fn data_dir(&self) -> &Path {
