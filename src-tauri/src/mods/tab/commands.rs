@@ -41,6 +41,7 @@ use super::listing::{self, ModDto};
 use super::stage::{Stage, Staged, Trust};
 use super::status::{self, SafetyStatus};
 use super::uninstall::{self, UninstallPreview, Uninstalled};
+use super::uninstall_notes;
 use crate::mods::ai as money;
 use crate::mods::api::events::{self as mod_events, SuspendReason};
 use crate::mods::api::grants;
@@ -518,7 +519,102 @@ pub async fn repair_mod(webview: Webview, mod_id: String) -> Result<Repaired> {
 pub async fn uninstall_preview(webview: Webview, mod_id: String) -> Result<UninstallPreview> {
     let id = parse_id(&mod_id)?;
     blocking(&webview, move |app| {
-        with_existing(app, |ledger| uninstall::preview(ledger, &id))
+        let mut preview = with_existing(app, |ledger| uninstall::preview(ledger, &id))?;
+        // The Pinboard's notes, when this is the Pinboard (the ledger's read is over; the plan takes
+        // the store's guard for its own).
+        preview.notes =
+            uninstall_notes::plan(&app.state::<AppState>(), &id).map_err(ModsError::internal)?;
+        Ok(preview)
+    })
+    .await
+}
+
+/// The Pinboard's notes as the uninstall dialog would keep them: what still needs saving, what is
+/// saved already, what can never be a document, and whether the document engine is set up. `None`
+/// for any other mod. Read it again when the person presses Uninstall: the board may have changed.
+#[tauri::command]
+pub async fn uninstall_notes_plan(
+    webview: Webview,
+    mod_id: String,
+) -> Result<Option<uninstall_notes::NotesPlan>> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        uninstall_notes::plan(&app.state::<AppState>(), &id).map_err(ModsError::internal)
+    })
+    .await
+}
+
+/// Save one of the Pinboard's notes as a document (it lands reviewed) and read the document back. The
+/// page calls this note by note, so it has progress and a Cancel, and goes on to the uninstall only
+/// when every call answered ok. The page names the note by its key only; what is saved is what the
+/// board holds now.
+#[tauri::command]
+pub async fn uninstall_save_note(
+    webview: Webview,
+    mod_id: String,
+    key: String,
+) -> Result<uninstall_notes::NoteSaved> {
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        let state = app.state::<AppState>();
+        uninstall_notes::save_one(&state, &uninstall_notes::Engine(&state), &id, &key)
+            .map_err(ModsError::from)
+    })
+    .await
+}
+
+/// Write the Pinboard's notes as `.md` files (`notes`) and its whole board as one `.json` file
+/// (`board`) into a folder the person picks here (`None`: they cancelled). For when the document
+/// engine is not set up, and as the plain-text safety copy. Nothing in the folder is overwritten.
+#[tauri::command]
+pub async fn uninstall_export_files(
+    webview: Webview,
+    mod_id: String,
+    notes: bool,
+    board: bool,
+) -> Result<Option<uninstall_notes::ExportOutcome>> {
+    use tauri_plugin_dialog::DialogExt;
+    let id = parse_id(&mod_id)?;
+    blocking(&webview, move |app| {
+        if !notes && !board {
+            return Err(ModsError::bad_request("Nothing was asked for."));
+        }
+        let state = app.state::<AppState>();
+        // Read first and drop the guard: the folder dialog below waits on a person.
+        let stored = {
+            let conn = state.conn().map_err(|_| ModsError::no_store())?;
+            if !uninstall_notes::is_pinboard(&conn, &id).map_err(ModsError::internal)? {
+                return Err(uninstall_notes::Refusal::NotThePinboard.into());
+            }
+            crate::pinboard_legacy::stored_board(&conn).map_err(ModsError::internal)?
+        };
+        let Some(stored) = stored else {
+            return Err(ModsError::bad_request("There is no board to save."));
+        };
+        let picked = app
+            .dialog()
+            .file()
+            .set_title("Choose a folder for your Pinboard")
+            .blocking_pick_folder();
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let folder = picked
+            .into_path()
+            .map_err(|_| ModsError::bad_request("PM couldn't read the folder you chose."))?;
+        if !folder.is_dir() {
+            return Err(ModsError::bad_request("That isn't a folder."));
+        }
+        let notes_list = notes.then(|| {
+            uninstall_notes::exportable(crate::pinboard_legacy::pinboard_notes(&stored.text()))
+        });
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        Ok(Some(uninstall_notes::export_into(
+            &folder,
+            &date,
+            notes_list.as_deref(),
+            board.then_some(stored.bytes.as_slice()),
+        )))
     })
     .await
 }

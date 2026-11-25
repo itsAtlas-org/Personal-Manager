@@ -149,8 +149,11 @@ describe("App's routing", () => {
     expect(route).toBeGreaterThan(0);
     expect(chat).toBeGreaterThan(route);
     expect(appSource).toContain("<ModsRoute");
-    // The old stub that drew nothing for a mod view is gone.
-    expect(appSource).not.toMatch(/isModView\(view\) \? null/);
+    // A mod's own view draws nothing from this chain: `ModTabHost` keeps the frames mounted beside it
+    // (K5, so a tab switch can let a frame flush). That arm must still come before the chat.
+    const modArm = appSource.indexOf("isModView(view) ? null");
+    expect(modArm).toBeGreaterThan(0);
+    expect(chat).toBeGreaterThan(modArm);
   });
 
   it("asks App's fallback the same question the sidebar answers: nav entries, then reachable", () => {

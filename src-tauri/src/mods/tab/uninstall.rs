@@ -49,6 +49,10 @@ pub struct UninstallPreview {
     pub stays: Stays,
     /// The safety list removed it: the dialog says why it is being uninstalled.
     pub removed_by_safety_list: bool,
+    /// The Pinboard's notes, when this is the first-party Pinboard: the dialog offers to keep them
+    /// first (D9, [`super::uninstall_notes`]). Filled by the command, which holds the app state the
+    /// plan needs; `None` for every other mod.
+    pub notes: Option<super::uninstall_notes::NotesPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -209,6 +213,7 @@ pub fn preview<S: LedgerStore>(ledger: &Ledger<'_, S>, id: &ModId) -> Result<Uni
         leaves: stored.leaves,
         stays: stored.stays,
         removed_by_safety_list: stored.reason.as_deref() == Some(store::REASON_BLACKLIST_REMOVED),
+        notes: None,
     })
 }
 

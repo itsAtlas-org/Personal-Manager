@@ -525,3 +525,132 @@ fn the_command_is_registered_and_wrapped() {
     let ipc = include_str!("../../../src/lib/ipc.ts");
     assert!(ipc.contains("invoke<PinboardEntry[]>(\"calendar_pinboard_entries\")"));
 }
+
+// ---- the notes (K5b): the same fixtures, read for the notes an uninstall keeps ----
+
+fn note_of(v: &Value) -> LegacyNote {
+    LegacyNote {
+        key: v["key"].as_str().unwrap().to_owned(),
+        title: v["title"].as_str().unwrap().to_owned(),
+        text: v["text"].as_str().unwrap().to_owned(),
+        recorded_current: v["recordedCurrent"].as_bool().unwrap(),
+    }
+}
+
+#[test]
+fn every_shared_fixture_with_notes_gives_the_notes_the_uninstall_keeps() {
+    let fixtures: Value = serde_json::from_str(FIXTURES).unwrap();
+    let mut checked = 0;
+    for c in fixtures["cases"].as_array().unwrap() {
+        let Some(expected) = c.get("expectedNotes") else {
+            continue;
+        };
+        let expected: Vec<LegacyNote> = expected.as_array().unwrap().iter().map(note_of).collect();
+        let raws: Vec<String> = match c.get("raws") {
+            Some(r) => r
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_owned())
+                .collect(),
+            None => vec![expand(&c["board"]).to_string()],
+        };
+        for raw in raws {
+            assert_eq!(
+                pinboard_notes(&raw),
+                expected,
+                "{}",
+                c["name"].as_str().unwrap()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 8, "the note fixtures were read ({checked})");
+}
+
+#[test]
+fn the_notes_of_a_board_never_depend_on_its_timelines_and_the_entries_never_on_its_notes() {
+    // The same board feeds both readers; neither is affected by what only the other reads.
+    let raw = json!({"version": 1, "widgets": [
+        {"id": "n1", "kind": "note", "text": "a note"},
+        {"id": "t1", "kind": "timeline", "items": [{"id": "i1", "date": "2026-12-01", "label": "x"}]},
+    ]})
+    .to_string();
+    assert_eq!(pinboard_notes(&raw).len(), 1);
+    assert_eq!(
+        pinboard_entries(&raw),
+        vec![entry("t1:i1", "2026-12-01", "x")]
+    );
+}
+
+/// The Pinboard's `cheapHash`, from the TypeScript function run in node over these strings.
+#[test]
+fn the_cheap_hash_is_the_pinboards_own() {
+    for (text, hash) in [
+        ("", "45h"),
+        ("hello", "2y0dev"),
+        ("- a\n- b", "169yung"),
+        ("\u{e9}\u{1F680} note", "o0ezb5"),
+        (&"a".repeat(500), "k40eo5"),
+    ] {
+        assert_eq!(cheap_hash(text), hash, "{text:?}");
+    }
+}
+
+fn install_mod_row(conn: &Connection) {
+    insert_mod(
+        conn,
+        &ModRow::signed(PINBOARD_MOD_ID, "first", &["storage"]),
+    );
+}
+
+fn put_board_row(conn: &Connection, value: &str) {
+    conn.execute(
+        "INSERT OR REPLACE INTO mod_kv(mod_id, key, class, value) VALUES (?1, 'board', 'content', ?2)",
+        params![PINBOARD_MOD_ID, value],
+    )
+    .unwrap();
+}
+
+#[test]
+fn before_the_move_the_stored_board_is_the_old_row_and_its_bytes_are_exact() {
+    let (_dir, conn) = store();
+    install_mod_row(&conn);
+    assert_eq!(stored_board(&conn).unwrap(), None, "no row");
+    put_board_row(&conn, "{\"from\":\"the mod\"}");
+    let raw = "{\"version\":1,\n  \"widgets\":[] }  \u{e9}";
+    crate::db::set_setting(&conn, BOARD_KEY, raw).unwrap();
+    let got = stored_board(&conn).unwrap().unwrap();
+    assert_eq!(got.source, BoardSource::Legacy);
+    assert_eq!(
+        got.bytes,
+        raw.as_bytes(),
+        "the bytes as stored, never re-written"
+    );
+}
+
+#[test]
+fn after_the_move_the_stored_board_is_the_mods_and_only_the_mods() {
+    let (_dir, conn) = store();
+    install_mod_row(&conn);
+    crate::db::set_setting(&conn, BOARD_KEY, "{\"legacy\":true}").unwrap();
+    mark_moved(&conn);
+    assert_eq!(
+        stored_board(&conn).unwrap(),
+        None,
+        "a moved store whose mod wrote no board has none: the frozen row is not a fallback"
+    );
+    put_board_row(&conn, "{\"version\":1,\"widgets\":[]}");
+    let got = stored_board(&conn).unwrap().unwrap();
+    assert_eq!(got.source, BoardSource::Mod);
+    assert_eq!(got.bytes, b"{\"version\":1,\"widgets\":[]}");
+}
+
+#[test]
+fn a_blank_board_row_is_no_board() {
+    let (_dir, conn) = store();
+    for raw in ["", "  ", "\n\t"] {
+        crate::db::set_setting(&conn, BOARD_KEY, raw).unwrap();
+        assert_eq!(stored_board(&conn).unwrap(), None, "{raw:?}");
+    }
+}

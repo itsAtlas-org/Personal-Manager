@@ -11,7 +11,7 @@
 // dialog, or the Mods tab, is still on screen, and its follow-up (forgetting the mod's tab placement
 // and folds on this device, saying what was removed) belongs to the action, not to this component.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { uninstallPreview } from "../../lib/ipc";
 import { formatBytes } from "../../lib/format";
 import { clearModError, useModActions } from "../../lib/modActions";
@@ -21,7 +21,9 @@ import { Button, Callout, Dialog } from "../ui";
 import { ModName } from "./ModName";
 import { modText } from "./modText";
 import { uninstallAction } from "./uninstallActions";
+import { keepChoiceOf, keepNotes, keptSentence, type KeepResult } from "./uninstallKeep";
 import { plural, uninstallNote } from "./uninstallNote";
+import { NotesChoices, NotesStopped } from "./UninstallNotes";
 
 export function UninstallDialog({
   modId,
@@ -40,6 +42,11 @@ export function UninstallDialog({
   const [preview, setPreview] = useState<UninstallPreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [alsoDelete, setAlsoDelete] = useState(false);
+  // The Pinboard's notes (D9): both start on, and only the Pinboard has them to offer.
+  const [saveNotes, setSaveNotes] = useState(true);
+  const [saveBoard, setSaveBoard] = useState(true);
+  const [phase, setPhase] = useState<KeepPhase>({ kind: "idle" });
+  const stopRef = useRef(false);
   const { busy, errors } = useModActions();
 
   useEffect(() => {
@@ -59,7 +66,8 @@ export function UninstallDialog({
     };
   }, [modId]);
 
-  const working = busy.has(modId);
+  const keeping = phase.kind === "keeping";
+  const working = busy.has(modId) || keeping;
   const error = errors.get(modId) ?? null;
   // The row's sentence says why the safety list removed it; the preview carries no reason.
   const { rows } = useModRows();
@@ -99,16 +107,35 @@ export function UninstallDialog({
   if (leaves.navTab) goes.push(`Its tab in the sidebar, “${modText(leaves.navTab)}”`);
   if (leaves.calendarOverlay) goes.push("Its calendar overlay");
 
-  function confirm() {
-    if (!preview) return;
-    const name = modText(preview.name);
-    void uninstallAction(modId, name, made > 0 && alsoDelete).then((r) => {
+  function uninstall(name: string, kept: string | null) {
+    void uninstallAction(modId, name, made > 0 && alsoDelete, false, kept).then((r) => {
       void refresh();
       if (r.ok) {
-        onDone?.(uninstallNote(name, r.value));
+        onDone?.(uninstallNote(name, r.value, kept));
         onClose();
       }
     });
+  }
+
+  // Keep what the person asked to keep, and only then uninstall. The keeping never uninstalls: a
+  // failure, a Cancel between notes or a closed folder dialog ends here with nothing deleted.
+  async function confirm() {
+    if (!preview || working) return;
+    const name = modText(preview.name);
+    const choice = keepChoiceOf(preview.notes, saveNotes, saveBoard);
+    if (choice.notes === "none" && !choice.board) return uninstall(name, null);
+    stopRef.current = false;
+    setPhase({ kind: "keeping", done: 0, total: null });
+    const result = await keepNotes(modId, choice, {
+      onProgress: (done, total) => setPhase({ kind: "keeping", done, total }),
+      cancelled: () => stopRef.current,
+    });
+    if (result.kind === "stopped") {
+      setPhase({ kind: "stopped", result });
+      return;
+    }
+    setPhase({ kind: "idle" });
+    uninstall(name, keptSentence(result));
   }
 
   return (
@@ -125,11 +152,26 @@ export function UninstallDialog({
       widthClassName="max-w-md"
       footer={
         <>
-          <Button variant="tertiary" onClick={onClose} disabled={working} data-autofocus>
-            Cancel
-          </Button>
-          <Button variant="danger" onClick={confirm} disabled={working}>
-            {working ? "Uninstalling…" : "Uninstall"}
+          {keeping ? (
+            // Stops between notes: the note being saved finishes, nothing is uninstalled.
+            <Button
+              variant="tertiary"
+              onClick={() => {
+                stopRef.current = true;
+                setPhase((p) => (p.kind === "keeping" ? { ...p, stopping: true } : p));
+              }}
+              disabled={phase.stopping === true}
+              data-autofocus
+            >
+              {phase.stopping ? "Stopping…" : "Cancel"}
+            </Button>
+          ) : (
+            <Button variant="tertiary" onClick={onClose} disabled={working} data-autofocus>
+              Cancel
+            </Button>
+          )}
+          <Button variant="danger" onClick={() => void confirm()} disabled={working}>
+            {keeping ? "Saving your notes…" : working ? "Uninstalling…" : "Uninstall"}
           </Button>
         </>
       }
@@ -200,8 +242,34 @@ export function UninstallDialog({
             and uninstalling never deletes them.
           </p>
         )}
+        {preview.notes && (
+          <NotesChoices
+            plan={preview.notes}
+            saveNotes={saveNotes}
+            onSaveNotes={setSaveNotes}
+            saveBoard={saveBoard}
+            onSaveBoard={setSaveBoard}
+            disabled={working}
+          />
+        )}
+        {phase.kind === "keeping" && (
+          <p className="text-ink" role="status">
+            {phase.total === null
+              ? "Getting your notes ready…"
+              : phase.total === 0
+                ? "Writing your files…"
+                : `Saving ${Math.min(phase.done + 1, phase.total)} of ${phase.total}`}
+          </p>
+        )}
+        {phase.kind === "stopped" && <NotesStopped result={phase.result} />}
         {error && <Callout size="md">{error}</Callout>}
       </div>
     </Dialog>
   );
 }
+
+/** Where keeping the Pinboard's notes stands. `total` is null until the plan is read. */
+type KeepPhase =
+  | { kind: "idle" }
+  | { kind: "keeping"; done: number; total: number | null; stopping?: boolean }
+  | { kind: "stopped"; result: Extract<KeepResult, { kind: "stopped" }> };

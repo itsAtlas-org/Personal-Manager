@@ -1299,6 +1299,28 @@ struct ExistingNote {
     vault_path: String,
 }
 
+/// Whether a stored note document is already exactly this save: a full vault note (not a legacy
+/// index-only pointer, which a save promotes), made from this body (`expected_hash` is
+/// `pointer_content_hash(source_id, body)`) and known by this title. The one rule behind the early
+/// return of [`ingest_note_document`] (nothing re-chunked, nothing embedded) and behind the uninstall's
+/// "this note is already saved" (`notes::is_current`), so the two can never disagree.
+pub(crate) fn note_is_current(
+    stored_source_type: &str,
+    stored_hash: &str,
+    stored_title: &str,
+    expected_hash: &str,
+    title: &str,
+) -> bool {
+    stored_source_type == SOURCE_TYPE_VAULT && stored_hash == expected_hash && stored_title == title
+}
+
+/// Where a note that has no document yet starts. The Pinboard's "Ingest" files a new note into the
+/// review queue; the uninstall's save (D9) lands it already reviewed, so N saved notes do not become N
+/// items to review. Pure, so the rule has a test: the embed that surrounds it has none.
+pub(crate) fn fresh_note_filing(arrival: crate::notes::Arrival) -> (&'static str, bool) {
+    ("Unsorted", arrival.reviewed())
+}
+
 /// Whether `id` may name a note: non-empty, and only ASCII letters, digits, `-` and `_`. The derived
 /// vault name is then always one ordinary filename inside the vault that can't point anywhere else.
 /// Pinboard ids (a UUID, or the `w-…` fallback) and Chat's `chat-<message id>` all pass.
@@ -1370,6 +1392,7 @@ pub fn ingest_note_document(
     vault_root: &Path,
     manifest_cipher: &crate::index_only::ManifestCipher,
     namespace: &crate::notes::Namespace,
+    arrival: crate::notes::Arrival,
     key: &str,
     title: &str,
     body: &str,
@@ -1432,8 +1455,13 @@ pub fn ingest_note_document(
     // would leave every chunk's vector keyed to the OLD title — the rename would show in the UI
     // while search kept answering to the name the user just changed away from.
     if let Some(e) = &existing {
-        if e.source_type == SOURCE_TYPE_VAULT && e.content_hash == content_hash && e.title == title
-        {
+        if note_is_current(
+            &e.source_type,
+            &e.content_hash,
+            &e.title,
+            &content_hash,
+            title,
+        ) {
             let conn = state.conn()?;
             return load_document(&conn, e.doc_id);
         }
@@ -1473,14 +1501,17 @@ pub fn ingest_note_document(
             e.created_at.clone().unwrap_or_else(|| now.clone()),
             Some(e.vault_path.clone()),
         ),
-        None => (
-            "Unsorted".into(),
-            Vec::new(),
-            None,
-            false,
-            now.clone(),
-            None,
-        ),
+        None => {
+            let (project, reviewed) = fresh_note_filing(arrival);
+            (
+                project.into(),
+                Vec::new(),
+                None,
+                reviewed,
+                now.clone(),
+                None,
+            )
+        }
     };
     // Editing a note re-writes its whole vault file, so its other project memberships have to be
     // carried across with the rest of the filing or the edit quietly unlinks it. A brand-new note
@@ -7734,6 +7765,64 @@ mod tests {
 
     // Chunking behaviour (token-sizing, structure-awareness, parent tiers, determinism) is
     // now covered by `crate::splitter`'s own unit tests.
+
+    /// A note's text may hold `---` lines (a horizontal rule, a table's separator, a pasted front
+    /// matter). They sit after the file's own closing fence, so a Rebuild reads the body back whole
+    /// and the header is still only the fields PM wrote (the uninstall's save, K5b, writes the
+    /// Pinboard's notes through this).
+    #[test]
+    fn a_note_body_holding_triple_dash_lines_round_trips_through_the_vault_file() {
+        let body =
+            "---\ntitle: forged\nreviewed: false\n---\nrule below\n\n---\n\n| a | b |\n|---|---|\n\nend";
+        let front = Frontmatter {
+            title: "Plan --- v2",
+            source_path: "",
+            ext: Some("md"),
+            content_hash: "h",
+            created_at: "2026-11-25T00:00:00.000Z",
+            ingested_at: "2026-11-25T00:00:00.000Z",
+            project: "Unsorted",
+            linked_projects: &[],
+            tags: &[],
+            importance: None,
+            last_activity: "2026-11-25T00:00:00.000Z",
+            reviewed: true,
+            photo: None,
+            spreadsheet: None,
+            chat: None,
+            source_id: Some("note:n1"),
+            external_ref: None,
+        };
+        let rendered = render_markdown(&front, body);
+        let (fields, read) = parse_frontmatter(&rendered).unwrap();
+        assert_eq!(read.trim_end(), body, "the body comes back whole");
+        assert_eq!(fields.get("title").map(String::as_str), Some("Plan --- v2"));
+        assert_eq!(fields.get("reviewed").map(|s| s.trim()), Some("true"));
+        assert_eq!(fields.get("source_id").map(String::as_str), Some("note:n1"));
+    }
+
+    /// The uninstall's save files a new note as already reviewed; a note the person ingests starts in
+    /// the review queue. The embed around this has no unit test, so the choice is a pure function.
+    #[test]
+    fn a_new_note_starts_reviewed_only_when_the_caller_says_so() {
+        use crate::notes::Arrival;
+        assert_eq!(fresh_note_filing(Arrival::Reviewed), ("Unsorted", true));
+        assert_eq!(fresh_note_filing(Arrival::Review), ("Unsorted", false));
+        // The one rule `ingest_note_document` returns early on, and the dialog skips by.
+        assert!(note_is_current(SOURCE_TYPE_VAULT, "h", "T", "h", "T"));
+        assert!(
+            !note_is_current(SOURCE_TYPE_VAULT, "h", "T", "h2", "T"),
+            "text changed"
+        );
+        assert!(
+            !note_is_current(SOURCE_TYPE_VAULT, "h", "T", "h", "T2"),
+            "renamed"
+        );
+        assert!(
+            !note_is_current(SOURCE_TYPE_INDEX_ONLY, "h", "T", "h", "T"),
+            "a legacy pointer is promoted, not skipped"
+        );
+    }
 
     #[test]
     fn malicious_title_cannot_inject_frontmatter_fields() {

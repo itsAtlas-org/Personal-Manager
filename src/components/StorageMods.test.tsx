@@ -31,6 +31,8 @@ vi.mock("../lib/ipc", () => ({
   getLocalAiSwitch: () => getLocalAiSwitch(),
   uninstallPreview: (id: string) => uninstallPreview(id),
   uninstallMod: (id: string, also: boolean) => uninstallMod(id, also),
+  // No mod here holds notes to keep (only the Pinboard does).
+  uninstallNotesPlan: () => Promise.resolve(null),
 }));
 vi.mock("../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -91,6 +93,7 @@ const preview = (extra: Partial<UninstallPreview> = {}): UninstallPreview => ({
   },
   stays: { tasks: 0, milestones: 0, documents: 0, keptDocuments: 0 },
   removedBySafetyList: false,
+  notes: null,
   ...extra,
 });
 

@@ -550,6 +550,49 @@ export interface UninstallPreview {
    *  part of "also delete what it made". */
   stays: { tasks: number; milestones: number; documents: number; keptDocuments: number };
   removedBySafetyList: boolean;
+  /** The Pinboard's notes, for the first-party Pinboard only (null for any other mod): what the
+   *  dialog offers to keep first (D9). Read again when the person presses Uninstall. */
+  notes: NotesPlan | null;
+}
+
+/** One note, as the uninstall dialog lists it. `title` is the person's own text: React text only. */
+export interface NoteRef {
+  key: string;
+  title: string;
+}
+
+/** The Pinboard's notes against the store: what to save, what is saved, what cannot be. */
+export interface NotesPlan {
+  /** Notes with some text. */
+  total: number;
+  /** Still to save, in board order: no document yet, or edited since the last one. */
+  toSave: NoteRef[];
+  /** Documents already, unchanged since: skipped, never embedded again. */
+  alreadySaved: number;
+  /** Notes that cannot be documents (an unusual id); only the files keep them. */
+  unsaveable: number;
+  /** Whether PM's document engine is set up: saving as documents needs it, the files do not. */
+  engineReady: boolean;
+  /** The stored board's size in bytes, 0 when there is none. */
+  boardBytes: number;
+  /** `mod`: the board has moved into the mod. `legacy`: it has not, PM's own copy is the board. */
+  source: "mod" | "legacy";
+}
+
+/** One note saved as a document. `unchanged`: it was a document already and nothing was embedded. */
+export interface NoteSaved {
+  outcome: "saved" | "unchanged";
+  documentId: number;
+}
+
+/** What writing the notes' `.md` files and the board file did. */
+export interface ExportOutcome {
+  folder: string;
+  notesWritten: number;
+  boardFile: string | null;
+  /** The first thing that could not be written; nothing after it was tried. `noteIndex` is the
+   *  position among the notes with text (0 first), null for the board file. */
+  failed: { noteIndex: number | null; message: string } | null;
 }
 
 export interface GiftsDeleted {

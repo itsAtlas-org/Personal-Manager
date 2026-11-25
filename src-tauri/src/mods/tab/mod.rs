@@ -14,6 +14,8 @@
 //!   and the answers written as `mod_grants` rows.
 //! - [`catalogue`]: the Available section, from the cached signed index.
 //! - [`uninstall`]: the preview, the uninstall and, only when asked, deleting what the mod made.
+//! - [`uninstall_notes`]: keeping the Pinboard's notes first (D9): a plan, one note saved at a time,
+//!   and the `.md` files and the whole-board file for when the document engine is not set up.
 //! - [`disclaimer`], [`device`]: the Mods disclaimer, per device AND per vault.
 //! - [`status`]: how fresh the safety list is, the record's health and the strips.
 //! - [`error`]: the typed refusals.
@@ -48,5 +50,6 @@ pub mod status;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod uninstall;
+pub mod uninstall_notes;
 pub mod unsigned;
 pub mod words;

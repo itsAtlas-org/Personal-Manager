@@ -402,6 +402,7 @@ describe("uninstalling from a row", () => {
     },
     stays: { tasks: 0, milestones: 0, documents: 0 },
     removedBySafetyList: false,
+    notes: null,
   };
   const gone: ModUninstalled = {
     id: "acme.tool",

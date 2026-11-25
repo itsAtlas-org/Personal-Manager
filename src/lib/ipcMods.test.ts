@@ -82,6 +82,24 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     "uninstall_mod",
     { modId: "atlas.map", alsoDeleteGifts: true },
   ],
+  [
+    "uninstallNotesPlan",
+    () => ipc.uninstallNotesPlan("atlas.pinboard"),
+    "uninstall_notes_plan",
+    { modId: "atlas.pinboard" },
+  ],
+  [
+    "uninstallSaveNote",
+    () => ipc.uninstallSaveNote("atlas.pinboard", "n-1"),
+    "uninstall_save_note",
+    { modId: "atlas.pinboard", key: "n-1" },
+  ],
+  [
+    "uninstallExportFiles",
+    () => ipc.uninstallExportFiles("atlas.pinboard", true, false),
+    "uninstall_export_files",
+    { modId: "atlas.pinboard", notes: true, board: false },
+  ],
   ["pauseMod", () => ipc.pauseMod("atlas.map"), "pause_mod", { modId: "atlas.map" }],
   ["resumeMod", () => ipc.resumeMod("atlas.map"), "resume_mod", { modId: "atlas.map" }],
   [

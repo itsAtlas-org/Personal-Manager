@@ -19,10 +19,17 @@ import { plural, uninstallNote } from "./uninstallNote";
 
 const uninstallPreview = vi.fn();
 const uninstallMod = vi.fn();
+const uninstallNotesPlan = vi.fn();
+const uninstallSaveNote = vi.fn();
+const uninstallExportFiles = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   uninstallPreview: (id: string) => uninstallPreview(id),
   uninstallMod: (id: string, also: boolean) => uninstallMod(id, also),
+  uninstallNotesPlan: (id: string) => uninstallNotesPlan(id),
+  uninstallSaveNote: (id: string, key: string) => uninstallSaveNote(id, key),
+  uninstallExportFiles: (id: string, notes: boolean, board: boolean) =>
+    uninstallExportFiles(id, notes, board),
 }));
 vi.mock("../../kit/theme", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -44,6 +51,7 @@ const preview = (extra: Partial<UninstallPreview> = {}): UninstallPreview => ({
   },
   stays: { tasks: 0, milestones: 0, documents: 0, keptDocuments: 0 },
   removedBySafetyList: false,
+  notes: null,
   ...extra,
 });
 

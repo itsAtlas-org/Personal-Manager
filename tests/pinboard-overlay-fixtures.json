@@ -1,5 +1,5 @@
 {
-  "about": "Shared by src/lib/pinboard/calendarEntries.test.ts (the TypeScript original) and src-tauri/src/pinboard_legacy/tests.rs (the Rust port): both must give `expected` for every case. A case holds `board` (an object, written out as JSON) or `raws` (strings read as they stand, each giving `expected`). An item list may hold {\"$repeat\": N, \"item\": {...}}, which stands for N items with \"{n}\" in the strings replaced by 1..N. A long answer is checked by `expectedCount`, `expectedFirst` and `expectedLast`. An entry's id is <widgetId>:<itemId>.",
+  "about": "Shared by src/lib/pinboard/calendarEntries.test.ts (the TypeScript original) and src-tauri/src/pinboard_legacy/tests.rs (the Rust port): both must give `expected` for every case. A case may also hold `expectedNotes`, the note cards of the same board ({key, title, text, recordedCurrent}), which only the Rust reader (`pinboard_notes`, what an uninstall saves) reads: the TypeScript original has no counterpart, because the Pinboard draws its notes from the board directly. A case holds `board` (an object, written out as JSON) or `raws` (strings read as they stand, each giving `expected`). An item list may hold {\"$repeat\": N, \"item\": {...}}, which stands for N items with \"{n}\" in the strings replaced by 1..N. A long answer is checked by `expectedCount`, `expectedFirst` and `expectedLast`. An entry's id is <widgetId>:<itemId>.",
   "cases": [
     {
       "name": "a freeform timeline lifts every dated entry",
@@ -1647,6 +1647,390 @@
           "label": "deadline"
         }
       ]
+    },
+    {
+      "name": "notes: a note card is read with its id, title and text",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "n1",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "- a\n- b",
+            "title": "Plan"
+          }
+        ]
+      },
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "Plan",
+          "text": "- a\n- b",
+          "recordedCurrent": false
+        }
+      ]
+    },
+    {
+      "name": "notes: folders are walked, in board order, and only note cards count",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "n1",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "one"
+          },
+          {
+            "id": "f1",
+            "kind": "folder",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "children": [
+              {
+                "id": "n2",
+                "kind": "note",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 3,
+                  "h": 3
+                },
+                "text": "two"
+              },
+              {
+                "id": "t1",
+                "kind": "timeline",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 3,
+                  "h": 3
+                },
+                "items": []
+              }
+            ]
+          },
+          {
+            "id": "l1",
+            "kind": "tasklist",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            }
+          },
+          {
+            "id": "t2",
+            "kind": "timeline",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "items": []
+          },
+          {
+            "id": "n3",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "three"
+          }
+        ]
+      },
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "",
+          "text": "one",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n2",
+          "title": "",
+          "text": "two",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n3",
+          "title": "",
+          "text": "three",
+          "recordedCurrent": false
+        }
+      ]
+    },
+    {
+      "name": "notes: a card with no text id is skipped, and a missing or non-text body is blank",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "no id"
+          },
+          {
+            "id": 7,
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "numeric id"
+          },
+          {
+            "id": "n1",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            }
+          },
+          {
+            "id": "n2",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": 42,
+            "title": ["x"]
+          }
+        ]
+      },
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "",
+          "text": "",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n2",
+          "title": "",
+          "text": "",
+          "recordedCurrent": false
+        }
+      ]
+    },
+    {
+      "name": "notes: unicode, a --- line and a title with spaces to trim are kept whole",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "n1",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "intro\n---\nrule \u00e9\u00e8 \ud83d\ude80\n---\nend",
+            "title": "  Caf\u00e9 plan\u00a0"
+          }
+        ]
+      },
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "Caf\u00e9 plan",
+          "text": "intro\n---\nrule \u00e9\u00e8 \ud83d\ude80\n---\nend",
+          "recordedCurrent": false
+        }
+      ]
+    },
+    {
+      "name": "notes: the board's own record of an ingest is read against the text",
+      "board": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "n1",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "hello",
+            "ingestedAt": "2026-07-01T10:00:00.000Z",
+            "ingestedHash": "2y0dev"
+          },
+          {
+            "id": "n2",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "hello",
+            "ingestedAt": "2026-07-01T10:00:00.000Z",
+            "ingestedHash": "stale"
+          },
+          {
+            "id": "n3",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "hello",
+            "ingestedHash": "2y0dev"
+          },
+          {
+            "id": "n4",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "hello",
+            "ingestedAt": "",
+            "ingestedHash": "2y0dev"
+          },
+          {
+            "id": "n5",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "\u00e9\ud83d\ude80 note",
+            "ingestedAt": "2026-07-01T10:00:00.000Z",
+            "ingestedHash": "o0ezb5"
+          },
+          {
+            "id": "n6",
+            "kind": "note",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 3,
+              "h": 3
+            },
+            "text": "",
+            "ingestedAt": "2026-07-01T10:00:00.000Z",
+            "ingestedHash": "45h"
+          }
+        ]
+      },
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "",
+          "text": "hello",
+          "recordedCurrent": true
+        },
+        {
+          "key": "n2",
+          "title": "",
+          "text": "hello",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n3",
+          "title": "",
+          "text": "hello",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n4",
+          "title": "",
+          "text": "hello",
+          "recordedCurrent": false
+        },
+        {
+          "key": "n5",
+          "title": "",
+          "text": "\u00e9\ud83d\ude80 note",
+          "recordedCurrent": true
+        },
+        {
+          "key": "n6",
+          "title": "",
+          "text": "",
+          "recordedCurrent": true
+        }
+      ]
+    },
+    {
+      "name": "notes: a board of another version is still read, its notes are the person's words",
+      "raws": [
+        "{\"version\": 2, \"widgets\": [{\"id\": \"n1\", \"kind\": \"note\", \"rect\": {\"x\": 0, \"y\": 0, \"w\": 3, \"h\": 3}, \"text\": \"from a newer board\"}]}",
+        "{\"widgets\": [{\"id\": \"n1\", \"kind\": \"note\", \"rect\": {\"x\": 0, \"y\": 0, \"w\": 3, \"h\": 3}, \"text\": \"from a newer board\"}]}"
+      ],
+      "expected": [],
+      "expectedNotes": [
+        {
+          "key": "n1",
+          "title": "",
+          "text": "from a newer board",
+          "recordedCurrent": false
+        }
+      ]
+    },
+    {
+      "name": "notes: malformed boards give no notes",
+      "raws": [
+        "",
+        "{not json",
+        "null",
+        "[]",
+        "42",
+        "{\"version\":1}",
+        "{\"version\":1,\"widgets\":{}}"
+      ],
+      "expected": [],
+      "expectedNotes": []
     }
   ]
 }

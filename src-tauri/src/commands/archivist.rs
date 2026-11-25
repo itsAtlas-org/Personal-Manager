@@ -907,7 +907,7 @@ pub struct NoteIngest {
 
 /// The title for a note-derived document: its first non-blank line, trimmed and capped by
 /// characters (never splitting a codepoint), else a friendly fallback. Pure — see tests.
-fn derive_title(body: &str) -> String {
+pub(crate) fn derive_title(body: &str) -> String {
     const MAX: usize = 80;
     let line = body
         .lines()

@@ -13,6 +13,7 @@ import type {
   DevModeState,
   DevSwitch,
   AiPromptInfo,
+  ExportOutcome,
   InstallResult,
   ModIcon,
   ModInfo,
@@ -26,6 +27,8 @@ import type {
   ModsResetResult,
   ModsRetryResult,
   ModsSafetyStatus,
+  NotesPlan,
+  NoteSaved,
   Reloaded,
   Repaired,
   TestModStatus,
@@ -2410,6 +2413,20 @@ export const uninstallPreview = (modId: string) =>
  *  private storage goes with it. The answer says what to prune from `localStorage` (`prune`). */
 export const uninstallMod = (modId: string, alsoDeleteGifts: boolean) =>
   invoke<ModUninstalled>("uninstall_mod", { modId, alsoDeleteGifts });
+
+/** The Pinboard's notes as the uninstall dialog would keep them (null for any other mod). */
+export const uninstallNotesPlan = (modId: string) =>
+  invoke<NotesPlan | null>("uninstall_notes_plan", { modId });
+
+/** Save one of the Pinboard's notes as a document and read it back; the dialog calls it note by note
+ *  and uninstalls only when every call answered. Rejects with a typed refusal. */
+export const uninstallSaveNote = (modId: string, key: string) =>
+  invoke<NoteSaved>("uninstall_save_note", { modId, key });
+
+/** Write the Pinboard's notes as `.md` files (`notes`) and its whole board as one `.json` file
+ *  (`board`) into a folder PM asks the person for. Null when they cancel. */
+export const uninstallExportFiles = (modId: string, notes: boolean, board: boolean) =>
+  invoke<ExportOutcome | null>("uninstall_export_files", { modId, notes, board });
 
 /** Pause a running mod: its data stays. */
 export const pauseMod = (modId: string) => invoke<void>("pause_mod", { modId });

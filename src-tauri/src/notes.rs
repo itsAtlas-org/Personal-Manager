@@ -51,6 +51,23 @@ impl Namespace {
     }
 }
 
+/// Where a note that has no document yet starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    /// Unsorted and unreviewed, in the review queue: what a note the person ingests is.
+    Review,
+    /// Unsorted and already reviewed, so it is not an item to review: the notes an uninstall saves
+    /// (D9), which would otherwise be N more things in the queue. An existing note keeps its filing
+    /// whichever this is.
+    Reviewed,
+}
+
+impl Arrival {
+    pub fn reviewed(self) -> bool {
+        self == Self::Reviewed
+    }
+}
+
 /// Save a note as a vault document, creating it or updating it in place (an unchanged note is a
 /// no-op, an edited one keeps its project, tags and importance). `title` is the line the note is
 /// known by; the caller has already chosen it. Blocking: it embeds the text, so call it off the
@@ -58,6 +75,18 @@ impl Namespace {
 pub fn save(
     state: &AppState,
     namespace: &Namespace,
+    key: &str,
+    title: &str,
+    body: &str,
+) -> Result<Document> {
+    save_as(state, namespace, Arrival::Review, key, title, body)
+}
+
+/// [`save`], saying where a note with no document yet starts ([`Arrival`]).
+pub fn save_as(
+    state: &AppState,
+    namespace: &Namespace,
+    arrival: Arrival,
     key: &str,
     title: &str,
     body: &str,
@@ -83,6 +112,7 @@ pub fn save(
         &vault_root,
         &manifest_cipher,
         namespace,
+        arrival,
         key,
         title,
         body,

@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -254,6 +254,152 @@ pub fn calendar_entries(conn: &Connection) -> Result<Vec<Entry>> {
     Ok(crate::db::get_setting(conn, BOARD_KEY)?
         .map(|raw| derive_overlay(&raw))
         .unwrap_or_default())
+}
+
+// ---- The notes (K5b: what an uninstall saves) ----
+
+/// One note card of the stored board. `text` is the board's own text, exactly as stored (the
+/// Pinboard's shorthand included); `title` is the card's own title and may be empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyNote {
+    /// The widget id: the document the note became is `note:<key>`.
+    pub key: String,
+    pub title: String,
+    pub text: String,
+    /// The board itself says the document was made from exactly this text: the card carries
+    /// `ingestedAt` and an `ingestedHash` that is the Pinboard's hash of `text`. The text a card
+    /// ingests is its rendered Markdown, so the stored document is not the card's text and cannot be
+    /// compared with it; this record is how an ingested, untouched note is told from an edited one.
+    pub recorded_current: bool,
+}
+
+/// The Pinboard's `cheapHash` (`PinboardView.tsx`): djb2 over UTF-16 code units, in base 36. It only
+/// tells whether a note's text has changed since it was last ingested.
+fn cheap_hash(s: &str) -> String {
+    let mut h: i32 = 5381;
+    for unit in s.encode_utf16() {
+        h = (h.wrapping_shl(5).wrapping_add(h)) ^ i32::from(unit);
+    }
+    let mut n = h as u32;
+    if n == 0 {
+        return "0".into();
+    }
+    let mut digits = Vec::new();
+    while n > 0 {
+        digits.push(char::from_digit(n % 36, 36).unwrap_or('0'));
+        n /= 36;
+    }
+    digits.iter().rev().collect()
+}
+
+/// Every note card of a stored board, in board order, folders walked: `kind` `note` and nothing else
+/// (timelines, task lists and folders themselves hold no note). A card with no text id is skipped (it
+/// has no key); a missing or non-text `text` reads as blank, and blank cards are returned so the
+/// caller decides what to do with them. The board is stored JSON read defensively: malformed, or no
+/// `widgets` list, gives nothing. **The board's version is not checked**: this reader exists to keep
+/// a person's words, and a card of a newer board that still looks like a note is worth saving.
+pub fn pinboard_notes(raw: &str) -> Vec<LegacyNote> {
+    let Ok(board) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(widgets) = board.get("widgets").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for w in widgets {
+        visit_notes(w, &mut out);
+    }
+    out
+}
+
+fn visit_notes(w: &Value, out: &mut Vec<LegacyNote>) {
+    let Some(w) = w.as_object() else { return };
+    match w.get("kind").and_then(Value::as_str) {
+        Some("folder") => {
+            if let Some(children) = w.get("children").and_then(Value::as_array) {
+                for child in children {
+                    visit_notes(child, out);
+                }
+            }
+        }
+        Some("note") => {
+            let Some(key) = w.get("id").and_then(Value::as_str) else {
+                return;
+            };
+            let text = w.get("text").and_then(Value::as_str).unwrap_or("");
+            let recorded_current = w
+                .get("ingestedAt")
+                .and_then(Value::as_str)
+                .is_some_and(|at| !at.is_empty())
+                && w.get("ingestedHash").and_then(Value::as_str) == Some(&cheap_hash(text));
+            out.push(LegacyNote {
+                key: key.to_owned(),
+                title: w
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map_or("", js_trim)
+                    .to_owned(),
+                text: text.to_owned(),
+                recorded_current,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Which copy of the board is the live one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardSource {
+    /// The mod's own `mod_kv` row, once the board has moved.
+    Mod,
+    /// `settings['pinboard']`, before it has.
+    Legacy,
+}
+
+/// The stored board's exact bytes and where they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBoard {
+    pub source: BoardSource,
+    pub bytes: Vec<u8>,
+}
+
+impl StoredBoard {
+    /// The text the notes are read from. A board that is not UTF-8 is read lossily here only; the
+    /// bytes themselves are never changed.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+/// The board as the Pinboard would load it now: the mod's `board` row once the move is recorded (and
+/// then ONLY that: a moved store whose mod never wrote a board has none, and the frozen legacy row is
+/// not read as a fallback, as for the Calendar), else `settings['pinboard']`. `None` when there is no
+/// row, or it is blank.
+pub fn stored_board(conn: &Connection) -> Result<Option<StoredBoard>> {
+    let moved = crate::projects::pinboard_move_recorded(conn)?;
+    let bytes: Option<Vec<u8>> = if moved {
+        conn.query_row(
+            "SELECT CAST(value AS BLOB) FROM mod_kv WHERE mod_id = ?1 AND key = 'board'",
+            [PINBOARD_MOD_ID],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = ?1",
+            [BOARD_KEY],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
+    let source = if moved {
+        BoardSource::Mod
+    } else {
+        BoardSource::Legacy
+    };
+    Ok(bytes
+        .filter(|b| !b.iter().all(u8::is_ascii_whitespace))
+        .map(|bytes| StoredBoard { source, bytes }))
 }
 
 #[cfg(test)]
