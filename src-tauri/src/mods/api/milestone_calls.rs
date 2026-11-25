@@ -173,11 +173,9 @@ pub(super) fn create_with_milestone(
 ) -> Result<Wrote<Value>, ModError> {
     gifts::ensure_room(conn, mod_id, 1)?;
     let (id, aftermath) = ops::add_in(conn, project, label, due_date, None).map_err(internal)?;
-    // The project exists the way a filed one does, so it is in PM's pickers and `projects.list` (the
-    // tag registry they read), and its entity can be renamed or merged: a bare `projects` row is
-    // neither. Same transaction as the milestone; no ledger row.
-    crate::entities::resolve_project(conn, project, true).map_err(internal)?;
-    crate::tags::intern(conn, crate::tags::KIND_PROJECT, project).map_err(internal)?;
+    // `ops::add_in` made the project the way a typed one comes to exist (`projects::ensure_named`:
+    // row, entity and registry row, in the milestone's transaction), so it is in PM's pickers and
+    // `projects.list` and can be renamed or merged. No ledger row for it.
     gifts::record(conn, mod_id, Gift::Milestone(id))?;
     Ok(Wrote {
         value: json!({"id": id}),

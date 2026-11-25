@@ -386,8 +386,8 @@ fn clean(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Add a milestone, upserting a bare `projects` row first so the FK holds for a lazy
-/// (never-triaged) project. `sort_order` defaults to the end of the list. A non-empty
+/// Add a milestone, making its project exist first ([`crate::projects::ensure_named`]) so the FK holds for
+/// a lazy (never-triaged) project and the pickers offer it. `sort_order` defaults to the end of the list. A non-empty
 /// `event_uid` makes it calendar-linked; `due_date` is then a cache for offline display.
 /// Returns the new stable id. Its own transaction: [`add_in`] is the same write for a caller that
 /// has one open.
@@ -418,10 +418,7 @@ pub fn add_in(
     let label = clean(Some(label.to_string())).unwrap_or_else(|| "deadline".to_string());
     let due_date = clean(due_date);
     let event_uid = clean(event_uid);
-    conn.execute(
-        "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-        params![project],
-    )?;
+    crate::projects::ensure_named(conn, project)?;
     conn.execute(
         "INSERT INTO project_milestones(project_name, label, due_date, event_uid, sort_order) \
          VALUES (?1, ?2, ?3, ?4, \
@@ -593,10 +590,8 @@ pub fn upsert_external(
     let state = status.map(state_for_status);
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-        params![project],
-    )?;
+    // The project exists the way a filed one does (row, entity, registry tag), so the pickers offer it.
+    crate::projects::ensure_named(&tx, project)?;
     // The `ON CONFLICT` target repeats the partial index's own predicate — SQLite requires the two
     // to match before it will use a partial index to resolve an upsert.
     tx.execute(
@@ -914,6 +909,26 @@ mod tests {
         );
     }
 
+    /// A project first named by an external milestone is one every picker offers, as for `add`.
+    #[test]
+    fn a_project_first_named_by_an_external_milestone_is_offered_by_the_pickers() {
+        let (_dir, conn) = store();
+        upsert_external(&conn, "Brand New", "sheets", "r1", "pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+        // A re-sync, and the project under another casing, add no second registry row.
+        upsert_external(&conn, "Brand New", "sheets", "r1", "pitch 2", None, None).unwrap();
+        upsert_external(&conn, "brand new", "sheets", "r2", "wrap", None, None).unwrap();
+        let tags: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tags WHERE kind = 'project'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, 1);
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+    }
+
     /// Two different sources may legitimately use the same row id; the anchor is the PAIR.
     #[test]
     fn external_anchor_is_scoped_by_source_type() {
@@ -1100,6 +1115,51 @@ mod tests {
         // The wrapper is the same write in a transaction of its own.
         add(&conn, "Atlas", "Second", None, None).unwrap();
         assert_eq!(milestone_rows(&conn), 2);
+    }
+
+    /// A project first named by a milestone is one every picker offers (`tags::project_names`).
+    #[test]
+    fn a_project_first_named_by_a_milestone_is_offered_by_the_pickers() {
+        let (_dir, conn) = store();
+        add(&conn, "Brand New", "Pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+        // A second milestone, and the same project under another casing, add no second registry
+        // row or entity: the milestone keeps the name it was given, as it always has.
+        add(&conn, "Brand New", "Launch", None, None).unwrap();
+        add(&conn, "brand new", "Wrap", None, None).unwrap();
+        let rows = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(rows("SELECT count(*) FROM tags WHERE kind = 'project'"), 1);
+        assert_eq!(
+            rows("SELECT count(*) FROM entities WHERE type = 'project' AND lower(canonical_name) = 'brand new'"),
+            1
+        );
+        assert_eq!(rows("SELECT count(*) FROM projects"), 2);
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Brand New"]);
+    }
+
+    /// A project named by an alias is the entity's project: the pickers keep offering the canonical
+    /// name, never the alias.
+    #[test]
+    fn a_milestone_naming_a_project_by_an_alias_offers_the_canonical_name() {
+        let (_dir, conn) = store();
+        let id = crate::entities::resolve_project(&conn, "Atlas", true)
+            .unwrap()
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entity_aliases(entity_id, alias) VALUES (?1, 'The Atlas')",
+            [id],
+        )
+        .unwrap();
+        add(&conn, "The Atlas", "Pitch", None, None).unwrap();
+        assert_eq!(crate::tags::project_names(&conn).unwrap(), ["Atlas"]);
+        let entities: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM entities WHERE type = 'project' AND lower(canonical_name) LIKE '%atlas'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entities, 1);
     }
 
     #[test]

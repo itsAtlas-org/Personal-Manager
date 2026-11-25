@@ -435,6 +435,38 @@ pub fn keep_projects_of(conn: &Connection, doc_id: i64) -> Result<()> {
 /// The pre-triage inbox. Not a project the user chose, so it never gets a row of its own.
 const UNSORTED: &str = "Unsorted";
 
+/// The way a project a person typed comes to exist: its triage row (so every FK to `projects` holds
+/// for a lazy, never-filed project), its entity (so it can be renamed or merged), and its tag
+/// registry row (what `tags::project_names` reads, so the task editor's datalist, `list_projects`,
+/// @-mentions and a mod's `projects.list` all offer it). A bare `projects` row alone is none of the
+/// last two, and a project first named in the task editor or on a milestone used to stop there.
+///
+/// Called by every path where free text names a project that may not exist yet: a task's project
+/// field (add, update, checklist import), a milestone's project, and a mod's confirmed "Create
+/// project X?". It changes nothing for a name that already exists: the row is an upsert, the entity
+/// is found by alias, and the registry row is found by `tags::normalize` (trimmed, ASCII-lowercased,
+/// the same key the v46 backfill wrote), so a case variant never makes a second one. A name a
+/// project already goes by under another casing, or an alias of an entity, registers the project it
+/// means (its established name), never the variant. Must run in the caller's transaction when it has
+/// one: its statements are not atomic alone. A blank name does nothing beyond what it always did.
+pub fn ensure_named(conn: &Connection, name_as_given: &str) -> Result<()> {
+    let typed = name_as_given.trim();
+    // Look up before the insert: the row it makes would otherwise answer its own question.
+    let established = crate::tasks::find_existing_project(conn, typed)?;
+    // The row keeps the name exactly as the caller will key its own rows by (as it always has).
+    conn.execute(
+        "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+        params![name_as_given],
+    )?;
+    if typed.is_empty() {
+        return Ok(());
+    }
+    let name = established.as_deref().unwrap_or(typed);
+    crate::entities::resolve_project(conn, name, true)?;
+    crate::tags::intern(conn, crate::tags::KIND_PROJECT, name)?;
+    Ok(())
+}
+
 /// Bump a project's `last_touched` to now, creating a bare row if needed. Called when the
 /// user engages a project outside document ingest — sends a message in its scoped chat, or
 /// edits its milestones — so that engagement counts toward the focus view's "active" date

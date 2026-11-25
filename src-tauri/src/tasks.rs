@@ -415,15 +415,14 @@ fn lookup_project(conn: &Connection, typed: &str) -> Result<Option<String>> {
     }
 }
 
-/// Upsert a bare `projects` row so the FK holds for a lazy (never-triaged) project.
+/// Make the project a task names exist the way a typed project does (see
+/// [`crate::projects::ensure_named`]): its row so the FK holds, and its entity and registry row so
+/// the pickers offer it.
 fn ensure_project(conn: &Connection, project: Option<&str>) -> Result<()> {
-    if let Some(p) = project {
-        conn.execute(
-            "INSERT INTO projects(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-            params![p],
-        )?;
+    match project {
+        Some(p) => crate::projects::ensure_named(conn, p),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 // --- reading ------------------------------------------------------------------------------
@@ -1805,6 +1804,76 @@ mod tests {
             ..in_project("deck", "Other")
         };
         assert!(err(add(&conn, &f, SOURCE_USER)).contains("belongs to another project"));
+    }
+
+    /// The names every project picker offers (`tags::project_names`: `list_projects`, the task
+    /// editor's datalist, @-mentions, a mod's `projects.list`).
+    fn offered(conn: &Connection) -> Vec<String> {
+        crate::tags::project_names(conn).unwrap()
+    }
+
+    #[test]
+    fn a_project_first_named_in_a_task_is_offered_by_the_pickers_once() {
+        let (_dir, conn) = store();
+        let id = add(&conn, &in_project("Draft", "Brand New"), SOURCE_USER).unwrap();
+        assert_eq!(offered(&conn), ["Brand New"]);
+        // The same project under another casing is the same project: no second row anywhere.
+        add(&conn, &in_project("More", "brand new"), SOURCE_USER).unwrap();
+        assert_eq!(get(&conn, id).project_name.as_deref(), Some("Brand New"));
+        assert_eq!(offered(&conn), ["Brand New"]);
+        let rows = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(rows("SELECT count(*) FROM projects"), 1);
+        assert_eq!(rows("SELECT count(*) FROM tags WHERE kind = 'project'"), 1);
+        assert_eq!(
+            rows("SELECT count(*) FROM entities WHERE type = 'project' AND lower(canonical_name) = 'brand new'"),
+            1
+        );
+    }
+
+    #[test]
+    fn a_project_first_named_by_an_update_or_an_import_is_offered_too() {
+        let (_dir, conn) = store();
+        let id = add(&conn, &fields("Loose"), SOURCE_USER).unwrap();
+        update(&conn, id, &in_project("Loose", "By Update")).unwrap();
+        import_checklist(
+            &conn,
+            Some("By Import"),
+            &[ChecklistItem {
+                title: "One".into(),
+                done: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(offered(&conn), ["By Import", "By Update"]);
+    }
+
+    #[test]
+    fn naming_an_existing_project_or_an_alias_creates_nothing_new() {
+        let (_dir, conn) = store();
+        // A filed project: entity, home registry row, no bare row needed.
+        let alias = crate::entities::resolve_project(&conn, "Atlas", true)
+            .unwrap()
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entity_aliases(entity_id, alias) VALUES (?1, 'The Atlas')",
+            [alias],
+        )
+        .unwrap();
+        crate::tags::intern(&conn, crate::tags::KIND_PROJECT, "Atlas").unwrap();
+        let before = offered(&conn);
+        let a = add(&conn, &in_project("a", "atlas"), SOURCE_USER).unwrap();
+        let b = add(&conn, &in_project("b", "The Atlas"), SOURCE_USER).unwrap();
+        assert_eq!(get(&conn, a).project_name.as_deref(), Some("Atlas"));
+        assert_eq!(get(&conn, b).project_name.as_deref(), Some("Atlas"));
+        assert_eq!(offered(&conn), before);
+        let tags: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tags WHERE kind = 'project'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, 1);
     }
 
     #[test]
