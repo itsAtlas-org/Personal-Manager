@@ -649,8 +649,9 @@ function SealedFrame({ modId, name, tier, onClosed, about }: ModFrameProps) {
         case "flushed":
           // The answer to `lifecycle.suspend`: paid for like any message, then relayed. Rust counts it
           // only for a session it asked, and holds the deadline whoever is waiting (the page's retire
-          // of a tab, a pause, an uninstall, a quit); a frame that never sends it is waited for until
-          // that deadline and no longer.
+          // of a tab, a pause, an uninstall, a quit). It waits only for a frame whose mod's manifest
+          // says `"answersSuspend": true`, and one of those that never sends it is waited for until
+          // that deadline and no longer; any other frame is not waited for at all (suspend.rs).
           if (!live.flood.take(performance.now())) {
             stopFlooding(live);
             return;

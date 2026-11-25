@@ -3,6 +3,15 @@
 The Pinboard's own history. Its version is the one in `manifest.json`, separate from PM's (spec D12): a
 change that touches only this folder bumps this version and adds an entry here.
 
+## 1.0.1
+
+- The manifest now says `"answersSuspend": true`: the Pinboard saves what you were typing when PM
+  is about to close it (on a tab switch, a pause, an update, an uninstall, a vault switch, turning on
+  the app lock, or a quit) and
+  tells PM when that is done. PM 3.188 waits for that answer only from a mod that says it gives one,
+  so without this line PM would close the board without waiting for your last edit. Nothing else
+  changes. 1.0.0 was never published; 1.0.1 is the first version people install.
+
 ## 1.0.0
 
 - The Pinboard, PM's planning board as a mod: notes, task lists, timelines and folders on one free

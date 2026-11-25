@@ -39,6 +39,7 @@ fn serve(host: &TestHost, m: &str) {
         &root,
         "app/index.html",
         [("app/index.html".into(), file)],
+        false,
     )
     .unwrap();
     host.runtime().install(installed);

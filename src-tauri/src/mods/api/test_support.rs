@@ -101,8 +101,14 @@ pub fn insert_mod(conn: &Connection, row: &ModRow) {
     .unwrap();
 }
 
-/// Register `m`'s files with the runtime, as the ledger's startup load does for a row it serves.
+/// Register `m`'s files with the runtime, as the ledger's startup load does for a row it serves. Its
+/// manifest says nothing of `answersSuspend`, so PM does not wait for its frames to save.
 pub fn serve(host: &TestHost, m: &str) {
+    serve_as(host, m, false);
+}
+
+/// [`serve`] for a mod whose manifest says `answersSuspend: answers_suspend`.
+pub fn serve_as(host: &TestHost, m: &str, answers_suspend: bool) {
     let id = ModId::parse(m).unwrap();
     let root = host.dir().join("mods").join(m);
     std::fs::create_dir_all(root.join("app")).unwrap();
@@ -117,6 +123,7 @@ pub fn serve(host: &TestHost, m: &str) {
         &root,
         "app/index.html",
         [("app/index.html".into(), file)],
+        answers_suspend,
     )
     .unwrap();
     host.runtime().install(installed);

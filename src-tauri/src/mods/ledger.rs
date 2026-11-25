@@ -1075,7 +1075,13 @@ impl<'a, S: LedgerStore> Ledger<'a, S> {
                 report.held.push((row.id.clone(), why));
                 continue;
             }
-            match InstalledMod::from_ledger(ok.id, &ok.root, &ok.entry, ok.files) {
+            match InstalledMod::from_ledger(
+                ok.id,
+                &ok.root,
+                &ok.entry,
+                ok.files,
+                ok.answers_suspend,
+            ) {
                 Ok(m) => {
                     report.loaded.push(row.id.clone());
                     serve.push(m);
@@ -1375,6 +1381,8 @@ struct Loadable {
     root: PathBuf,
     entry: String,
     files: Vec<(String, ServedFile)>,
+    /// The manifest's `answersSuspend` (false when absent).
+    answers_suspend: bool,
 }
 
 fn decode_sha(s: &str) -> Option<[u8; 32]> {
@@ -1408,6 +1416,12 @@ fn read_row(layout: &Layout, row: &Row) -> Result<Loadable, &'static str> {
         )
         .map(|(min, target)| ApiRange { min, target })
         .ok_or(record)?;
+    // The install checked it is a boolean when present; anything else here is a hand-edited row.
+    let answers_suspend = match manifest.get("answersSuspend") {
+        None => false,
+        Some(Value::Bool(answers)) => *answers,
+        Some(_) => return Err(record),
+    };
     let mut files = Vec::with_capacity(records.len());
     for r in records {
         package::check_path(&r.path).map_err(|_| record)?;
@@ -1432,6 +1446,7 @@ fn read_row(layout: &Layout, row: &Row) -> Result<Loadable, &'static str> {
         version,
         entry,
         files,
+        answers_suspend,
     })
 }
 
@@ -3298,6 +3313,37 @@ mod tests {
         assert_eq!(w.ledger().startup(now(), &serve_all).loaded, ["atlas.map"]);
     }
 
+    /// `answersSuspend` reaches the runtime both ways a mod is loaded: at its install, from the
+    /// verified package, and at every startup after, from the manifest its row keeps. Absent is no.
+    #[test]
+    fn answers_suspend_survives_the_install_and_the_restart() {
+        for (manifest, want) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let w = world();
+            w.install(
+                &pkg("1.0.0", |m| match manifest {
+                    Some(answers) => m["answersSuspend"] = Value::Bool(answers),
+                    None => {
+                        m.as_object_mut().unwrap().remove("answersSuspend");
+                    }
+                }),
+                Approval::Approved,
+            )
+            .unwrap();
+            assert_eq!(
+                w.runtime.installed_answers_suspend(&id("atlas.map")),
+                Some(want),
+                "at install, {manifest:?}"
+            );
+            w.runtime.uninstall(&id("atlas.map"));
+            assert_eq!(w.ledger().startup(now(), &serve_all).loaded, ["atlas.map"]);
+            assert_eq!(
+                w.runtime.installed_answers_suspend(&id("atlas.map")),
+                Some(want),
+                "after a restart, {manifest:?}"
+            );
+        }
+    }
+
     /// A hand-edited row can't steer a path: its id, version and file paths go back through the
     /// grammar, and it parks.
     #[test]
@@ -3312,6 +3358,7 @@ mod tests {
             "UPDATE mods SET files = '[{\"path\":\"../../../escape.txt\",\"sha256\":\"00\",\"size\":1}]'",
             "UPDATE mods SET files = 'nope'",
             "UPDATE mods SET manifest = '{}'",
+            "UPDATE mods SET manifest = json_set(manifest, '$.answersSuspend', 'yes')",
         ] {
             let w2 = world();
             w2.install(&pkg("1.0.0", |_| {}), Approval::Approved).unwrap();

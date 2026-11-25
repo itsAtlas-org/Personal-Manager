@@ -708,6 +708,7 @@ mod tests {
                 workers: vec![],
             },
             requires: vec![],
+            answers_suspend: false,
         };
         change(&mut m);
         m

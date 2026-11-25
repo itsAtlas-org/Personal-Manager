@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.188.0-alpha",
+    date: "2026-11-25",
+    highlights: [
+      "With the Document Map open, quitting PM, switching vaults and turning on the app lock no longer stall for a second and a half first, and neither do pausing, updating or removing the Map. Before PM closes a mod it gives the mod a moment to save what it's holding, and it now waits only for a mod that says it has something to save, like the Pinboard. The Map never has anything to save, so PM no longer waits for it.",
+      'For people who make mods: a mod whose page saves when PM is about to close it now says so in its manifest, with "answersSuspend": true. PM waits for its answer (never more than a second and a half) only then.',
+    ],
+  },
+  {
     version: "3.187.1-alpha",
     date: "2026-11-25",
     highlights: [

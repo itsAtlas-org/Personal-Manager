@@ -949,16 +949,22 @@ never accepts a confirmation by any route but the token.
 Before PM takes a frame down for a reason that is not an emergency (leaving the tab, a pause, an
 uninstall, an update, a vault switch, the app lock, a quit) it sends `lifecycle.suspend`, and goes on
 when the frame answers `flushed` or when `SUSPEND_DEADLINE` passes, whichever is first (`mods/suspend.rs`).
-The wait is in Rust so that every path gets the same one, and PM never waits past the deadline, so a
-mute or hostile frame costs that long and a quit is never held. A suspend never waits for the
-person: a question open for the frame is revoked when the wait ends. A frozen-page stop or a safety
-list removal is not a suspend and gives the mod no more time.
+PM waits only for a frame whose mod's manifest says `"answersSuspend": true`; any other frame is told
+and taken down at once. The wait is in Rust so that every path gets the same one, and PM never waits
+past the deadline, so a mute or hostile frame costs that long and a quit is never held. A suspend
+never waits for the person: a question open for the frame is revoked when its wait ends (at once,
+for a frame PM does not wait for). A frozen-page stop or a safety list removal is not a suspend and
+gives the mod no more time.
 
 **Why.** A mod that debounces its saves (the Pinboard keeps edits 500 ms) loses them if its frame is
-destroyed on a tab switch, and nothing would say so.
+destroyed on a tab switch, and nothing would say so. A mod with nothing to save (the Document Map)
+must not cost every tab switch and quit the whole deadline, so the wait is opt-in.
 
 **Co-signers.** A new path that takes frames down calls `suspend::suspend` (or `quit`) first, and a
-`flushed` answer counts only for a session PM is waiting on.
+`flushed` answer counts only for a session PM is waiting on. A new way of loading a mod into the
+runtime passes the manifest's `answersSuspend` (`InstalledMod::from_ledger` takes it as a required
+argument), and a mod whose code calls `flushed()` says `"answersSuspend": true` (`check-mods.mjs`
+holds the two together for every mod in this repo).
 
 ---
 

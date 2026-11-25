@@ -2,7 +2,7 @@
   "id": "atlas.pinboard",
   "name": "Pinboard",
   "description": "Notes, task lists, timelines and folders on one free board, with your dated entries on the Calendar.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": {
     "min": "1.0",
     "target": "1.0"
@@ -187,6 +187,7 @@
   "entry": {
     "page": "app/index.html"
   },
+  "answersSuspend": true,
   "engines": {
     "frame": true
   }

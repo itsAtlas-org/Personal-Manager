@@ -131,7 +131,9 @@ export interface ModHost {
   /** Ask PM for a frame height in CSS pixels (clamped to PM's bounds; PM never answers). */
   resize(height: number): void;
   /** Answer `lifecycle.suspend`: what this frame was holding is saved, so PM may take it down now.
-   *  Once per suspend; PM never replies, and waits no longer than its own deadline without it. */
+   *  Once per suspend; PM never replies, and waits no longer than its own deadline without it.
+   *  PM waits for it only from a mod whose manifest says `"answersSuspend": true`; any other mod's
+   *  frame is told and then taken down at once, so a mod with something to save says so. */
   flushed(): void;
   /** Why the host is gone, once it is; null while it is there. */
   readonly closed: HostError | null;

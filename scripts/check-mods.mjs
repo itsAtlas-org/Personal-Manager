@@ -17,6 +17,10 @@
 //     * `apiVersion` is one this PM serves (policy.rs MOD_API_VERSION);
 //     * `publisher.commit` is the all-zero placeholder: a manifest cannot hold the hash of the
 //       commit that contains it, so `pack-mod --commit` stamps the real one into the package;
+//     * `answersSuspend` and the source agree: code that calls the kit's `flushed()` says
+//       `"answersSuspend": true`, and a manifest that says it has code that calls it (suspend.rs
+//       waits only for a mod that says so: without it the frame's last save is lost, and with it
+//       but no answer every tab switch and quit waits out the deadline);
 //     * CHANGELOG.md's top entry is the manifest's version and says something (D12);
 //     * a folder with a Worker has its own tsconfig (lib WebWorker, no DOM), is excluded from the DOM
 //       project in mods/tsconfig.json and has a `tsc -p` line in the justfile, so a Worker cannot
@@ -297,11 +301,41 @@ function checkModFolder(root, dir, kind, rust) {
   for (const link of walk(root, dir, (rel) => rel === "dist" || rel === ".build").links) {
     bad(`${link} is a symbolic link: nothing under a mod folder may be one`);
   }
+  const answers = answersSuspendInSource(root, sources.files);
+  if (answers && raw.answersSuspend !== true) {
+    bad(
+      "its source answers lifecycle.suspend (it calls flushed()) but manifest.json doesn't say " +
+        '"answersSuspend": true, so PM would take its frame down without waiting for that save',
+    );
+  } else if (!answers && raw.answersSuspend === true) {
+    bad(
+      'manifest.json says "answersSuspend": true but nothing in its source calls flushed(), so PM ' +
+        "would wait out its whole deadline for this mod on every tab switch and every quit",
+    );
+  }
   if (kind === "mod") {
     problems.push(...changelogProblems(root, dir, m.version));
     problems.push(...workerProblems(root, dir, sources.files));
   }
   return problems;
+}
+
+/**
+ * Whether a mod's own code (its tests aside) answers `lifecycle.suspend`: uses the kit's `flushed`,
+ * called (`host.flushed()`) or handed on (`.then(host.flushed)`). A TEXTUAL heuristic, not a parse:
+ * comments are dropped by pattern, so a mod that only mentions it doesn't count, and a test file
+ * (`*.test.*`, `*.spec.*`, anything under `__tests__/`) never counts. Enough for the mods in this repo,
+ * whose PRs are reviewed; PM's own rule (suspend.rs) holds whatever this misses.
+ */
+function answersSuspendInSource(root, sourceFiles) {
+  return sourceFiles.some((file) => {
+    if (!/\.(m?[jt]sx?|cjs|cts)$/.test(file)) return false;
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(file) || /(^|\/)__tests__\//.test(file)) return false;
+    const code = readText(root, file)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+    return /\.flushed\b/.test(code);
+  });
 }
 
 /** CHANGELOG.md: present, and its top entry is `version` and is not empty. */

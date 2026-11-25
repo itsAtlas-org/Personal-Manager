@@ -14,7 +14,8 @@
 // - Over the port the frame sends a call, `{ id, method, args }`, a height request, `{ resize }`, or
 //   (once PM has told it `lifecycle.suspend`, which it needs no permission to hear) its answer,
 //   `{ flushed: true }`: what it was holding is saved, so PM may take the frame down. PM never
-//   answers that either; the page waits for it up to its own deadline (ModFrame.tsx).
+//   answers that either. Rust waits for it up to its deadline, and only from a mod whose manifest
+//   says `"answersSuspend": true` (suspend.rs); any other mod's frame is not waited for.
 //   PM answers a call with `{ id, ok: true, result }` or `{ id, ok: false, error }`, where `error` is
 //   `{ code, message }` with a stable `MOD-####` code (ERROR_CODES.md), plus `permission` when a
 //   permission is the reason and `revision` when a stored value moved on. PM never answers a height

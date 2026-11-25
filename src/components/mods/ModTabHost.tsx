@@ -9,7 +9,8 @@
 // waits 500 ms) lost its last edit to a quick tab switch. So a mod's tab is NOT drawn inside the router's
 // keyed view. It is drawn here, beside it, and when the app leaves it the tab is kept mounted, hidden,
 // while PM tells the frame (`lifecycle.suspend`, reason `hidden`) and waits for its `flushed` or for PM's
-// own deadline (`suspendModFrames`: never past 2.5 s, whatever the backend does). Only then does it
+// own deadline (`suspendModFrames`: never past 2.5 s, whatever the backend does; no wait at all for a mod
+// whose manifest doesn't say `"answersSuspend": true`). Only then does it
 // unmount and end the session. The same wait runs before a pause, an uninstall, an update, a vault
 // change, the lock and a quit, from the places that do those (`ipc.ts`, `mods::tab::commands`,
 // `mods::suspend`).
