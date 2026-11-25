@@ -39,6 +39,8 @@ vi.mock("../../../kit/theme", async (importOriginal) => ({
 }));
 
 import * as ipc from "../../../lib/ipc";
+import { ContextMenuHost } from "../../../kit/ui/ContextMenuHost";
+import { closeContextMenu, currentContextMenu } from "../../../kit/lib/contextMenu";
 import { RunwayBoard } from "./RunwayBoard";
 import { useRunwayModel, type RunwayProps } from "./runwayLogic";
 import { EDGE_SCROLL_MAX, edgeScrollStep } from "./useRunwayDrag";
@@ -1033,5 +1035,295 @@ describe("RunwayBoard: dragging", () => {
     );
     // Off to the side: nothing.
     expect(edgeScrollStep(500, 20, box)).toBe(0);
+  });
+});
+
+// The right-click menu of a card. Each item repeats a control the card already shows (the tick, ✎,
+// Move…, the project and event chips) and calls the same handler; Delete task… opens the editor's
+// own question and never deletes by itself.
+describe("RunwayBoard right-click menu", () => {
+  afterEach(() => act(() => closeContextMenu()));
+
+  const cardOf = (title: string) => screen.getByText(title).closest("li")!;
+  const items = () => currentContextMenu()?.items ?? [];
+  /** The menu as a list of words, "-" for a separator, "+" before a ticked choice. */
+  const words = () =>
+    items().map((i) =>
+      i.kind === "separator"
+        ? "-"
+        : i.kind === "swatches"
+          ? i.label
+          : `${i.checked ? "+" : ""}${i.label}`,
+    );
+  const find = (label: string) => {
+    const hit = items().find(
+      (i) => i.kind !== "separator" && i.kind !== "swatches" && i.label === label,
+    );
+    if (!hit || hit.kind === "separator" || hit.kind === "swatches") throw new Error(`no ${label}`);
+    return hit;
+  };
+  const choose = (label: string) => act(() => find(label).onSelect());
+  const rightClick = (el: Element) => fireEvent.contextMenu(el);
+
+  it("offers the task's actions, the tick as a radio, destructive last and ending in …", () => {
+    board({ tasks: [task({ project_name: "Atlas" })] });
+    rightClick(cardOf("Draft the deck"));
+    expect(currentContextMenu()?.label).toBe("Task Draft the deck");
+    expect(words()).toEqual([
+      "Edit task…",
+      "+To do",
+      "Doing",
+      "Done",
+      "-",
+      "Move up",
+      "Move down",
+      "-",
+      "Move to Tomorrow",
+      "Move to Rest of this week",
+      "Move to Next week",
+      "Move to Later",
+      "-",
+      "Background lane",
+      "Park it",
+      "-",
+      "Open project Atlas",
+      "-",
+      "Delete task…",
+    ]);
+    // Position state is shown disabled; the one task in its lane has nowhere to go.
+    expect(find("Move up").disabled).toBe(true);
+    expect(find("Move down").disabled).toBe(true);
+    expect(find("Delete task…").danger).toBe(true);
+    // Choice rows are radios; the actions are not.
+    expect(find("Doing").checked).toBe(false);
+    expect(find("Edit task…").checked).toBeUndefined();
+  });
+
+  it("leaves out the project and event items a task has none of", () => {
+    board();
+    rightClick(cardOf("Draft the deck"));
+    expect(words().some((w) => w.startsWith("Open project") || w.startsWith("Open event"))).toBe(
+      false,
+    );
+  });
+
+  it("sets the status it names through the task IPC, and a choice already made sends nothing", async () => {
+    board({ tasks: [task({ status: "doing" })] });
+    rightClick(cardOf("Draft the deck"));
+    expect(words()).toContain("+Doing");
+    choose("Doing");
+    await act(async () => {});
+    expect(mocked.changeTaskStatus).not.toHaveBeenCalled();
+    choose("Done");
+    await waitFor(() => expect(mocked.changeTaskStatus).toHaveBeenCalledWith(1, "done"));
+  });
+
+  it("opens the editor from Edit task…", async () => {
+    board();
+    rightClick(cardOf("Draft the deck"));
+    choose("Edit task…");
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+  });
+
+  it("moves a task to a column and says where it went, as Move… does", async () => {
+    const { announce } = board();
+    rightClick(cardOf("Draft the deck"));
+    // Where it is now isn't offered.
+    expect(words()).not.toContain("Move to Today");
+    choose("Move to Tomorrow");
+    await waitFor(() =>
+      expect(mocked.planTask).toHaveBeenCalledWith(1, "2026-11-05", null, "foreground", false),
+    );
+    expect(announce).toHaveBeenCalledWith("Moved to Tomorrow");
+  });
+
+  it("moves up and down its lane, disabled at the ends", async () => {
+    board({ tasks: [task({ id: 1 }), task({ id: 2, title: "Call the bank" })] });
+    rightClick(cardOf("Call the bank"));
+    expect(find("Move down").disabled).toBe(true);
+    expect(find("Move up").disabled).toBe(false);
+    choose("Move up");
+    await waitFor(() => expect(mocked.reorderTasks).toHaveBeenCalledWith([2, 1]));
+    act(() => closeContextMenu());
+    rightClick(cardOf("Draft the deck"));
+    expect(find("Move up").disabled).toBe(true);
+  });
+
+  it("moves to the other lane, and parks and brings back", async () => {
+    board({ tasks: [task({ id: 1 }), task({ id: 2, title: "On the shelf", parked: true })] });
+    rightClick(cardOf("Draft the deck"));
+    choose("Background lane");
+    await waitFor(() =>
+      expect(mocked.planTask).toHaveBeenCalledWith(1, "2026-11-04", null, "background", false),
+    );
+    act(() => closeContextMenu());
+    // The parked shelf's cards have the same menu, with Bring back for Park it.
+    rightClick(cardOf("On the shelf"));
+    expect(words()).not.toContain("Park it");
+    choose("Bring back from Parked");
+    await waitFor(() =>
+      expect(mocked.planTask).toHaveBeenLastCalledWith(2, "2026-11-04", null, "foreground", false),
+    );
+  });
+
+  it("draws the very list the Move… popover draws, so the two cannot drift", () => {
+    board({
+      tasks: [task({ id: 1 }), task({ id: 2, title: "Call the bank", lane: "background" })],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Move Call the bank" }));
+    const popover = within(screen.getByRole("group", { name: "Move Call the bank" }))
+      .getAllByRole("button")
+      .filter((b) => b.getAttribute("aria-current") !== "true")
+      // "Tomorrow" + its days: the popover adds the column's days after its name.
+      .map((b) => b.textContent ?? "");
+    rightClick(cardOf("Call the bank"));
+    const menu = items()
+      .flatMap((i) => (i.kind === "separator" || i.kind === "swatches" ? [] : [i.label]))
+      .filter((l) => l.startsWith("Move") || /lane$|Park|Bring/.test(l));
+    expect(popover.length).toBe(menu.length);
+    popover.forEach((text, n) => {
+      expect(text.startsWith(menu[n].replace(/^Move to /, ""))).toBe(true);
+    });
+  });
+
+  it("Delete task… asks the editor's question and deletes only when answered yes", async () => {
+    const { announce } = board();
+    rightClick(cardOf("Draft the deck"));
+    choose("Delete task…");
+    const ask = await screen.findByRole("dialog", { name: "Delete this task?" });
+    // The menu opened a question: nothing is deleted yet.
+    expect(mocked.deleteTask).not.toHaveBeenCalled();
+    expect(within(ask).getByText(/“Draft the deck” goes from every list it shows on/)).toBeTruthy();
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+    await act(async () => {});
+    expect(mocked.deleteTask).not.toHaveBeenCalled();
+    rightClick(cardOf("Draft the deck"));
+    choose("Delete task…");
+    fireEvent.click(
+      within(await screen.findByRole("dialog", { name: "Delete this task?" })).getByRole("button", {
+        name: "Delete",
+      }),
+    );
+    await waitFor(() => expect(mocked.deleteTask).toHaveBeenCalledWith(1));
+    expect(announce).toHaveBeenCalledWith("Deleted Draft the deck");
+  });
+
+  it("opens the project and the linked event from the menu, as the chips do", () => {
+    const ev: CalendarEvent = {
+      id: "e1",
+      calendar_id: "cal",
+      summary: "Review",
+      description: null,
+      location: null,
+      start: "2026-11-06T14:00:00",
+      end: "2026-11-06T15:00:00",
+      all_day: false,
+      html_link: null,
+      uid: "u1",
+    };
+    const { onOpenProject, onEventClick } = board({
+      tasks: [
+        task({
+          project_name: "Atlas",
+          event_uid: "u1",
+          deadline_from: "event",
+          effective_deadline: "2026-11-06",
+          event_title: "Review",
+        }),
+      ],
+      events: [ev],
+    });
+    rightClick(cardOf("Draft the deck"));
+    choose("Open project Atlas");
+    expect(onOpenProject).toHaveBeenCalledWith("Atlas");
+    choose("Open event Review");
+    expect(onEventClick).toHaveBeenCalledWith(ev, expect.anything());
+  });
+
+  it("gives a stack its own menu: open or close it, and move the whole stack", async () => {
+    board({
+      tasks: [
+        task({ id: 1, title: "Book the slot", stack_id: 7 }),
+        task({ id: 2, title: "Fill the form", stack_id: 7 }),
+      ],
+      stacks: [stack],
+    });
+    const stackCard = screen.getByRole("button", { name: /^≡ Visa/ }).closest("li")!;
+    rightClick(stackCard);
+    expect(currentContextMenu()?.label).toBe("Stack Visa");
+    expect(words()[0]).toBe("Open stack");
+    expect(words()).not.toContain("Delete task…");
+    choose("Open stack");
+    expect(screen.getByText("Fill the form")).toBeTruthy();
+    // Its tasks keep their own menu, and it is the one that opens, not the stack's behind it.
+    rightClick(cardOf("Fill the form"));
+    expect(currentContextMenu()?.label).toBe("Task Fill the form");
+    act(() => closeContextMenu());
+    rightClick(stackCard);
+    expect(words()[0]).toBe("Close stack");
+    choose("Move to Tomorrow");
+    await waitFor(() => expect(mocked.planTask).toHaveBeenCalledTimes(2));
+    expect(mocked.planTask).toHaveBeenCalledWith(1, "2026-11-05", null, "foreground", false);
+    expect(mocked.planTask).toHaveBeenCalledWith(2, "2026-11-05", null, "foreground", false);
+  });
+
+  it("gives a milestone its project", () => {
+    const { onOpenProject } = board({ milestones: [milestone] });
+    rightClick(screen.getByRole("button", { name: "◆ Pitch · Atlas" }).closest("li")!);
+    expect(words()).toEqual(["Open project Atlas"]);
+    choose("Open project Atlas");
+    expect(onOpenProject).toHaveBeenCalledWith("Atlas");
+  });
+
+  it("leaves Shift+right-click to the system menu", () => {
+    board();
+    fireEvent.contextMenu(cardOf("Draft the deck"), { shiftKey: true });
+    expect(currentContextMenu()).toBeNull();
+  });
+
+  // The same press and 70px move: a plain left press drags (the control), a right press and a Mac's
+  // Ctrl-click (a right-click that arrives as button 0) do not.
+  it.each([
+    { name: "a left press", init: { button: 0, buttons: 1 }, drags: true },
+    { name: "a right press", init: { button: 2, buttons: 2 }, drags: false },
+    { name: "a Ctrl-click", init: { button: 0, buttons: 1, ctrlKey: true }, drags: false },
+  ])("$name starts a drag: $drags", ({ init, drags }) => {
+    const { announce } = board();
+    fireEvent.pointerDown(cardOf("Draft the deck"), {
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      clientX: 10,
+      clientY: 10,
+      ...init,
+    });
+    fireEvent.pointerMove(document.body, {
+      pointerId: 1,
+      buttons: init.buttons,
+      clientX: 80,
+      clientY: 90,
+    });
+    if (drags) {
+      expect(announce).toHaveBeenCalledWith("Moving Draft the deck");
+    } else {
+      expect(announce).not.toHaveBeenCalled();
+      expect(document.querySelector("[data-runway-ghost]")).toBeNull();
+    }
+  });
+
+  it("opens from the keyboard on a control inside the card, with its first item focused", async () => {
+    board({ tasks: [task({ project_name: "Atlas" })] });
+    render(<ContextMenuHost />);
+    const tick = screen.getByRole("button", { name: "To do: mark as doing" });
+    tick.focus();
+    fireEvent.keyDown(tick, { key: "ContextMenu" });
+    const first = await screen.findByRole("menuitem", { name: "Edit task…" });
+    expect(currentContextMenu()?.label).toBe("Task Draft the deck");
+    expect(document.activeElement).toBe(first);
+    // Shift+F10 is the same ask on a keyboard with no Menu key.
+    act(() => closeContextMenu());
+    tick.focus();
+    fireEvent.keyDown(tick, { key: "F10", shiftKey: true });
+    expect(await screen.findByRole("menuitem", { name: "Edit task…" })).toBeTruthy();
   });
 });

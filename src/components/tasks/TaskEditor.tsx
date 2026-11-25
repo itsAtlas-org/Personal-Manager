@@ -65,7 +65,6 @@ import {
   Button,
   Callout,
   Collapsible,
-  ConfirmDialog,
   Dialog,
   Input,
   SegmentedControl,
@@ -73,6 +72,7 @@ import {
   Textarea,
   Toggle,
 } from "../ui";
+import { DeleteTaskDialog } from "./DeleteTaskDialog";
 import { EventPicker } from "./EventPicker";
 import { StackEditor } from "./StackEditor";
 
@@ -826,18 +826,13 @@ function TaskEditorBody({
         {/* The confirm and the stack editor sit inside this dialog, not beside it: a dialog is the
             topmost one when no open dialog is its DOM descendant (useDialogLayer), so a sibling
             would be topmost too and one Escape would close both, losing this editor's edits. */}
-        <ConfirmDialog
+        <DeleteTaskDialog
           open={confirmDelete}
-          title="Delete this task?"
-          confirmLabel="Delete"
-          danger
+          title={task?.title}
           busy={busy}
           onConfirm={() => void remove()}
           onClose={() => setConfirmDelete(false)}
-        >
-          “{task?.title}” goes from every list it shows on. Its project, milestone and event stay as
-          they are.
-        </ConfirmDialog>
+        />
         <StackEditor
           stack={editingStack}
           onClose={() => setEditingStack(null)}

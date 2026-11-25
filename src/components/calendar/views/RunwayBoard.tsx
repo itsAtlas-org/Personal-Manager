@@ -54,7 +54,14 @@ import {
   useRunwayFolds,
   type RunwayProps,
 } from "./runwayLogic";
-import { EventsStrip, MoveMenu, RunwayChrome, WindowDialog } from "./runwayParts";
+import {
+  milestoneCardItems,
+  onCardMenu,
+  stackCardItems,
+  taskCardItems,
+  type RunwayMenuCtx,
+} from "./runwayMenu";
+import { DeleteTaskAsk, EventsStrip, MoveMenu, RunwayChrome, WindowDialog } from "./runwayParts";
 import {
   useRunwayDrag,
   type RunwayDrag,
@@ -73,8 +80,8 @@ const LANES: { lane: TaskLane; label: string }[] = [
 /** The task open in the editor from a card's ✎. A new task is CalendarView's (+ Task, in the header). */
 type Editing = { task: Task } | null;
 
-/** What every card needs from the board. */
-interface CardCtx {
+/** What every card needs from the board (its menu's part is `RunwayMenuCtx`). */
+interface CardCtx extends RunwayMenuCtx {
   today: Date;
   now: Date;
   columns: RunwayColumn[];
@@ -86,6 +93,7 @@ interface CardCtx {
   replan: (tasks: readonly Task[], planFor: (t: Task) => TaskPlan | null, where: string) => void;
   reorder: (order: number[], said: string) => void;
   edit: (task: Task) => void;
+  askDelete: (task: Task) => void;
   colorOf?: (calendarId: string) => string;
   onOpenProject?: (project: string) => void;
   onEventClick?: (ev: CalendarEvent, anchor: DOMRect) => void;
@@ -108,8 +116,9 @@ export function RunwayBoard(props: RunwayProps) {
     chrome,
   } = props;
   const { today, columns, model, strips, showEvents, toggleEvents } = props.runway;
-  const { error, cycle, replan, reorder } = useRunwayActions(announce);
+  const { error, cycle, replan, reorder, remove } = useRunwayActions(announce);
   const [editing, setEditing] = useState<Editing>(null);
+  const [deleting, setDeleting] = useState<Task | null>(null);
   const [windowEdit, setWindowEdit] = useState<{ window: RunwayWindow | null } | null>(null);
   const { isFolded, toggle: toggleFold } = useRunwayFolds();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -186,6 +195,7 @@ export function RunwayBoard(props: RunwayProps) {
     replan: (ts, planFor, where) => replan(ts, planFor, where),
     reorder,
     edit: (task) => setEditing({ task }),
+    askDelete: setDeleting,
     colorOf,
     onOpenProject,
     onEventClick,
@@ -239,6 +249,7 @@ export function RunwayBoard(props: RunwayProps) {
         task={editing ? editing.task : null}
         onClose={() => setEditing(null)}
       />
+      <DeleteTaskAsk task={deleting} remove={remove} onClose={() => setDeleting(null)} />
       <WindowDialog
         open={windowEdit !== null}
         window={windowEdit?.window}
@@ -561,6 +572,9 @@ function TaskCardView({
       data-runway-key={key}
       data-runway-mark={mark ?? undefined}
       onPointerDown={(e) => ctx.drag.press(e, { key, taskIds: [t.id] })}
+      onContextMenu={onCardMenu(`Task ${t.title}`, (anchor) =>
+        taskCardItems(t, column, laneCards, ctx, anchor),
+      )}
       className={cn(
         "flex cursor-grab touch-none items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface px-1.5 py-1",
         ctx.drag.dragging?.key === key && "opacity-40",
@@ -655,6 +669,7 @@ function MilestoneCardView({
     <li
       data-runway-card={zone}
       data-runway-key={`milestone:${m.id}`}
+      onContextMenu={onCardMenu(`Milestone ${m.label}`, () => milestoneCardItems(m, ctx))}
       className="flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-dashed border-border px-1.5 py-1"
     >
       <button
@@ -704,6 +719,9 @@ function StackCardView({
       data-runway-card={zone}
       data-runway-key={key}
       onPointerDown={open ? undefined : (e) => ctx.drag.press(e, item)}
+      onContextMenu={onCardMenu(`Stack ${title}`, () =>
+        stackCardItems(card.tasks, column, laneCards, ctx, open, setOpen),
+      )}
       className={cn(
         "rounded-[var(--radius-sm)] border border-border bg-surface shadow-[3px_3px_0_0_var(--border)]",
         !open && "cursor-grab touch-none",

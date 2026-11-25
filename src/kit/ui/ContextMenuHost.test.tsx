@@ -11,6 +11,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   closeContextMenu,
+  copyViaHost,
   currentContextMenu,
   openContextMenu,
   wantsAppMenu,
@@ -558,6 +559,19 @@ describe("the fallback's Copy and Open on a surface's own menu", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     });
+    expect(live(container)).toBe("Link copied");
+  });
+
+  it("copies for a surface's own item through the host, which says it aloud", async () => {
+    // A menu's Copy item calls `copyViaHost`: it is spoken ("Link copied"), where a bare clipboard
+    // write from the item would be silent, the menu having closed by then.
+    const { container } = render(<ContextMenuHost />);
+    copiesTo(() => Promise.resolve());
+    await act(async () => copyViaHost("https://example.com/e", "Link copied"));
+    expect(live(container)).toBe("Link copied");
+    // Nothing is said where the write was refused.
+    copiesTo(() => Promise.reject(new Error("no")));
+    await act(async () => copyViaHost("x", "Copied twice"));
     expect(live(container)).toBe("Link copied");
   });
 });

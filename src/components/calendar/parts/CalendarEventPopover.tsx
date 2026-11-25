@@ -64,6 +64,7 @@ import { Markdown } from "../../../lib/markdown";
 import { RsvpControl } from "../edit/RsvpControl";
 import { RichDescription } from "./RichDescription";
 import { stopLinkAuxClick, useMailLink } from "./useMailLink";
+import { sourceLabel } from "./sourceLabel";
 import { repeatsText, whenText } from "./whenText";
 
 interface Props {
@@ -166,19 +167,6 @@ function restOfDescription(provider: string | undefined): string {
       return "The rest is in Outlook.";
     default:
       return "The rest is in the calendar it comes from.";
-  }
-}
-
-/** "Open in Google" / "Open in Outlook" / a generic label from the provider. */
-function sourceLabel(provider: string | undefined): string {
-  switch (provider) {
-    case "google":
-      return "Open in Google Calendar";
-    case "outlook":
-    case "microsoft":
-      return "Open in Outlook";
-    default:
-      return "Open in calendar";
   }
 }
 

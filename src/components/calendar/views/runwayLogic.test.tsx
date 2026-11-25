@@ -9,7 +9,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunwayWindow } from "../../../lib/calendarPrefs";
-import { buildColumns, type RunwayColumn } from "../../../lib/runway";
+import { buildColumns, type RunwayCard, type RunwayColumn } from "../../../lib/runway";
+import type { Task } from "../../../lib/types";
 
 const prefs = vi.hoisted(() => ({ hydrated: false, windows: [] as RunwayWindow[] }));
 vi.mock("../../../lib/ipc", () => ({}));
@@ -19,7 +20,7 @@ vi.mock("../../../lib/calendarPrefs", async (importOriginal) => ({
   readRunwayWindows: () => prefs.windows,
 }));
 
-import { useRunwayFolds } from "./runwayLogic";
+import { moveChoices, runMoveChoice, useRunwayFolds } from "./runwayLogic";
 
 const KEY = "pm.calendar.runwayFolded";
 const stored = () => JSON.parse(localStorage.getItem(KEY) ?? "[]") as string[];
@@ -70,5 +71,90 @@ describe("useRunwayFolds", () => {
     const { result } = renderHook(() => useRunwayFolds());
     act(() => result.current.toggle(col("today")));
     expect(stored()).toEqual(["window:w1", "today"]);
+  });
+});
+
+// The Move… popover and the card's right-click menu draw one list, so what a card can do is decided
+// in one place. Below it, the list itself: its order, what is disabled, and what choosing does.
+describe("moveChoices", () => {
+  const task = (over: Partial<Task> = {}): Task =>
+    ({
+      id: 1,
+      lane: "foreground",
+      parked: false,
+      do_start: "2026-11-04",
+      do_end: null,
+      ...over,
+    }) as Task;
+  const columns = buildColumns(new Date(2026, 10, 4), []);
+  const lane: RunwayCard[] = [1, 2].map(
+    (id) => ({ kind: "task", task: task({ id }) }) as unknown as RunwayCard,
+  );
+
+  it("lists up and down, each column, the other lane, then parking, the current column marked", () => {
+    const list = moveChoices({
+      tasks: [task({ id: 1 })],
+      columns,
+      here: "today",
+      laneCards: lane,
+      canReorder: true,
+    });
+    expect(list.map((c) => c.key)).toEqual([
+      "up",
+      "down",
+      ...columns.filter((c) => c.kind !== "past").map((c) => `column:${c.id}`),
+      "lane",
+      "park",
+    ]);
+    expect(list.find((c) => c.key === "up")?.disabled).toBe(true);
+    expect(list.find((c) => c.key === "down")?.disabled).toBe(false);
+    const here = list.find((c) => c.key === "column:today");
+    expect(here).toMatchObject({ current: true, disabled: true });
+    expect(list.find((c) => c.key === "lane")?.label).toBe("Background lane");
+    expect(list.find((c) => c.key === "park")?.label).toBe("Park it");
+  });
+
+  it("has no up or down without a lane to step in, and offers Bring back for a parked task", () => {
+    const list = moveChoices({
+      tasks: [task({ parked: true })],
+      columns,
+      here: null,
+      canReorder: true,
+    });
+    expect(list.some((c) => c.part === "step")).toBe(false);
+    expect(list.find((c) => c.key === "park")?.label).toBe("Bring back from Parked");
+    // Parked, no column is "the one it is in".
+    expect(list.some((c) => c.current)).toBe(false);
+  });
+
+  it("runs what each choice means: a plan for a column, an order for a step", () => {
+    const list = moveChoices({
+      tasks: [task({ id: 2 })],
+      columns,
+      here: "today",
+      laneCards: lane,
+      canReorder: true,
+    });
+    const replan = vi.fn();
+    const reorder = vi.fn();
+    runMoveChoice(
+      list.find((c) => c.key === "column:tomorrow")!,
+      replan,
+      reorder,
+    );
+    expect(replan).toHaveBeenCalledWith(expect.any(Function), "Tomorrow");
+    runMoveChoice(
+      list.find((c) => c.key === "up")!,
+      replan,
+      reorder,
+    );
+    expect(reorder).toHaveBeenCalledWith([2, 1], "Moved up in Today");
+    // A step with nowhere to go does nothing.
+    runMoveChoice(
+      list.find((c) => c.key === "down")!,
+      replan,
+      reorder,
+    );
+    expect(reorder).toHaveBeenCalledTimes(1);
   });
 });
