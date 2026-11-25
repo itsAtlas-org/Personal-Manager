@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.187.1-alpha",
+    date: "2026-11-25",
+    highlights: [
+      "In notes, pressing Enter in the middle of a numbered item now gives the second half the next number instead of repeating the same one, and splitting a ticked checklist item leaves the new half unticked.",
+      "Under-the-hood tidying: routine updates to the building blocks underneath PM, bundled together. The note editor now handles selecting text with the mouse itself instead of leaving it to the system, which avoids the occasional flicker or jump while you drag. On a Mac, clicking back into a note where its cursor was no longer sends the cursor to the top, and pasting from some other web editors can no longer upset the note editor. The rest are small updates to the framework PM's windows are built on, the part that writes your exports, the Linux sandbox around PM's helper, and the tools PM is built and checked with.",
+    ],
+  },
+  {
     version: "3.187.0-alpha",
     date: "2026-11-25",
     highlights: [
