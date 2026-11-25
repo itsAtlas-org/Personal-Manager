@@ -7,14 +7,16 @@
 //! `tasks.importChecklist`; and `ui.openTaskEditor`.
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
 use super::call_fixtures::*;
 use super::task_calls::{list_page, task_dto};
 use super::test_support::TestHost;
-use super::{limits, Code, PageAction, Point};
+use super::{limits, Code, Host, PageAction, Point};
 use crate::mods::api::projection::Projection;
+use crate::mods::ids::ModId;
 
 const TASK_MOD: &str = "atlas.tasker";
 
@@ -512,21 +514,26 @@ async fn a_mod_past_its_gift_quota_is_refused_and_makes_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gift_calls_are_rate_limited_by_their_family() {
     let (host, s) = first(TASK_MOD, &["tasks.write", "tasks.read"]);
-    // The family's burst is 50, refilling 10 a second: a quiet mod gets its burst at once, then waits.
+    let me = ModId::parse(TASK_MOD).unwrap();
+    // The family's burst (GIFT_BURST, pinned with explicit instants in limits.rs) refills ten a
+    // second, so a test that counted real calls would depend on how fast the runner makes them.
+    // Empty the bucket through the host's own limiter instead, the very call the dispatcher makes,
+    // with no DB work between, then make one real call right behind it. A token takes 100 ms to
+    // come back; should a stalled runner let one in anyway, empty it and ask again.
     let mut refused = None;
-    for n in 0..(limits::GIFT_BURST as usize + 5) {
-        let reply = call(&host, &s, "tasks.add", json!({"title": format!("t{n}")})).await;
+    for _ in 0..5 {
+        while host
+            .calls()
+            .admit_family(&me, limits::Family::Gifts, Instant::now())
+            .is_ok()
+        {}
+        let reply = call(&host, &s, "tasks.add", json!({"title": "over the burst"})).await;
         if let super::Reply::Error { error } = reply {
-            refused = Some((n, error.code));
+            refused = Some(error.code);
             break;
         }
     }
-    let (at, code) = refused.expect("the family's bucket ran dry");
-    assert_eq!(code, Code::RateLimited);
-    assert!(
-        (limits::GIFT_BURST as usize..limits::GIFT_BURST as usize + 5).contains(&at),
-        "refused at call {at}"
-    );
+    assert_eq!(refused, Some(Code::RateLimited));
     // Other calls of the mod are still served: the family's bucket is its own.
     value(call(&host, &s, "tasks.list", json!({})).await);
 }
