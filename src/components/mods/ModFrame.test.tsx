@@ -1503,7 +1503,13 @@ describe("About this mod", () => {
     const { port } = connect(await theFrame());
     fireEvent.click(aboutButton()!);
     port.postMessage({ id: 1, method: "calendar.events", args: null });
-    await screen.findByRole("dialog");
+    // The question is on screen AND live: Modal's Escape listener and its place among the open
+    // dialogs are registered by effects that run a beat after the commit that draws it, and an Escape
+    // sent in that gap reaches nobody (the About panel stands down for any modal dialog in the DOM).
+    // Focus on "Not now" (data-autofocus) is set in the same passive-effect flush, so it marks ready.
+    const question = await screen.findByRole("dialog");
+    const notNow = within(question).getByRole("button", { name: "Not now" });
+    await waitFor(() => expect(document.activeElement).toBe(notNow));
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.querySelector('[data-help="mod-about"]')).not.toBeNull();
