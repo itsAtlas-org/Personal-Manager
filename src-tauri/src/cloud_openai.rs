@@ -54,6 +54,10 @@ pub(crate) struct Flavour {
     /// every chunk's `finish_reason`; an `Err` drops the partial text like a mid-stream error chunk.
     /// `None` for a provider that has no such reason.
     pub stop_error: Option<fn(&str) -> Option<Error>>,
+    /// How the provider counts output when `completion_tokens` leaves its thinking out (Gemini puts
+    /// thoughts in the total only). Called at the two places usage is read: the stream's final chunk
+    /// and a one-shot reply. `None` reads the plain `usage` object, which is every other provider.
+    pub usage: Option<fn(&serde_json::Value) -> Usage>,
 }
 
 /// How much of a failed response's body is handed to `Flavour::request_error`. Far above any real
@@ -238,6 +242,9 @@ pub(crate) fn build_body(
 ///
 /// Pure, so the shape-matching — the part that can silently be wrong — is testable without a socket.
 pub(crate) fn chunk_error(flavour: &Flavour, value: &serde_json::Value) -> Option<Error> {
+    // Google's compatible endpoint wraps an error in a one-element array (`[{"error":{...}}]`), so a
+    // mid-stream failure would read as "no error" and the loop would end on a truncated reply.
+    let value = value.as_array().and_then(|a| a.first()).unwrap_or(value);
     let err = value.get("error")?;
     // A provider whose codes are words ("rate_limit_exceeded") reads the whole error object itself.
     if let Some(read) = flavour.stream_error {
@@ -276,7 +283,15 @@ pub(crate) fn parse_usage(value: &serde_json::Value) -> Usage {
         // cache, and the part written to it (OpenAI bills a write above the plain input rate).
         cached_tokens: value["usage"]["prompt_tokens_details"]["cached_tokens"].as_i64(),
         cache_write_tokens: value["usage"]["prompt_tokens_details"]["cache_write_tokens"].as_i64(),
+        output_partial: false,
     }
+}
+
+/// The usage of one response or final chunk, read the way the flavour counts it.
+fn usage_of(flavour: &Flavour, value: &serde_json::Value) -> Usage {
+    flavour
+        .usage
+        .map_or_else(|| parse_usage(value), |read| read(value))
 }
 
 /// POST a streaming chat completion with a body from [`build_body`]. `on_token` is called with each
@@ -388,7 +403,7 @@ where
                 }
                 // The final chunk (empty choices) carries token usage — we asked for
                 // it via stream_options; keep it whenever present.
-                let u = parse_usage(&value);
+                let u = usage_of(flavour, &value);
                 if u.prompt_tokens.is_some() || u.completion_tokens.is_some() {
                     usage = u;
                 }
@@ -453,7 +468,7 @@ pub(crate) async fn complete(
     Ok(Completion {
         text,
         model: value["model"].as_str().map(str::to_string),
-        usage: parse_usage(&value),
+        usage: usage_of(flavour, &value),
         // Same signal, same meaning — the non-streaming path gets it in one response rather than a
         // chunk, and callers must not have to care which path produced the Completion.
         truncated: value["choices"][0]["finish_reason"].as_str() == Some("length"),
@@ -493,6 +508,9 @@ mod tests {
             include_str!("cloud_openai.rs"),
             include_str!("openrouter.rs"),
             include_str!("openai_direct.rs"),
+            // Google's key goes in `x-goog-api-key`, which is fine; no attribution or User-Agent.
+            include_str!("gemini_direct.rs"),
+            include_str!("region.rs"),
         ] {
             let src = src.to_ascii_lowercase();
             for header in [
@@ -572,6 +590,7 @@ mod tests {
             patient: false,
             stream_error: None,
             stop_error: None,
+            usage: None,
         }
     }
 
@@ -602,5 +621,40 @@ mod tests {
         let err = chunk_error(&plain_flavour(), &chunk).expect("an error chunk");
         assert!(err.to_string().starts_with("Plain request failed (429"));
         assert!(chunk_error(&plain_flavour(), &serde_json::json!({"choices": []})).is_none());
+    }
+
+    /// Google's compatible endpoint wraps an error in a one-element array. Without the unwrap a
+    /// mid-stream failure reads as "no error" and the loop ends on a truncated reply.
+    #[test]
+    fn an_array_wrapped_mid_stream_error_is_still_an_error() {
+        let wrapped = serde_json::json!([{"error": {"code": 503, "message": "busy"}}]);
+        let err = chunk_error(&plain_flavour(), &wrapped).expect("an error chunk");
+        assert!(err.to_string().starts_with("Plain request failed (503"));
+        // An array that is not an error, and an empty one, stay "no error".
+        assert!(chunk_error(&plain_flavour(), &serde_json::json!([{"choices": []}])).is_none());
+        assert!(chunk_error(&plain_flavour(), &serde_json::json!([])).is_none());
+    }
+
+    /// The `usage` hook replaces the plain reader at both call sites' shared helper, and a flavour
+    /// without one reads the plain `usage` object.
+    #[test]
+    fn a_flavours_usage_hook_decides_how_output_is_counted() {
+        fn doubled(_: &serde_json::Value) -> Usage {
+            Usage {
+                completion_tokens: Some(99),
+                ..Usage::default()
+            }
+        }
+        let reply = serde_json::json!({"usage": {"prompt_tokens": 5, "completion_tokens": 2}});
+        let plain = usage_of(&plain_flavour(), &reply);
+        assert_eq!(
+            (plain.prompt_tokens, plain.completion_tokens),
+            (Some(5), Some(2))
+        );
+        let hooked = Flavour {
+            usage: Some(doubled),
+            ..plain_flavour()
+        };
+        assert_eq!(usage_of(&hooked, &reply).completion_tokens, Some(99));
     }
 }

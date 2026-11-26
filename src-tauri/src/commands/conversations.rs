@@ -1427,6 +1427,34 @@ mod tests {
         assert_eq!(meter_model(false, None, primary.clone(), false), primary);
     }
 
+    /// Chat on Google Gemini reads its window from PM's own list, and there is no OpenRouter upgrade
+    /// model to offer for it (the meter's `upgrade` is built only on OpenRouter).
+    #[test]
+    fn a_gemini_chat_meter_reads_the_geminis_window() {
+        let primary = "gemini/gemini-3.8-flash".to_string();
+        assert_eq!(
+            meter_model(
+                true,
+                Some("anthropic/claude-sonnet-4.6".into()),
+                primary.clone(),
+                false
+            ),
+            primary
+        );
+        let m = crate::direct_models::find(&primary).expect("the Gemini id resolves");
+        assert_eq!(i64::from(m.context), 1_048_576);
+        // A reply Gemini served is kept as the meter's model, like any direct provider's.
+        assert_eq!(
+            meter_model(
+                true,
+                Some(primary.clone()),
+                "gemini/gemini-4-carbon".into(),
+                true
+            ),
+            primary
+        );
+    }
+
     /// Pin the chat honesty wire shape the PR6 frontend depends on: `Done` carries a `served_by`
     /// tag ("local"/"cloud"), and `Fallback` is the adjacently-tagged snake_case variant the TS
     /// `ChatEvent` union mirrors. A rename here would silently desync `src/lib/types.ts`.

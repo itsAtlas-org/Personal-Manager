@@ -1035,6 +1035,10 @@ pub struct PowerRoleView {
     /// The cloud provider this role's cloud leg goes to, so the copy can name it ("billed to your
     /// OpenAI key") instead of saying OpenRouter about a role that isn't on it.
     pub cloud_provider: llm_gateway::CloudProvider,
+    /// On whose terms that cloud provider's route is, when it has tiers (Gemini), so the battery
+    /// question can say "billed" for a paid key and "Google may train on it" for a free one. `None`
+    /// for OpenRouter and OpenAI. `blocked` means the role is paused.
+    pub route_terms: Option<crate::direct_providers::RouteTerms>,
 }
 
 /// The On battery policy's state, for the status snapshot. No getter of its own: the stored values
@@ -1068,7 +1072,7 @@ pub struct PowerView {
 /// The status's power answer, built from the SAME pure functions `resolve` uses, so the section can
 /// never describe a route the gateway would not take. Pure, so it is unit-tested.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn power_view(
+pub(crate) fn power_view_with(
     snap: &PowerSnapshot,
     settings: &PowerSettings,
     keep_local: bool,
@@ -1078,6 +1082,10 @@ pub(crate) fn power_view(
     background_bound: Option<&str>,
     chat_key: KeyPresence,
     background_key: KeyPresence,
+    terms: (
+        Option<crate::direct_providers::RouteTerms>,
+        Option<crate::direct_providers::RouteTerms>,
+    ),
 ) -> PowerView {
     let ctx = llm_gateway::RuntimeContext::from_parts(snap, settings, keep_local);
     let role = |role: Role, bound: Option<&str>, key: KeyPresence| {
@@ -1085,7 +1093,14 @@ pub(crate) fn power_view(
         // The preference `resolve_provider` serves the role by: a role switching Local AI off
         // emptied is "Local only" until a model is picked.
         let pref = prefs.served_pref(role);
-        let blocked = llm_gateway::power_blocked(pref, local_ready, key);
+        let route_terms = match role {
+            Role::Chat => terms.0,
+            Role::Background => terms.1,
+        };
+        // A role on a paused provider (a free Gemini key where only paid ones are used) is never one
+        // the policy can move: it would fail every call.
+        let paused = route_terms == Some(crate::direct_providers::RouteTerms::Blocked);
+        let blocked = llm_gateway::power_blocked(pref, local_ready, key, paused);
         let route = match llm_gateway::power_route(role, &ctx, blocked) {
             // Plugged back in, with the latch still waiting out its minute: there is nothing left to
             // ask about. The question says "you're on battery" and offers the cloud "until you plug
@@ -1111,6 +1126,7 @@ pub(crate) fn power_view(
             ),
             cloud_key: key,
             cloud_provider: settings.providers.for_role(role),
+            route_terms,
         }
     };
     let chat = role(Role::Chat, chat_bound, chat_key);
@@ -1134,6 +1150,35 @@ pub(crate) fn power_view(
         chat,
         background,
     }
+}
+
+/// [`power_view_with`] for the roles that are on a provider without tiers (OpenRouter, OpenAI): the
+/// shape every test written before Gemini uses, so none of them has to say "no terms" 14 times.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn power_view(
+    snap: &PowerSnapshot,
+    settings: &PowerSettings,
+    keep_local: bool,
+    prefs: &llm_gateway::RoutingPrefs,
+    endpoint_set: bool,
+    chat_bound: Option<&str>,
+    background_bound: Option<&str>,
+    chat_key: KeyPresence,
+    background_key: KeyPresence,
+) -> PowerView {
+    power_view_with(
+        snap,
+        settings,
+        keep_local,
+        prefs,
+        endpoint_set,
+        chat_bound,
+        background_bound,
+        chat_key,
+        background_key,
+        (None, None),
+    )
 }
 
 /// The local model the status REPORTS for a role: none while the On battery policy has it on the
@@ -1177,8 +1222,20 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
             state.local_ai.keep_local(),
         )
     };
+    // A tier provider's key fingerprint (keychain) and where this computer is (the OS zone) are read
+    // BEFORE the guard, like the power latch: a role on a paused provider is one the policy can't move.
+    // This is polled, so which providers the roles use is peeked under a short guard first and nothing
+    // is read unless a role is on a provider with tiers (a person on OpenRouter pays nothing for it).
+    let (tier_fps, region) = {
+        let state = app.state::<AppState>();
+        let providers = {
+            let conn = state.conn()?;
+            llm_gateway::RoleProviders::read(&conn)?
+        };
+        crate::direct_providers::tier_context(providers.chat, providers.background)
+    };
     // One connection for every setting this needs, dropped before the first await.
-    let (base_url, configured, chat_bound, background_bound, prefs, power_settings) = {
+    let (base_url, configured, chat_bound, background_bound, prefs, power_settings, route_terms) = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
         let base_url = db::get_setting(&conn, LOCAL_BASE_URL_KEY)?;
@@ -1196,6 +1253,20 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
             db::get_setting(&conn, LOCAL_BACKGROUND_MODEL_KEY)?.as_deref(),
         );
         let power_settings = PowerSettings::read(&conn);
+        let route_terms = (
+            crate::direct_providers::route_terms_of(
+                &conn,
+                power_settings.providers.chat,
+                &region,
+                &tier_fps,
+            )?,
+            crate::direct_providers::route_terms_of(
+                &conn,
+                power_settings.providers.background,
+                &region,
+                &tier_fps,
+            )?,
+        );
         (
             base_url,
             configured,
@@ -1203,6 +1274,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
             background,
             prefs,
             power_settings,
+            route_terms,
         )
     };
     if !configured {
@@ -1227,7 +1299,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
             // closed — so `effective`, `cloud_key` and `any_cloud_key` are true for a user with a
             // cloud key who hasn't connected a server yet. Nothing can move: with no endpoint every
             // role's `blocked` stays `NoLocalModel` or `CloudRouting`.
-            power: power_view(
+            power: power_view_with(
                 &snap,
                 &power_settings,
                 keep_local,
@@ -1237,6 +1309,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
                 background_bound.as_deref(),
                 llm_gateway::key_presence(&app, Role::Chat),
                 llm_gateway::key_presence(&app, Role::Background),
+                route_terms,
             ),
         });
     }
@@ -1244,7 +1317,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
     // In-memory reads of the secrets cache, after the guard has closed. Only the two REPORTED model
     // fields below change with the route; every internal use keeps the BOUND models, because a
     // parked model can still be loaded, released and probed.
-    let power = power_view(
+    let power = power_view_with(
         &snap,
         &power_settings,
         keep_local,
@@ -1254,6 +1327,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
         background_bound.as_deref(),
         llm_gateway::key_presence(&app, Role::Chat),
         llm_gateway::key_presence(&app, Role::Background),
+        route_terms,
     );
 
     let (in_cooldown, cooldown_remaining_s) = {
@@ -4452,6 +4526,85 @@ mod tests {
             background: pref,
             local_ai_on: true,
             emptied: llm_gateway::Emptied::default(),
+        }
+    }
+
+    /// A role on a paused provider (a free Gemini key where only paid ones are used) is one the On
+    /// battery policy can never move: moving it would fail every call. The same role on a paid key
+    /// moves as usual, and a role's terms ride the view beside its provider.
+    #[test]
+    fn a_role_on_a_paused_provider_is_never_moved_by_the_policy() {
+        use crate::direct_providers::RouteTerms;
+        let view = |terms| {
+            power_view_with(
+                &low_battery(),
+                &policy(true),
+                false,
+                &both(ProviderPref::LocalThenCloud),
+                true,
+                Some("gemma3:4b"),
+                Some("qwen3:8b"),
+                KeyPresence::Present,
+                KeyPresence::Present,
+                terms,
+            )
+        };
+        let paused = view((Some(RouteTerms::Blocked), None));
+        assert_eq!(paused.chat.blocked, Some(PowerBlocked::Paused));
+        assert_ne!(paused.chat.route, PowerRoute::Cloud, "it stays local");
+        assert_eq!(paused.chat.route_terms, Some(RouteTerms::Blocked));
+        assert_eq!(paused.background.blocked, None);
+        assert_eq!(paused.background.route, PowerRoute::Cloud);
+        let paid = view((Some(RouteTerms::Paid), Some(RouteTerms::Free)));
+        assert_eq!(paid.chat.route, PowerRoute::Cloud);
+        assert_eq!(paid.background.route, PowerRoute::Cloud);
+        assert_eq!(paid.background.route_terms, Some(RouteTerms::Free));
+        let v = serde_json::to_value(&paused.chat).unwrap();
+        assert_eq!(v["blocked"], "paused");
+        assert_eq!(v["route_terms"], "blocked");
+    }
+
+    /// The status builder reads the region and the fingerprints BEFORE its guard and hands the terms to
+    /// the policy: a source scan, because the pure function can't prove the caller passes them.
+    #[test]
+    fn the_power_policy_asks_about_a_paused_provider() {
+        let src = include_str!("local_ai.rs");
+        let view = src
+            .split("pub(crate) fn power_view_with(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("power_view_with");
+        assert!(view.contains("power_blocked(pref, local_ready, key, paused)"));
+        let status = src
+            .split("pub async fn local_llm_status(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("local_llm_status");
+        // The fingerprints and the region come from `tier_context`, which reads neither unless a role is
+        // on a provider with tiers, and they are read before the main guard (the peek that feeds it is
+        // a guard of its own, dropped first).
+        let ctx_at = status
+            .find("tier_context(")
+            .expect("fingerprints and region are read");
+        let main_guard_at = status
+            .find("let (base_url,")
+            .expect("the main settings block");
+        assert!(ctx_at < main_guard_at, "both before the main guard");
+        assert!(
+            !status.contains("region::assumed()") && !status.contains("tier_fps()"),
+            "never read unconditionally"
+        );
+        let calls: Vec<&str> = status
+            .split("power_view_with(")
+            .skip(1)
+            .map(|c| c.split(");").next().unwrap())
+            .collect();
+        assert_eq!(calls.len(), 2, "the early return and the full status");
+        for call in calls {
+            assert!(
+                call.contains("route_terms"),
+                "a call without the terms: {call}"
+            );
         }
     }
 

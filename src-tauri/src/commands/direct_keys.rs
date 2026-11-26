@@ -14,10 +14,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::direct_providers::{
-    self, DirectProvider, DirectProvidersState, KeyNote, KeyOutcome, RoleMove, PROVIDERS,
+    self, DirectProvider, DirectProvidersState, KeyNote, KeyOutcome, KeyState, KeyTier, RoleMove,
+    PROVIDERS,
 };
 use crate::error::{Error, Result};
 use crate::llm_gateway::{self, CloudProvider, KeyPresence, Role};
+use crate::region::{self, Region, RegionRefusal};
 use crate::AppState;
 
 /// "chat" or "background". Anything else is refused rather than guessed.
@@ -55,6 +57,13 @@ pub struct KeyCheckResult {
     /// the key is read-only). Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<KeyNote>,
+    /// On whose terms the key is (Gemini): paid, free or unknown. Absent for a provider with no tiers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<KeyTier>,
+    /// Set with `free_key_refused`, and with a re-check of a saved key that is paused: where PM thinks
+    /// this computer is and why that matters. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<RegionRefusal>,
 }
 
 /// The whole read model for the "Your own keys" section and the role blocks. Read-only, no
@@ -62,14 +71,31 @@ pub struct KeyCheckResult {
 /// `unreadable` and its verdict is hidden.
 #[tauri::command]
 pub fn direct_providers_state(app: AppHandle) -> Result<DirectProvidersState> {
-    // The keychain first, with no guard held.
-    let presences: Vec<(CloudProvider, KeyPresence)> = PROVIDERS
+    // The keychain first, with no guard held; then where this computer is (the OS time zone, no
+    // network and no database); THEN the guard.
+    let states: Vec<KeyState> = PROVIDERS
         .iter()
-        .map(|d| (d.provider, direct_providers::key_presence_of(d)))
+        .map(|d| {
+            let (presence, fp) = direct_providers::key_state_of(d);
+            (d.provider, presence, fp)
+        })
         .collect();
+    // Only read when a provider with tiers has a key: the verdict on a provider without them (or
+    // without a key) never depends on the place, and `Outside` in its stead changes nothing.
+    let region = if PROVIDERS
+        .iter()
+        .zip(&states)
+        .any(|(d, (_, presence, _))| d.tiers && *presence == KeyPresence::Present)
+    {
+        region::assumed()
+    } else {
+        Region::Outside
+    };
     let state = app.state::<AppState>();
     let conn = state.conn()?;
-    direct_providers::build_state(&conn, &presences)
+    // What failed calls learned since the card was last read is written first, so the card shows it.
+    direct_providers::apply_seen(&conn)?;
+    direct_providers::build_state(&conn, &states, &region)
 }
 
 /// Turn a provider on or off. Off moves every role that was on it back to OpenRouter in the same
@@ -111,8 +137,23 @@ pub async fn save_direct_key(
     if llm_gateway::is_a_stored_openrouter_key(&key) {
         return Ok(refused(KeyOutcome::Malformed));
     }
-    // The network, with no lock held.
+    // Nor does one company's key go to another (`sk-` to Google, `AIza` to OpenAI). No network call.
+    if direct_providers::looks_like_another_providers_key(d.provider, &key) {
+        return Ok(refused(KeyOutcome::Malformed));
+    }
+    // Where this computer is: the OS time zone, read before any guard, no network. Only for a
+    // provider with tiers; the rule is the identity for any other.
+    let region = if d.tiers {
+        region::assumed()
+    } else {
+        Region::Outside
+    };
+    // The network, with no lock held. The key goes to the provider here, BEFORE PM knows the
+    // verdict: that is how it learns the tier, and a free key can't use the probe model.
     let check = direct_providers::check_key(d.provider, &key).await;
+    // A free or unknown key where PM only uses paid ones is refused: nothing is stored, and the typed
+    // key stays in the field so Check again is the same submit.
+    let check = direct_providers::apply_region_rule(d.provider, check, &region);
     if !check.outcome.keeps_key() {
         return Ok(KeyCheckResult {
             outcome: check.outcome,
@@ -120,6 +161,8 @@ pub async fn save_direct_key(
             listed: Vec::new(),
             listed_total: 0,
             note: None,
+            tier: check.tier,
+            refusal: check.refusal,
         });
     }
     // The keychain, then the store.
@@ -127,7 +170,12 @@ pub async fn save_direct_key(
     {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        direct_providers::store_key_check(&conn, d.provider, &check)?;
+        direct_providers::store_key_check(
+            &conn,
+            d.provider,
+            &check,
+            &direct_providers::key_fp(&key),
+        )?;
     }
     Ok(KeyCheckResult {
         outcome: check.outcome,
@@ -135,6 +183,8 @@ pub async fn save_direct_key(
         listed: check.listed,
         listed_total: check.listed_total,
         note: check.note,
+        tier: check.tier,
+        refusal: None,
     })
 }
 
@@ -145,6 +195,8 @@ fn refused(outcome: KeyOutcome) -> KeyCheckResult {
         listed: Vec::new(),
         listed_total: 0,
         note: None,
+        tier: None,
+        refusal: None,
     }
 }
 
@@ -157,11 +209,13 @@ fn should_store_recheck(
     prev: Option<&direct_providers::StoredKeyCheck>,
     check: &direct_providers::KeyCheck,
 ) -> bool {
+    // `Busy` is shown and stores nothing: Google had a bad second and decided nothing.
     let says_something = matches!(
         check.outcome,
         KeyOutcome::Ok
             | KeyOutcome::Restricted
             | KeyOutcome::NoCredit
+            | KeyOutcome::NeedsVerification
             | KeyOutcome::Rejected
             | KeyOutcome::RegionBlocked
     );
@@ -188,21 +242,38 @@ pub async fn recheck_direct_key(app: AppHandle, provider: String) -> Result<KeyC
     let d = parse_provider(&provider)?;
     let key = (d.get_key)()?
         .ok_or_else(|| Error::Other(format!("There is no {} key to check.", d.name)))?;
+    let fp = direct_providers::key_fp(key.expose());
+    let region = if d.tiers {
+        region::assumed()
+    } else {
+        Region::Outside
+    };
     let check = direct_providers::check_key(d.provider, key.expose()).await;
-    {
+    // The region rule is NOT applied here: the key is already saved, and a stored free key in the
+    // region is paused at read, never deleted. A fresh verdict replaces the stored one (clearing a
+    // flip), and the result says whether the key is still paused.
+    let refusal = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
         let prev = direct_providers::read_key_check(&conn, d.provider)?;
         if should_store_recheck(prev.as_ref(), &check) {
-            direct_providers::store_key_check(&conn, d.provider, &check)?;
+            direct_providers::store_key_check(&conn, d.provider, &check, &fp)?;
         }
-    }
+        if d.tiers && check.outcome != KeyOutcome::Rejected {
+            let tier = direct_providers::tier_now(&conn, d.provider, Some(&fp))?;
+            direct_providers::refuses(d.provider, tier, &region)
+        } else {
+            None
+        }
+    };
     Ok(KeyCheckResult {
         outcome: check.outcome,
         saved: true,
         listed: check.listed,
         listed_total: check.listed_total,
         note: check.note,
+        tier: check.tier,
+        refusal,
     })
 }
 
@@ -231,12 +302,17 @@ fn gate_role_provider(
     role: Role,
     opted_in: bool,
     key: KeyPresence,
+    blocked: Option<&RegionRefusal>,
 ) -> Result<()> {
     if !opted_in {
         return Err(Error::Other(format!("Turn on {} first.", d.name)));
     }
     match key {
-        KeyPresence::Present => Ok(()),
+        // A role is never MOVED onto a provider that is paused: it would fail every call.
+        KeyPresence::Present => match blocked {
+            Some(r) => Err(Error::Other(r.sentence(d.provider))),
+            None => Ok(()),
+        },
         KeyPresence::Absent => Err(Error::Other(format!("Add your {} key first.", d.name))),
         KeyPresence::Unreadable => Err(Error::Other(format!(
             "PM can't read your {} key right now, so {} can't be moved to it.",
@@ -257,12 +333,23 @@ pub fn set_role_cloud_provider(app: AppHandle, role: String, provider: String) -
         direct_providers::set_role_provider(&conn, role, CloudProvider::OpenRouter)?;
     } else {
         let d = parse_provider(&provider)?;
-        // The keychain first, with no guard held.
-        let key = direct_providers::key_presence_of(d);
+        // The keychain first, then where this computer is, with no guard held.
+        let (key, fp) = direct_providers::key_state_of(d);
+        let region = if d.tiers {
+            region::assumed()
+        } else {
+            Region::Outside
+        };
         let state = app.state::<AppState>();
         let conn = state.conn()?;
         let opted = direct_providers::opted_in(&conn, d.provider)?;
-        gate_role_provider(d, role, opted, key)?;
+        let blocked = if d.tiers && key == KeyPresence::Present {
+            let tier = direct_providers::tier_now(&conn, d.provider, fp.as_deref())?;
+            direct_providers::refuses(d.provider, tier, &region)
+        } else {
+            None
+        };
+        gate_role_provider(d, role, opted, key, blocked.as_ref())?;
         direct_providers::set_role_provider(&conn, role, d.provider)?;
     }
     llm_gateway::ping_status(&app);
@@ -312,7 +399,8 @@ mod tests {
         assert!(parse_role("Chat").is_err());
         assert!(parse_role("").is_err());
         assert_eq!(parse_provider("openai").unwrap().name, "OpenAI");
-        for bad in ["openrouter", "gemini", "anthropic", "", "OpenAI"] {
+        assert_eq!(parse_provider("gemini").unwrap().name, "Google Gemini");
+        for bad in ["openrouter", "anthropic", "", "OpenAI", "Gemini"] {
             assert!(parse_provider(bad).is_err(), "{bad}");
         }
     }
@@ -320,14 +408,15 @@ mod tests {
     #[test]
     fn a_role_moves_to_a_provider_only_when_it_is_on_and_keyed() {
         let d = parse_provider("openai").unwrap();
-        assert!(gate_role_provider(d, Role::Chat, true, KeyPresence::Present).is_ok());
-        let off = gate_role_provider(d, Role::Chat, false, KeyPresence::Present).unwrap_err();
+        assert!(gate_role_provider(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
+        let off = gate_role_provider(d, Role::Chat, false, KeyPresence::Present, None).unwrap_err();
         assert!(off.to_string().contains("Turn on OpenAI"), "{off}");
-        let none = gate_role_provider(d, Role::Chat, true, KeyPresence::Absent).unwrap_err();
+        let none = gate_role_provider(d, Role::Chat, true, KeyPresence::Absent, None).unwrap_err();
         assert!(none.to_string().contains("Add your OpenAI key"), "{none}");
         // An unreadable keychain refuses too, in its own words: it is not "no key".
         let unreadable =
-            gate_role_provider(d, Role::Background, true, KeyPresence::Unreadable).unwrap_err();
+            gate_role_provider(d, Role::Background, true, KeyPresence::Unreadable, None)
+                .unwrap_err();
         assert!(
             unreadable.to_string().contains("can't read"),
             "{unreadable}"
@@ -338,6 +427,78 @@ mod tests {
         );
     }
 
+    /// A role is never MOVED onto a paused provider, and the refusal is the same sentence a paused
+    /// send gives.
+    #[test]
+    fn a_role_is_not_moved_onto_a_paused_provider() {
+        let d = parse_provider("gemini").unwrap();
+        let uk = region::region_of_on(Some("Europe/London"), false);
+        let blocked = direct_providers::refuses(CloudProvider::Gemini, Some(KeyTier::Free), &uk);
+        assert!(blocked.is_some());
+        let e = gate_role_provider(d, Role::Chat, true, KeyPresence::Present, blocked.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("Gemini is paused:") && e.contains("Europe/London"),
+            "{e}"
+        );
+        // Paid: nothing blocks it. Turned off still says "turn on" first.
+        assert!(gate_role_provider(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
+        let off = gate_role_provider(d, Role::Chat, false, KeyPresence::Present, blocked.as_ref())
+            .unwrap_err();
+        assert!(off.to_string().contains("Turn on Google Gemini"), "{off}");
+    }
+
+    /// Gemini has no tick-box: the tier is detected, so the command that writes it refuses.
+    #[test]
+    fn gemini_has_no_data_sharing_option() {
+        let (_dir, conn) = {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(
+                &dir.path().join("t.sqlite"),
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            )
+            .unwrap();
+            (dir, conn)
+        };
+        let e = direct_providers::set_shares_data(&conn, CloudProvider::Gemini, true).unwrap_err();
+        assert!(e.to_string().contains("no such option"), "{e}");
+        assert!(!direct_providers::shares_data(&conn, CloudProvider::Gemini).unwrap());
+        assert!(direct_providers::set_shares_data(&conn, CloudProvider::OpenAi, true).is_ok());
+    }
+
+    #[test]
+    fn a_key_for_another_company_is_never_sent() {
+        let gem = CloudProvider::Gemini;
+        let oa = CloudProvider::OpenAi;
+        assert!(direct_providers::looks_like_another_providers_key(
+            gem,
+            "sk-proj-abcdefghijklmnopqrst"
+        ));
+        assert!(direct_providers::looks_like_another_providers_key(
+            oa,
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+        assert!(!direct_providers::looks_like_another_providers_key(
+            gem,
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+        assert!(!direct_providers::looks_like_another_providers_key(
+            oa,
+            "sk-proj-abcdefghijklmnopqrst"
+        ));
+        // The shape check refuses them too, so `save_direct_key` answers `malformed` with no network.
+        assert!(!(parse_provider("gemini").unwrap().well_formed)(
+            "sk-proj-abcdefghijklmnopqrst"
+        ));
+        assert!(!(parse_provider("openai").unwrap().well_formed)(
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+        assert!((parse_provider("gemini").unwrap().well_formed)(
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+    }
+
     fn stored(outcome: KeyOutcome, note: Option<KeyNote>) -> direct_providers::StoredKeyCheck {
         direct_providers::StoredKeyCheck {
             at: "2026-11-26T00:00:00Z".into(),
@@ -345,6 +506,9 @@ mod tests {
             listed: Vec::new(),
             listed_total: 0,
             note,
+            tier: None,
+            flipped_free_at: None,
+            key_fp: None,
         }
     }
 
@@ -380,10 +544,20 @@ mod tests {
             Some(&stored(KeyOutcome::Ok, None)),
             &checked(KeyOutcome::NoCredit, None)
         ));
-        // Trouble reaching the provider is never stored.
+        // Trouble reaching the provider is never stored, and neither is a busy Google: it is shown and
+        // decides nothing.
         assert!(!should_store_recheck(
             None,
             &checked(KeyOutcome::Unreachable, None)
+        ));
+        assert!(!should_store_recheck(
+            Some(&stored(KeyOutcome::Ok, None)),
+            &checked(KeyOutcome::Busy, None)
+        ));
+        // A project Google wants verified IS a verdict about the key.
+        assert!(should_store_recheck(
+            Some(&stored(KeyOutcome::Ok, None)),
+            &checked(KeyOutcome::NeedsVerification, None)
         ));
         assert!(!should_store_recheck(
             None,
@@ -399,6 +573,8 @@ mod tests {
             listed: vec!["openai/gpt-6.2-sol".into()],
             listed_total: 3,
             note: None,
+            tier: None,
+            refusal: None,
         })
         .unwrap();
         assert_eq!(v["outcome"]["unexpected"], 418);
@@ -406,15 +582,47 @@ mod tests {
         assert_eq!(v["listed_total"], 3);
         assert_eq!(v["listed"][0], "openai/gpt-6.2-sol");
         assert!(v.get("note").is_none(), "no note, no field");
+        assert!(
+            v.get("tier").is_none() && v.get("refusal").is_none(),
+            "OpenAI's result is unchanged"
+        );
         let noted = serde_json::to_value(KeyCheckResult {
             outcome: KeyOutcome::Restricted,
             saved: true,
             listed: vec![],
             listed_total: 0,
             note: Some(KeyNote::ReadOnly),
+            tier: None,
+            refusal: None,
         })
         .unwrap();
         assert_eq!(noted["note"], "read_only");
+        // The Gemini words: a tier, a refusal that names the place and the zone, and the new outcomes.
+        let uk = region::region_of_on(Some("Europe/London"), false);
+        let refused_free = serde_json::to_value(KeyCheckResult {
+            outcome: KeyOutcome::FreeKeyRefused,
+            saved: false,
+            listed: vec![],
+            listed_total: 0,
+            note: None,
+            tier: Some(KeyTier::Free),
+            refusal: uk.refusal(region::Basis::Free),
+        })
+        .unwrap();
+        assert_eq!(refused_free["outcome"], "free_key_refused");
+        assert_eq!(refused_free["tier"], "free");
+        assert_eq!(refused_free["refusal"]["kind"], "uk");
+        assert_eq!(refused_free["refusal"]["label"], "the United Kingdom");
+        assert_eq!(refused_free["refusal"]["zone"], "Europe/London");
+        assert_eq!(refused_free["refusal"]["basis"], "free");
+        for (o, word) in [
+            (KeyOutcome::NoCredit, "no_credit"),
+            (KeyOutcome::NeedsVerification, "needs_verification"),
+            (KeyOutcome::Busy, "busy"),
+        ] {
+            assert_eq!(serde_json::to_value(o).unwrap(), word);
+        }
+        assert_eq!(serde_json::to_value(KeyTier::Unknown).unwrap(), "unknown");
         assert_eq!(
             serde_json::to_value(refused(KeyOutcome::Malformed)).unwrap()["outcome"],
             "malformed"

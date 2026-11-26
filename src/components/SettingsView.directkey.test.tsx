@@ -11,7 +11,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { directState, openaiView } from "../lib/directProvidersFixture";
+import { directState, geminiView, openaiView, stateWith } from "../lib/directProvidersFixture";
 import type { DirectProvidersState } from "../lib/types";
 
 // Hoisted with the mock, which runs `rec` while building the module.
@@ -23,7 +23,12 @@ const { calls, world, rec } = vi.hoisted(() => {
       calls.push(`${name}(${args.map((a) => JSON.stringify(a)).join(",")})`);
       return Promise.resolve();
     };
-  return { calls, world: { state: null as unknown }, rec };
+  // `onSave` lets a test say what the key check answered and what the state is after it.
+  return {
+    calls,
+    world: { state: null as unknown, onSave: null as null | (() => unknown) },
+    rec,
+  };
 });
 
 vi.mock("../lib/ipc", async (importOriginal) => ({
@@ -46,6 +51,8 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
       background_provider: "openrouter",
       chat_cloud_model: null,
       background_cloud_model: null,
+      chat_route_terms: null,
+      background_route_terms: null,
       time_zone: "UTC",
       indexing_speed: "fast",
     }),
@@ -58,6 +65,7 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   },
   saveDirectKey: (...a: unknown[]) => {
     calls.push(`saveDirectKey(${a.map((x) => JSON.stringify(x)).join(",")})`);
+    if (world.onSave) return Promise.resolve(world.onSave());
     // The key is kept: the next read has it.
     world.state = directState({ view: openaiView() });
     return Promise.resolve({
@@ -70,21 +78,10 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   setRoleCloudProvider: (role: string, provider: string) => {
     calls.push(`setRoleCloudProvider("${role}","${provider}")`);
     const cur = world.state as DirectProvidersState;
-    world.state = directState({
-      view: cur.providers[0],
-      chat:
-        role === "chat"
-          ? (provider as "openai")
-          : cur.roles.chat.stored === "openai"
-            ? "openai"
-            : "openrouter",
-      background:
-        role === "background"
-          ? (provider as "openai")
-          : cur.roles.background.stored === "openai"
-            ? "openai"
-            : "openrouter",
-    });
+    type Who = "openrouter" | "openai" | "gemini";
+    const keep = (r: "chat" | "background") =>
+      r === role ? (provider as Who) : (cur.roles[r].stored as Who);
+    world.state = stateWith(cur.providers, { chat: keep("chat"), background: keep("background") });
     return Promise.resolve();
   },
   setDirectRole: rec("setDirectRole"),
@@ -124,6 +121,7 @@ beforeEach(() => {
   }
   if (!Element.prototype.scrollTo) Element.prototype.scrollTo = () => {};
   calls.length = 0;
+  world.onSave = null;
 });
 afterEach(cleanup);
 
@@ -154,7 +152,7 @@ describe("the cloud pane's words", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Rather not use OpenRouter? Use your own OpenAI key. It's off unless you turn it on, and it isn't zero data retention.",
+        "Rather not use OpenRouter? Use your own OpenAI or Google Gemini key. It's off unless you turn it on, and it isn't zero data retention.",
       ),
     ).toBeTruthy();
   });
@@ -244,5 +242,101 @@ describe("a good own key", () => {
     });
     await waitFor(() => expect(calls).toContain('setRoleCloudProvider("chat","openai")'));
     expect((screen.getByLabelText("Chat uses") as HTMLSelectElement).value).toBe("openai");
+  });
+});
+
+describe("a Google Gemini key in the wizard", () => {
+  const geminiKey = () => screen.getByLabelText("Gemini API key") as HTMLInputElement;
+  const noKey = () => geminiView({ key: "absent", key_check: null, tier: null });
+  const typeGemini = async () => {
+    fireEvent.change(geminiKey(), { target: { value: "AIzaWizardKeyNotReal0123456789abcdef" } });
+    fireEvent.submit(geminiKey().closest("form")!);
+  };
+  /** The key is kept: the next read has it, on the tier given. */
+  const savesAs = (tier: "paid" | "free" | "unknown") => {
+    world.onSave = () => {
+      world.state = stateWith([
+        geminiView({
+          tier,
+          key_check: {
+            at: "x",
+            outcome: "ok",
+            listed: ["gemini/gemini-3.8-flash", "gemini/gemini-3.1-flash-lite"],
+            listed_total: 49,
+            tier,
+            flipped_free_at: null,
+          },
+        }),
+      ]);
+      return {
+        outcome: "ok",
+        saved: true,
+        listed: ["gemini/gemini-3.8-flash", "gemini/gemini-3.1-flash-lite"],
+        listed_total: 49,
+        tier,
+      };
+    };
+  };
+
+  it("points BOTH roles at a paid key when there is no OpenRouter key", async () => {
+    await mount(stateWith([noKey()]));
+    savesAs("paid");
+    await typeGemini();
+    await waitFor(() => expect(getStarted().disabled).toBe(false));
+    expect(calls).toContain('setRoleCloudProvider("chat","gemini")');
+    expect(calls).toContain('setRoleCloudProvider("background","gemini")');
+    expect(screen.queryByText(/Background work isn't set up yet/)).toBeNull();
+  });
+
+  it.each(["free", "unknown"] as const)(
+    "points CHAT only at a %s key, and says background isn't set up",
+    async (tier) => {
+      await mount(stateWith([noKey()]));
+      savesAs(tier);
+      await typeGemini();
+      await screen.findByText(
+        "Background work isn't set up yet. Pick where it should go, or add an OpenRouter key.",
+      );
+      expect(calls).toContain('setRoleCloudProvider("chat","gemini")');
+      expect(calls).not.toContain('setRoleCloudProvider("background","gemini")');
+      // Background has nothing to answer it, so the wizard can't finish yet.
+      expect(getStarted().disabled).toBe(true);
+    },
+  );
+
+  it("cannot finish on a paused provider", async () => {
+    await mount(
+      stateWith(
+        [
+          geminiView({
+            tier: "free",
+            blocked: {
+              kind: "uk",
+              label: "the United Kingdom",
+              zone: "Europe/London",
+              basis: "free",
+            },
+          }),
+        ],
+        { chat: "gemini", background: "gemini" },
+      ),
+    );
+    expect(getStarted().disabled).toBe(true);
+  });
+
+  it("adopts nothing for a key that came back with no credit", async () => {
+    await mount(stateWith([noKey()]));
+    world.onSave = () => {
+      world.state = stateWith([
+        geminiView({
+          key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 49, tier: "paid" },
+        }),
+      ]);
+      return { outcome: "no_credit", saved: true, listed: [], listed_total: 49, tier: "paid" };
+    };
+    await typeGemini();
+    await screen.findByText("✓ Saved to your keychain.");
+    expect(calls.some((c) => c.startsWith("setRoleCloudProvider("))).toBe(false);
+    expect(getStarted().disabled).toBe(true);
   });
 });

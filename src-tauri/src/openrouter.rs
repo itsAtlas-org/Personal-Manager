@@ -70,6 +70,11 @@ pub struct Usage {
     /// `cost`), and only `openai_direct::cost_usd` reads them.
     pub cached_tokens: Option<i64>,
     pub cache_write_tokens: Option<i64>,
+    /// The provider reported a prompt count but no total, so the output count may leave its thinking
+    /// out (Gemini counts thoughts in a total, not in `completion_tokens`). A price worked out from
+    /// such a count would look exact and under-count, so the cost reads "-" instead. False for every
+    /// provider that reports output whole.
+    pub output_partial: bool,
 }
 
 /// The result of a chat call: the assembled text, the model that actually served it
@@ -433,6 +438,7 @@ pub(crate) const FLAVOUR: Flavour = Flavour {
     patient: false,
     stream_error: None,
     stop_error: None,
+    usage: None,
 };
 
 /// The fields only OpenRouter's body carries: usage accounting, how the model(s) are named, and the

@@ -363,6 +363,11 @@ export function AiModelsSettings({
     isDirect(dp.state.roles.chat.effective) &&
     isDirect(dp.state.roles.background.effective);
   const catalogueDate = dp.state?.providers[0]?.catalogue_checked_on ?? null;
+  // Gemini's cost copy is only worth reading by someone who has turned it on or kept a key.
+  const geminiInUse =
+    dp.state?.providers.find(
+      (p) => p.provider === "gemini" && (p.opted_in || p.key === "present"),
+    ) ?? null;
 
   return (
     <>
@@ -753,6 +758,17 @@ export function AiModelsSettings({
                 version of PM (checked on {dayMonthYear(catalogueDate)}). Cached input is priced at
                 the cached rate. It leaves out tax and anything the provider adds. Check your
                 provider&apos;s own dashboard for the bill.
+              </p>
+            )}
+            {geminiInUse && (
+              <p>
+                Gemini&apos;s replies report thinking in a total, not in the output count, so PM
+                works the output out as the total minus the prompt. A free Gemini key costs nothing,
+                so PM shows $0.00 for free-tier models while its last check says the key is free. If
+                you&apos;ve since upgraded the project, press Check again; until then, or until a
+                paid-only model answers, the figure can be too low. Some prices change on a set date
+                (checked {dayMonthYear(geminiInUse.catalogue_checked_on)}); PM&apos;s list knows the
+                dates.
               </p>
             )}
           </SectionInfo>

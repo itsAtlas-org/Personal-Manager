@@ -37,6 +37,8 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
       background_provider: "openrouter",
       chat_cloud_model: null,
       background_cloud_model: null,
+      chat_route_terms: null,
+      background_route_terms: null,
       time_zone: "UTC",
       indexing_speed: "fast",
     }),

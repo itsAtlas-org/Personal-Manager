@@ -53,6 +53,9 @@ mod fit;
 // scheduler keeps them current. Assertion/resolution and chat grounding arrive in the following PRs.
 mod flags;
 mod fts_segment;
+// Your own Google Gemini key: the one module that knows Google's wire and key check (a flavour of the
+// shared dialect, plus the tier probe and the free-key refusal).
+mod gemini_direct;
 mod google;
 // Best-effort hardware scan (#296): RAM/CPU/disk via sysinfo, GPU/VRAM hand-rolled per-OS. Every
 // probe nulls its field on failure rather than erroring.
@@ -115,6 +118,7 @@ mod preferences;
 mod project_activity;
 mod projects;
 mod python_fetch;
+mod region;
 mod registry;
 mod residency;
 mod retag;
@@ -891,6 +895,8 @@ impl AppState {
             // Under `db`'s guard, so whoever holds the guard next sees the new store's epoch.
             self.store_epoch
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The same rule as `take_conn`: a new store never inherits another's notes.
+            direct_providers::forget_all_seen();
         }
         // The one choke point that heals fault state: every successful open path (retry,
         // unlock, adopt, repair, curtain take-over) lands here, so none can leave a stale
@@ -975,6 +981,9 @@ impl AppState {
             .map_err(|_| error::Error::Other("database lock poisoned".into()))?;
         self.store_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // What failed calls learned about a direct provider's key (free, paid, a spent allowance)
+        // belongs to the store it was learned in: a locked or replaced vault starts clean.
+        direct_providers::forget_all_seen();
         Ok(guard.take())
     }
 

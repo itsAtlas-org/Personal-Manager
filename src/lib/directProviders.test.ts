@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import appSource from "../App.tsx?raw";
 
 import {
+  adoptRoles,
   chatUpgradeApplies,
+  directInfo,
   directPickerRows,
   directReady,
   effortAfterModelChange,
@@ -17,10 +19,20 @@ import {
   eligibleProviders,
   footerRow,
   isEligible,
+  flippedLine,
   keyVerdict,
   movedLine,
+  notThereLine,
   offersRecheck,
+  offersRecheckFor,
+  pausedText,
+  readsFree,
   recheckStores,
+  refusalText,
+  routeLabel,
+  routeTitle,
+  termsFor,
+  tierBadge,
   pickerCaption,
   providerName,
   providerOptionLabel,
@@ -33,7 +45,20 @@ import {
   unavailableLabel,
   wizardModelsLine,
 } from "./directProviders";
-import { directState, LUNA, openaiView, settingsFor, SOL, TERRA } from "./directProvidersFixture";
+import {
+  directState,
+  FLASH,
+  FLASH_LITE,
+  geminiView,
+  LUNA,
+  openaiView,
+  PRO,
+  settingsFor,
+  SOL,
+  stateWith,
+  TERRA,
+} from "./directProvidersFixture";
+import type { RegionRefusal } from "./types";
 
 describe("effort levels", () => {
   it("names every level the catalogue can carry, and Title-cases one it has not met", () => {
@@ -77,6 +102,11 @@ describe("effort levels", () => {
     expect(effortOptions("chat", undefined)).toEqual([]);
   });
 
+  it("keeps OpenAI's chat option worded as it always was, even for a row with its own default", () => {
+    expect(TERRA.effort_default).toBe("medium");
+    expect(effortOptions("chat", TERRA)[0]).toEqual({ value: "", label: "Model default" });
+  });
+
   it("writes the role default as null, so a role on its default keeps tracking it", () => {
     expect(effortToWrite("chat", SOL, "")).toBeNull();
     expect(effortToWrite("chat", SOL, "high")).toBe("high");
@@ -115,7 +145,9 @@ describe("provider words", () => {
   it("names a provider, and falls back to the raw word for one it has no card for", () => {
     expect(providerName("openrouter")).toBe("OpenRouter");
     expect(providerName("openai")).toBe("OpenAI");
-    expect(providerName("gemini")).toBe("gemini");
+    expect(providerName("gemini")).toBe("Google Gemini");
+    // A provider this version has no card for is still shown as its own word.
+    expect(providerName("anthropic")).toBe("anthropic");
     expect(providerOptionLabel("openrouter")).toBe("OpenRouter (asks for zero data retention)");
     expect(providerOptionLabel("openai")).toBe("OpenAI, direct (no zero data retention)");
   });
@@ -430,22 +462,61 @@ describe("the sidebar footer", () => {
       id: "openai/gpt-6.2-sol",
       fallbacks: 0,
       via: "OpenAI direct",
+      viaTitle: null,
+      viaDue: false,
     });
     // The other role is untouched.
     expect(footerRow(s, "background")).toEqual({
       id: "google/gemini-2.5-flash",
       fallbacks: 0,
       via: null,
+      viaTitle: null,
+      viaDue: false,
     });
   });
 
   it("counts auto-switch fallbacks on OpenRouter as it always did", () => {
+    const none = { viaTitle: null, viaDue: false };
     expect(footerRow(settingsFor(), "chat")).toEqual({
       id: "anthropic/claude-sonnet-4.6",
       fallbacks: 1,
       via: null,
+      ...none,
     });
-    expect(footerRow(null, "chat")).toEqual({ id: null, fallbacks: 0, via: null });
+    expect(footerRow(null, "chat")).toEqual({ id: null, fallbacks: 0, via: null, ...none });
+  });
+
+  it("says a Gemini route's terms from Settings, due-tinted when it is free or paused", () => {
+    const on = (terms: "paid" | "free" | "blocked" | null | undefined) =>
+      footerRow(
+        settingsFor({
+          chat_provider: "gemini",
+          chat_cloud_model: "gemini/gemini-3.8-flash",
+          chat_route_terms: terms,
+        }),
+        "chat",
+      );
+    expect(on("paid")).toMatchObject({ via: "Gemini direct, paid", viaDue: false });
+    expect(on("free")).toMatchObject({ via: "Gemini direct, free", viaDue: true });
+    expect(on("blocked")).toMatchObject({ via: "Gemini paused", viaDue: true });
+    // A Settings that predates the field reads as free: Unknown is free.
+    expect(on(undefined)).toMatchObject({ via: "Gemini direct, free", viaDue: true });
+    // Rust's `null` is a role on Gemini with no key: nothing is known about the terms, so the footer
+    // says only where the route goes (never "free", never the due tint).
+    expect(on(null)).toEqual({
+      id: "gemini/gemini-3.8-flash",
+      fallbacks: 0,
+      via: "Gemini direct",
+      viaTitle: null,
+      viaDue: false,
+    });
+    expect(on("paid").viaTitle).toBe(
+      "Chat goes straight to Google Gemini with your own key, on Google's paid terms. It isn't zero data retention. Change it in Settings > AI & Models.",
+    );
+    expect(on("free").viaTitle).toMatch(/train on what you send and people at Google may read it/);
+    // The key may be paid and merely unchecked: the title says PM treats it as free.
+    expect(on("free").viaTitle).toMatch(/a key PM treats as free\. If it is free/);
+    expect(on("paid").viaTitle).not.toMatch(/free/i);
   });
 });
 
@@ -465,5 +536,369 @@ describe("the context meter's larger-model switch", () => {
     const guard = body.indexOf("if (!chatUpgradeApplies(settings)) return Promise.resolve();");
     expect(guard).toBeGreaterThan(-1);
     expect(guard).toBeLessThan(body.indexOf("setChatModels("));
+  });
+});
+
+// ---- Google Gemini: the tier is a second axis, and the UI only words what Rust decided -----------
+
+const UK: RegionRefusal = {
+  kind: "uk",
+  label: "the United Kingdom",
+  zone: "Europe/London",
+  basis: "free",
+};
+const UNPLACED: RegionRefusal = { kind: "unplaceable", label: "x", zone: "UTC", basis: "free" };
+const gemini = () => directInfo("gemini")!;
+const freeView = (over = {}) =>
+  geminiView({
+    tier: "free",
+    key_check: {
+      at: "x",
+      outcome: "ok",
+      listed: [FLASH.id],
+      listed_total: 49,
+      tier: "free",
+      flipped_free_at: null,
+    },
+    ...over,
+  });
+
+describe("Gemini's warning, by verdict", () => {
+  it("says the free-tier rule before any key is pasted, and never claims zero data retention", () => {
+    const t = termsFor(gemini(), geminiView({ key: "absent", key_check: null, tier: null }));
+    expect(t.tone).toBe("warning");
+    expect(t.headline).toBe("This isn't zero data retention.");
+    expect(t.points.join(" ")).toMatch(/free Gemini key lets Google train/);
+    expect(t.points.join(" ")).toMatch(
+      /UK, the EU, Iceland, Liechtenstein, Norway and Switzerland/,
+    );
+  });
+
+  it("words paid, free, unknown and unchecked differently, danger for all but paid", () => {
+    const paid = termsFor(gemini(), geminiView());
+    expect(paid.tone).toBe("warning");
+    expect(paid.points[0]).toMatch(/doesn't use what you send to improve its products/);
+    const free = termsFor(gemini(), freeView());
+    expect(free.tone).toBe("danger");
+    expect(free.headline).toMatch(/train on what you send, and people at Google may read it/);
+    const unknown = termsFor(gemini(), geminiView({ tier: "unknown" }));
+    expect(unknown.tone).toBe("danger");
+    expect(unknown.points[0]).toMatch(/couldn't tell whether this key is free or paid/);
+    // A key with NO usable verdict says nothing was asked, which is not "couldn't tell".
+    const none = termsFor(gemini(), geminiView({ tier: null }));
+    expect(none.tone).toBe("danger");
+    expect(none.headline).toBe("PM hasn't checked this key, so it treats it as free.");
+    expect(JSON.stringify(none)).not.toMatch(/couldn't tell/);
+    for (const t of [paid, free, unknown, none]) {
+      expect(JSON.stringify(t)).not.toMatch(/sends zero data retention/);
+    }
+  });
+
+  it("keeps OpenAI's one warning and its shared headline", () => {
+    const o = directInfo("openai")!;
+    expect(termsFor(o, openaiView()).headline).toBe("This isn't zero data retention.");
+    expect(termsFor(o, openaiView({ shares_data: true })).headline).toBe(
+      "OpenAI may train on what you send.",
+    );
+  });
+});
+
+describe("the tier badge", () => {
+  it("is real words with a decorative glyph, one per verdict", () => {
+    expect(tierBadge(gemini(), geminiView())).toEqual({
+      glyph: "✓",
+      text: "Paid key",
+      tone: "ok",
+    });
+    expect(tierBadge(gemini(), freeView())).toMatchObject({ glyph: "⚠", text: "Free key" });
+    expect(tierBadge(gemini(), geminiView({ tier: "unknown" }))?.text).toBe(
+      "Free key (PM couldn't tell)",
+    );
+    // A present key with no verdict for it is "not checked", never "couldn't tell".
+    expect(tierBadge(gemini(), geminiView({ tier: null }))?.text).toBe(
+      "Not checked yet (treated as free)",
+    );
+  });
+
+  it("adds paused or out of credit, and is absent without a key or without tiers", () => {
+    expect(tierBadge(gemini(), freeView({ blocked: UK }))?.text).toBe("Free key (paused)");
+    const empty = geminiView({
+      key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0, tier: "paid" },
+    });
+    expect(tierBadge(gemini(), empty)?.text).toBe("Paid key (out of credit)");
+    expect(tierBadge(gemini(), geminiView({ key: "absent" }))).toBeNull();
+    expect(tierBadge(directInfo("openai")!, openaiView())).toBeNull();
+  });
+});
+
+describe("what a Gemini key check says", () => {
+  const v = (outcome: Parameters<typeof keyVerdict>[0], tier?: "paid" | "free" | "unknown") =>
+    keyVerdict(outcome, 3, "Google Gemini", undefined, { info: gemini(), tier });
+
+  it("words a paid key as working and on paid terms", () => {
+    expect(v("ok", "paid")).toEqual({
+      tone: "ok",
+      text: "Key works. It's on Google's paid terms. 3 Gemini models are ready to use.",
+    });
+    expect(
+      keyVerdict("ok", 1, "Google Gemini", undefined, { info: gemini(), tier: "paid" }).text,
+    ).toContain("1 Gemini model is ready to use.");
+    expect(
+      keyVerdict("ok", 0, "Google Gemini", undefined, { info: gemini(), tier: "paid" }).text,
+    ).toMatch(/none of the models PM knows are in its list/);
+  });
+
+  it("warns on a free or unknown key outside the region, and never draws a tick", () => {
+    expect(v("ok", "free")).toEqual({
+      tone: "warn",
+      text: `Saved. This key is on Google's free tier, so Google may train on what you send. 3 Gemini models are ready, but models marked "Needs a paid key" won't work on it.`,
+    });
+    expect(v("ok", "unknown")).toEqual({
+      tone: "warn",
+      text: "Saved. PM couldn't tell whether this key is free or paid, so it treats it as free: Google may train on what you send.",
+    });
+    // A tier that never arrived reads as Unknown.
+    expect(v("ok").text).toMatch(/couldn't tell/);
+  });
+
+  it("words an empty prepay balance with the word the backend uses, no_credit", () => {
+    expect(v("no_credit").text).toBe(
+      "Saved. This key is paid, but its prepay balance is empty, so Google has stopped it. Add credit at aistudio.google.com/billing, then press Check again.",
+    );
+    // And OpenAI's own sentence is unchanged.
+    expect(keyVerdict("no_credit", 3, "OpenAI").text).toMatch(/platform\.openai\.com/);
+  });
+
+  it("refuses with Google's reasons, and says busy is not a connection problem", () => {
+    expect(v("needs_verification")).toEqual({
+      tone: "refused",
+      text: "Not saved. Google wants this project verified in AI Studio before the key can be used. Verify it, then press Save and check again.",
+    });
+    expect(v("rejected").text).toMatch(/^Not saved\. Google says this key isn't right\./);
+    expect(v("rejected").text).toMatch(/leaked keys, old keys with no restrictions/);
+    expect(v("region_blocked").text).toMatch(/doesn't offer free Gemini keys where you are/);
+    const busy = v("busy");
+    expect(busy.tone).toBe("refused");
+    expect(busy.text).toBe(
+      "Google was busy or limiting requests, so PM couldn't check the key. Nothing was decided. Wait a minute and press Save and check again.",
+    );
+    expect(busy.text).not.toMatch(/connection/);
+    expect(v("unreachable").text).toBe(
+      "Not saved. PM couldn't reach Google to check it. Check your connection and try again.",
+    );
+    expect(v("free_key_refused")).toEqual({
+      tone: "refused",
+      text: "Not saved. It's a free key and PM only uses paid keys where you are.",
+    });
+  });
+
+  it("shows a word it has no sentence for as itself", () => {
+    expect(v("brand_new_word" as never).text).toContain("brand_new_word");
+  });
+
+  it("keeps a re-check neutral beside a pause, and drops 'Saved.' otherwise", () => {
+    const r = recheckVerdict("ok", 3, "Google Gemini", undefined, {
+      info: gemini(),
+      tier: "free",
+      refusal: UK,
+    });
+    expect(r).toEqual({ tone: "warn", text: "Checked: this key still reads as free." });
+    expect(r.text).not.toMatch(/Saved/);
+    const plain = recheckVerdict("ok", 3, "Google Gemini", undefined, {
+      info: gemini(),
+      tier: "free",
+    });
+    expect(plain.text).toMatch(/^This key is on Google's free tier/);
+    expect(recheckVerdict("busy", 0, "Google Gemini", undefined, { info: gemini() }).text).toMatch(
+      /press Check again\.$/,
+    );
+  });
+
+  it("stores a verification answer on re-check and never a busy one", () => {
+    expect(recheckStores("needs_verification")).toBe(true);
+    expect(recheckStores("busy")).toBe(false);
+  });
+
+  it("hides a stored verdict that isn't about THIS key", () => {
+    // A carried row beside a different key reads as no verdict: no "Key works" about another key.
+    expect(storedVerdict(geminiView({ tier: null }), "Google Gemini")).toBeNull();
+    expect(storedVerdict(geminiView(), "Google Gemini")?.text).toMatch(/paid terms/);
+    expect(storedVerdict(freeView({ blocked: UK }), "Google Gemini")?.text).toBe(
+      "Checked: this key still reads as free.",
+    );
+  });
+});
+
+describe("the paused and refused sentences", () => {
+  it("names where PM thinks you are and what it read", () => {
+    expect(pausedText(gemini(), UK, "free")).toBe(
+      "Gemini is paused. Your key reads as free, and PM thinks you're in the United Kingdom (it read your computer's time zone as Europe/London). Google's terms only allow paid keys there, so PM won't use it. Make the project paid in AI Studio, then press Check again.",
+    );
+    expect(pausedText(gemini(), UNPLACED, "free")).toBe(
+      "Gemini is paused. Your key reads as free, and PM can't tell where this computer is (its time zone reads as UTC), so it only uses paid keys. Set your computer's time zone, or make the project paid in AI Studio, then press Check again.",
+    );
+    expect(pausedText(gemini(), { ...UNPLACED, zone: "" }, "free")).toContain("reads as unknown");
+  });
+
+  it("leads with Google's own word when it told PM the project is free", () => {
+    expect(pausedText(gemini(), UK, "free", "2026-11-26T10:00:00Z")).toMatch(
+      /^Google told PM on 26-11-2026 that this project is on the free tier\. Gemini is paused\./,
+    );
+    expect(flippedLine("2026-11-26T10:00:00Z")).toBe(
+      "Google told PM on 26-11-2026 that this project is now on the free tier, so Google may use what you send to improve its products. Make the project paid in AI Studio, then press Check again.",
+    );
+  });
+
+  it("says 'hasn't checked' for no verdict and 'couldn't tell' for an unknown one", () => {
+    const unknown: RegionRefusal = { ...UK, basis: "unknown" };
+    expect(pausedText(gemini(), unknown, null)).toContain(
+      "PM hasn't checked your key, so it treats it as free, and PM thinks you're in",
+    );
+    expect(pausedText(gemini(), unknown, "unknown")).toContain(
+      "PM couldn't tell whether your key is free or paid, so it treats it as free, and",
+    );
+  });
+
+  it("tells a typed free key it wasn't saved, with the zone and the way out", () => {
+    expect(refusalText(UK)).toMatch(
+      /^It's a free key, and PM thinks you're in the United Kingdom: it read your computer's time zone as Europe\/London\./,
+    );
+    expect(refusalText(UK)).toMatch(
+      /link billing to the key's project in AI Studio and add prepay credit/,
+    );
+    expect(refusalText({ ...UK, basis: "unknown" })).toMatch(
+      /^PM couldn't tell whether it's free or paid, so it treats it as free, and PM thinks/,
+    );
+    expect(refusalText(UNPLACED)).toMatch(
+      /can't tell where this computer is \(its time zone reads as UTC\)/,
+    );
+    expect(notThereLine(UK)).toBe(
+      "Not in the United Kingdom? Set your computer's time zone to where you really are, then press Check again.",
+    );
+    expect(notThereLine(UNPLACED)).toBeNull();
+  });
+});
+
+describe("who Gemini can be picked for, and what is wrong with a role on it", () => {
+  const paused = freeView({ blocked: UK });
+  const empty = geminiView({
+    key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0, tier: "paid" },
+  });
+
+  it("never offers a paused or out-of-credit Gemini, but still offers OpenAI with no credit", () => {
+    expect(isEligible(geminiView())).toBe(true);
+    expect(isEligible(paused)).toBe(false);
+    expect(isEligible(empty)).toBe(false);
+    expect(
+      isEligible(
+        openaiView({ key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0 } }),
+      ),
+    ).toBe(true);
+  });
+
+  it("gives a role already on a paused Gemini its own issue and label", () => {
+    const state = stateWith([paused], { chat: "gemini" });
+    expect(roleIssue(state, "chat")).toBe("blocked");
+    expect(
+      roleIssueLine("blocked", "chat", "Google Gemini", {
+        id: "gemini",
+        blocked: UK,
+        tier: "free",
+      }),
+    ).toBe(
+      "Chat is set to Google Gemini, but Gemini is paused (your key reads as free and PM thinks you're in the United Kingdom). Chat won't answer until the project is paid, or until you pick another provider.",
+    );
+    expect(unavailableLabel("gemini", state, "chat")).toBe("Google Gemini (paused)");
+  });
+
+  it("gives a role on an empty prepaid Gemini its own line and label", () => {
+    const state = stateWith([empty], { background: "gemini" });
+    expect(roleIssue(state, "background")).toBe("no_credit");
+    expect(roleIssueLine("no_credit", "background", "Google Gemini", { id: "gemini" })).toBe(
+      "Background is set to Google Gemini, but its prepay balance is empty. Background won't answer until you add credit in AI Studio, or you pick another provider.",
+    );
+    expect(unavailableLabel("gemini", state, "background")).toBe("Google Gemini (out of credit)");
+  });
+
+  it("makes the wizard unable to finish on a paused provider", () => {
+    expect(directReady(stateWith([paused], { chat: "gemini", background: "gemini" }), false)).toBe(
+      false,
+    );
+    expect(
+      directReady(stateWith([geminiView()], { chat: "gemini", background: "gemini" }), false),
+    ).toBe(true);
+  });
+
+  it("adopts a paid key for both roles and a free or unknown one for chat only", () => {
+    expect(adoptRoles(geminiView())).toEqual(["chat", "background"]);
+    expect(adoptRoles(freeView())).toEqual(["chat"]);
+    expect(adoptRoles(geminiView({ tier: "unknown" }))).toEqual(["chat"]);
+    expect(adoptRoles(geminiView({ tier: null }))).toEqual(["chat"]);
+    // Nothing that can't be picked is adopted.
+    expect(adoptRoles(freeView({ blocked: UK }))).toEqual([]);
+    expect(adoptRoles(openaiView())).toEqual(["chat", "background"]);
+    expect(adoptRoles(undefined)).toEqual([]);
+  });
+
+  it("offers Check again for everything but a known-paid, working key", () => {
+    const ok = { outcome: "ok" as const };
+    expect(offersRecheckFor(gemini(), ok, "paid", null)).toBe(false);
+    expect(offersRecheckFor(gemini(), ok, "free", null)).toBe(true);
+    expect(offersRecheckFor(gemini(), ok, "unknown", null)).toBe(true);
+    expect(offersRecheckFor(gemini(), ok, null, null)).toBe(true);
+    expect(offersRecheckFor(gemini(), ok, "paid", UK)).toBe(true);
+    expect(offersRecheckFor(gemini(), { outcome: "needs_verification" }, "paid", null)).toBe(true);
+    // OpenAI has no tiers: only its own verdicts offer it.
+    expect(offersRecheckFor(directInfo("openai")!, ok, null, null)).toBe(false);
+  });
+});
+
+describe("the picker's Gemini rows", () => {
+  it("flags a paid-only model against a key that reads as free, and only then", () => {
+    const flag = (v: ReturnType<typeof geminiView>) =>
+      directPickerRows(v).find((r) => r.id === PRO.id)?.note;
+    expect(flag(geminiView())).toBeNull();
+    expect(flag(freeView())).toBe("Needs a paid key");
+    expect(flag(geminiView({ tier: null }))).toBe("Needs a paid key");
+    // A model with a free allowance is never flagged.
+    expect(directPickerRows(freeView()).find((r) => r.id === FLASH.id)?.note).toBeNull();
+    expect(readsFree(freeView())).toBe(true);
+    expect(readsFree(openaiView())).toBe(false);
+  });
+
+  it("says when a price rises", () => {
+    const flash = directPickerRows(geminiView()).find((r) => r.id === FLASH.id);
+    expect(flash?.tip).toContain(
+      "Rises to $1.50 in and $7.50 out per million tokens on 01-01-2027.",
+    );
+    expect(directPickerRows(geminiView()).find((r) => r.id === PRO.id)?.tip).not.toMatch(/Rises/);
+  });
+
+  it("names the model's own default effort in chat's first option", () => {
+    expect(effortOptions("chat", FLASH)[0]).toEqual({ value: "", label: "Model default (Medium)" });
+    // 3.8 Flash has no Minimal.
+    expect(effortOptions("chat", FLASH).map((o) => o.label)).not.toContain("Minimal");
+    expect(effortOptions("background", FLASH_LITE).map((o) => o.label)).toEqual([
+      "Minimal",
+      "Low (PM's default)",
+      "Medium",
+      "High",
+    ]);
+  });
+});
+
+describe("the route labels", () => {
+  it("says the terms for Gemini and the one label for OpenAI", () => {
+    expect(routeLabel(gemini(), "paid")).toBe("Gemini direct, paid");
+    expect(routeLabel(gemini(), "free")).toBe("Gemini direct, free");
+    expect(routeLabel(gemini(), "blocked")).toBe("Gemini paused");
+    expect(routeLabel(directInfo("openai")!, null)).toBe("OpenAI direct");
+    expect(routeLabel(directInfo("openai")!, null, true)).toBe("OpenAI direct, shared");
+  });
+
+  it("titles a paused route with where PM thinks you are, when it knows", () => {
+    expect(routeTitle(gemini(), "chat", "blocked", UK)).toBe(
+      "Chat is set to Google Gemini, but your key reads as free and PM thinks you're in the United Kingdom. Chat can't answer until you fix this. Open Settings > AI & Models.",
+    );
   });
 });

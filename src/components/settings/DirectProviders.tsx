@@ -31,8 +31,9 @@ export function DirectProviders({
     >
       <SectionLabel>Your own keys</SectionLabel>
       <p className="mt-1 text-xs text-ink4">
-        Use your own key from OpenAI instead of OpenRouter. It's off until you turn it on. Requests
-        to your own key are not zero data retention.
+        Use your own key from OpenAI or Google instead of OpenRouter. It's off until you turn it on.
+        Requests to your own key are not zero data retention, and a free Google key lets Google
+        train on what you send.
       </p>
       {dp.error && !dp.state && (
         <Callout className="mt-3" live={false}>

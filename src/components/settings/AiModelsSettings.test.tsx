@@ -27,6 +27,8 @@ const SETTINGS = {
   background_provider: "openrouter",
   chat_cloud_model: null,
   background_cloud_model: null,
+  chat_route_terms: null,
+  background_route_terms: null,
 };
 
 // Spread over the real module, so a wrapper this tab doesn't call here stays as it is.

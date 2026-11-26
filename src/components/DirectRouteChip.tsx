@@ -3,7 +3,16 @@
 
 import { useEffect } from "react";
 
-import { directInfo, isDirect, providerView } from "../lib/directProviders";
+import {
+  directInfo,
+  hasTiers,
+  isDirect,
+  providerView,
+  routeLabel,
+  routeTermsOf,
+  routeTitle,
+  viewTerms,
+} from "../lib/directProviders";
 import type { LocalLlmStatus, Settings } from "../lib/types";
 import { useDirectProviders } from "../lib/useDirectProviders";
 
@@ -11,7 +20,8 @@ import { useDirectProviders } from "../lib/useDirectProviders";
  * "OpenAI direct" in the chat composer, beside the local-endpoint chip: the one place chat says,
  * where the person is typing, that this reply goes straight to a provider with their own key and so
  * isn't zero data retention. Neutral ink, because it is a choice they made and not a fault; a role
- * whose key is gone wears the due tint instead, because chat can't answer.
+ * whose key is gone wears the due tint instead, because chat can't answer. On a provider with tiers
+ * (Gemini) it also says the terms the route is on, and a free or paused route wears the due tint too.
  *
  * Renders nothing on OpenRouter (so a person who never turned a key on sees no change), and nothing
  * while a local model is answering chat (the reply isn't going to the provider; the note under the
@@ -46,24 +56,31 @@ function Chip({ provider, settings }: { provider: string; settings: Settings | n
   const unreadable = view.key === "unreadable";
   const noKey = view.key !== "present" && !unreadable;
   const noCredit = !noKey && !unreadable && view.key_check?.outcome === "no_credit";
-  const broken = noKey || unreadable || noCredit;
+  // Where Settings has the role's terms they win: they are what Rust resolved for the route, region
+  // and all. Before Settings has them (or for an older shape) the provider's own view says it.
+  const tiered = hasTiers(info);
+  const terms = tiered ? routeTermsOf(settings?.chat_route_terms ?? viewTerms(view)) : null;
+  const paused = !noKey && !unreadable && terms === "blocked";
+  const broken = noKey || unreadable || noCredit || paused;
+  const free = !broken && terms === "free";
   const label = unreadable
     ? `${info.name}: key unreadable`
     : noKey
       ? `${info.name}: no key`
       : noCredit
         ? `${info.name}: no credit`
-        : view.shares_data
-          ? info.chipSharedLabel
-          : info.chipLabel;
+        : routeLabel(info, terms, view.shares_data);
   const title = unreadable
     ? `Chat is set to ${info.name}, but PM can't read your key right now. Chat can't answer until it can. Check Settings > AI & Models.`
     : noKey
       ? `Chat is set to ${info.name}, but there's no key to use. Chat can't answer until you fix this. Change it in Settings > AI & Models.`
       : noCredit
         ? `Your ${info.name} account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.`
-        : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
-  const token = broken ? "--st-due" : "--ink3";
+        : tiered
+          ? routeTitle(info, "chat", terms, view.blocked)
+          : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
+  // The due tint is for a route to look at: a key that can't answer, or one on free terms.
+  const token = broken || free ? "--st-due" : "--ink3";
   return (
     <span
       className="inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[0.625rem] font-medium"

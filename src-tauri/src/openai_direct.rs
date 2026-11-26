@@ -28,7 +28,9 @@ use crate::direct_models::{self, DirectModel};
 use crate::direct_providers::{KeyCheck, KeyNote, KeyOutcome};
 use crate::error::{Error, Result};
 use crate::llm_gateway::CloudArm;
-use crate::openrouter::{ChatMessage, Completion, Usage};
+#[cfg(test)]
+use crate::openrouter::Usage;
+use crate::openrouter::{ChatMessage, Completion};
 
 /// The chat-completions URL. A const, so the key can only ever go to this host.
 const ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
@@ -47,6 +49,7 @@ pub(crate) const FLAVOUR: Flavour = Flavour {
     patient: true,
     stream_error: Some(stream_error),
     stop_error: Some(stop_error),
+    usage: None,
 };
 
 /// The fields only OpenAI's body carries: the model (by its WIRE id) and `store: false`. The effort
@@ -146,74 +149,24 @@ pub(crate) async fn stream_chat<F: FnMut(&str)>(
     Ok(settle(completion, model))
 }
 
-/// Turn what the server reported into what PM logs. PURE.
-///
-/// `Completion.model` is ALWAYS left as an OpenRouter-style catalogue id, never None and never a raw
-/// wire id: the catalogue row the served snapshot maps to, else the model that was asked for. About
-/// 25 callers log `completion.model.or(Some(plan.primary_model_id()))`, and on a local-then-cloud
-/// route that primary is the LOCAL model, so a None would book OpenAI's tokens and a computed price
-/// under the local model's name. A direct arm holds one model, so the requested one is the only
-/// honest fallback. The cost is worked out here too (OpenAI reports none).
-pub(crate) fn settle(mut completion: Completion, requested: &DirectModel) -> Completion {
-    let served = completion.model.as_deref().and_then(served_model_id);
-    let priced = served.unwrap_or(requested);
-    completion.model = Some(priced.id.clone());
-    completion.usage.cost = cost_usd(priced, &completion.usage);
-    completion
+/// Turn what the server reported into what PM logs: the shared arithmetic in [`direct_models`], priced
+/// on today's UTC date. Kept under this name so OpenAI's own tests and callers keep their path.
+pub(crate) fn settle(completion: Completion, requested: &DirectModel) -> Completion {
+    direct_models::settle_on(completion, requested, &direct_models::utc_today())
 }
 
-/// The catalogue row a served model name stands for: an exact wire id, else the same with a trailing
-/// `-YYYY-MM-DD` snapshot date taken off. `None` for a model PM doesn't list.
+/// The catalogue row a served model name stands for ([`direct_models::served_model_id`]). Only
+/// OpenAI's tests call it by this name now; the shared function is what production uses.
+#[cfg(test)]
 pub(crate) fn served_model_id(served_wire: &str) -> Option<&'static DirectModel> {
-    if let Some(m) = direct_models::find_wire(served_wire) {
-        return Some(m);
-    }
-    // "-" + YYYY-MM-DD is 11 bytes. The name comes off the wire, so cut with `get`: a multi-byte
-    // character straddling the offset must be a miss, never a panic inside a billed stream.
-    if served_wire.len() > 11 {
-        let head = served_wire.get(..served_wire.len() - 11)?;
-        let tail = served_wire.get(served_wire.len() - 11..)?;
-        let date = tail.strip_prefix('-')?;
-        if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
-            return direct_models::find_wire(head);
-        }
-    }
-    None
+    direct_models::served_model_id(served_wire)
 }
 
-/// What a request cost, from the tokens the provider reported and PM's bundled prices (USD).
-///
-/// P is the prompt, C the part read from the cache, W the part written to it, O the completion
-/// (reasoning included; the reasoning count is never added again). The ordinary input is
-/// `max(0, P - C - W)`. Over the model's long-context line the WHOLE request is billed at the
-/// higher rates. `None` when no usage came back at all, so the row shows "—" and never a made-up $0.
-///
-/// The cache arithmetic assumes the prompt count INCLUDES the cached and written parts. That is how
-/// the Responses guide shows it and is strongly implied for chat completions, but it is unverified
-/// there (live test L4).
+/// What a request cost today ([`direct_models::cost_usd`]); OpenAI's prices never change on a date.
+/// Only OpenAI's tests call it by this name now.
+#[cfg(test)]
 pub(crate) fn cost_usd(m: &DirectModel, u: &Usage) -> Option<f64> {
-    if u.prompt_tokens.is_none() && u.completion_tokens.is_none() {
-        return None;
-    }
-    let prompt = u.prompt_tokens.unwrap_or(0).max(0);
-    let cached = u.cached_tokens.unwrap_or(0).max(0);
-    let written = u.cache_write_tokens.unwrap_or(0).max(0);
-    let out = u.completion_tokens.unwrap_or(0).max(0);
-    let ordinary = (prompt - cached - written).max(0);
-
-    let lc = &m.long_context;
-    let long = prompt > lc.threshold;
-    let (in_m, cached_m, write_m, out_m) = if long {
-        (lc.in_mult, lc.cached_mult, lc.write_mult, lc.out_mult)
-    } else {
-        (1.0, 1.0, 1.0, 1.0)
-    };
-    let cached_price = m.price_cached_in.unwrap_or(m.price_in);
-    let total = ordinary as f64 * m.price_in * in_m
-        + cached as f64 * cached_price * cached_m
-        + written as f64 * m.price_cache_write * write_m
-        + out as f64 * m.price_out * out_m;
-    Some(total / 1_000_000.0)
+    direct_models::cost_usd(m, u, &direct_models::utc_today())
 }
 
 // ---- errors ----------------------------------------------------------------------------------
@@ -454,10 +407,16 @@ fn stop_error(reason: &str) -> Option<Error> {
 
 /// Whether a pasted key is the right shape to try: trimmed, 20 to 300 characters, visible ASCII
 /// only (so `bearer_auth` can't fail on a header character). No prefix rule: key prefixes aren't in
-/// OpenAI's own pages, so PM doesn't guess them.
+/// OpenAI's own pages, so PM doesn't guess them. The one prefix PM does turn away is Google's `AIza`:
+/// a key for another company is never sent to this one.
 pub(crate) fn well_formed(key: &str) -> bool {
     let key = key.trim();
-    (20..=300).contains(&key.len()) && key.chars().all(|c| c.is_ascii_graphic())
+    (20..=300).contains(&key.len())
+        && key.chars().all(|c| c.is_ascii_graphic())
+        && !crate::direct_providers::looks_like_another_providers_key(
+            crate::llm_gateway::CloudProvider::OpenAi,
+            key,
+        )
 }
 
 /// What the key check's response means. PURE: the status and body in, the verdict out.
@@ -682,6 +641,8 @@ async fn check_key_at(key: &str, urls: &CheckUrls) -> KeyCheck {
         listed,
         listed_total,
         note,
+        tier: None,
+        refusal: None,
     }
 }
 
@@ -1267,6 +1228,7 @@ mod tests {
                 patient: FLAVOUR.patient,
                 stream_error: FLAVOUR.stream_error,
                 stop_error: FLAVOUR.stop_error,
+                usage: FLAVOUR.usage,
             }
         }
     }

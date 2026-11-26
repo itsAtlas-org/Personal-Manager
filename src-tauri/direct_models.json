@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "catalogue_version": 1,
   "checked_on": "2026-11-26",
   "providers": [
@@ -108,6 +108,242 @@
           "checked_on": "2026-11-26",
           "retires_on": null,
           "note": null
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "terms_checked_on": "2026-11-26",
+      "default_chat": "gemini/gemini-3.8-flash",
+      "default_background": "gemini/gemini-3.1-flash-lite",
+      "probe_models": [
+        "gemini/gemini-3.1-pro-preview",
+        "gemini/gemini-4-carbon",
+        "gemini/gemini-4-argon",
+        "gemini/gemini-4-neon"
+      ],
+      "models": [
+        {
+          "id": "gemini/gemini-4-hydrogen",
+          "wire": "gemini-4-hydrogen",
+          "name": "Gemini 4 Hydrogen",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 1.5,
+          "price_cached_in": 0.075,
+          "price_cache_write": 0.0,
+          "price_out": 7.5,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["low", "medium", "high", "xhigh"],
+          "effort_default": "high",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": "Gemini 4, the strongest model that also has a free allowance. Thinks at high by default.",
+          "free_tier": true,
+          "price_changes": []
+        },
+        {
+          "id": "gemini/gemini-4-neon",
+          "wire": "gemini-4-neon",
+          "name": "Gemini 4 Neon",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 3.0,
+          "price_cached_in": 0.15,
+          "price_cache_write": 0.0,
+          "price_out": 15.0,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["low", "medium", "high", "xhigh"],
+          "effort_default": "high",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": "Gemini 4, the dearest of the four. Paid keys only. Thinks at high by default.",
+          "free_tier": false,
+          "price_changes": []
+        },
+        {
+          "id": "gemini/gemini-4-carbon",
+          "wire": "gemini-4-carbon",
+          "name": "Gemini 4 Carbon",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 32768,
+          "price_in": 2.0,
+          "price_cached_in": 0.1,
+          "price_cache_write": 0.0,
+          "price_out": 10.0,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["low", "medium", "high"],
+          "effort_default": "medium",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": "Gemini 4. Paid keys only. Thinks at medium by default.",
+          "free_tier": false,
+          "price_changes": [
+            { "from": "2026-12-01", "price_in": 4.0, "price_cached_in": 0.2, "price_out": 20.0 }
+          ]
+        },
+        {
+          "id": "gemini/gemini-4-argon",
+          "wire": "gemini-4-argon",
+          "name": "Gemini 4 Argon",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 32768,
+          "price_in": 2.0,
+          "price_cached_in": 0.1,
+          "price_cache_write": 0.0,
+          "price_out": 10.0,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["low", "medium", "high"],
+          "effort_default": "medium",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": "Gemini 4. Paid keys only. Thinks at medium by default.",
+          "free_tier": false,
+          "price_changes": [
+            { "from": "2026-12-01", "price_in": 4.0, "price_cached_in": 0.2, "price_out": 20.0 }
+          ]
+        },
+        {
+          "id": "gemini/gemini-3.8-flash",
+          "wire": "gemini-3.8-flash",
+          "name": "Gemini 3.8 Flash",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 0.75,
+          "price_cached_in": 0.075,
+          "price_cache_write": 0.0,
+          "price_out": 3.75,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["low", "medium", "high"],
+          "effort_default": "medium",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": null,
+          "free_tier": true,
+          "price_changes": [
+            { "from": "2027-01-01", "price_in": 1.5, "price_cached_in": 0.15, "price_out": 7.5 }
+          ]
+        },
+        {
+          "id": "gemini/gemini-3.5-flash-lite",
+          "wire": "gemini-3.5-flash-lite",
+          "name": "Gemini 3.5 Flash-Lite",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 0.3,
+          "price_cached_in": 0.03,
+          "price_cache_write": 0.0,
+          "price_out": 2.5,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["minimal", "low", "medium", "high"],
+          "effort_default": "minimal",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": null,
+          "free_tier": true,
+          "price_changes": []
+        },
+        {
+          "id": "gemini/gemini-3.1-flash-lite",
+          "wire": "gemini-3.1-flash-lite",
+          "name": "Gemini 3.1 Flash-Lite",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 0.25,
+          "price_cached_in": 0.025,
+          "price_cache_write": 0.0,
+          "price_out": 1.5,
+          "long_context": {
+            "threshold": 1048576,
+            "in_mult": 1.0,
+            "cached_mult": 1.0,
+            "write_mult": 1.0,
+            "out_mult": 1.0
+          },
+          "effort_levels": ["minimal", "low", "medium", "high"],
+          "effort_default": "minimal",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": null,
+          "free_tier": true,
+          "price_changes": []
+        },
+        {
+          "id": "gemini/gemini-3.1-pro-preview",
+          "wire": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro (preview)",
+          "context": 1048576,
+          "max_input": 1048576,
+          "max_output": 65536,
+          "price_in": 2.0,
+          "price_cached_in": 0.2,
+          "price_cache_write": 0.0,
+          "price_out": 12.0,
+          "long_context": {
+            "threshold": 200000,
+            "in_mult": 2.0,
+            "cached_mult": 2.0,
+            "write_mult": 1.0,
+            "out_mult": 1.5
+          },
+          "effort_levels": ["low", "medium", "high"],
+          "effort_default": "high",
+          "input_modalities": ["text", "image"],
+          "checked_on": "2026-11-26",
+          "retires_on": null,
+          "note": "A preview model, so Google may retire it. Paid keys only. Costs more above 200,000 tokens of prompt.",
+          "free_tier": false,
+          "price_changes": []
         }
       ]
     }

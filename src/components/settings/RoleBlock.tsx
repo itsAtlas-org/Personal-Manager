@@ -157,6 +157,31 @@ export function RoleBlock({
   }
 
   const direct = view !== undefined && directInfo(view.provider) !== null;
+  const storedView = state && isDirect(stored) ? providerView(state, stored) : undefined;
+  const issueCtx = { id: stored, blocked: storedView?.blocked, tier: storedView?.tier };
+  const useOpenRouter = (
+    <Button
+      type="button"
+      variant="tertiary"
+      size="xs"
+      aria-label={`Use OpenRouter for ${who}`}
+      onClick={() => void pickProvider("openrouter")}
+    >
+      Use OpenRouter
+    </Button>
+  );
+  // The issues that are a state of the account and that Check again can end: said in the status
+  // region. An empty balance gets the way out only where the provider can't be picked with one.
+  const emptyNotOffered = issue === "no_credit" && directInfo(stored)?.noCredit.offered === false;
+  const statusIssue =
+    issue === "blocked" || issue === "no_credit" ? (
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-st-due">
+          {roleIssueLine(issue, role, providerName(stored), issueCtx)}
+        </span>
+        {(issue === "blocked" || emptyNotOffered) && useOpenRouter}
+      </div>
+    ) : null;
   const model = view ? roleModel(view, role) : undefined;
   const efforts = direct ? effortOptions(role, model) : [];
   const effortValue = view?.roles[role].effort ?? "";
@@ -183,7 +208,8 @@ export function RoleBlock({
         </SettingRow>
       )}
 
-      {direct && view && (
+      {/* A paused role says so above; "goes straight to Google" would contradict it. */}
+      {direct && view && issue !== "blocked" && (
         <p className="text-xs text-ink4">{routeNote(role, providerName(view.provider), routing)}</p>
       )}
 
@@ -250,38 +276,24 @@ export function RoleBlock({
 
       {issue === "turned_off" && state && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-ink3">
-          <span>{roleIssueLine(issue, role, providerName(stored))}</span>
-          <Button
-            type="button"
-            variant="tertiary"
-            size="xs"
-            aria-label={`Use OpenRouter for ${who}`}
-            onClick={() => void pickProvider("openrouter")}
-          >
-            Use OpenRouter
-          </Button>
+          <span>{roleIssueLine(issue, role, providerName(stored), issueCtx)}</span>
+          {useOpenRouter}
         </div>
       )}
       {(issue === "key_missing" || issue === "key_unreadable") && (
-        <p className="text-xs text-st-due">{roleIssueLine(issue, role, providerName(stored))}</p>
+        <p className="text-xs text-st-due">
+          {roleIssueLine(issue, role, providerName(stored), issueCtx)}
+        </p>
       )}
       {/* A status and not an alert: it is a state of the account, not something that just failed.
           The region stays mounted (for a role that can change, like the one below) so a line that
-          appears later, after Check again, is announced. */}
+          appears later, after Check again, is announced. A paused provider, and a prepaid key with
+          nothing left, can't be picked for a role at all, so a role already on one gets the way out
+          beside the line. */}
       {live ? (
-        <div role="status">
-          {issue === "no_credit" && (
-            <p className="text-xs text-st-due">
-              {roleIssueLine(issue, role, providerName(stored))}
-            </p>
-          )}
-        </div>
+        <div role="status">{statusIssue}</div>
       ) : (
-        issue === "no_credit" && (
-          <p role="status" className="text-xs text-st-due">
-            {roleIssueLine(issue, role, providerName(stored))}
-          </p>
-        )
+        statusIssue && <div role="status">{statusIssue}</div>
       )}
       {role === "background" && direct && (
         <p className="text-xs text-ink4">

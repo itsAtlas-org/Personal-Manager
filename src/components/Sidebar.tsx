@@ -223,6 +223,12 @@ interface Props {
    *  without the route it takes. */
   chatVia?: string | null;
   backgroundVia?: string | null;
+  /** What a route with terms of its own (a Gemini key, free or paid) says on hover, and whether it
+   *  is one to look at (free, or paused), which wears the due tint. */
+  chatViaTitle?: string | null;
+  chatViaDue?: boolean;
+  backgroundViaTitle?: string | null;
+  backgroundViaDue?: boolean;
   /** Live local-endpoint status (#297). Adds a coloured "Local" line to the model footer — but ONLY
    *  when an endpoint is configured; `null`/unconfigured renders nothing (zero-pixel for cloud-only). */
   localAi: LocalLlmStatus | null;
@@ -257,6 +263,10 @@ export function Sidebar({
   backgroundFallbacks,
   chatVia = null,
   backgroundVia = null,
+  chatViaTitle = null,
+  chatViaDue = false,
+  backgroundViaTitle = null,
+  backgroundViaDue = false,
   localAi,
   width,
   onStartResize,
@@ -680,6 +690,8 @@ export function Sidebar({
               parked={localAi ? powerOf(localAi).chat.local_model : null}
               fallbacks={chatFallbacks}
               via={chatVia}
+              viaTitle={chatViaTitle}
+              viaDue={chatViaDue}
             />
             <ModelRow
               role="Tasks"
@@ -691,6 +703,8 @@ export function Sidebar({
               parked={localAi ? powerOf(localAi).background.local_model : null}
               fallbacks={backgroundFallbacks}
               via={backgroundVia}
+              viaTitle={backgroundViaTitle}
+              viaDue={backgroundViaDue}
             />
             <LocalRow status={localAi} />
           </button>
@@ -730,6 +744,8 @@ function ModelRow({
   parked,
   fallbacks,
   via,
+  viaTitle,
+  viaDue,
 }: {
   role: string;
   id: string | null;
@@ -746,6 +762,9 @@ function ModelRow({
   fallbacks: number;
   /** The direct provider answering this role from the cloud, when there is one. */
   via: string | null;
+  /** The route's own hover text, and whether it is one to look at (free or paused). */
+  viaTitle: string | null;
+  viaDue: boolean;
 }) {
   // On battery the backend already reports no local model for a moved role, so `shown` is the cloud
   // model answering and `activity` is null — only the title and the chip need to say why.
@@ -758,7 +777,9 @@ function ModelRow({
         ? `${local} — running on this machine${id ? `; ${id} is the cloud fallback` : ""}`
         : id
           ? via
-            ? `${id}, straight to ${via.replace(/ direct$/, "")} with your own key`
+            ? viaTitle
+              ? `${id}: ${viaTitle}`
+              : `${id}, straight to ${via.replace(/ direct$/, "")} with your own key`
             : id
           : "Using the default model";
   return (
@@ -803,7 +824,10 @@ function ModelRow({
       )}
       {/* Only said when the cloud model is what answers: a local model answering needs no route. */}
       {via && !local && !awaitingModel && (
-        <span className="shrink-0 font-mono text-[0.625rem] text-ink4" title={title}>
+        <span
+          className={`shrink-0 font-mono text-[0.625rem] ${viaDue ? "text-st-due" : "text-ink4"}`}
+          title={title}
+        >
           {via}
         </span>
       )}

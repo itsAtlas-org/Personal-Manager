@@ -1233,6 +1233,10 @@ export default function App() {
                   backgroundFallbacks={footerRow(settings, "background").fallbacks}
                   chatVia={footerRow(settings, "chat").via}
                   backgroundVia={footerRow(settings, "background").via}
+                  chatViaTitle={footerRow(settings, "chat").viaTitle}
+                  chatViaDue={footerRow(settings, "chat").viaDue}
+                  backgroundViaTitle={footerRow(settings, "background").viaTitle}
+                  backgroundViaDue={footerRow(settings, "background").viaDue}
                   localAi={localAi}
                 />
               )}

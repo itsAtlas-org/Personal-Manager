@@ -56,6 +56,11 @@ export interface Settings {
    *  OpenRouter list (null if that list is empty). */
   chat_cloud_model: string | null;
   background_cloud_model: string | null;
+  /** On whose terms each role's route is, when its provider has tiers (Gemini): an unknown or
+   *  unchecked key reads as `free`, and `blocked` means the role is paused (a free key where PM only
+   *  uses paid ones). null for OpenRouter and OpenAI. Optional so an older-shaped mock still types. */
+  chat_route_terms?: RouteTerms | null;
+  background_route_terms?: RouteTerms | null;
 }
 
 // ---- Your own provider keys (opt-in; commands/direct_keys.rs, direct_providers.rs) --------------
@@ -77,7 +82,28 @@ export type KeyOutcome =
   | "region_blocked"
   | "malformed"
   | "unreachable"
+  /** Google answered with a rate limit, a 5xx or a timeout and decided nothing. Not kept; never "check
+   *  your connection". */
+  | "busy"
+  /** Google wants the project verified before the key can be used. Not kept. */
+  | "needs_verification"
+  /** The DECISION, made by the command: a free or unknown-tier key where PM only uses paid ones. Never
+   *  kept, never stored; `refusal` says where PM thinks this computer is. */
+  | "free_key_refused"
   | { unexpected: number };
+/** On whose terms a key is (direct_providers.rs KeyTier). Unknown reads as free everywhere. */
+export type KeyTier = "paid" | "free" | "unknown";
+/** The terms a role's route is on (direct_providers.rs RouteTerms). */
+export type RouteTerms = "paid" | "free" | "blocked";
+/** Why a free or unknown key is not used here (region.rs RegionRefusal). `label` and `zone` are from
+ *  Rust, one source: PM read the OS time zone as `zone` and placed the computer in `label`. `basis` is
+ *  `free` (Google said so) or `unknown` (nothing was asked or the check couldn't decide). */
+export interface RegionRefusal {
+  kind: "uk" | "eea" | "switzerland" | "unplaceable";
+  label: string;
+  zone: string;
+  basis: "free" | "unknown";
+}
 /** An extra word about a verdict. OPEN like `KeyOutcome`: an unknown one is no note. `chat_untried`:
  *  the test chat couldn't be tried, so the model listing's verdict stands. `read_only`: the key lists
  *  models but can't chat. `no_access`: it can do neither. */
@@ -96,14 +122,23 @@ export interface KeyCheckResult {
   listed: string[];
   listed_total: number;
   note?: KeyNote | string | null;
+  /** Gemini: paid, free or unknown. Absent for a provider with no tiers. */
+  tier?: KeyTier | null;
+  /** Set with `free_key_refused`, and with a re-check of a saved key that is paused: where PM thinks
+   *  this computer is. Absent otherwise. */
+  refusal?: RegionRefusal | null;
 }
-/** The last verdict as stored. */
+/** The last verdict as stored. The key's fingerprint is blanked in Rust and never arrives. */
 export interface StoredKeyCheck {
   at: string;
   outcome: KeyOutcome;
   listed: string[];
   listed_total: number;
   note?: KeyNote | string | null;
+  /** The tier now, for the key beside it (a failed call that said "free" shows here at once). */
+  tier?: KeyTier | null;
+  /** When a failed call told PM the project is on the free tier after the check said paid (ISO). */
+  flipped_free_at?: string | null;
 }
 /** One bundled catalogue row. Prices are USD per MILLION tokens. */
 export interface DirectModelView {
@@ -120,6 +155,10 @@ export interface DirectModelView {
   input_modalities: string[];
   checked_on: string;
   retires_on: string | null;
+  /** null where the provider has no free tier at all, false for a model only a paid key can use. */
+  free_tier?: boolean | null;
+  /** The next announced price change; `price_in`/`price_out` above are the prices in force today. */
+  next_price?: { from: string; price_in: number; price_out: number } | null;
 }
 /** What a role does on a provider, EFFECTIVELY: `effort` null means the field is omitted (chat's default). */
 export interface DirectRoleView {
@@ -135,6 +174,13 @@ export interface DirectProviderView {
   /** null unless `key === "present"`: a verdict carried in a backup is never shown beside no key. */
   key_check: StoredKeyCheck | null;
   shares_data: boolean;
+  /** On whose terms the key is NOW (a check, a failed call or the stored row), only when it is about
+   *  THIS key. null for a provider with no tiers, with no key, or for a key with no usable verdict:
+   *  that reads as free and the card says PM hasn't checked it. */
+  tier?: KeyTier | null;
+  /** Set when the provider is on, its key is here, the verdict reads free and this computer is where
+   *  PM only uses paid keys. The UI never computes this: Rust read the region. */
+  blocked?: RegionRefusal | null;
   catalogue_checked_on: string;
   terms_checked_on: string;
   roles: { chat: DirectRoleView; background: DirectRoleView };
@@ -3269,7 +3315,7 @@ export type PowerRoute = "unchanged" | "needs_consent" | "kept_local" | "cloud";
 /** Why the policy can never move a role, in the order the copy prefers (llm_gateway.rs
  *  PowerBlocked). */
 export type PowerBlocked =
-  "cloud_routing" | "no_local_model" | "no_key" | "key_unreadable" | "local_only";
+  "cloud_routing" | "no_local_model" | "no_key" | "key_unreadable" | "local_only" | "paused";
 
 /** One role's half of the On battery answer (local_ai.rs PowerRoleView). */
 export interface PowerRoleView {
@@ -3288,6 +3334,9 @@ export interface PowerRoleView {
   cloud_key: KeyPresence;
   /** The cloud provider this role's cloud leg goes to, so copy can name it. */
   cloud_provider: CloudProviderId;
+  /** On whose terms that provider's route is, when it has tiers (Gemini); `blocked` means the role
+   *  is paused. null for OpenRouter and OpenAI. */
+  route_terms?: RouteTerms | null;
 }
 
 /** Where a role's requests really go (llm_gateway.rs EffectiveRoute). `cloud_for_power` is a

@@ -22,6 +22,9 @@ export const SOL: DirectModelView = {
   input_modalities: ["text", "image"],
   checked_on: "2026-11-26",
   retires_on: null,
+  // OpenAI has no free tier and no dated price change.
+  free_tier: null,
+  next_price: null,
 };
 
 export const LUNA: DirectModelView = {
@@ -62,6 +65,9 @@ export function openaiView(over: Partial<DirectProviderView> = {}): DirectProvid
       listed_total: 40,
     },
     shares_data: false,
+    // OpenAI has no tiers: no verdict on terms and nothing blocked.
+    tier: null,
+    blocked: null,
     catalogue_checked_on: "2026-11-26",
     terms_checked_on: "2026-11-26",
     roles: {
@@ -73,37 +79,130 @@ export function openaiView(over: Partial<DirectProviderView> = {}): DirectProvid
   };
 }
 
-/** The whole state. `chat` and `background` are the roles' stored (and, by default, effective)
- *  provider. */
-export function directState(
+// Gemini's rows, with the levels and prices the bundled catalogue carries: 3.8 Flash and 3.1
+// Flash-Lite have a free allowance, 3.1 Pro only answers a paid key, and 3.8 Flash has a dated price
+// step coming.
+export const FLASH: DirectModelView = {
+  id: "gemini/gemini-3.8-flash",
+  name: "Gemini 3.8 Flash",
+  note: null,
+  context: 1_048_576,
+  max_output: 65_536,
+  price_in: 0.75,
+  price_cached_in: 0.075,
+  price_out: 3.75,
+  effort_levels: ["low", "medium", "high"],
+  effort_default: "medium",
+  input_modalities: ["text", "image"],
+  checked_on: "2026-11-26",
+  retires_on: null,
+  free_tier: true,
+  next_price: { from: "2027-01-01", price_in: 1.5, price_out: 7.5 },
+};
+
+export const FLASH_LITE: DirectModelView = {
+  ...FLASH,
+  id: "gemini/gemini-3.1-flash-lite",
+  name: "Gemini 3.1 Flash-Lite",
+  price_in: 0.25,
+  price_cached_in: 0.025,
+  price_out: 1.5,
+  effort_levels: ["minimal", "low", "medium", "high"],
+  effort_default: "minimal",
+  next_price: null,
+};
+
+export const PRO: DirectModelView = {
+  ...FLASH,
+  id: "gemini/gemini-3.1-pro-preview",
+  name: "Gemini 3.1 Pro (preview)",
+  price_in: 2,
+  price_cached_in: 0.2,
+  price_out: 12,
+  effort_levels: ["low", "medium", "high"],
+  effort_default: "high",
+  free_tier: false,
+  next_price: null,
+};
+
+/** A Google Gemini view: opted in with a PAID key that checked out, Chat on 3.8 Flash and Background
+ *  on 3.1 Flash-Lite, neither role using it yet. Every field is set, so a test can't pass on a field
+ *  the backend would have sent and a mock forgot. Override any part. */
+export function geminiView(over: Partial<DirectProviderView> = {}): DirectProviderView {
+  return {
+    provider: "gemini",
+    name: "Google Gemini",
+    opted_in: true,
+    key: "present",
+    key_check: {
+      at: "2026-11-26T10:00:00Z",
+      outcome: "ok",
+      listed: [FLASH.id, FLASH_LITE.id, PRO.id],
+      listed_total: 49,
+      tier: "paid",
+      flipped_free_at: null,
+    },
+    shares_data: false,
+    tier: "paid",
+    blocked: null,
+    catalogue_checked_on: "2026-11-26",
+    terms_checked_on: "2026-11-26",
+    roles: {
+      chat: { uses_this_provider: false, model: FLASH.id, effort: null },
+      background: { uses_this_provider: false, model: FLASH_LITE.id, effort: "low" },
+    },
+    models: [FLASH, FLASH_LITE, PRO],
+    ...over,
+  };
+}
+
+type Who = "openrouter" | "openai" | "gemini";
+
+/** The whole state of every provider given. `chat` and `background` are the roles' stored (and, by
+ *  default, effective) provider; each view's `uses_this_provider` follows the EFFECTIVE one. */
+export function stateWith(
+  views: DirectProviderView[],
   over: {
-    view?: DirectProviderView;
-    chat?: "openrouter" | "openai";
-    background?: "openrouter" | "openai";
-    chatEffective?: "openrouter" | "openai";
-    backgroundEffective?: "openrouter" | "openai";
+    chat?: Who;
+    background?: Who;
+    chatEffective?: Who;
+    backgroundEffective?: Who;
   } = {},
 ): DirectProvidersState {
   const chat = over.chat ?? "openrouter";
   const background = over.background ?? "openrouter";
-  const base = over.view ?? openaiView();
-  const view: DirectProviderView = {
-    ...base,
-    roles: {
-      chat: { ...base.roles.chat, uses_this_provider: (over.chatEffective ?? chat) === "openai" },
-      background: {
-        ...base.roles.background,
-        uses_this_provider: (over.backgroundEffective ?? background) === "openai",
-      },
-    },
-  };
+  const chatEff = over.chatEffective ?? chat;
+  const backgroundEff = over.backgroundEffective ?? background;
   return {
-    providers: [view],
+    providers: views.map((base) => ({
+      ...base,
+      roles: {
+        chat: { ...base.roles.chat, uses_this_provider: chatEff === base.provider },
+        background: {
+          ...base.roles.background,
+          uses_this_provider: backgroundEff === base.provider,
+        },
+      },
+    })),
     roles: {
-      chat: { stored: chat, effective: over.chatEffective ?? chat },
-      background: { stored: background, effective: over.backgroundEffective ?? background },
+      chat: { stored: chat, effective: chatEff },
+      background: { stored: background, effective: backgroundEff },
     },
   };
+}
+
+/** The whole state with ONE provider (OpenAI unless `view` says otherwise). */
+export function directState(
+  over: {
+    view?: DirectProviderView;
+    chat?: Who;
+    background?: Who;
+    chatEffective?: Who;
+    backgroundEffective?: Who;
+  } = {},
+): DirectProvidersState {
+  const { view, ...roles } = over;
+  return stateWith([view ?? openaiView()], roles);
 }
 
 /** The part of `Settings` the footer and the chip read. */
@@ -117,6 +216,8 @@ export function settingsFor(over: Partial<Settings> = {}): Settings {
     background_provider: "openrouter",
     chat_cloud_model: "anthropic/claude-sonnet-4.6",
     background_cloud_model: "google/gemini-2.5-flash",
+    chat_route_terms: null,
+    background_route_terms: null,
     ...over,
   } as Settings;
 }
