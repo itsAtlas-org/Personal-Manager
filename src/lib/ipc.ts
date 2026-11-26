@@ -1795,7 +1795,7 @@ export interface MainNavigate {
 }
 
 /** Show `to` in the main window and bring it forward: the pop-out's links to a project or the
- *  pinboard. */
+ *  Pinboard's tab (`view: "mod:atlas.pinboard"`). The main window checks `view` (`navigateTarget`). */
 export const showInMainWindow = (to: MainNavigate) =>
   invoke<void>("show_in_main_window", { view: to.view, project: to.project ?? null });
 

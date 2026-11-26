@@ -37,16 +37,7 @@ import { isTearingDown } from "./teardown";
 /** PM's own views. "project" is a view with no sidebar entry: it's reached from Focus (and the
  *  palette), and Focus stays lit while it's open. */
 export type CoreView =
-  | "focus"
-  | "project"
-  | "chat"
-  | "calendar"
-  | "documents"
-  | "review"
-  | "teach"
-  | "pinboard"
-  | "mods"
-  | "dev";
+  "focus" | "project" | "chat" | "calendar" | "documents" | "review" | "teach" | "mods" | "dev";
 
 /** A mod's own tab, `mod:<mod id>`. An installed mod that names a tab contributes one
  *  (`modNavEntries`, from the rows `lib/modRows` reads); App draws it through ModTab, which puts
@@ -161,14 +152,6 @@ export const CORE_NAV: readonly NavEntryDef[] = [
     hideable: true,
     defaultShown: notMinimal,
     group: LEARNING_GROUP,
-  },
-  {
-    id: "pinboard",
-    label: "Pinboard",
-    source: "core",
-    helpId: "nav-pinboard",
-    hideable: true,
-    defaultShown: always,
   },
   // The Mods tab (spec §1.13): a core entry, never hideable, shown at every Depth. Mods' own tabs
   // are not listed here; `useNav` appends them (`source: "mod"`, `id: "mod:<id>"`).
@@ -478,9 +461,9 @@ export function isNavIdShape(id: string, core: ReadonlySet<string> = CORE_IDS): 
 }
 
 /** Core tabs that became a mod's tab, by the id a placement stored for them (the Map: `graph`
- *  became `mod:atlas.map`; the Pinboard's `pinboard` will become `mod:atlas.pinboard`, which takes
- *  effect only once PM's own list has no `pinboard` entry: PR C2). A pin or a hide the user made on
- *  the old tab belongs to the new one. */
+ *  became `mod:atlas.map`; the Pinboard's `pinboard` became `mod:atlas.pinboard`). Each takes effect
+ *  only while PM's own list has no entry of the old id, which is so for both now. A pin or a hide
+ *  the user made on the old tab belongs to the new one. */
 const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([
   ["graph", "mod:atlas.map"],
   ["pinboard", "mod:atlas.pinboard"],
@@ -493,6 +476,28 @@ const RENAMED_NAV_IDS: ReadonlyMap<string, string> = new Map([
 export function renamedNavId(id: string, core: ReadonlySet<string> = CORE_IDS): string {
   const to = RENAMED_NAV_IDS.get(id);
   return to !== undefined && !core.has(id) ? to : id;
+}
+
+/** The Pinboard's tab since it became a mod (`atlas.pinboard`, the Rust pilot table's id). The
+ *  Calendar's dots and Runway cards open it from the main window and from the pop-out. */
+export const PINBOARD_VIEW: ModView = "mod:atlas.pinboard";
+
+/** Where a "show this in the main window" request lands. */
+export type NavigateTarget = { kind: "project"; project: string } | { kind: "view"; view: View };
+
+/** What the main window does with a request from the pop-out Calendar (`main://navigate`), or null
+ *  to ignore it. The pop-out is a second webview, and the Rust relay passes its `view` through as a
+ *  plain string, so the main window decides what it accepts: the Calendar, a project that was
+ *  named, or a mod's tab by a well-formed id (a mod that isn't there lands on Focus, `isReachable`).
+ *  The old `pinboard` view means the Pinboard's tab now. Anything else is refused, never guessed at. */
+export function navigateTarget(view: string, project?: string): NavigateTarget | null {
+  if (view === "project") {
+    return project ? { kind: "project", project } : null;
+  }
+  if (view === "calendar") return { kind: "view", view };
+  if (view === "pinboard") return { kind: "view", view: PINBOARD_VIEW };
+  if (view.startsWith("mod:") && isNavIdShape(view)) return { kind: "view", view: view as ModView };
+  return null;
 }
 
 function cleanIds(value: unknown, core: ReadonlySet<string>): string[] {
@@ -531,8 +536,8 @@ const PILOT_CORE_TAB: ReadonlyMap<
   { tab: string; shown: (depth: Depth) => boolean; feature: string }
 > = new Map([
   ["atlas.map", { tab: "graph", shown: notMinimal, feature: "Map" }],
-  // Dormant until PR C2 takes the core Pinboard tab out: the rule applies only once `pinboard` is
-  // gone from PM's own entries (`pilotHiddenRuleApplies`), and a tab that was always shown stays so.
+  // The core Pinboard tab is gone, so the installed-hidden rule applies (`pilotHiddenRuleApplies`);
+  // the tab was always shown, so the rule hides nothing, and its placeholder shows from the start.
   ["atlas.pinboard", { tab: "pinboard", shown: always, feature: "Pinboard" }],
 ]);
 
@@ -554,8 +559,9 @@ export function pilotCoreTab(modId: string): string | null {
 }
 
 /** Whether the installed-hidden rule applies to `modId` at all: only once the core tab it replaced
- *  is gone from PM's own entries (`core`), which it is for the Map. A set that still names the tab
- *  says the core tab is the user's Map and the mod's arrival changes nothing they see. */
+ *  is gone from PM's own entries (`core`), which it is for the Map and the Pinboard. A set that
+ *  still names the tab says the core tab is still the user's own and the mod's arrival changes
+ *  nothing they see. */
 export function pilotHiddenRuleApplies(
   modId: string,
   core: ReadonlySet<string> = CORE_IDS,

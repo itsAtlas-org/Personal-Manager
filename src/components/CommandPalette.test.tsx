@@ -134,7 +134,6 @@ describe("CommandPalette's Go to", () => {
       "Documents",
       "Review",
       "Teach",
-      "Pinboard",
       "Mods",
       "Settings",
     ]);
@@ -147,19 +146,17 @@ describe("CommandPalette's Go to", () => {
       "Chats",
       "Calendar",
       "Documents",
-      "Pinboard",
       "Mods",
       "Settings",
     ]);
   });
 
   it("still offers a tab hidden from the sidebar, after the sidebar's own", async () => {
-    writeNavPlacement({ hidden: ["calendar"], pinned: ["pinboard"] });
+    writeNavPlacement({ hidden: ["calendar"], pinned: ["documents"] });
     expect(await gotoLabels()).toEqual([
-      "Pinboard",
+      "Documents",
       "Focus",
       "Chats",
-      "Documents",
       "Review",
       "Teach",
       "Mods",

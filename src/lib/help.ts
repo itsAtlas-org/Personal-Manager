@@ -40,10 +40,6 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Teach",
     body: "Where you teach PM how your projects are named. Merge a name variant into the real project so it stops reappearing, rename a project everywhere at once, or add a name you know means the same thing — the same thing correcting a project in Review does, just directly. On for the Standard and Power presets; right-click it in the sidebar to hide it (Review goes with it) or pin it to the top.",
   },
-  "nav-pinboard": {
-    title: "Pinboard",
-    body: "A free-form planning board: pin sticky notes and simple timelines, drag them around, and resize them. It's a scratch space for thinking — saved on this device, separate from your documents.",
-  },
   "nav-dev": {
     title: "Dev",
     body: "Developer mode's inspection tab: read-only views of PM's internal state — raw tables, row counts, the corrections log, and system & build info. For debugging and watching how PM works; nothing here changes your data. Turn it on or off under Settings → Developer.",

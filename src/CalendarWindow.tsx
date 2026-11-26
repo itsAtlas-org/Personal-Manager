@@ -18,7 +18,7 @@
 //     and the main one from writing each other's changes away.
 //   - The link interceptor and the sideways-scroll normaliser, which App installs for the whole app.
 //
-// Links that lead elsewhere in PM (a project, the pinboard) go to the main window and bring it
+// Links that lead elsewhere in PM (a project, the Pinboard's tab) go to the main window and bring it
 // forward (`show_in_main_window`).
 
 import { useCallback, useEffect, useState } from "react";
@@ -32,6 +32,7 @@ import {
   vaultLockStatus,
   vaultStatus,
 } from "./lib/ipc";
+import { PINBOARD_VIEW } from "./lib/nav";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { subscribeUntilCleanup } from "./lib/subscribe";
 import { useCalendarChangeCheck } from "./lib/useCalendarChangeCheck";
@@ -85,7 +86,7 @@ export default function CalendarWindow() {
           // No sidebar here, so the calendar list rides in the header as "Calendars n/m".
           rosterInHeader
           onOpenProject={(project) => void showInMainWindow({ view: "project", project })}
-          onOpenPinboard={() => void showInMainWindow({ view: "pinboard" })}
+          onOpenPinboard={() => void showInMainWindow({ view: PINBOARD_VIEW })}
         />
       </main>
     );

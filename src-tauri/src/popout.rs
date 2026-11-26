@@ -31,7 +31,7 @@
 //! updater grants: the core defaults (it listens for `calendar://changed`, `tasks://changed` and the
 //! vault's curtain) and the window controls its title bar drives. Anything it needs from the rest of
 //! PM goes through PM's own commands, which aren't ACL-gated: [`show_in_main`] for a link to a project
-//! or the pinboard.
+//! or the Pinboard's tab.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -43,13 +43,14 @@ use crate::{mods, settings, tray, AppState};
 pub const CALENDAR_LABEL: &str = "calendar";
 
 /// Sent to the main window to show one of its views: the pop-out's link to a project or to the
-/// pinboard. `App.tsx` follows it.
+/// Pinboard's tab. `App.tsx` follows it, and decides itself what it accepts (`navigateTarget`).
 pub const NAVIGATE_EVENT: &str = "main://navigate";
 
 /// Where the main window should go, from a link in another window.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Navigate {
-    /// An app view's name, such as `"pinboard"` or `"project"`.
+    /// An app view's name, such as `"calendar"` or `"project"`, or a mod's tab, `"mod:<mod id>"`
+    /// (the Pinboard's is `"mod:atlas.pinboard"`).
     pub view: String,
     /// With `view: "project"`, which one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,12 +129,12 @@ mod tests {
             serde_json::json!({ "view": "project", "project": "Atlas" })
         );
         let to = Navigate {
-            view: "pinboard".into(),
+            view: "mod:atlas.pinboard".into(),
             project: None,
         };
         assert_eq!(
             serde_json::to_value(&to).unwrap(),
-            serde_json::json!({ "view": "pinboard" })
+            serde_json::json!({ "view": "mod:atlas.pinboard" })
         );
     }
 }
