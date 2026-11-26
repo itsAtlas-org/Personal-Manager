@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.199.2-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "If PM's check for changes you made in Google fails, it now leaves a short note in its log saying how many times in a row it has failed and when it will try again, so a calendar that stops updating is easier to track down. Until now a failed check left no trace at all.",
+      "PM's notes about your calendars in its log no longer name your calendars or your account, so a log you share in a bug report doesn't carry your email address.",
+    ],
+  },
+  {
     version: "3.199.1-alpha",
     date: "2026-11-26",
     highlights: [
