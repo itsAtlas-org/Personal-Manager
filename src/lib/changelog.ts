@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.191.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "You can now use your own OpenAI key. It's off until you turn it on, under Settings > AI & Models > Your own keys.",
+      "Chat and Background each pick their own provider, with their own model and effort. OpenRouter is still the default and still asks for zero data retention on every request. A request to your own key isn't zero data retention, and PM says so everywhere you choose it.",
+      "PM works out what your own key costs from the tokens used and its built-in prices, so Usage & cost still adds up.",
+      "Mods can't use your own keys.",
+    ],
+  },
+  {
     version: "3.190.1-alpha",
     date: "2026-11-26",
     highlights: [

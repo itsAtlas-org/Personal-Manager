@@ -378,7 +378,7 @@ export function ShareVaultWizard({ open, onClose, status, onChanged }: Props) {
               {[
                 "Sign in to Windows as them and open Personal Manager (install it first if needed).",
                 "PM spots this shared vault and offers to join it — they enter the passphrase you just chose.",
-                "They add their own OpenRouter key. Keys and sign-ins never travel between Windows accounts.",
+                "They add their own AI key. Keys and sign-ins never travel between Windows accounts.",
                 "They reconnect any cloud accounts and calendars as themselves — everything already indexed is there waiting.",
               ].map((line, i) => (
                 <li key={i} className="flex gap-3 text-sm text-ink2">

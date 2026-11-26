@@ -379,6 +379,8 @@ fn parse_usage(value: &serde_json::Value) -> Usage {
         completion_tokens: value["usage"]["completion_tokens"].as_i64(),
         // A local server almost never reports a cost; kept for shape-parity with the cloud arm.
         cost: value["usage"]["cost"].as_f64(),
+        cached_tokens: None,
+        cache_write_tokens: None,
     }
 }
 

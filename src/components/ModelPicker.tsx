@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { listModels } from "../lib/ipc";
+import type { DirectPickerRow } from "../lib/directProviders";
 import { isKeyForDialogOver } from "../lib/useDialogLayer";
 import type { ModelInfo } from "../lib/types";
 import { Button, Input, Skeleton } from "./ui";
+
+/** Where the picker's models come from. OpenRouter's own list is fetched when the menu first opens;
+ *  a provider the person reaches with their own key is handed in (PM's bundled list of that
+ *  provider's models), and the picker then never calls OpenRouter: a person who only uses their own
+ *  key hasn't opted into OpenRouter. */
+export type ModelSource =
+  { kind: "openrouter" } | { kind: "direct"; models: DirectPickerRow[]; caption: string };
 
 interface Props {
   /** The currently selected model id (e.g. "anthropic/claude-sonnet-4.6"). */
@@ -13,6 +21,14 @@ interface Props {
   onChange: (modelId: string) => void;
   /** Trigger label shown when nothing is selected (e.g. "Add a model…"). */
   triggerLabel?: string;
+  /** Where the list comes from. OpenRouter when omitted, which is how every existing caller reads. */
+  source?: ModelSource;
+  /** Let the person type a model id that isn't in the list. Off for a direct provider: PM can only
+   *  use a model whose price and window it knows. */
+  allowCustom?: boolean;
+  /** The trigger's accessible name. It must contain the visible `triggerLabel` words so speech input
+   *  ("click Add a model") still lands, and say which control it is when there are two. */
+  ariaLabel?: string;
 }
 
 type Sort = "default" | "asc" | "desc";
@@ -24,25 +40,41 @@ type Sort = "default" | "asc" | "desc";
  * model id, so PM is never locked to the catalogue (spec §6). The catalogue is
  * fetched lazily the first time the dropdown opens.
  */
-export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…" }: Props) {
+export function ModelPicker({
+  value,
+  onChange,
+  triggerLabel = "Choose a model…",
+  source = { kind: "openrouter" },
+  allowCustom = true,
+  ariaLabel,
+}: Props) {
+  const direct = source.kind === "direct";
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState<ModelInfo[] | null>(null);
+  const [fetched, setModels] = useState<ModelInfo[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("default");
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+  // A direct list is already in hand; OpenRouter's arrives on first open.
+  const models: ModelInfo[] | null = source.kind === "direct" ? source.models : fetched;
+  const rowsById = useMemo(
+    () => (source.kind === "direct" ? new Map(source.models.map((r) => [r.id, r])) : null),
+    [source],
+  );
 
-  // Lazy-load the catalogue the first time the dropdown is opened.
+  // Lazy-load the catalogue the first time the dropdown is opened. Never for a direct source.
   useEffect(() => {
-    if (!open || models || loading) return;
+    if (direct || !open || models || loading) return;
     setLoading(true);
     setError(null);
     listModels()
       .then(setModels)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [open, models, loading]);
+  }, [direct, open, models, loading]);
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -59,6 +91,8 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
       if (isKeyForDialogOver(rootRef.current, e.target)) return;
       e.stopPropagation();
       setOpen(false);
+      // The menu's search box unmounts with it, which would drop focus to <body>.
+      triggerRef.current?.focus();
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -94,18 +128,24 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
 
   // Let the user pick a model id that isn't in the catalogue (or hasn't loaded).
   const trimmed = query.trim();
-  const customAvailable = trimmed.length > 0 && !filtered.some((m) => m.id === trimmed);
+  const customAvailable =
+    allowCustom && trimmed.length > 0 && !filtered.some((m) => m.id === trimmed);
 
   function pick(modelId: string) {
     onChange(modelId);
     setOpen(false);
     setQuery("");
+    triggerRef.current?.focus();
   }
 
   return (
     <div ref={rootRef} className="relative mt-1">
       <button
+        ref={triggerRef}
         type="button"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center justify-between gap-2 rounded-[var(--radius-sm)] border border-ink4 bg-surface px-3 py-2 text-left text-sm text-ink2 outline-none transition hover:border-ink2 focus:border-accent-text"
       >
@@ -113,11 +153,17 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
           {selected ? selected.name : value || triggerLabel}
           {selected && <span className="ml-2 font-mono text-xs text-ink4">{selected.id}</span>}
         </span>
-        <span className="shrink-0 text-ink4">{open ? "▴" : "▾"}</span>
+        {/* Decoration: aria-expanded already says it, and the glyph would read into the name. */}
+        <span aria-hidden="true" className="shrink-0 text-ink4">
+          {open ? "▴" : "▾"}
+        </span>
       </button>
 
       {open && (
-        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-[var(--radius)] border border-border bg-panel shadow-2xl">
+        <div
+          id={panelId}
+          className="absolute z-20 mt-1 w-full overflow-hidden rounded-[var(--radius)] border border-border bg-panel shadow-2xl"
+        >
           <div className="border-b border-rule p-2">
             <Input
               autoFocus
@@ -150,6 +196,9 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
               </span>
             </div>
           )}
+          {source.kind === "direct" && (
+            <p className="px-3 pb-1 text-xs text-ink4">{source.caption}</p>
+          )}
 
           <div className="max-h-72 overflow-y-auto">
             {loading && (
@@ -166,39 +215,56 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
             )}
 
             {!loading &&
-              shown.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => pick(m.id)}
-                  className={`flex w-full items-start gap-3 px-3 py-2 text-left transition hover:bg-surface ${
-                    m.id === value ? "bg-surface" : ""
-                  }`}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm text-ink">{m.name}</span>
-                      {m.id === value && <span className="shrink-0 text-xs text-st-quick">✓</span>}
+              shown.map((m) => {
+                const extra = rowsById?.get(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => pick(m.id)}
+                    title={extra?.tip}
+                    className={`flex w-full items-start gap-3 px-3 py-2 text-left transition hover:bg-surface ${
+                      m.id === value ? "bg-surface" : ""
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm text-ink">{m.name}</span>
+                        {m.id === value && (
+                          <span className="shrink-0 text-xs text-st-quick">✓</span>
+                        )}
+                      </div>
+                      <div className="truncate font-mono text-xs text-ink4">{m.id}</div>
+                      {extra?.note && <div className="mt-0.5 text-xs text-ink4">{extra.note}</div>}
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {modelTags(m).map((t) => (
+                          <span
+                            key={t.label}
+                            className={`rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[0.625rem] font-medium ${t.cls}`}
+                          >
+                            {t.label}
+                          </span>
+                        ))}
+                        {extra?.unlisted && (
+                          <span className="rounded-[var(--radius-sm)] border border-ink4 px-1.5 py-0.5 text-[0.625rem] text-ink3">
+                            Not in your key's list
+                          </span>
+                        )}
+                        {extra?.retires && (
+                          <span className="rounded-[var(--radius-sm)] border border-ink4 px-1.5 py-0.5 text-[0.625rem] text-st-due">
+                            Retires {extra.retires}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="truncate font-mono text-xs text-ink4">{m.id}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {modelTags(m).map((t) => (
-                        <span
-                          key={t.label}
-                          className={`rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[0.625rem] font-medium ${t.cls}`}
-                        >
-                          {t.label}
-                        </span>
-                      ))}
+                    <div className="shrink-0 whitespace-nowrap pt-0.5 text-right font-mono text-xs text-ink3">
+                      {fmtPerM(m.prompt_price)}
+                      <span className="text-ink4"> → </span>
+                      {fmtPerM(m.completion_price)}
                     </div>
-                  </div>
-                  <div className="shrink-0 whitespace-nowrap pt-0.5 text-right font-mono text-xs text-ink3">
-                    {fmtPerM(m.prompt_price)}
-                    <span className="text-ink4"> → </span>
-                    {fmtPerM(m.completion_price)}
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
 
             {!loading && !error && filtered.length > MAX_SHOWN && (
               <div className="px-3 py-2 text-center text-xs text-ink4">
@@ -209,6 +275,11 @@ export function ModelPicker({ value, onChange, triggerLabel = "Choose a model…
             {!loading && !error && filtered.length === 0 && !customAvailable && (
               <div className="px-3 py-6 text-center text-sm text-ink4">
                 No models match “{query}”.
+                {!allowCustom && (
+                  <span className="mt-1 block text-xs">
+                    PM can only use models it knows the price of.
+                  </span>
+                )}
               </div>
             )}
 

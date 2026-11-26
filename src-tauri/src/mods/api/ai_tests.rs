@@ -1191,10 +1191,12 @@ fn the_row_is_experimental_under_the_ai_family() {
 fn every_route_pm_has_may_serve_a_mod() {
     use crate::llm_gateway::{CloudArm, CloudProvider, LocalArm, RoutePlan};
     use crate::secret::Secret;
-    let cloud = || CloudArm {
-        provider: CloudProvider::OpenRouter,
-        key: Secret::from("k".to_string()),
-        models: vec!["a/b".into()],
+    let cloud = || {
+        CloudArm::new(
+            CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            vec!["a/b".into()],
+        )
     };
     let local = || LocalArm {
         base_url: "http://127.0.0.1:1".into(),
@@ -1225,11 +1227,8 @@ fn every_route_pm_has_may_serve_a_mod() {
 fn a_route_with_a_non_openrouter_arm_never_serves_a_mod() {
     use crate::llm_gateway::{CloudArm, CloudProvider, LocalArm, RoutePlan};
     use crate::secret::Secret;
-    let cloud = |provider| CloudArm {
-        provider,
-        key: Secret::from("k".to_string()),
-        models: vec!["a/b".into()],
-    };
+    let cloud =
+        |provider| CloudArm::new(provider, Secret::from("k".to_string()), vec!["a/b".into()]);
     let local = || LocalArm {
         base_url: "http://127.0.0.1:1".into(),
         model: "m".into(),

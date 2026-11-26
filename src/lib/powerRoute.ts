@@ -13,6 +13,7 @@
 // battery draining — the card stays awake while the server holds a model — so `REDUCES_POWER` is
 // the only way any of this copy says what the switch buys, and a test holds the rest of it to that.
 
+import { isDirect, providerName } from "./directProviders";
 import type { LocalRole } from "./localModelState";
 import type { LocalLlmStatus, PowerBlocked, PowerRoleView, PowerScope, PowerView } from "./types";
 
@@ -42,6 +43,7 @@ export const INERT_POWER_VIEW: PowerView = {
     local_model: null,
     effective: "nothing",
     cloud_key: "absent",
+    cloud_provider: "openrouter",
   },
   background: {
     route: "unchanged",
@@ -49,6 +51,7 @@ export const INERT_POWER_VIEW: PowerView = {
     local_model: null,
     effective: "nothing",
     cloud_key: "absent",
+    cloud_provider: "openrouter",
   },
 };
 
@@ -172,13 +175,17 @@ export function blockedReason(role: LocalRole, blocked: PowerBlocked, power: Pow
       return `${name} is set to Local only, which never uses the cloud`;
     case "no_local_model":
       return `${name} has no local model`;
-    case "no_key":
+    case "no_key": {
       // The one asymmetric key rule: background may use its own key, chat only the main one. A
       // background-key-only setup reads as "no key" for chat, and saying just that would be a lie
       // about a key the user can see in Settings.
-      return role === "chat" && power.any_cloud_key
+      // That rule is OpenRouter's: a chat on a provider of the person's own is missing THAT key, and
+      // a background key beside it changes nothing.
+      const provider = roleView(power, role).cloud_provider ?? "openrouter";
+      return role === "chat" && power.any_cloud_key && !isDirect(provider)
         ? "Chat uses your main OpenRouter key, and only a background key is set up"
-        : `${name} has no OpenRouter key to use`;
+        : `${name} has no ${providerName(provider)} key to use`;
+    }
     case "key_unreadable":
       return "PM can't read your saved keys right now";
   }
@@ -357,7 +364,53 @@ export function powerSummary(gate: PowerGate, power: PowerView | null): string |
 export function consentText(power: PowerView): string {
   const chat = power.chat.route === "needs_consent";
   const background = power.background.route === "needs_consent";
-  return `You're on battery${atPercent(power.percent)}. To reduce power use, PM can send ${askPhrase(chat, background)} to your OpenRouter cloud model instead of running ${themPhrase(chat, background)} on your graphics card, until you plug in. While it does, what you send leaves this machine and is billed to your OpenRouter key at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
+  const head = `You're on battery${atPercent(power.percent)}. To reduce power use, PM can send ${askPhrase(chat, background)}`;
+  const tail = `instead of running ${themPhrase(chat, background)} on your graphics card, until you plug in.`;
+  const asked = ROLES.filter((r) => (r === "chat" ? chat : background));
+  const providers = asked.map((r) => roleView(power, r).cloud_provider ?? "openrouter");
+  const distinct = [...new Set(providers)];
+  // Everything on OpenRouter is the text this question has always had, word for word.
+  if (distinct.every((p) => !isDirect(p)) || distinct.length === 0) {
+    return `${head} to your OpenRouter cloud model ${tail} While it does, what you send leaves this machine and is billed to your OpenRouter key at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
+  }
+  const direct = distinct.filter(isDirect).map(providerName).join(" and ");
+  if (distinct.length === 1) {
+    const name = providerName(distinct[0]);
+    return `${head} to your ${name} cloud model ${tail} While it does, what you send leaves this machine and goes straight to ${name}, which isn't zero data retention. It's billed to your ${name} key at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
+  }
+  // Two roles on two providers: say which is which, so a yes to one isn't read as a yes to both.
+  const which = asked
+    .map((r, i) => `${providerName(providers[i])} for ${ROLE_NAME[r].replace(" work", "")}`)
+    .join(" and ");
+  return `${head} to your cloud models (${which}) ${tail} While it does, what you send leaves this machine, and what goes to ${direct} goes straight there, which isn't zero data retention. It's billed to each provider's key at your cloud models' usual rates. Until you answer, PM keeps using your local model.`;
+}
+
+/** Who the cloud is, for the On battery copy: "OpenRouter", "OpenAI", or "OpenRouter and OpenAI"
+ *  when the two roles are on different providers. */
+export function cloudNames(power: PowerView | null): string {
+  if (!power) return "OpenRouter";
+  const names = [
+    ...new Set([
+      power.chat.cloud_provider ?? "openrouter",
+      power.background.cloud_provider ?? "openrouter",
+    ]),
+  ].map(providerName);
+  return names.join(" and ");
+}
+
+/** The retention caveat the On battery cost line adds when some cloud role is on a provider of the
+ *  person's own, or null when none is. */
+export function directRetentionNote(power: PowerView | null): string | null {
+  if (!power) return null;
+  const direct = [
+    ...new Set(
+      [power.chat.cloud_provider, power.background.cloud_provider].filter(
+        (p): p is NonNullable<typeof p> => p != null && isDirect(p),
+      ),
+    ),
+  ];
+  if (direct.length === 0) return null;
+  return `${direct.map(providerName).join(" and ")} keeps requests for up to 30 days.`;
 }
 
 /** The sidebar's "on battery" chip, spelled out. */

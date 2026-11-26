@@ -708,6 +708,8 @@ const LOCAL_AI_SETTINGS: &[&str] = &[
     power::THRESHOLD_KEY,
     power::SCOPE_KEY,
     power::CONSENT_KEY,
+    // The same consent for the providers reached with a person's own key: withdrawn with the rest.
+    power::DIRECT_CONSENT_KEY,
     // Already on this device, All models: the extra folder, the update check, the licences.
     LOCAL_MODEL_SCAN_DIR_KEY,
     local_catalog::RESCAN_CADENCE_KEY,
@@ -1028,8 +1030,11 @@ pub struct PowerRoleView {
     /// preference, the endpoint, the model and the key together. What every route sentence in the
     /// Local AI tab is worded from, so none of them is a guess from the preference alone.
     pub effective: llm_gateway::EffectiveRoute,
-    /// Whether this role's cloud key can be read.
+    /// Whether this role's cloud key can be read: the key of the provider below.
     pub cloud_key: KeyPresence,
+    /// The cloud provider this role's cloud leg goes to, so the copy can name it ("billed to your
+    /// OpenAI key") instead of saying OpenRouter about a role that isn't on it.
+    pub cloud_provider: llm_gateway::CloudProvider,
 }
 
 /// The On battery policy's state, for the status snapshot. No getter of its own: the stored values
@@ -1105,6 +1110,7 @@ pub(crate) fn power_view(
                 route == PowerRoute::Cloud,
             ),
             cloud_key: key,
+            cloud_provider: settings.providers.for_role(role),
         }
     };
     let chat = role(Role::Chat, chat_bound, chat_key);
@@ -1117,7 +1123,9 @@ pub(crate) fn power_view(
         threshold: settings.threshold,
         return_at: power::return_at(settings.threshold),
         roles: settings.scope,
-        consent: settings.consent,
+        // What each role's yes covers on the provider it is on NOW, so the strip never reads "agreed"
+        // for a yes that was about a different (zero-retention) provider.
+        consent: settings.effective_consent(),
         consent_needed: chat.route == PowerRoute::NeedsConsent
             || background.route == PowerRoute::NeedsConsent,
         keep_local,
@@ -2600,9 +2608,22 @@ pub fn set_local_power_policy(
         }
         if let Some(request) = consent.as_deref() {
             let stored = db::get_setting(&conn, power::CONSENT_KEY)?;
-            match consent_write(stored.as_deref(), request)? {
+            let stored_direct = db::get_setting(&conn, power::DIRECT_CONSENT_KEY)?;
+            // The providers the roles are on NOW: a yes is about the provider it was asked for.
+            let providers = llm_gateway::RoleProviders::read(&conn)?;
+            let (openrouter, direct) = consent_rows(
+                stored.as_deref(),
+                stored_direct.as_deref(),
+                request,
+                &providers,
+            )?;
+            match openrouter {
                 Some(scope) => db::set_setting(&conn, power::CONSENT_KEY, scope.as_setting())?,
                 None => db::delete_setting(&conn, power::CONSENT_KEY)?,
+            }
+            match direct.as_setting() {
+                Some(json) => db::set_setting(&conn, power::DIRECT_CONSENT_KEY, &json)?,
+                None => db::delete_setting(&conn, power::DIRECT_CONSENT_KEY)?,
             }
         }
         power::threshold_from(db::get_setting(&conn, power::THRESHOLD_KEY)?.as_deref())
@@ -2614,22 +2635,43 @@ pub fn set_local_power_policy(
     Ok(())
 }
 
-/// What a consent request leaves stored: `Some(scope)` to write, `None` to delete the row.
+/// What a consent request leaves stored, in the two rows: OpenRouter's (`Some(scope)` to write,
+/// `None` to delete) and the direct providers' (as [`power::DirectConsent`]).
 ///
-/// `"none"` withdraws every yes — "not asked" is the state PM returns to, so the question comes back
-/// the next time the battery is low, which is honest, because PM is local again. Anything else names
-/// the roles a yes is about (the ones the question named) and is ADDED to any earlier yes: it never
-/// covers a role the user wasn't asked about, and never quietly drops one they were. An unknown value
-/// is refused rather than read as either.
-fn consent_write(stored: Option<&str>, request: &str) -> Result<Option<power::PowerScope>> {
-    match request.trim() {
-        "none" => Ok(None),
-        roles => {
-            let scope = power::PowerScope::parse_strict(roles)
-                .ok_or_else(|| Error::Other("unknown On battery consent".into()))?;
-            Ok(power::Consent::from_setting(stored).with(scope).as_scope())
+/// `"none"` withdraws every yes, in both rows — "not asked" is the state PM returns to, so the
+/// question comes back the next time the battery is low, which is honest, because PM is local again.
+/// Anything else names the roles a yes is about (the ones the question named) and is ADDED to any
+/// earlier yes: it never covers a role the user wasn't asked about, and never quietly drops one they
+/// were. Each named role's yes goes to the row of THE PROVIDER THAT ROLE IS ON NOW, because the
+/// question named that provider; the same word later covers nothing if the role moves. An unknown
+/// value is refused rather than read as either.
+fn consent_rows(
+    openrouter_stored: Option<&str>,
+    direct_stored: Option<&str>,
+    request: &str,
+    providers: &llm_gateway::RoleProviders,
+) -> Result<(Option<power::PowerScope>, power::DirectConsent)> {
+    let request = request.trim();
+    if request == "none" {
+        return Ok((None, power::DirectConsent::NONE));
+    }
+    let scope = power::PowerScope::parse_strict(request)
+        .ok_or_else(|| Error::Other("unknown On battery consent".into()))?;
+    let mut openrouter = power::Consent::from_setting(openrouter_stored);
+    let mut direct = power::DirectConsent::from_setting(direct_stored);
+    for (role, only) in [
+        (Role::Chat, power::PowerScope::Chat),
+        (Role::Background, power::PowerScope::Background),
+    ] {
+        if !scope.covers(role) {
+            continue;
+        }
+        match providers.for_role(role) {
+            llm_gateway::CloudProvider::OpenRouter => openrouter = openrouter.with(only),
+            provider => direct = direct.with(provider, only),
         }
     }
+    Ok((openrouter.as_scope(), direct))
 }
 
 /// "Keep using local until I quit PM" — memory only, never saved. Deliberately not `set_*`: the
@@ -4400,6 +4442,7 @@ mod tests {
             } else {
                 power::Consent::NONE
             },
+            ..PowerSettings::OFF
         }
     }
 
@@ -4559,21 +4602,81 @@ mod tests {
         assert!(!settling.consent_needed);
     }
 
+    /// OpenRouter's row after a request, with both roles on OpenRouter: the original behaviour.
+    fn or_row(stored: Option<&str>, request: &str) -> Result<Option<power::PowerScope>> {
+        consent_rows(
+            stored,
+            None,
+            request,
+            &llm_gateway::RoleProviders::OPENROUTER,
+        )
+        .map(|r| r.0)
+    }
+
     #[test]
     fn a_consent_request_adds_the_roles_it_names_and_none_withdraws_them_all() {
         use power::PowerScope::*;
-        assert_eq!(consent_write(None, "background").unwrap(), Some(Background));
+        assert_eq!(or_row(None, "background").unwrap(), Some(Background));
         // Added to the earlier yes, never replacing it.
-        assert_eq!(
-            consent_write(Some("background"), "chat").unwrap(),
-            Some(Both)
-        );
-        assert_eq!(consent_write(Some("both"), "chat").unwrap(), Some(Both));
-        assert_eq!(consent_write(Some("chat"), " chat ").unwrap(), Some(Chat));
-        assert_eq!(consent_write(Some("both"), "none").unwrap(), None);
+        assert_eq!(or_row(Some("background"), "chat").unwrap(), Some(Both));
+        assert_eq!(or_row(Some("both"), "chat").unwrap(), Some(Both));
+        assert_eq!(or_row(Some("chat"), " chat ").unwrap(), Some(Chat));
+        assert_eq!(or_row(Some("both"), "none").unwrap(), None);
         // Junk is refused, whatever is stored, rather than read as a yes or a no.
-        assert!(consent_write(Some("both"), "true").is_err());
-        assert!(consent_write(None, "").is_err());
+        assert!(or_row(Some("both"), "true").is_err());
+        assert!(or_row(None, "").is_err());
+    }
+
+    /// A yes is recorded against the provider the role is on when it is given: a role on OpenAI
+    /// writes OpenAI's row and leaves OpenRouter's alone, and the reverse. "none" withdraws both.
+    #[test]
+    fn a_yes_is_recorded_for_the_provider_the_role_is_on() {
+        use llm_gateway::{CloudProvider, RoleProviders};
+        use power::PowerScope::*;
+        let chat_on_openai = RoleProviders {
+            chat: CloudProvider::OpenAi,
+            background: CloudProvider::OpenRouter,
+        };
+        // "both" while Chat is on OpenAI: Chat's yes lands on OpenAI, Background's on OpenRouter.
+        let (or, direct) = consent_rows(None, None, "both", &chat_on_openai).unwrap();
+        assert_eq!(or, Some(Background));
+        assert_eq!(
+            direct.get(CloudProvider::OpenAi),
+            power::Consent {
+                chat: true,
+                background: false
+            }
+        );
+        // Added to what was there, in each row.
+        let (or, direct) = consent_rows(
+            Some("chat"),
+            Some(r#"{"openai":"background"}"#),
+            "both",
+            &chat_on_openai,
+        )
+        .unwrap();
+        assert_eq!(or, Some(Both));
+        assert_eq!(
+            direct.get(CloudProvider::OpenAi),
+            power::Consent {
+                chat: true,
+                background: true
+            }
+        );
+        // "none" clears both rows.
+        let (or, direct) = consent_rows(
+            Some("both"),
+            Some(r#"{"openai":"both"}"#),
+            "none",
+            &chat_on_openai,
+        )
+        .unwrap();
+        assert_eq!(or, None);
+        assert_eq!(direct.as_setting(), None);
+        // A request for a role that isn't named leaves the other provider's row as it was.
+        let (or, direct) = consent_rows(Some("chat"), None, "background", &chat_on_openai).unwrap();
+        assert_eq!(or, Some(Both));
+        assert_eq!(direct, power::DirectConsent::NONE);
     }
 
     #[test]
@@ -6516,6 +6619,10 @@ mod tests {
         ("local_llm_power_threshold", "40"),
         ("local_llm_power_roles", "chat"),
         ("local_llm_power_cloud_consent", "both"),
+        (
+            "local_llm_power_cloud_consent_direct",
+            r#"{"openai":"both"}"#,
+        ),
         ("local_model_scan_dir", "/models"),
         ("local_model_rescan_cadence", "manual"),
         ("local_model_terms_accepted", "gemma,llama3.2"),

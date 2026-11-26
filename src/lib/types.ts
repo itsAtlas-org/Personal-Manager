@@ -46,6 +46,101 @@ export interface Settings {
   /** The effective confidence-gate threshold — the minimum top rerank score for PM to trust its
    *  grounding — or null when a dev has disabled the gate. On by default; tuned in Developer mode (#402). */
   retrieval_confidence_threshold: number | null;
+  /** The cloud provider that EFFECTIVELY answers each role (settings.rs `Settings`), after the
+   *  backend demotes a direct provider that isn't opted in. Everything that names "the model
+   *  answering" (the composer chip, the sidebar footer, the context meter's switch button, the
+   *  Reset diff) reads these and `*_cloud_model`, never `chat_models[0]`, which is OpenRouter's. */
+  chat_provider: CloudProviderId;
+  background_provider: CloudProviderId;
+  /** The EFFECTIVE cloud primary of each role: the direct role's one model, else the first of the
+   *  OpenRouter list (null if that list is empty). */
+  chat_cloud_model: string | null;
+  background_cloud_model: string | null;
+}
+
+// ---- Your own provider keys (opt-in; commands/direct_keys.rs, direct_providers.rs) --------------
+// Serde names are frozen; the Rust types ARE the contract. No command ever returns a key: only
+// presence and a check verdict.
+
+/** A cloud provider's stored token (llm_gateway.rs CloudProvider). */
+export type CloudProviderId = "openrouter" | "openai" | "gemini" | "anthropic";
+/** The two AI roles a provider is chosen for. */
+export type RoleName = "chat" | "background";
+/** What a key check found. OPEN: a newer PM adds words (Gemini's tier and region), so render an
+ *  unknown string as itself and never throw on it. `unexpected` is the object form `{unexpected: 418}`;
+ *  narrow with `typeof`. */
+export type KeyOutcome =
+  | "ok"
+  | "restricted"
+  | "rejected"
+  | "region_blocked"
+  | "malformed"
+  | "unreachable"
+  | { unexpected: number };
+/** A role moved off a provider, in the same transaction as the change that moved it. `to` is
+ *  "openrouter" in this version. The UI never computes a move: this is the command's own answer. */
+export interface RoleMove {
+  role: RoleName;
+  from: CloudProviderId;
+  to: CloudProviderId;
+}
+/** The answer to a key check. `listed` is the OpenRouter-style catalogue ids the key can see. */
+export interface KeyCheckResult {
+  outcome: KeyOutcome;
+  saved: boolean;
+  listed: string[];
+  listed_total: number;
+}
+/** The last verdict as stored. */
+export interface StoredKeyCheck {
+  at: string;
+  outcome: KeyOutcome;
+  listed: string[];
+  listed_total: number;
+}
+/** One bundled catalogue row. Prices are USD per MILLION tokens. */
+export interface DirectModelView {
+  id: string;
+  name: string;
+  note: string | null;
+  context: number;
+  max_output: number;
+  price_in: number;
+  price_cached_in: number | null;
+  price_out: number;
+  effort_levels: string[];
+  effort_default: string | null;
+  input_modalities: string[];
+  checked_on: string;
+  retires_on: string | null;
+}
+/** What a role does on a provider, EFFECTIVELY: `effort` null means the field is omitted (chat's default). */
+export interface DirectRoleView {
+  uses_this_provider: boolean;
+  model: string;
+  effort: string | null;
+}
+export interface DirectProviderView {
+  provider: CloudProviderId;
+  name: string;
+  opted_in: boolean;
+  key: KeyPresence;
+  /** null unless `key === "present"`: a verdict carried in a backup is never shown beside no key. */
+  key_check: StoredKeyCheck | null;
+  shares_data: boolean;
+  catalogue_checked_on: string;
+  terms_checked_on: string;
+  roles: { chat: DirectRoleView; background: DirectRoleView };
+  models: DirectModelView[];
+}
+/** `stored` and `effective` differ when a stored direct provider was demoted at read. */
+export interface RoleProviderView {
+  stored: CloudProviderId;
+  effective: CloudProviderId;
+}
+export interface DirectProvidersState {
+  providers: DirectProviderView[];
+  roles: { chat: RoleProviderView; background: RoleProviderView };
 }
 
 /** One search-language / embedder choice offered at vault creation. */
@@ -483,7 +578,10 @@ export interface ContextStatus {
    *  inferred window must never be rendered as if it were measured (#792). */
   window_proven: boolean;
   compress: CompressDecision;
+  /** Always empty unless `provider` is OpenRouter: the switch buttons come from OpenRouter's catalogue. */
   upgrade: ModelOption[];
+  /** The cloud provider answering chat; the meter names it. */
+  provider: CloudProviderId;
 }
 
 /** The pre-compress state to Undo with — held by the UI and echoed back to `revert_compress`. */
@@ -3143,7 +3241,11 @@ export interface LocalAiSwitch {
 /** Whether an AI provider is available, for the keyless-onboarding gate (#295, settings.rs
  *  `AiProviderStatus`). Any one dismisses the first-run wizard; see `lib/aiGate.ts`. */
 export interface AiProviderStatus {
+  /** Whether CHAT has a cloud key (its provider's). The first-run gate asks this one. */
   has_cloud_key: boolean;
+  /** Whether BACKGROUND has one. Background work gates on this: a restore can leave Chat keyed and
+   *  Background on a provider with no key on this device. */
+  background_has_cloud_key: boolean;
   local_configured: boolean;
   onboarding_done: boolean;
 }
@@ -3174,8 +3276,11 @@ export interface PowerRoleView {
    *  and the key together (llm_gateway.rs EffectiveRoute). Every route sentence is worded from this,
    *  never guessed from the preference alone. */
   effective: EffectiveRoute;
-  /** Whether this role's cloud key can be read (llm_gateway.rs KeyPresence). */
+  /** Whether this role's cloud key can be read (llm_gateway.rs KeyPresence): the key of
+   *  `cloud_provider`. */
   cloud_key: KeyPresence;
+  /** The cloud provider this role's cloud leg goes to, so copy can name it. */
+  cloud_provider: CloudProviderId;
 }
 
 /** Where a role's requests really go (llm_gateway.rs EffectiveRoute). `cloud_for_power` is a

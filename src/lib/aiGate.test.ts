@@ -11,6 +11,7 @@ import type { AiProviderStatus } from "./types";
 
 const s = (over: Partial<AiProviderStatus>): AiProviderStatus => ({
   has_cloud_key: false,
+  background_has_cloud_key: false,
   local_configured: false,
   onboarding_done: false,
   ...over,

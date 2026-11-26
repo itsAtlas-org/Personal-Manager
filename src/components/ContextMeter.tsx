@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chatContextStatus, compressChat, revertCompress } from "../lib/ipc";
+import { providerName } from "../lib/directProviders";
 import type { CompressResult, ContextStatus } from "../lib/types";
 import { useDepth } from "../theme/depth";
 import { Markdown } from "../lib/markdown";
@@ -106,6 +107,12 @@ export function ContextMeter({ conversationId, refreshKey, onUpgrade }: Props) {
   // catalogued cloud model's window is published fact and carries no source at all. Rendering the
   // two identically is what let an 8x overstatement look like a measurement (#792).
   const assumed = status.window_source != null && !status.window_proven;
+  // A model reached with the person's own key is named with its provider ("gpt-6.2-sol on OpenAI"):
+  // the same id can mean a different window on another route. Older backends send none, which reads
+  // as OpenRouter.
+  const provider = status.provider ?? "openrouter";
+  const modelLabel =
+    provider === "openrouter" ? status.model : `${status.model} on ${providerName(provider)}`;
 
   // Minimal depth stays out of the way entirely until usage is in alert territory.
   if (minimal && !alerting) return null;
@@ -160,8 +167,8 @@ export function ContextMeter({ conversationId, refreshKey, onUpgrade }: Props) {
             onClick={toggle}
             title={
               known
-                ? `${pct}% of ${status.model}'s context used${assumed ? " — assumed window, see details" : ""}`
-                : `Context usage is unknown for ${status.model}`
+                ? `${pct}% of ${modelLabel}'s context used${assumed ? " — assumed window, see details" : ""}`
+                : `Context usage is unknown for ${modelLabel}`
             }
             data-help="context-meter"
             // The edge is `--ink4`, not `--border2`: that measures 1.42–1.84:1 against `--panel` at
@@ -209,8 +216,8 @@ export function ContextMeter({ conversationId, refreshKey, onUpgrade }: Props) {
         <div className="p-2">
           <p className="text-sm text-ink2">
             {alerting
-              ? `This conversation is filling ${status.model}'s context (${known ? `${pct}%` : "—"}).`
-              : `${status.model}'s context is ${known ? `${pct}%` : "—"} full.`}
+              ? `This conversation is filling ${modelLabel}'s context (${known ? `${pct}%` : "—"}).`
+              : `${modelLabel}'s context is ${known ? `${pct}%` : "—"} full.`}
           </p>
           {assumed && (
             // Unfolded on purpose: the settings doctrine folds prose but never a caveat that

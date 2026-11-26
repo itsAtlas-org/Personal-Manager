@@ -254,7 +254,8 @@ export function LocalAiRoles({
       )}
       <SectionInfo title="How routing & fallback work">
         <p>
-          <span className="text-ink2">Cloud</span> keeps using your OpenRouter model.{" "}
+          <span className="text-ink2">Cloud</span> keeps using your cloud model (OpenRouter, or the
+          provider you chose for that role in AI &amp; Models).{" "}
           <span className="text-ink2">Local only</span> uses the model you picked and fails if it's
           unreachable. <span className="text-ink2">Local, fall back to cloud</span> tries local
           first and quietly hands off to your cloud model {WHEN_SERVER_CANT}. It never switches to
@@ -287,7 +288,7 @@ const WHEN_SERVER_CANT =
  *  section it names is read from the list, so a rename can't leave it naming a heading that's gone. */
 const GOOD_IF: Record<string, string> = {
   cloud:
-    "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to OpenRouter.",
+    "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to your cloud provider.",
   local: `Good if nothing should ever go to the cloud. If your server is down, this job doesn't answer, and ${sectionLabel("sec-localai-power")} never moves it.`,
   "local-then-cloud": `Good for most setups with a cloud key: your own model when it can, your cloud model ${WHEN_SERVER_CANT}. It's the only setting ${sectionLabel("sec-localai-power")} can move.`,
 };

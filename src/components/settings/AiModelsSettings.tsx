@@ -3,9 +3,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { dayMonthYear, isDirect, roleDefaultEffort, roleModel } from "../../lib/directProviders";
 import { formatWhen } from "../../lib/format";
 import {
   costSummary,
+  getLocalLlmConfig,
   getSettings,
   hasOpenRouterBackgroundKey,
   hasOpenRouterKey,
@@ -15,13 +17,15 @@ import {
   setBackgroundModels,
   setChatAutoSwitch,
   setChatModels,
+  setDirectRole,
   setOpenRouterBackgroundKey,
   setOpenRouterKey,
+  setRoleCloudProvider,
   settingsDefaults,
 } from "../../lib/ipc";
-import type { CostSummary, Settings } from "../../lib/types";
+import { useDirectProviders } from "../../lib/useDirectProviders";
+import type { CostSummary, RoleName, Settings } from "../../lib/types";
 import { IngestProgress } from "../IngestProgress";
-import { ModelListEditor } from "../ModelListEditor";
 import { modText } from "../mods/modText";
 import {
   Button,
@@ -34,6 +38,8 @@ import {
   useFieldA11y,
   VisuallyHidden,
 } from "../ui";
+import { DirectProviders } from "./DirectProviders";
+import { RoleBlock } from "./RoleBlock";
 import { TabResetSection } from "./ResetControls";
 import { LocalAiOffRow, LocalAiPickPrompt } from "./LocalAiOffControls";
 import { readReviewAiEnabled, writeReviewAiEnabled } from "../../lib/reviewPrefs";
@@ -115,11 +121,33 @@ export function AiModelsSettings({
   // The Local AI switch (D7): while it is off, this tab carries the way back on and a cloud model
   // for any role that was routed to a local one. `null` until it answers, which shows neither.
   const localAi = useLocalAiSwitch();
+  // The providers a person reaches with their own key, shared by the "Your own keys" card and both
+  // role blocks so they never disagree about what is on, keyed, or moved.
+  const dp = useDirectProviders();
+  // Each role's routing, which decides what the note under a direct provider says. "cloud" while
+  // Local AI is off (nothing local can answer then) and until the read lands.
+  const [routing, setRouting] = useState({ chat: "cloud", background: "cloud" });
+  const localOn = localAi?.on === true;
+  useEffect(() => {
+    if (!localOn) {
+      setRouting({ chat: "cloud", background: "cloud" });
+      return;
+    }
+    let cancelled = false;
+    getLocalLlmConfig()
+      .then((c) => {
+        if (!cancelled) setRouting({ chat: c.chat_routing, background: c.background_routing });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [localOn]);
   // The two key fields' label/control wiring. Both labels sat above their Input with no htmlFor, so
   // the placeholder was the last-resort accessible name: the most consequential input in PM
   // announced as "sk-or-... , password", and lost even that the moment typing started.
   const keyField = useFieldA11y();
-  const bgKeyField = useFieldA11y();
+  const bgKeyField = useFieldA11y({ description: true });
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +314,56 @@ export function AiModelsSettings({
     changeBackgroundAuto(false);
   }
 
+  // The provider half of a reset: a role on a provider of its own goes back to OpenRouter, and an
+  // effort someone chose goes back to the role's default. It narrows toward zero data retention, so
+  // it can only ever lose a choice, never widen where data goes. It turns no provider off and
+  // deletes no key. The model chosen on a direct provider is left: the wire has no "default model".
+  const roles: RoleName[] = ["chat", "background"];
+  function roleOnOwnProvider(role: RoleName): boolean {
+    return dp.state !== null && isDirect(dp.state.roles[role].stored);
+  }
+  function roleEffortChosen(role: RoleName): boolean {
+    return (dp.state?.providers ?? []).some((p) => {
+      const eff = p.roles[role].effort;
+      return eff !== roleDefaultEffort(role, roleModel(p, role));
+    });
+  }
+  const directDefault = roles.every((r) => !roleOnOwnProvider(r) && !roleEffortChosen(r));
+  async function resetDirect() {
+    if (!dp.state) return;
+    for (const role of roles) {
+      if (roleOnOwnProvider(role)) await setRoleCloudProvider(role, "openrouter");
+      for (const p of dp.state.providers) {
+        const model = roleModel(p, role);
+        if (model && p.roles[role].effort !== roleDefaultEffort(role, model)) {
+          await setDirectRole(p.provider, role, [model.id], null);
+        }
+      }
+    }
+    await dp.reload();
+  }
+
+  // The cloud model each role will really use, for the Local AI prompt: a direct role's one model,
+  // else the first of OpenRouter's list.
+  function cloudModelOf(role: RoleName): string | null {
+    const list = role === "chat" ? chatModels : backgroundModels;
+    if (dp.state && isDirect(dp.state.roles[role].effective)) {
+      const view = dp.state.providers.find((p) => p.provider === dp.state?.roles[role].effective);
+      return view ? view.roles[role].model : null;
+    }
+    return list[0] ?? null;
+  }
+  const orKey = { chat: keyAlreadySet, background: keyAlreadySet || bgKeyAlreadySet };
+  // "Refresh prices" asks OpenRouter for its list, which a person using only their own keys has
+  // never opted into: hide it for them, and only them.
+  const noOpenRouterAtAll =
+    dp.state !== null &&
+    !keyAlreadySet &&
+    !bgKeyAlreadySet &&
+    isDirect(dp.state.roles.chat.effective) &&
+    isDirect(dp.state.roles.background.effective);
+  const catalogueDate = dp.state?.providers[0]?.catalogue_checked_on ?? null;
+
   return (
     <>
       {error && <Callout className="mt-4">{error}</Callout>}
@@ -343,6 +421,9 @@ export function AiModelsSettings({
         placeholder={bgKeyAlreadySet ? "•••••••• (saved — type to replace)" : "sk-or-..."}
         className="mt-1"
       />
+      <p {...bgKeyField.descriptionProps} className="mt-1 text-xs text-ink4">
+        Only used while Background is on OpenRouter.
+      </p>
       {bgKeySaved && (
         <p className="mt-1 text-xs font-medium text-st-track">✓ Saved to your keychain</p>
       )}
@@ -350,14 +431,16 @@ export function AiModelsSettings({
           including the keychain sentence that used to head every tab. */}
       <SectionInfo title="About your API keys">
         <p>
-          Your API key lives in the OS keychain and saves as soon as you click away. The model is
-          swappable anytime.
+          Your OpenRouter key lives in your computer&apos;s keychain and saves as soon as you click
+          away. You can swap the model any time.
         </p>
         <p>
           The background key is used for background work (sorting proposals, learning). Lets you
           track that spend separately. Falls back to your main key if blank.
         </p>
       </SectionInfo>
+
+      <DirectProviders dp={dp} orKey={orKey} onError={setError} />
 
       <div
         id="sec-ai-models"
@@ -369,30 +452,42 @@ export function AiModelsSettings({
         {localAi && (
           <LocalAiPickPrompt
             sw={localAi}
-            chatModel={settingsLoaded ? (chatModels[0] ?? null) : null}
-            backgroundModel={settingsLoaded ? (backgroundModels[0] ?? null) : null}
+            chatModel={settingsLoaded ? cloudModelOf("chat") : null}
+            backgroundModel={settingsLoaded ? cloudModelOf("background") : null}
             onError={setError}
           />
         )}
-        <ModelListEditor
+        <RoleBlock
+          role="chat"
           label="Chat model"
           description="Answers your chats. Add several and turn on auto-switch to fall back when one runs out."
           helpId="settings-chat-models"
-          models={chatModels}
-          onChange={changeChatModels}
-          autoSwitch={chatAuto}
-          onAutoSwitchChange={changeChatAuto}
-          onReset={chatRoleIsDefault ? undefined : resetChatRole}
+          dp={dp}
+          routing={routing.chat}
+          openRouter={{
+            models: chatModels,
+            onChange: changeChatModels,
+            autoSwitch: chatAuto,
+            onAutoSwitchChange: changeChatAuto,
+            onReset: chatRoleIsDefault ? undefined : resetChatRole,
+          }}
+          onError={setError}
         />
-        <ModelListEditor
+        <RoleBlock
+          role="background"
           label="Background model"
           description="Runs sorting proposals and Learning You. Free models work well here; chain a few for daily limits."
           helpId="settings-background-models"
-          models={backgroundModels}
-          onChange={changeBackgroundModels}
-          autoSwitch={backgroundAuto}
-          onAutoSwitchChange={changeBackgroundAuto}
-          onReset={backgroundRoleIsDefault ? undefined : resetBackgroundRole}
+          dp={dp}
+          routing={routing.background}
+          openRouter={{
+            models: backgroundModels,
+            onChange: changeBackgroundModels,
+            autoSwitch: backgroundAuto,
+            onAutoSwitchChange: changeBackgroundAuto,
+            onReset: backgroundRoleIsDefault ? undefined : resetBackgroundRole,
+          }}
+          onError={setError}
         />
         {/* A pointer, deliberately not a mirror: the local controls keep one home, in the Local AI
          *  tab. Without this, the two roles above read as the whole of model choice. While Local AI
@@ -400,9 +495,9 @@ export function AiModelsSettings({
          *  while on is the top of the tab, so it is never in two places at once). */}
         {localAi?.on && (
           <p className="text-xs text-ink4">
-            These are cloud models, run through OpenRouter. A model on your own machine is chosen
-            separately — same two roles, plus whether each one uses local, cloud, or local with a
-            cloud fallback.{" "}
+            These are cloud models. Which cloud provider answers each role is set above. A model on
+            your own machine is chosen separately: same two roles, plus whether each one uses local,
+            cloud, or local with a cloud fallback.{" "}
             {onOpenLocalAi && (
               <button
                 type="button"
@@ -517,14 +612,16 @@ export function AiModelsSettings({
         >
           <SectionLabel
             action={
-              <Button
-                variant="tertiary"
-                size="sm"
-                onClick={refreshPrices}
-                disabled={refreshingPrices}
-              >
-                {refreshingPrices ? "Refreshing…" : "Refresh prices"}
-              </Button>
+              noOpenRouterAtAll ? undefined : (
+                <Button
+                  variant="tertiary"
+                  size="sm"
+                  onClick={refreshPrices}
+                  disabled={refreshingPrices}
+                >
+                  {refreshingPrices ? "Refreshing…" : "Refresh prices"}
+                </Button>
+              )
             }
           >
             Usage &amp; cost
@@ -649,22 +746,39 @@ export function AiModelsSettings({
               reported cost and not yet in the price cache shows{" "}
               <span className="font-mono text-ink4">—</span>, never an understated&nbsp;$0.
             </p>
+            {catalogueDate && (
+              <p>
+                Calls that go straight to your own key aren&apos;t priced by the provider. PM works
+                the cost out from the tokens the provider reports times the prices built into this
+                version of PM (checked on {dayMonthYear(catalogueDate)}). Cached input is priced at
+                the cached rate. It leaves out tax and anything the provider adds. Check your
+                provider&apos;s own dashboard for the bill.
+              </p>
+            )}
           </SectionInfo>
         </div>
       )}
 
       <TabResetSection
         tabName="AI & Models"
-        isDefault={chatRoleIsDefault && backgroundRoleIsDefault && !reviewAi}
-        onReset={() => {
+        isDefault={chatRoleIsDefault && backgroundRoleIsDefault && directDefault && !reviewAi}
+        onReset={async () => {
           resetChatRole();
           resetBackgroundRole();
           changeReviewAi(false);
+          try {
+            await resetDirect();
+          } catch (e) {
+            // Like the tab's other writes: say so instead of an unhandled rejection.
+            setError(String(e));
+            await dp.reload();
+          }
         }}
         confirmBody={
           <>
-            Restores the chat and background models (and their auto-switch) and turns Review filing
-            suggestions back off. Your saved API keys aren&apos;t affected.
+            Restores the chat and background models and their auto-switch, sends both roles back to
+            OpenRouter, and turns Review filing suggestions back off. Your saved API keys, and which
+            providers you&apos;ve turned on, aren&apos;t affected.
           </>
         }
       />

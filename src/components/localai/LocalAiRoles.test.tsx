@@ -139,7 +139,7 @@ describe("each role's row", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to OpenRouter.",
+        "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to your cloud provider.",
       ),
     ).toBeTruthy();
     cleanup();

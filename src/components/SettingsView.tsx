@@ -24,6 +24,8 @@ import {
   setLocalAiEnabled,
   useLocalAiSwitch,
 } from "../lib/localAiSwitch";
+import { directReady } from "../lib/directProviders";
+import { useDirectProviders } from "../lib/useDirectProviders";
 import { BackupSettings } from "./BackupSettings";
 import { AttentionDot } from "./Sidebar";
 import { ConnectorsSettings } from "./ConnectorsSettings";
@@ -36,6 +38,7 @@ import { AccessibilitySettings } from "./settings/AccessibilitySettings";
 import { SearchSettings } from "./settings/SearchSettings";
 import { ModelListEditor } from "./ModelListEditor";
 import { OnboardingLocalConnect } from "./onboarding/OnboardingLocalConnect";
+import { OnboardingDirectKey } from "./settings/OnboardingDirectKey";
 import { ModNoticeStrips } from "./mods/ModNoticeStrips";
 import { ModsStrips } from "./mods/ModsStrips";
 import { PinboardMoveStrips } from "./mods/PinboardMoveStrips";
@@ -125,6 +128,8 @@ export function SettingsView({
   const [chatAuto, setChatAuto] = useState(false);
   const [backgroundAuto, setBackgroundAuto] = useState(false);
   const [keyAlreadySet, setKeyAlreadySet] = useState(false);
+  // The providers a person reaches with their own key, for the wizard's optional card.
+  const dp = useDirectProviders(onboarding);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [timeZone, setTimeZoneState] = useState("");
@@ -298,7 +303,12 @@ export function SettingsView({
 
   // A provider is ready when the active pane is satisfied: a cloud key (entered or already saved),
   // or a configured local model. "Get started" gates on this; "Set up AI later" bypasses it.
-  const providerReady = aiMode === "cloud" ? keyAlreadySet || key.trim().length > 0 : localReady;
+  // A cloud pane is also satisfied by a provider the person reaches with their own key: opted in,
+  // key checked, and BOTH roles on a provider that has a key (else "Get started" ends onboarding
+  // with an app that has nothing to answer a role).
+  const openRouterKeyHere = keyAlreadySet || key.trim().length > 0;
+  const providerReady =
+    aiMode === "cloud" ? openRouterKeyHere || directReady(dp.state, openRouterKeyHere) : localReady;
   const canSave = !saving && providerReady;
 
   async function save() {
@@ -386,8 +396,7 @@ export function SettingsView({
             <SectionLabel>AI provider</SectionLabel>
             <p className="mt-1 text-xs leading-relaxed text-ink4">
               PM needs an AI model to power chat and the behind-the-scenes work. Use a cloud
-              provider through OpenRouter, or run a model on this device — you can also set this up
-              later.
+              provider, or run a model on this device. You can also set this up later.
             </p>
             <div className="mt-3">
               <SegmentedControl
@@ -395,7 +404,7 @@ export function SettingsView({
                 value={aiMode}
                 onChange={(m) => void chooseAiMode(m)}
                 options={[
-                  { value: "cloud", label: "Cloud (OpenRouter)" },
+                  { value: "cloud", label: "Cloud" },
                   { value: "local", label: "On this device" },
                 ]}
               />
@@ -405,7 +414,7 @@ export function SettingsView({
           {aiMode === "cloud" ? (
             <>
               <p className="mt-3 text-xs leading-relaxed text-ink4">
-                PM reaches AI models through{" "}
+                By default PM reaches AI models through{" "}
                 <a
                   href="https://openrouter.ai"
                   target="_blank"
@@ -413,9 +422,9 @@ export function SettingsView({
                   className="text-accent-text underline hover:brightness-110"
                 >
                   OpenRouter
-                </a>{" "}
-                — one account for OpenAI, Anthropic, Google, and free models. It's free to start,
-                and PM sends Zero-Data-Retention on every request.
+                </a>
+                : one account for OpenAI, Anthropic, Google and free models. It's free to start, and
+                PM asks for zero data retention on every request.
               </p>
 
               <label {...keyField.labelProps} className="mt-3 block text-sm font-medium text-ink2">
@@ -460,6 +469,12 @@ export function SettingsView({
                   onAutoSwitchChange={setBackgroundAuto}
                 />
               </div>
+
+              <OnboardingDirectKey
+                dp={dp}
+                hasOpenRouterKey={openRouterKeyHere}
+                onError={setError}
+              />
             </>
           ) : localAi?.on ? (
             <OnboardingLocalConnect onConfigured={setLocalReady} />
@@ -479,8 +494,8 @@ export function SettingsView({
               <p className="mt-2 text-xs text-ink4">Two things are yours alone on this account:</p>
               <ul className="ml-4 mt-1 list-disc space-y-1 text-xs text-ink4">
                 <li>
-                  Your own <strong>OpenRouter key</strong> (above) — AI features wake up once it's
-                  saved. Keys never travel between Windows accounts.
+                  Your own <strong>AI key</strong> (above): OpenRouter, or your own. AI features
+                  wake up once it's saved. Keys never travel between Windows accounts.
                 </li>
                 <li>
                   Your own <strong>sign-ins</strong> — reconnect Drive, OneDrive, and calendars
