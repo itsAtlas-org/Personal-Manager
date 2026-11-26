@@ -194,10 +194,6 @@ export const HELP: Record<string, HelpEntry> = {
     title: "In your own words",
     body: "Type a preference as a plain sentence and PM fills in the fields for you. Check them before saving — nothing is stored until you do.",
   },
-  "settings-pinboard-confirm-delete": {
-    title: "Confirm before deleting a pinboard card",
-    body: "Ask before a note or timeline is deleted from the Pinboard, so an important one can't go with a stray click. The pop-up tells you what actually goes with it — entries that would leave your calendar, or a document already saved to your vault that would stay behind. If you ticked 'Don't ask again' in that pop-up, this is where you turn it back on. It's per-device, and it doesn't apply to a folder's ✕, which only ungroups it and spills the cards back onto the board. Either way, Ctrl+Z (⌘Z on a Mac) undoes a deletion.",
-  },
   "settings-sidebar-placement": {
     title: "Sidebar tabs",
     body: "Right-click a tab in the sidebar to arrange it, or select it with the keyboard and press Shift+F10 (or the Menu key, if your keyboard has one). 'Pin to the top' moves it above the rest, in the order you pin them; 'Hide' takes it out of the sidebar, and it's still a search away: press Ctrl K (⌘K on a Mac) and type its name. To bring one back, right-click any tab and choose 'Show'. Review and Teach move together, and hiding them also hides the filing controls in Documents and in a project's files; nothing is lost: new items still index and file themselves, and PM keeps applying what you've taught it. On the Minimal preset Review and Teach start out of the sidebar, and 'Show' brings them back pinned to the top. Focus always stays, and Dev comes and goes with Developer mode. It's remembered on this device; 'Reset sidebar placement' puts every tab back where it started.",
