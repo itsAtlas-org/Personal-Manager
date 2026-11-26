@@ -849,7 +849,11 @@ fn the_pending_key_has_two_writers_and_this_file_never_writes_the_legacy_row() {
         &mut users,
     );
     assert_eq!(users.len(), 1, "{users:?}");
-    assert!(users[0].0.ends_with("mods/autoinstall.rs"), "{users:?}");
+    // Compared as a path, by components: on Windows the walk reports `src\mods\autoinstall.rs`.
+    assert!(
+        std::path::Path::new(&users[0].0).ends_with("mods/autoinstall.rs"),
+        "{users:?}"
+    );
     assert_eq!(users[0].1, 2, "the PILOTS entry and the re-arm's insert");
     let autoinstall = include_str!("../autoinstall.rs");
     let autoinstall = autoinstall.split("#[cfg(test)]\nmod tests").next().unwrap();
