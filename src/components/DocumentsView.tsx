@@ -60,6 +60,7 @@ import { useDepth } from "../theme";
 import { useLearningToolsVisible } from "../lib/nav";
 import {
   DOC_COLUMN_CAPS,
+  DOC_COLUMN_HELP_IDS,
   DOC_COLUMN_KEYS,
   DOC_COLUMN_LABELS,
   DOC_TITLE_CAP,
@@ -898,10 +899,12 @@ export function DocumentsView({ onReviewClick }: Props) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={pickFiles} disabled={busy || installingOcr}>
+          {/* One entry on both buttons, each carrying the attribute itself: a wrapper that is
+              `display: contents` generates no box, so help mode's hover outline would never draw. */}
+          <Button onClick={pickFiles} disabled={busy || installingOcr} data-help="documents-add">
             Add files
           </Button>
-          <Button onClick={pickFolder} disabled={busy || installingOcr}>
+          <Button onClick={pickFolder} disabled={busy || installingOcr} data-help="documents-add">
             Add folder
           </Button>
           {/* Faint, like Rebuild beside it: a rarely-used tool that acts on this list, not a
@@ -932,6 +935,7 @@ export function DocumentsView({ onReviewClick }: Props) {
               variant="tertiary"
               onClick={() => setResetting(true)}
               disabled={busy || installingOcr}
+              data-help="documents-reset"
               title="Remove every file from your connected accounts and folders, with its filing, and fetch them again"
             >
               Reset…
@@ -993,7 +997,7 @@ export function DocumentsView({ onReviewClick }: Props) {
               source, cleared in one go (#1017) rather than one hover-Delete at a time. Calm, not a
               warning: nothing is wrong with PM, and the rows keep their own badges. */}
           {deadCount > 0 && (
-            <Banner tone="info">
+            <Banner tone="info" helpId="documents-dead-banner">
               <div className="flex items-center justify-between gap-3">
                 <span>
                   {deadCount} file{deadCount === 1 ? "" : "s"} can&rsquo;t be reached at the source
@@ -1179,39 +1183,41 @@ export function DocumentsView({ onReviewClick }: Props) {
               )}
               {prep && <p className="px-1 py-1 text-sm text-ink3">{prep}</p>}
               {items.length > 0 && (
-                <Collapsible
-                  title="Activity"
-                  meta={`${items.length}`}
-                  // Controlled + persisted: this view unmounts on every tab switch, so the
-                  // primitive's own `useState` reseeded the fold open each time it came back.
-                  open={activityOpen}
-                  onOpenChange={(o) => {
-                    setActivityOpen(o);
-                    writeActivityOpen(o);
-                  }}
-                >
-                  {/* The list had no scroller of its own, so a long rebuild rendered every row
+                <div data-help="documents-activity">
+                  <Collapsible
+                    title="Activity"
+                    meta={`${items.length}`}
+                    // Controlled + persisted: this view unmounts on every tab switch, so the
+                    // primitive's own `useState` reseeded the fold open each time it came back.
+                    open={activityOpen}
+                    onOpenChange={(o) => {
+                      setActivityOpen(o);
+                      writeActivityOpen(o);
+                    }}
+                  >
+                    {/* The list had no scroller of its own, so a long rebuild rendered every row
                       into the pane scroller and pushed the duplicates panel and the document
                       table below the fold. ~26rem is about 15 rows at this row height. */}
-                  <ul className="flex max-h-[26rem] flex-col gap-1 overflow-y-auto pt-1">
-                    {truncated && (
-                      <li className="px-1 py-0.5 text-xs text-ink4">
-                        Showing the last {items.length} files — this run was longer.
-                      </li>
-                    )}
-                    {items.map((item, i) => (
-                      <li
-                        key={i}
-                        className="flex items-center justify-between gap-3 px-1 py-0.5 text-sm"
-                      >
-                        <span className="truncate text-ink2">{item.name}</span>
-                        <span className={`shrink-0 text-xs ${statusColor(item.status)}`}>
-                          {statusLabel(item)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </Collapsible>
+                    <ul className="flex max-h-[26rem] flex-col gap-1 overflow-y-auto pt-1">
+                      {truncated && (
+                        <li className="px-1 py-0.5 text-xs text-ink4">
+                          Showing the last {items.length} files — this run was longer.
+                        </li>
+                      )}
+                      {items.map((item, i) => (
+                        <li
+                          key={i}
+                          className="flex items-center justify-between gap-3 px-1 py-0.5 text-sm"
+                        >
+                          <span className="truncate text-ink2">{item.name}</span>
+                          <span className={`shrink-0 text-xs ${statusColor(item.status)}`}>
+                            {statusLabel(item)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </Collapsible>
+                </div>
               )}
               {summary && (
                 /* The "could not be read" clause renders only when non-zero, so a clean import reads
@@ -1267,7 +1273,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                 {/* Archived projects' files (#1018), beside the list they hide from. Says how many
                     so a hidden file is never a mystery, and only appears when there are some. */}
                 {archivedCount > 0 ? (
-                  <p className="text-xs text-ink4">
+                  <p className="text-xs text-ink4" data-help="documents-archived">
                     {showArchived
                       ? `Showing ${archivedCount} file${archivedCount === 1 ? "" : "s"} from archived projects`
                       : `${archivedCount} file${archivedCount === 1 ? "" : "s"} in archived projects hidden`}
@@ -1283,77 +1289,86 @@ export function DocumentsView({ onReviewClick }: Props) {
                 ) : (
                   <span />
                 )}
-                <div className="flex items-center gap-2" data-help="documents-view">
-                  <SegmentedControl
-                    ariaLabel="Show documents as"
-                    value={docView}
-                    onChange={setDocView}
-                    options={[
-                      { value: "all", label: "All files", title: "Every document in one list" },
-                      {
-                        value: "folders",
-                        label: "Folders",
-                        title: "In folders by where each file came from",
-                      },
-                      { value: "projects", label: "Projects", title: "In a folder per project" },
-                    ]}
-                  />
+                <div className="flex items-center gap-2">
+                  {/* The layout switch and the column picker are separate help targets, so they
+                      must not nest: the picker's panel renders inside its own box (no portal) and
+                      used to inherit the layout entry. */}
+                  <div data-help="documents-view">
+                    <SegmentedControl
+                      ariaLabel="Show documents as"
+                      value={docView}
+                      onChange={setDocView}
+                      options={[
+                        { value: "all", label: "All files", title: "Every document in one list" },
+                        {
+                          value: "folders",
+                          label: "Folders",
+                          title: "In folders by where each file came from",
+                        },
+                        { value: "projects", label: "Projects", title: "In a folder per project" },
+                      ]}
+                    />
+                  </div>
                   {/* The shared Popover primitive rather than a hand-rolled panel: this was the only
                     dismissless one left in the tree, so clicking anywhere else on the page left it
                     hanging open. It brings click-outside, Escape and focus-restore with it. Passed as
                     a plain node, NOT the function form — the function form hands you `close`, which
                     is right for a menu of actions and wrong for a list of checkboxes you tick several
                     of. */}
-                  <Popover
-                    align="right"
-                    ariaLabel="Columns"
-                    rootClassName="flex justify-end"
-                    panelClassName="w-56 p-2"
-                    trigger={({ open, toggle }) => (
-                      <Button
-                        variant="tertiary"
-                        size="sm"
-                        onClick={toggle}
-                        aria-expanded={open}
-                        title="Choose which columns this table shows"
-                      >
-                        Columns
-                      </Button>
-                    )}
-                  >
-                    <>
-                      <p className="px-1 pb-1 text-xs text-ink4">Title always shows.</p>
-                      {DOC_COLUMN_KEYS.map((key) => (
-                        <label
-                          key={key}
-                          className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] px-1 py-1 text-sm text-ink2 hover:bg-surface"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={shows(key)}
-                            onChange={() => setColumns(toggleColumn(columns, key))}
-                          />
-                          {DOC_COLUMN_LABELS[key]}
-                        </label>
-                      ))}
-                      <div className="mt-1 border-t border-rule pt-1">
+                  <div data-help="documents-columns">
+                    <Popover
+                      align="right"
+                      ariaLabel="Columns"
+                      rootClassName="flex justify-end"
+                      panelClassName="w-56 p-2"
+                      trigger={({ open, toggle }) => (
                         <Button
                           variant="tertiary"
                           size="sm"
-                          onClick={() => setColumns(null)}
-                          disabled={columnChoice == null}
-                          title="Go back to following your display depth"
+                          onClick={toggle}
+                          aria-expanded={open}
+                          title="Choose which columns this table shows"
                         >
-                          Reset to depth
+                          Columns
                         </Button>
-                      </div>
-                    </>
-                  </Popover>
+                      )}
+                    >
+                      <>
+                        <p className="px-1 pb-1 text-xs text-ink4">Title always shows.</p>
+                        {DOC_COLUMN_KEYS.map((key) => (
+                          <label
+                            key={key}
+                            className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] px-1 py-1 text-sm text-ink2 hover:bg-surface"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={shows(key)}
+                              onChange={() => setColumns(toggleColumn(columns, key))}
+                            />
+                            {DOC_COLUMN_LABELS[key]}
+                          </label>
+                        ))}
+                        <div className="mt-1 border-t border-rule pt-1">
+                          <Button
+                            variant="tertiary"
+                            size="sm"
+                            onClick={() => setColumns(null)}
+                            disabled={columnChoice == null}
+                            title="Go back to following your display depth"
+                          >
+                            Reset to depth
+                          </Button>
+                        </div>
+                      </>
+                    </Popover>
+                  </div>
                 </div>
               </div>
             )}
             {opened && documents.length > 0 && (
-              <>
+              // The folder path and tiles are what the layout entry's "click a folder to open it, and
+              // the path at the top to go back up" describes, so they carry it too.
+              <div data-help="documents-view">
                 <FolderCrumbs
                   trail={opened.trail}
                   rootLabel={docView === "projects" ? "All projects" : "All sources"}
@@ -1363,7 +1378,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                   folders={opened.folder.folders}
                   onOpen={(key) => setFolderPath([...opened.path, key])}
                 />
-              </>
+              </div>
             )}
             {documents.length === 0 ? (
               <p className="text-sm text-ink4">No documents yet.</p>
@@ -1378,6 +1393,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                   <tr className="border-b border-border">
                     <SortHeader
                       label="Title"
+                      helpId="documents-col-title"
                       sortKey="title"
                       sort={activeSort}
                       onSort={toggleSort}
@@ -1386,6 +1402,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("project") && (
                       <SortHeader
                         label="Project"
+                        helpId={DOC_COLUMN_HELP_IDS.project}
                         sortKey="project"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1394,6 +1411,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("importance") && (
                       <SortHeader
                         label="Importance"
+                        helpId={DOC_COLUMN_HELP_IDS.importance}
                         sortKey="importance"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1402,6 +1420,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("source") && (
                       <SortHeader
                         label="Source"
+                        helpId={DOC_COLUMN_HELP_IDS.source}
                         sortKey="source"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1410,6 +1429,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("chunks") && (
                       <SortHeader
                         label="Chunks"
+                        helpId={DOC_COLUMN_HELP_IDS.chunks}
                         sortKey="chunks"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1422,6 +1442,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                         <SortHeader
                           key={key}
                           label={DOC_COLUMN_LABELS[key]}
+                          helpId={DOC_COLUMN_HELP_IDS[key]}
                           sortKey={key}
                           sort={activeSort}
                           onSort={toggleSort}
@@ -1431,6 +1452,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("ingested") && (
                       <SortHeader
                         label="Ingested"
+                        helpId={DOC_COLUMN_HELP_IDS.ingested}
                         sortKey="ingested"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1440,6 +1462,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                     {shows("synced") && (
                       <SortHeader
                         label="Last synced"
+                        helpId={DOC_COLUMN_HELP_IDS.synced}
                         sortKey="synced"
                         sort={activeSort}
                         onSort={toggleSort}
@@ -1519,6 +1542,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                                     className={`shrink-0 text-xs text-ink4 transition-opacity hover:text-accent-text focus-visible:opacity-100 group-hover:opacity-100 ${
                                       editingId === doc.id ? "opacity-100" : "opacity-0"
                                     }`}
+                                    data-help="documents-row-edit"
                                     title="Change project or importance"
                                     aria-expanded={editingId === doc.id}
                                   >
@@ -1881,6 +1905,7 @@ function SourceBadge({ doc }: { doc: Document }) {
         : "Indexed by pointer — body fetched live on demand, summary readable offline";
   return (
     <span
+      data-help="documents-source-badge"
       className="shrink-0 rounded-full border border-border bg-surface px-1.5 py-0.5 text-[0.625rem] font-medium uppercase tracking-wide text-ink3"
       style={
         warn
@@ -1906,9 +1931,12 @@ function SortHeader({
   onSort,
   align,
   widthClass,
+  helpId,
 }: {
   label: string;
   sortKey: SortKey;
+  /** The help-mode entry for this column, on the <th> so the whole header cell is the target. */
+  helpId?: string;
   sort: DocSort | null;
   onSort: (key: SortKey) => void;
   align?: "right";
@@ -1921,6 +1949,7 @@ function SortHeader({
     // `pr-3` matches the cells below, so a header and its column sit on the same right edge; nowrap
     // because a wrapped two-word heading would set the column's height, not its width.
     <th
+      data-help={helpId}
       className={`whitespace-nowrap py-2 pr-3 font-medium last:pr-0 ${widthClass ?? ""} ${
         align === "right" ? "text-right" : ""
       }`}
@@ -1940,10 +1969,20 @@ function SortHeader({
   );
 }
 
-function Banner({ tone, children }: { tone: "info" | "warn"; children: React.ReactNode }) {
+function Banner({
+  tone,
+  helpId,
+  children,
+}: {
+  tone: "info" | "warn";
+  /** The help-mode entry for this banner, for the ones that have something to explain. */
+  helpId?: string;
+  children: React.ReactNode;
+}) {
   if (tone === "warn") {
     return (
       <div
+        data-help={helpId}
         className="mb-4 rounded-[var(--radius-sm)] border px-3 py-2 text-sm"
         style={{
           borderColor: "color-mix(in oklab, var(--st-due) 50%, transparent)",
@@ -1956,7 +1995,10 @@ function Banner({ tone, children }: { tone: "info" | "warn"; children: React.Rea
     );
   }
   return (
-    <div className="mb-4 rounded-[var(--radius-sm)] border border-border bg-surface px-3 py-2 text-sm text-ink2">
+    <div
+      data-help={helpId}
+      className="mb-4 rounded-[var(--radius-sm)] border border-border bg-surface px-3 py-2 text-sm text-ink2"
+    >
       {children}
     </div>
   );

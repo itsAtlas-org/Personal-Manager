@@ -82,6 +82,7 @@ export function SidebarNav({ view, onNavigate, reviewCount, onNew }: Props) {
             {item}
             <button
               onClick={onNew}
+              data-help="sidebar-new-chat"
               title="New conversation"
               aria-label="New conversation"
               className="shrink-0 rounded-[var(--radius-sm)] px-1.5 py-1.5 text-xs text-ink4 transition hover:bg-surface hover:text-ink"

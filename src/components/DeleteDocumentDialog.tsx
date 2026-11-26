@@ -210,6 +210,7 @@ export function DeleteDocumentButton({ onClick }: { onClick: () => void }) {
         e.stopPropagation();
         onClick();
       }}
+      data-help="documents-row-delete"
       title="Delete this document"
       aria-label="Delete this document"
       className="shrink-0 rounded-[var(--radius-sm)] px-1.5 py-0.5 text-xs text-ink4 opacity-0 transition-opacity hover:text-st-due focus-visible:opacity-100 group-hover:opacity-100"
