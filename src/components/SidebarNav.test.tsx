@@ -22,6 +22,7 @@ vi.mock("../lib/capabilities", async (importOriginal) => ({
   useDevMode: () => ({ devMode: gates.devMode, setDevMode: () => {} }),
 }));
 
+import { HELP } from "../lib/help";
 import { ModRowsContext } from "../lib/modRows";
 import type { ModInfo } from "../lib/modsTypes";
 import { SidebarNav } from "./SidebarNav";
@@ -54,6 +55,13 @@ function rightClick(el: Element, init: MouseEventInit = {}) {
 }
 
 describe("SidebarNav", () => {
+  it("gives the Chats row's New its own help entry, since it is not inside the tab's button", () => {
+    renderNav();
+    const plus = screen.getByRole("button", { name: "New conversation" });
+    expect(plus.closest("[data-help]")?.getAttribute("data-help")).toBe("sidebar-new-chat");
+    expect(HELP["sidebar-new-chat"]).toBeDefined();
+  });
+
   it("draws the tabs it always had, in order", () => {
     renderNav();
     expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "review", "teach", "mods"]);

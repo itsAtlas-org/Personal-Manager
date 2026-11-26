@@ -19,6 +19,7 @@ import { STATUS_LABEL } from "../components/ui/StatusBadge";
 import { inCancelZone } from "./calendarDrag";
 import { FORMAT_BUTTONS } from "./calendarEdit/formatKeys";
 import { CHANGELOG } from "./changelog";
+import { DOC_COLUMN_HELP_IDS, DOC_COLUMN_KEYS } from "./documentColumns";
 import { HELP } from "./help";
 
 const LABELS = Object.values(STATUS_LABEL);
@@ -311,5 +312,105 @@ describe("the calendar's help", () => {
     expect(HELP["calendar-new-task"].body).toMatch(/More options opens the task editor/);
     expect(HELP["calendar-choices"].body).toMatch(/a delete offers the same choices/);
     expect(HELP["focus-agenda"].body).toContain("Settings → Connectors");
+  });
+});
+
+// Help mode only shows what a `data-help` / `helpId` names AND HELP defines: a typo'd id, or an
+// element that names an entry nobody wrote, shows nothing at all and no type or lint sees it. The
+// calendar block above checks this for its own components; this is the same check over every
+// component, so the sidebar, the Documents table and anything added later are held to it too.
+describe("every help id a component names has an entry", () => {
+  const SOURCES = Object.entries(
+    import.meta.glob<string>("../components/**/*.tsx", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }),
+  ).filter(([path]) => !/\.test\.tsx$/.test(path));
+
+  /** Every string literal given to `data-help=` / `helpId=`, directly or inside a `{…}`. An
+   *  expression with no literal in it (`helpId={entry.helpId}`) is dynamic: its ids are named where
+   *  they are defined, so there is nothing here to check. A call (`data-help={sectionHelp("sec-…")}`)
+   *  is dynamic too, its string is an argument and not an id, and comment lines are skipped so a
+   *  doc example (`helpId="settings-map-tab"`) or a `<id>` placeholder is not read as a use. */
+  const literals = (text: string) =>
+    [
+      ...text
+        .split("\n")
+        .filter((line) => !/^\s*(\/\/|\/?\*)/.test(line))
+        .join("\n")
+        .matchAll(/\b(?:data-help|helpId)=(?:"([^"]+)"|\{([^}()]*)\})/g),
+    ].flatMap((m) =>
+      m[1] != null ? [m[1]] : [...(m[2] ?? "").matchAll(/"([^"]+)"/g)].map((s) => s[1]),
+    );
+
+  it("names only ids that exist, in any component", () => {
+    const named = SOURCES.flatMap(([path, text]) => literals(text).map((id) => ({ id, path })));
+    // A glob that matched nothing would pass vacuously.
+    expect(named.length).toBeGreaterThan(50);
+    // Collected rather than asserted one at a time, so a failure lists every dangling id at once.
+    const missing = named
+      .filter(({ id }) => HELP[id] === undefined)
+      .map((n) => `${n.id} (${n.path})`);
+    expect(missing).toEqual([]);
+  });
+
+  it("tolerates a dynamic id, and still reads a conditional's literals", () => {
+    expect(literals("<NavItem helpId={entry.helpId} />")).toEqual([]);
+    expect(literals(`<div data-help={a ? "x-one" : "x-two"} data-help="x-three" />`)).toEqual([
+      "x-one",
+      "x-two",
+      "x-three",
+    ]);
+  });
+});
+
+// The sidebar's small chrome and the Documents tab's controls and columns. The card can't scroll, so
+// each body stays short, and parts are named rather than pointed at by direction.
+describe("the sidebar and Documents help", () => {
+  const NEW_IDS = [
+    "sidebar-new-chat",
+    "sidebar-new-project-chat",
+    "sidebar-chat-move",
+    "sidebar-chat-delete",
+    "sidebar-whats-new",
+    "sidebar-settings",
+    "sidebar-resize",
+    "panel-reopen",
+    "documents-add",
+    "documents-reset",
+    "documents-columns",
+    "documents-col-title",
+    "documents-source-badge",
+    "documents-row-delete",
+    "documents-row-edit",
+    "documents-archived",
+    "documents-dead-banner",
+    "documents-activity",
+    // Ids other views already named but HELP never defined; filled in alongside.
+    "chat-answer-rating",
+    "chat-provenance",
+    "chat-prompt-inspect",
+    "onboarding-later",
+    "onboarding-local-url",
+    "review-apply-folder",
+    "review-folder-panel",
+    ...Object.values(DOC_COLUMN_HELP_IDS),
+  ];
+
+  it("has an entry for every one, short enough to read without scrolling", () => {
+    for (const id of NEW_IDS) {
+      expect(HELP[id], id).toBeDefined();
+      expect(HELP[id].title.length, id).toBeGreaterThan(0);
+      expect(HELP[id].body.length, id).toBeGreaterThan(0);
+      expect(HELP[id].body.length, id).toBeLessThanOrEqual(600);
+      expect(HELP[id].body, id).not.toMatch(/\b(above|below)\b/);
+    }
+  });
+
+  it("gives every Documents column its own entry", () => {
+    const ids = Object.values(DOC_COLUMN_HELP_IDS);
+    expect(ids).toHaveLength(DOC_COLUMN_KEYS.length);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
