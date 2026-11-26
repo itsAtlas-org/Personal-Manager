@@ -35,7 +35,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::Result;
 use crate::openrouter::ChatMessage;
-use crate::{chat, secrets, AppState};
+use crate::{chat, AppState};
 
 /// How many completed turn-pairs a conversation needs before we title it. The card asks for "roughly 3–4
 /// condensed turns (enough signal; not on the very first message)" — three pairs is the first point a short
@@ -278,10 +278,7 @@ where
 fn ready(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     state.conn().is_ok()
-        && secrets::get_background_or_primary_key()
-            .ok()
-            .flatten()
-            .is_some()
+        && crate::llm_gateway::role_has_cloud(app, crate::llm_gateway::Role::Background)
 }
 
 /// Eagerly title the just-active conversation after its reply lands (the primary trigger). Fire-and-forget

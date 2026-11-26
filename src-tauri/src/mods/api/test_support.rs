@@ -574,6 +574,7 @@ impl FakeModel {
 
     fn build(spec: PlanSpec) -> Option<RoutePlan> {
         let cloud = |ids: &[&str]| CloudArm {
+            provider: crate::llm_gateway::CloudProvider::OpenRouter,
             key: Secret::from("k".to_string()),
             models: ids.iter().map(|s| s.to_string()).collect(),
         };
