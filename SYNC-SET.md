@@ -50,6 +50,17 @@ Two rules that fall out of the classes:
 | `project_milestones` | truth | Multi-deadline project structure, incl. status and external-source anchoring. |
 | `tasks` | truth | User to-dos: title, why, plan window, deadline (its own date, or one followed from a linked milestone or calendar event), status, lane, stack, parked, plus optional links to a project, a milestone and an event (by iCal UID). **No portable mirror exists:** the DB is the only home, and it travels only in a `.pmbackup`, verbatim. The Pinboard's Task list widget keeps just its project filter and its sort (a closed `{by, desc}` choice) in the mod's `board` (`mod_kv`); `settings['pinboard']` holds only the frozen pre-move snapshot of it. |
 | `task_stacks` | truth | Named groups of tasks (in sequence / in order / waiting on someone) with a note. Same home as `tasks`: the DB only, travelling in a `.pmbackup`. |
+| `people` | truth | The address book. The DB is its only home, travelling in a `.pmbackup` like tasks. `uid` is the identity across stores. |
+| `person_details` | truth | A person's multi-value details. Same home as `people`. |
+| `contact_labels` | truth | Labels. Mirror Google contact groups per account when linked (PR B). |
+| `person_labels` | truth | Who carries which label. |
+| `label_sources` | truth | Which Google contact group a label is, per account; NULL id = kept in PM only for that account. |
+| `person_sources` | truth | Links to a provider's copy: ids, etag, the merge-base snapshot, open conflicts, and tombstones (ids only). The account's sign-in and sync token are device state elsewhere (`connector_sources`, keychain). A link whose account has no sign-in here reads as "Not syncing". |
+| `interactions` | truth | The timeline. Event links are by iCal UID plus occurrence start (I-04), with the title copied. |
+| `interaction_people` | truth | Who each timeline entry is about. |
+| `meet_prompt_answers` | truth | Which past meetings were answered, skipped or silenced as a series, so the prompt doesn't come back on another device. |
+| `person_projects` | truth | Person-to-project links by project name; re-keyed by project rename and merge. |
+| `person_distinct_pairs` | truth | "Not the same person" answers, by uid. |
 | `project_activity` | truth | An emit-only historical record of what happened when. Nothing can recompute a past event. |
 | `project_activity_daily` | derived | Per-(project, day, kind) compaction of the above. |
 | `corrections` | truth | The user's filing corrections, stamped with the pipeline version that produced the original. A learning signal; not recomputable. |

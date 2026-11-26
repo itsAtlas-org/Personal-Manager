@@ -1927,6 +1927,146 @@ const MIGRATIONS: &[&str] = &[
         WHERE EXISTS (SELECT 1 FROM settings
                       WHERE key = 'pinboard' AND trim(COALESCE(value, '')) <> '');
     "#,
+    // v63: Contacts. PM's own address book (docs: contacts spec). People are NOT entities (entities are
+    // name-keyed and rebuilt with new ids at every session open): a person is identified by people.id
+    // within this store and by people.uid across stores. Nothing here references entities or documents.
+    // Vocabulary sets (detail kinds, providers, source states, interaction kinds, prompt answers) are
+    // owned by Rust consts in people/ (I-12) with no CHECK, so a new kind or provider needs no migration.
+    // Purely additive.
+    r#"
+    CREATE TABLE people (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid           TEXT NOT NULL UNIQUE,          -- 32 random lowercase hex, minted once; the cross-store identity
+        display_name  TEXT NOT NULL,                 -- what PM shows; composed from the parts unless typed
+        given_name    TEXT,
+        middle_name   TEXT,
+        family_name   TEXT,
+        name_prefix   TEXT,                          -- "Dr."
+        name_suffix   TEXT,
+        birthday      TEXT,                          -- 'YYYY-MM-DD', or '--MM-DD' when the year is unknown
+        met_where     TEXT NOT NULL DEFAULT '',      -- where you met (PM only)
+        met_on        TEXT,                          -- 'YYYY', 'YYYY-MM' or 'YYYY-MM-DD'
+        notes         TEXT NOT NULL DEFAULT '',      -- plain text
+        starred       INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0,1)),
+        sort_key      TEXT NOT NULL DEFAULT '',      -- folded, for the list order
+        search_key    TEXT NOT NULL DEFAULT '',      -- folded haystack: names, nicknames, emails, phone digits, companies
+        merged_uids   TEXT,                          -- JSON array of the uids folded into this person by merges
+        trashed_at    TEXT,                          -- in Trash since; purged after 30 days
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX idx_people_trashed ON people(trashed_at);
+
+    CREATE TABLE person_details (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id   INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,                   -- people::DETAIL_KINDS
+        label       TEXT NOT NULL DEFAULT '',        -- free text: "work", "Instagram", "Discord", "Anniversary"
+        value       TEXT NOT NULL,                   -- the address, number, URL or handle, organisation, name, date
+        parts       TEXT,                            -- JSON for structured kinds (address, work, school)
+        from_date   TEXT,                            -- 'YYYY', 'YYYY-MM' or 'YYYY-MM-DD'
+        to_date     TEXT,
+        is_current  INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0,1)),
+        position    INTEGER NOT NULL DEFAULT 0,      -- order within a kind; 0 is the primary
+        value_key   TEXT NOT NULL DEFAULT '',        -- folded / normalised, for matching
+        src_key     TEXT,                            -- the value_key of the source item this row last agreed with, so an
+                                                     -- edited value updates that item in place
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX idx_person_details_person ON person_details(person_id, kind, position);
+    CREATE INDEX idx_person_details_key ON person_details(kind, value_key);
+
+    CREATE TABLE contact_labels (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid         TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        name_key    TEXT NOT NULL UNIQUE,            -- folded; Google group names are unique per account
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+
+    CREATE TABLE person_labels (
+        person_id   INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        label_id    INTEGER NOT NULL REFERENCES contact_labels(id) ON DELETE CASCADE,
+        PRIMARY KEY (person_id, label_id)
+    );
+
+    CREATE TABLE label_sources (                     -- which Google contact group a label is, per account (PR B)
+        label_id    INTEGER NOT NULL REFERENCES contact_labels(id) ON DELETE CASCADE,
+        provider    TEXT NOT NULL,                   -- people::PROVIDERS
+        account     TEXT NOT NULL,                   -- lowercased account email
+        external_id TEXT,                            -- contactGroups/<id>; NULL = "keep this label in PM only" for
+                                                     -- this account
+        etag        TEXT,
+        PRIMARY KEY (label_id, provider, account)
+    );
+    CREATE UNIQUE INDEX idx_label_sources_ext ON label_sources(provider, account, external_id)
+        WHERE external_id IS NOT NULL;
+
+    CREATE TABLE person_sources (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id   INTEGER REFERENCES people(id) ON DELETE SET NULL,  -- NULL once the person is purged; only
+                                                                       -- tombstones (ids only) survive that
+        provider    TEXT NOT NULL,                   -- people::PROVIDERS: 'vcard', 'google'
+        account     TEXT NOT NULL DEFAULT '',        -- lowercased account email; '' for a file
+        external_id TEXT,                            -- Google resourceName or vCard UID; NULL while a create is pending
+                                                     -- or for a file card with no (or a repeated) UID
+        etag        TEXT,                            -- Google: the CONTACT source's etag
+        snapshot    TEXT,                            -- the source's copy at the last agreement: the merge base; on a
+                                                     -- tombstone only {"pm_uids":[...],"source_id":...} (ids)
+        conflicts   TEXT,                            -- JSON array of open "same field changed" questions
+        state       TEXT NOT NULL DEFAULT 'linked',  -- people::SOURCE_STATES
+        dirty_at    TEXT,                            -- PM changed a source-mapped field since the last write
+        synced_at   TEXT,
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE UNIQUE INDEX idx_person_sources_ext ON person_sources(provider, account, external_id)
+        WHERE external_id IS NOT NULL;
+    CREATE INDEX idx_person_sources_person ON person_sources(person_id);
+
+    CREATE TABLE interactions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT NOT NULL,                   -- people::INTERACTION_KINDS: met | call | message | note
+        on_date     TEXT NOT NULL,                   -- the user's civil date, 'YYYY-MM-DD'
+        at          TEXT,                            -- an instant (ISO UTC) when known, e.g. the event's start
+        note        TEXT NOT NULL DEFAULT '',
+        event_uid   TEXT,                            -- soft link (I-04): iCal UID plus the occurrence start, no FK
+        event_start TEXT,                            -- calendar_events.start for that occurrence, as stored
+        event_title TEXT,                            -- copied: calendar rows are deleted and re-created by syncs
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX idx_interactions_event ON interactions(event_uid, event_start);
+
+    CREATE TABLE interaction_people (
+        interaction_id INTEGER NOT NULL REFERENCES interactions(id) ON DELETE CASCADE,
+        person_id      INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        PRIMARY KEY (interaction_id, person_id)
+    );
+    CREATE INDEX idx_interaction_people_person ON interaction_people(person_id);
+
+    CREATE TABLE meet_prompt_answers (
+        event_uid   TEXT NOT NULL,
+        event_start TEXT NOT NULL,                   -- '' for an answer that covers the whole series
+        answer      TEXT NOT NULL,                   -- people::PROMPT_ANSWERS: logged | skipped | series_skipped
+        answered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        PRIMARY KEY (event_uid, event_start)
+    );
+
+    CREATE TABLE person_projects (
+        person_id    INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+        project_name TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+        created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        PRIMARY KEY (person_id, project_name)
+    );
+
+    CREATE TABLE person_distinct_pairs (             -- "not the same person": duplicate suggestions never re-offered
+        low_uid     TEXT NOT NULL,                   -- the two people.uid values, ordered low < high
+        high_uid    TEXT NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        PRIMARY KEY (low_uid, high_uid)
+    );
+    "#,
 ];
 
 /// Whether a store at `stored` is one this build can open: at or below the migrations it knows.
@@ -2017,7 +2157,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
         conn.execute_batch(
-            "DROP TABLE mod_ledger;
+            "DROP TABLE person_distinct_pairs;
+             DROP TABLE person_projects;
+             DROP TABLE meet_prompt_answers;
+             DROP TABLE interaction_people;
+             DROP TABLE interactions;
+             DROP TABLE person_sources;
+             DROP TABLE label_sources;
+             DROP TABLE person_labels;
+             DROP TABLE contact_labels;
+             DROP TABLE person_details;
+             DROP TABLE people;
+             DROP TABLE mod_ledger;
              DROP TABLE mod_grants;
              DROP TABLE mod_kv;
              DROP TABLE mod_doc_data;
@@ -2114,6 +2265,178 @@ mod tests {
         assert_eq!(pinboard_markers(&conn), (None, None));
     }
 
+    /// A store with the people schema, foreign keys ON as every real connection has them, and a
+    /// project to link people to. Plain SQL only: the people module is a later slice.
+    fn people_store() -> (tempfile::TempDir, rusqlite::Connection) {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "the cascades below only fire with foreign keys on");
+        (dir, conn)
+    }
+
+    /// v63 creates all eleven address-book tables on a fresh store.
+    #[test]
+    fn v63_creates_the_eleven_people_tables() {
+        let (_d, conn) = people_store();
+        for table in [
+            "people",
+            "person_details",
+            "contact_labels",
+            "person_labels",
+            "label_sources",
+            "person_sources",
+            "interactions",
+            "interaction_people",
+            "meet_prompt_answers",
+            "person_projects",
+            "person_distinct_pairs",
+        ] {
+            assert!(has_table(&conn, table), "{table} exists after v63");
+        }
+    }
+
+    /// Deleting a person takes their details, labels, timeline entries and project links with them,
+    /// but only unlinks a source row (so a purge can leave a tombstone); deleting a project unlinks
+    /// its people and keeps them.
+    #[test]
+    fn the_people_foreign_keys_cascade_where_they_should() {
+        let (_d, conn) = people_store();
+        conn.execute_batch(
+            "INSERT INTO projects(name) VALUES ('Atlas');
+             INSERT INTO people(uid, display_name) VALUES ('00000000000000000000000000000001', 'Eve Example');
+             INSERT INTO people(uid, display_name) VALUES ('00000000000000000000000000000002', 'Finn Example');
+             INSERT INTO person_details(person_id, kind, value) VALUES (1, 'email', 'eve@example.com');
+             INSERT INTO contact_labels(uid, name, name_key) VALUES ('00000000000000000000000000000010', 'Friends', 'friends');
+             INSERT INTO person_labels(person_id, label_id) VALUES (1, 1);
+             INSERT INTO interactions(kind, on_date) VALUES ('met', '2026-01-02');
+             INSERT INTO interaction_people(interaction_id, person_id) VALUES (1, 1);
+             INSERT INTO person_projects(person_id, project_name) VALUES (1, 'Atlas');
+             INSERT INTO person_projects(person_id, project_name) VALUES (2, 'Atlas');
+             INSERT INTO person_sources(person_id, provider, external_id) VALUES (1, 'vcard', 'x1');",
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM people WHERE id = 1", []).unwrap();
+
+        for (what, sql) in [
+            ("details", "SELECT COUNT(*) FROM person_details"),
+            ("person labels", "SELECT COUNT(*) FROM person_labels"),
+            (
+                "interaction links",
+                "SELECT COUNT(*) FROM interaction_people",
+            ),
+        ] {
+            assert_eq!(count(&conn, sql), 0, "{what} go with the person");
+        }
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM person_projects WHERE person_id = 1"
+            ),
+            0,
+            "project links go with the person"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM contact_labels"),
+            1,
+            "the label itself stays"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM interactions"),
+            1,
+            "the timeline entry itself stays"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM person_sources WHERE person_id IS NULL AND external_id = 'x1'"
+            ),
+            1,
+            "the source row survives with no person"
+        );
+
+        conn.execute("DELETE FROM projects WHERE name = 'Atlas'", [])
+            .unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM person_projects"), 0);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM people"),
+            1,
+            "deleting a project keeps its people"
+        );
+    }
+
+    /// A source row's (provider, account, external_id) is unique only once it has an id: any number
+    /// of pending creates and ID-less file cards may coexist, but a repeat of a real id is refused.
+    #[test]
+    fn the_partial_unique_indexes_allow_many_null_ids_and_refuse_a_repeat() {
+        let (_d, conn) = people_store();
+        conn.execute_batch(
+            "INSERT INTO people(uid, display_name) VALUES ('00000000000000000000000000000001', 'Gus Example');
+             INSERT INTO contact_labels(uid, name, name_key) VALUES ('00000000000000000000000000000010', 'Work', 'work');",
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO person_sources(person_id, provider, account) VALUES (1, 'google', 'a@example.com')",
+                [],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO person_sources(person_id, provider, account, external_id) \
+             VALUES (1, 'google', 'a@example.com', 'people/c1')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO person_sources(person_id, provider, account, external_id) \
+                 VALUES (1, 'google', 'a@example.com', 'people/c1')",
+                [],
+            )
+            .is_err(),
+            "the same Google id twice on one account is refused"
+        );
+        conn.execute(
+            "INSERT INTO person_sources(person_id, provider, account, external_id) \
+             VALUES (1, 'google', 'b@example.com', 'people/c1')",
+            [],
+        )
+        .unwrap();
+
+        // Labels: the key is (label, provider, account), the id index covers real ids only.
+        conn.execute(
+            "INSERT INTO contact_labels(uid, name, name_key) VALUES ('00000000000000000000000000000011', 'Club', 'club')",
+            [],
+        )
+        .unwrap();
+        for label in [1, 2] {
+            conn.execute(
+                "INSERT INTO label_sources(label_id, provider, account) VALUES (?1, 'google', 'a@example.com')",
+                [label],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE label_sources SET external_id = 'contactGroups/g1' WHERE label_id = 1",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE label_sources SET external_id = 'contactGroups/g1' WHERE label_id = 2",
+                [],
+            )
+            .is_err(),
+            "two labels cannot be the same Google group"
+        );
+    }
+
     /// A freshly-opened store reaches the latest `user_version` and carries the v14 connector
     /// registry with its documented defaults — the table 4A's Drive connector writes account state to.
     #[test]
@@ -2131,7 +2454,7 @@ mod tests {
             "every migration applied"
         );
         assert_eq!(
-            version, 62,
+            version, 63,
             "migration count pin (connector registry is v14; usage cost_usd is v15; \
              semantic-map doc_layout is v16; importance 'archive' level is v17; \
              multi-provider calendar foundation is v18; shared-drive access relation is v19; \
@@ -2165,7 +2488,8 @@ mod tests {
              tasks and task_stacks are v59; \
              the mods tables and usage_log.mod_id are v60; \
              the Map's doc_layout drop and its auto-install marker are v61; \
-             the Pinboard's existing-user markers are v62)"
+             the Pinboard's existing-user markers are v62; \
+             the people address book is v63)"
         );
 
         // A minimal insert takes the additive defaults (index_only mode, ok state, NULL cursor).

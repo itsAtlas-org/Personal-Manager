@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.202.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "Meet People: your own address book in PM. Add the people in your life with their numbers, emails, socials, work and school, birthdays and where you met. Import contacts from your phone or iCloud with a vCard file, merge duplicates, and keep a timeline of when you met. After a meeting with guests, PM asks who you met so it remembers for you.",
+    ],
+  },
+  {
     version: "3.201.0-alpha",
     date: "2026-11-26",
     highlights: [

@@ -3252,7 +3252,7 @@ mod tests {
             e.uid = Some("standup@example.com".into());
             e
         };
-        let mut lunch = ev("lunch-2024", "Lunch with Ramit", "2024-03-01T12:00:00Z");
+        let mut lunch = ev("lunch-2024", "Lunch with Tomas", "2024-03-01T12:00:00Z");
         let notes = "Bring the Q1 numbers. ".repeat(20);
         lunch.description = Some(notes.clone());
         let mut offsite = ev("offsite", "Planning day", "2026-12-01");
@@ -3297,7 +3297,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(packed, "blob");
-        let found = search_events(&conn, "ramit", now, "2026-11-05", &[], 20).unwrap();
+        let found = search_events(&conn, "tomas", now, "2026-11-05", &[], 20).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].description.as_deref(), Some(notes.as_str()));
         assert_eq!(
