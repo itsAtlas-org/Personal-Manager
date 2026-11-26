@@ -150,6 +150,14 @@ fn chat_event_for(delta: llm_gateway::ChatDelta<'_>, show_thinking: bool) -> Opt
     }
 }
 
+/// The room a direct model leaves for what PM sends: its catalogue `max_input`, not the whole window.
+/// PM always asks for the model's maximum output, and the provider counts prompt plus that limit
+/// against the window, so the window minus the output limit is the real room the meter must fill.
+/// `None` for a model PM doesn't list.
+fn direct_input_window(model: &str) -> Option<i64> {
+    crate::direct_models::find(model).map(|m| i64::from(m.max_input))
+}
+
 /// A reply with no answer in it is not a turn: storing it puts a blank (or a cut-off marker and
 /// nothing else) into `messages`, the vault, the index and the summary. `None` when the reply has
 /// an answer. (Thinking with no answer never gets here on the local arm: it is UnfinishedThought.)
@@ -161,16 +169,42 @@ fn empty_reply_error(c: &openrouter::Completion, power_routed: bool) -> Option<E
     if !c.text.trim().is_empty() {
         return None;
     }
-    let what = if c.truncated {
-        "The model stopped before it wrote an answer, so PM didn't save this reply"
+    // Checked first: a refused reply is empty, and "Try again" is wrong for it (the same prompt will
+    // refuse again). Its usage was already logged by the caller, so the spend is booked.
+    let (what, retry) = if c.usage.refused {
+        (
+            "Anthropic's safety system stopped this reply, so PM has no answer to show",
+            "Rephrase it or pick another model.",
+        )
+    } else if c.truncated {
+        (
+            "The model stopped before it wrote an answer, so PM didn't save this reply",
+            "Try again.",
+        )
     } else {
-        "The model sent back an empty reply, so PM didn't save it"
+        (
+            "The model sent back an empty reply, so PM didn't save it",
+            "Try again.",
+        )
     };
     Some(if power_routed {
         llm_gateway::power_route_error(Error::Other(what.into()))
     } else {
-        Error::Other(format!("{what}. Try again."))
+        Error::Other(format!("{what}. {retry}"))
     })
+}
+
+/// Log the usage of a reply that had no answer (a refusal, a cut-off, an empty one). Provider-billed
+/// all the same, so the row is written before the error is shown, under the model that served it
+/// (or the requested one when none was reported). Its own function so a test can see the row.
+fn book_an_empty_reply(
+    conn: &Connection,
+    completion: &openrouter::Completion,
+    requested_model: &str,
+    meta: &llm_gateway::CallMeta,
+) {
+    let used = completion.model.as_deref().unwrap_or(requested_model);
+    log_usage(conn, "chat", Some(used), &completion.usage, meta);
 }
 
 // --- conversations & messages ---
@@ -835,12 +869,8 @@ pub async fn send_message(
     if let Some(e) = empty_reply_error(&completion, power_routed) {
         // Spent tokens are real: log them in their own short scope (the DB mutex is non-reentrant),
         // and never let a DB hiccup replace the user-facing reason.
-        let used = completion
-            .model
-            .clone()
-            .unwrap_or_else(|| plan.primary_model_id().to_string());
         if let Ok(conn) = state.conn() {
-            log_usage(&conn, "chat", Some(&used), &completion.usage, &meta);
+            book_an_empty_reply(&conn, &completion, plan.primary_model_id(), &meta);
         }
         let _ = on_event.send(ChatEvent::Error {
             message: e.to_string(),
@@ -1086,7 +1116,7 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
     // The reported model's window + the catalogue (latest refresh batch), from the daily price/context fetch.
     let catalogue = cached_catalogue(&conn)?;
     let direct_window = if direct {
-        crate::direct_models::find(&model).map(|m| i64::from(m.context))
+        direct_input_window(&model)
     } else {
         None
     };
@@ -1425,6 +1455,139 @@ mod tests {
         // On OpenRouter nothing changes: the served model wins, else the primary.
         assert_eq!(meter_model(false, old, primary.clone(), false), old_id);
         assert_eq!(meter_model(false, None, primary.clone(), false), primary);
+    }
+
+    /// The meter fills against the room a direct model leaves for input (the window minus the output
+    /// limit PM always reserves), not the whole window: Anthropic's own error is "input length and
+    /// `max_tokens` exceed context limit". Anthropic's rows hold 872,000 of 1,000,000; OpenAI's
+    /// 922,000 of 1,050,000; Gemini's has no reserve beyond its own limit.
+    #[test]
+    fn a_direct_chat_meter_reads_the_input_room_not_the_whole_window() {
+        assert_eq!(
+            direct_input_window("anthropic/claude-sonnet-5-5"),
+            Some(872_000)
+        );
+        assert_eq!(direct_input_window("openai/gpt-6.2-sol"), Some(922_000));
+        assert_eq!(
+            direct_input_window("gemini/gemini-3.8-flash"),
+            Some(1_048_576)
+        );
+        assert_eq!(direct_input_window("anthropic/claude-mythos-5-2"), None);
+        // The meter's model for an Anthropic chat that last answered on OpenRouter is the direct one.
+        assert_eq!(
+            meter_model(
+                true,
+                Some("anthropic/claude-sonnet-5.5".into()),
+                "anthropic/claude-sonnet-5-5".into(),
+                false
+            ),
+            "anthropic/claude-sonnet-5-5"
+        );
+    }
+
+    /// A refused reply is empty and BILLED: the chat logs its usage (the caller does) and answers with
+    /// a sentence that says what happened and doesn't suggest a retry of the same prompt.
+    #[test]
+    fn a_refused_reply_has_its_own_sentence() {
+        let refused = openrouter::Completion {
+            text: String::new(),
+            model: Some("anthropic/claude-sonnet-5-5".into()),
+            usage: openrouter::Usage {
+                prompt_tokens: Some(900),
+                refused: true,
+                ..Default::default()
+            },
+            truncated: false,
+        };
+        let said = empty_reply_error(&refused, false).unwrap().to_string();
+        assert_eq!(
+            said,
+            "Anthropic's safety system stopped this reply, so PM has no answer to show. Rephrase it or pick another model."
+        );
+        // On a battery-routed turn it names the way back to the local model, like every failure.
+        let routed = empty_reply_error(&refused, true).unwrap().to_string();
+        assert!(
+            routed.starts_with("Anthropic's safety system stopped this reply"),
+            "{routed}"
+        );
+        assert!(!routed.contains("Try again."), "{routed}");
+        // The others are unchanged.
+        let cut = openrouter::Completion {
+            truncated: true,
+            usage: openrouter::Usage::default(),
+            ..refused
+        };
+        assert!(empty_reply_error(&cut, false)
+            .unwrap()
+            .to_string()
+            .contains("stopped before it wrote an answer"));
+    }
+
+    /// A refused chat reply is billed, so the turn that fails with the refusal sentence has booked
+    /// its usage row first: the model that served it, its tokens and its cost. The sentence alone
+    /// was tested before; nothing showed the row.
+    #[test]
+    fn a_refused_chat_reply_logs_its_usage_row() {
+        let (_dir, conn) = temp_db();
+        let refused = openrouter::Completion {
+            text: String::new(),
+            model: Some("anthropic/claude-sonnet-5-5".into()),
+            usage: openrouter::Usage {
+                prompt_tokens: Some(900),
+                completion_tokens: Some(6),
+                cost: Some(0.0031),
+                refused: true,
+                ..Default::default()
+            },
+            truncated: false,
+        };
+        assert!(empty_reply_error(&refused, false).is_some());
+        let meta = llm_gateway::CallMeta {
+            provider: llm_gateway::Provider::Cloud,
+            latency_ms: 5,
+            fallback: None,
+            displaced_local_model: None,
+        };
+        book_an_empty_reply(&conn, &refused, "anthropic/claude-haiku-5-5", &meta);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let (model, kind): (String, String) = conn
+            .query_row("SELECT model, kind FROM usage_log", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (model.as_str(), kind.as_str()),
+            ("anthropic/claude-sonnet-5-5", "chat")
+        );
+        let (prompt, completion, cost): (Option<i64>, Option<i64>, Option<f64>) = conn
+            .query_row(
+                "SELECT prompt_tokens, completion_tokens, cost_usd FROM usage_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (prompt, completion, cost),
+            (Some(900), Some(6), Some(0.0031))
+        );
+
+        // With no served model reported, the requested one is the name on the row.
+        let nameless = openrouter::Completion {
+            model: None,
+            ..refused
+        };
+        book_an_empty_reply(&conn, &nameless, "anthropic/claude-haiku-5-5", &meta);
+        let named: String = conn
+            .query_row(
+                "SELECT model FROM usage_log ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(named, "anthropic/claude-haiku-5-5");
     }
 
     /// Chat on Google Gemini reads its window from PM's own list, and there is no OpenRouter upgrade

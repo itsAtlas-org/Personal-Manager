@@ -54,6 +54,8 @@ const OPENROUTER_BACKGROUND_KEY: &str = "openrouter_background_key";
 const OPENAI_KEY: &str = "openai_api_key";
 /// The person's own Google Gemini key, for the same opt-in direct route. One key for both roles.
 const GEMINI_KEY: &str = "gemini_api_key";
+/// The person's own Anthropic key, for the same opt-in direct route. One key for both roles.
+const ANTHROPIC_KEY: &str = "anthropic_api_key";
 /// Optional bearer token for a user-configured local OpenAI-compatible endpoint (#297). Most
 /// loopback servers need none; a remote (LAN / Tailscale) one may. Kept in the keychain like every
 /// other credential — never handed to the webview, never in settings.
@@ -652,6 +654,22 @@ pub fn clear_gemini_key() -> Result<()> {
     cache().delete_known(GEMINI_KEY, BUNDLED)
 }
 
+/// The person's own Anthropic key. Like the others it never reaches the webview, which learns only
+/// "present" and the check's verdict (AGENTS rule 5).
+pub fn get_anthropic_key() -> Result<Option<Secret>> {
+    Ok(present(get(ANTHROPIC_KEY)?))
+}
+
+pub fn set_anthropic_key(value: &str) -> Result<()> {
+    set(ANTHROPIC_KEY, value)
+}
+
+/// Forget the Anthropic key: an error, never a quiet `Ok`, when PM can't tell it is gone (as for
+/// OpenAI).
+pub fn clear_anthropic_key() -> Result<()> {
+    cache().delete_known(ANTHROPIC_KEY, BUNDLED)
+}
+
 /// The bearer token for a user-configured local endpoint, if one was set. A blank stored value reads
 /// as absent (matching the OpenRouter keys), so a saved-then-cleared token doesn't send `Bearer `.
 pub fn get_local_llm_endpoint_token() -> Result<Option<Secret>> {
@@ -1029,6 +1047,7 @@ const FIXED_KEYS: &[&str] = &[
     OPENROUTER_BACKGROUND_KEY,
     OPENAI_KEY,
     GEMINI_KEY,
+    ANTHROPIC_KEY,
     LOCAL_LLM_ENDPOINT_TOKEN,
     DB_KEY,
     BACKUP_PASSPHRASE,
@@ -1196,6 +1215,7 @@ mod tests {
         // would keep working after the person was told the vault was wiped.
         assert!(all_secret_keys(&[], &[], &[]).contains(&OPENAI_KEY.to_string()));
         assert!(all_secret_keys(&[], &[], &[]).contains(&GEMINI_KEY.to_string()));
+        assert!(all_secret_keys(&[], &[], &[]).contains(&ANTHROPIC_KEY.to_string()));
     }
 
     #[test]
@@ -1208,6 +1228,8 @@ mod tests {
         // A Google key reads the same way: blank is absent, a real one is present.
         assert!(present(Some("   ".into())).is_none());
         assert!(present(Some(format!("AIza{}", "x".repeat(35)))).is_some());
+        // An Anthropic key reads the same way.
+        assert!(present(Some(format!("sk-ant-api03-{}", "x".repeat(40)))).is_some());
     }
 
     #[test]

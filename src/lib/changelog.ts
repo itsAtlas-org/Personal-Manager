@@ -24,6 +24,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.198.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "You can now use your own Anthropic key, with Claude Sonnet, Opus, Haiku and Fable. It's off until you turn it on, under Settings > AI & Models > Your own keys.",
+      "When you save a key, PM sends one tiny test message, so it can tell you straight away if there's no credit yet or the key can't chat. Press Check again after you fix it.",
+      "Claude Fable is offered with a warning: Anthropic keeps what you send to it for 30 days, and it needs a workspace with 30-day data retention switched on.",
+      "A request to your own Anthropic key isn't zero data retention, and PM says so wherever you choose it. Mods can't use your own keys.",
+      "PM works out what it costs from the tokens used and its built-in prices, including the cheaper rate for cached input.",
+      "The two OpenRouter key boxes now turn away a key that looks like one from another company (Anthropic, OpenAI or Google), or one you've already saved for them, so it can't be sent to OpenRouter by mistake. Your Anthropic box does the same for OpenAI and OpenRouter keys.",
+      "With your own OpenAI key, the chat's context meter now fills against the model's input limit (922,000 tokens) instead of its whole window, because PM always leaves room for the longest reply. It can fill sooner than before.",
+    ],
+  },
+  {
     version: "3.197.0-alpha",
     date: "2026-11-26",
     highlights: [

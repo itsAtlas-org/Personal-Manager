@@ -1,8 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Your own Anthropic key: the one module that knows Anthropic's wire (its own request, stream and
+// error shapes, not a flavour of the shared dialect) and its key check.
+mod anthropic_direct;
 mod applock;
 mod backup;
+// A scripted loopback server for the direct providers' wire tests (test-only).
+#[cfg(test)]
+mod direct_test_support;
 // "A model that fits your machine better is available" (#437): the pure, conservative decision about
 // whether any curated model is worth interrupting the user about, given what they already run.
 mod better_fit;

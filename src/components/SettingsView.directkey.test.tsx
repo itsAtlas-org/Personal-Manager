@@ -152,7 +152,7 @@ describe("the cloud pane's words", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Rather not use OpenRouter? Use your own OpenAI or Google Gemini key. It's off unless you turn it on, and it isn't zero data retention.",
+        "Rather not use OpenRouter? Use your own OpenAI, Google Gemini or Anthropic key. It's off unless you turn it on, and it isn't zero data retention.",
       ),
     ).toBeTruthy();
   });

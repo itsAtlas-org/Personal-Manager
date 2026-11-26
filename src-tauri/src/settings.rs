@@ -818,6 +818,13 @@ mod tests {
             "direct_gemini_key_check",
             "direct_gemini_chat_models",
             "direct_gemini_background_models",
+            // Anthropic's six (no `_shares_data`: it has no tick-box).
+            "direct_anthropic_enabled",
+            "direct_anthropic_key_check",
+            "direct_anthropic_chat_models",
+            "direct_anthropic_background_models",
+            "direct_anthropic_chat_effort",
+            "direct_anthropic_background_effort",
             "chat_cloud_provider",
             "background_cloud_provider",
             "local_llm_power_cloud_consent_direct",

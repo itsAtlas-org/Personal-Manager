@@ -62,7 +62,13 @@ pub(crate) struct Flavour {
 
 /// How much of a failed response's body is handed to `Flavour::request_error`. Far above any real
 /// error, and a bound for a hostile or runaway endpoint.
-const MAX_ERROR_BODY: usize = 16 * 1024;
+pub(crate) const MAX_ERROR_BODY: usize = 16 * 1024;
+
+/// The most one streamed reply may grow to before PM stops reading it (untrusted model output), and
+/// the most one unterminated SSE line may buffer. Both sit far above any real reply. Shared by every
+/// provider's stream loop.
+pub(crate) const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
 
 /// `Authorization: Bearer <key>`, which is how OpenRouter, OpenAI and Gemini's compatible endpoint
 /// all take a key.
@@ -119,7 +125,7 @@ fn client(flavour: &Flavour) -> &'static reqwest::Client {
 }
 
 /// Cut a failed response's body to [`MAX_ERROR_BODY`] characters, no more.
-fn bounded_error_body(text: &str) -> String {
+pub(crate) fn bounded_error_body(text: &str) -> String {
     text.chars().take(MAX_ERROR_BODY).collect()
 }
 
@@ -284,6 +290,7 @@ pub(crate) fn parse_usage(value: &serde_json::Value) -> Usage {
         cached_tokens: value["usage"]["prompt_tokens_details"]["cached_tokens"].as_i64(),
         cache_write_tokens: value["usage"]["prompt_tokens_details"]["cache_write_tokens"].as_i64(),
         output_partial: false,
+        refused: false,
     }
 }
 
@@ -337,10 +344,8 @@ where
     // Untrusted model output (rule #6): bound both the assembled reply and any
     // single unterminated SSE line so a malicious/runaway endpoint can't grow
     // memory without limit within the request timeout. (The ICS feed path caps
-    // fetched bytes the same way.) Both limits sit far above any real reply.
-    const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
-    const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
-
+    // fetched bytes the same way.) Both limits sit far above any real reply; they live at module
+    // level (`MAX_REPLY_BYTES`, `MAX_SSE_LINE_BYTES`) so another dialect's stream loop holds the same two.
     let mut full = String::new();
     let mut served: Option<String> = None;
     let mut usage = Usage::default();
@@ -510,6 +515,8 @@ mod tests {
             include_str!("openai_direct.rs"),
             // Google's key goes in `x-goog-api-key`, which is fine; no attribution or User-Agent.
             include_str!("gemini_direct.rs"),
+            // Anthropic's key goes in `x-api-key`, which is fine. Its own extra rules are below.
+            include_str!("anthropic_direct.rs"),
             include_str!("region.rs"),
         ] {
             let src = src.to_ascii_lowercase();

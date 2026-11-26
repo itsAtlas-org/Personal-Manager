@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { directInfo } from "../../lib/directProviders";
+import { directInfo, directNames, orList } from "../../lib/directProviders";
 import type { UseDirectProviders } from "../../lib/useDirectProviders";
 import { Callout, SectionLabel } from "../ui";
 import { DirectProviderCard } from "./DirectProviderCard";
@@ -31,9 +31,9 @@ export function DirectProviders({
     >
       <SectionLabel>Your own keys</SectionLabel>
       <p className="mt-1 text-xs text-ink4">
-        Use your own key from OpenAI or Google instead of OpenRouter. It's off until you turn it on.
-        Requests to your own key are not zero data retention, and a free Google key lets Google
-        train on what you send.
+        Use your own key from {orList(directNames())} instead of OpenRouter. It's off until you turn
+        it on. Requests to your own key are not zero data retention, and a free Google key lets
+        Google train on what you send.
       </p>
       {dp.error && !dp.state && (
         <Callout className="mt-3" live={false}>

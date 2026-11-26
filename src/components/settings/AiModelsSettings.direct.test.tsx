@@ -10,7 +10,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { directState, openaiView } from "../../lib/directProvidersFixture";
+import { anthropicView, directState, openaiView } from "../../lib/directProvidersFixture";
 import type { DirectProvidersState } from "../../lib/types";
 
 const m = vi.hoisted(() => ({
@@ -89,7 +89,7 @@ describe("the Your own keys section", () => {
     expect(await screen.findByText("Your own keys")).toBeTruthy();
     expect(
       screen.getByText(
-        "Use your own key from OpenAI or Google instead of OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention, and a free Google key lets Google train on what you send.",
+        "Use your own key from OpenAI, Google Gemini or Anthropic instead of OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention, and a free Google key lets Google train on what you send.",
       ),
     ).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Use my own OpenAI key" });
@@ -149,6 +149,25 @@ describe("Usage copy", () => {
     expect(
       await screen.findByText(/prices built into this version of PM \(checked on 26-11-2026\)/),
     ).toBeTruthy();
+  });
+
+  it("tells an Anthropic user that a stopped, cut-off or errored reply is billed but not counted", async () => {
+    mount(directState({ view: anthropicView() }));
+    await screen.findByText(/Last 30 days/);
+    fireEvent.click(screen.getByText("How this is calculated"));
+    expect(
+      await screen.findByText(
+        /If Anthropic stops, cuts off or errors a reply partway, it still bills what it had written; PM can't see those tokens, so they aren't counted here\./,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("does not say it to someone who doesn't use Anthropic", async () => {
+    mount(directState());
+    await screen.findByText(/Last 30 days/);
+    fireEvent.click(screen.getByText("How this is calculated"));
+    await screen.findByText(/prices built into this version of PM/);
+    expect(screen.queryByText(/If Anthropic stops, cuts off or errors/)).toBeNull();
   });
 });
 

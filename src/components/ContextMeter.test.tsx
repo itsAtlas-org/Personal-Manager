@@ -68,6 +68,21 @@ describe("the context meter's naming", () => {
     );
   });
 
+  it("names Anthropic after a model reached with an Anthropic key, on its 872,000-token room", async () => {
+    m.chatContextStatus.mockResolvedValue(
+      status({
+        model: "anthropic/claude-sonnet-5-5",
+        context_window: 872_000,
+        provider: "anthropic",
+      }),
+    );
+    render(<ContextMeter conversationId={1} refreshKey={0} onUpgrade={() => Promise.resolve()} />);
+    const button = await meter();
+    expect(button.getAttribute("title")).toBe(
+      "50% of anthropic/claude-sonnet-5-5 on Anthropic's context used",
+    );
+  });
+
   it("names Google Gemini after a model reached with a Gemini key", async () => {
     m.chatContextStatus.mockResolvedValue(
       status({

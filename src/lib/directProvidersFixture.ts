@@ -156,7 +156,94 @@ export function geminiView(over: Partial<DirectProviderView> = {}): DirectProvid
   };
 }
 
-type Who = "openrouter" | "openai" | "gemini";
+// Anthropic's rows as the bundled catalogue carries them, in its order (dearest first). Fable is the
+// only row with a note; Haiku is the only one whose Low effort switches thinking off. There is no
+// Mythos row, by design: PM never offers it.
+const CLAUDE_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+export const FABLE: DirectModelView = {
+  id: "anthropic/claude-fable-5-2",
+  name: "Claude Fable 5.2",
+  note: "Anthropic keeps what you send to Fable for 30 days.",
+  context: 1_000_000,
+  max_output: 128_000,
+  price_in: 8,
+  price_cached_in: 0.2,
+  price_out: 40,
+  effort_levels: CLAUDE_LEVELS,
+  effort_default: "high",
+  input_modalities: ["text", "image"],
+  checked_on: "2026-11-26",
+  retires_on: null,
+  free_tier: null,
+  next_price: null,
+  thinking_off: null,
+};
+
+export const OPUS: DirectModelView = {
+  ...FABLE,
+  id: "anthropic/claude-opus-5-5",
+  name: "Claude Opus 5.5",
+  note: null,
+  price_in: 4,
+  price_cached_in: 0.2,
+  price_out: 20,
+  effort_default: "medium",
+};
+
+export const SONNET: DirectModelView = {
+  ...FABLE,
+  id: "anthropic/claude-sonnet-5-5",
+  name: "Claude Sonnet 5.5",
+  note: null,
+  price_in: 2,
+  price_cached_in: 0.1,
+  price_out: 10,
+  effort_default: "high",
+};
+
+export const HAIKU: DirectModelView = {
+  ...FABLE,
+  id: "anthropic/claude-haiku-5-5",
+  name: "Claude Haiku 5.5",
+  note: null,
+  price_in: 0.1,
+  price_cached_in: 0.01,
+  price_out: 0.5,
+  effort_default: "medium",
+  thinking_off: "disabled",
+};
+
+/** An Anthropic view: opted in with a key that checked out (all four models listed), Chat on Sonnet
+ *  and Background on Haiku at Low, neither role using it yet. Override any part. */
+export function anthropicView(over: Partial<DirectProviderView> = {}): DirectProviderView {
+  return {
+    provider: "anthropic",
+    name: "Anthropic",
+    opted_in: true,
+    key: "present",
+    key_check: {
+      at: "2026-11-26T10:00:00Z",
+      outcome: "ok",
+      listed: [FABLE.id, OPUS.id, SONNET.id, HAIKU.id],
+      listed_total: 15,
+    },
+    // No data-sharing programme to tick, and no tiers.
+    shares_data: false,
+    tier: null,
+    blocked: null,
+    catalogue_checked_on: "2026-11-26",
+    terms_checked_on: "2026-11-26",
+    roles: {
+      chat: { uses_this_provider: false, model: SONNET.id, effort: null },
+      background: { uses_this_provider: false, model: HAIKU.id, effort: "low" },
+    },
+    models: [FABLE, OPUS, SONNET, HAIKU],
+    ...over,
+  };
+}
+
+type Who = "openrouter" | "openai" | "gemini" | "anthropic";
 
 /** The whole state of every provider given. `chat` and `background` are the roles' stored (and, by
  *  default, effective) provider; each view's `uses_this_provider` follows the EFFECTIVE one. */

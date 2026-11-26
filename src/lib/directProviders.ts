@@ -24,8 +24,8 @@ import type {
   StoredKeyCheck,
 } from "./types";
 
-/** The providers that have a card in this version. 3 adds "anthropic". */
-export type DirectProviderId = "openai" | "gemini";
+/** The providers that have a card in this version. */
+export type DirectProviderId = "openai" | "gemini" | "anthropic";
 
 /** One state's unfolded warning: a headline and short points. `danger` is for terms where Google may
  *  train on what is sent; `warning` is for the rest. */
@@ -84,6 +84,20 @@ export interface DirectProviderInfo {
   tiers?: TierCopy;
   /** What a refused key's sentence adds after "says this key isn't right.". */
   rejectedHint: string;
+  /** What a key that can list models but not chat needs, finishing "If a chat fails, ...". */
+  restrictedHint: string;
+  /** What a key with no access at all must be given, in "Give it access to ___ in your X project":
+   *  OpenAI and Gemini keep their "the models and chat endpoints" wording from before Anthropic. */
+  accessWhat: string;
+  /** Whether the effective model's note is a warning worth a standing line, a link from the picker
+   *  and a spoken announcement (Anthropic's Fable retention). Gemini's notes are catalogue facts
+   *  (price tier, preview status), shown only inside the open picker as before. */
+  warnsOnModel: boolean;
+  /** What this provider calls the thing a key belongs to: "project" (OpenAI), "workspace"
+   *  (Anthropic). Only the restricted-key sentences use it. */
+  workspaceWord: string;
+  /** Where to add credit or raise a spend limit, for the shared no-credit sentence. */
+  billingPlace: string;
   /** A key that is valid but whose balance is empty: kept, never turned away. */
   noCredit: {
     saved: string;
@@ -97,6 +111,18 @@ export interface DirectProviderInfo {
   chipSharedLabel?: string;
   /** What the On battery question says Google or OpenAI does with a request (3.4c). */
   retention: { paid: string; free: string };
+}
+
+/** The no-credit sentences OpenAI and Anthropic share (#1149's wording). Spend limits arrive as
+ *  no credit from both, so one sentence covers both; only the name and the billing place differ.
+ *  Gemini's prepaid balance reads differently and keeps its own. */
+function sharedNoCredit(name: string, billingPlace: string): DirectProviderInfo["noCredit"] {
+  return {
+    saved: `Saved. Your ${name} account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at ${billingPlace}. Then press Check again.`,
+    role: () =>
+      `Your ${name} account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.`,
+    offered: true,
+  };
 }
 
 const GEMINI_REGION_POINT =
@@ -140,13 +166,12 @@ export const DIRECT_PROVIDERS: Record<DirectProviderId, DirectProviderInfo> = {
     },
     rejectedHint:
       "Check you copied the whole key from the right project. If it's an Admin key, make a normal project key instead.",
-    noCredit: {
-      saved:
-        "Saved. Your OpenAI account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.",
-      role: () =>
-        "Your OpenAI account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
-      offered: true,
-    },
+    restrictedHint: "give the key access to the models and chat endpoints in your OpenAI project",
+    accessWhat: "the models and chat endpoints",
+    warnsOnModel: false,
+    workspaceWord: "project",
+    billingPlace: "platform.openai.com",
+    noCredit: sharedNoCredit("OpenAI", "platform.openai.com"),
     chipLabel: "OpenAI direct",
     chipSharedLabel: "OpenAI direct, shared",
     retention: {
@@ -227,6 +252,12 @@ export const DIRECT_PROVIDERS: Record<DirectProviderId, DirectProviderInfo> = {
     },
     rejectedHint:
       "Check you copied the whole key from AI Studio. Google also blocks leaked keys, old keys with no restrictions, and keys limited to other Google services. A fresh key from AI Studio fixes all three.",
+    restrictedHint:
+      "give the key access to the models and chat endpoints in your Google Gemini project",
+    accessWhat: "the models and chat endpoints",
+    warnsOnModel: false,
+    workspaceWord: "project",
+    billingPlace: "aistudio.google.com/billing",
     noCredit: {
       saved:
         "Saved. This key is paid, but its prepay balance is empty, so Google has stopped it. Add credit at aistudio.google.com/billing, then press Check again.",
@@ -240,7 +271,63 @@ export const DIRECT_PROVIDERS: Record<DirectProviderId, DirectProviderInfo> = {
       free: "Google Gemini's free tier may train on requests, and people at Google may read them.",
     },
   },
+  anthropic: {
+    id: "anthropic",
+    name: "Anthropic",
+    company: "Anthropic",
+    modelsLabel: "Anthropic",
+    toggleLabel: "Use my own Anthropic key",
+    offLine: "Off. PM uses OpenRouter, which asks for zero data retention on every request.",
+    offWithKeyLine: "Off. Your key is saved but PM isn't using it.",
+    keyLabel: "Anthropic API key",
+    keyHint: "sk-ant-...",
+    keyDescription:
+      "Paste an API key from your Anthropic Console workspace. PM keeps it in your computer's keychain.",
+    keyUrl: "https://platform.claude.com/settings/keys",
+    keyLinkText: "Get a key at platform.claude.com →",
+    helpId: "settings-anthropic-key",
+    headline: "This isn't zero data retention.",
+    points: [
+      "Anthropic doesn't train on what you send through its API without your permission.",
+      "Anthropic can keep what you send for up to 30 days, and for up to 2 years if it flags a request for breaking its usage policy. Zero retention only comes from Anthropic, by agreement with them.",
+      "Claude Fable always needs 30-day retention: Anthropic won't run it on a workspace set to zero retention.",
+    ],
+    detailsTitle: "What Anthropic keeps",
+    details: [
+      "Anthropic's Commercial Terms say it may not train its models on what you send through the API, and its API documentation says retained data is never used for training without your express permission.",
+      "Anthropic deletes the inputs and outputs on its systems within 30 days. If a request is flagged for breaking Anthropic's usage policy, it can keep that content for up to 2 years. You can't change either yourself.",
+      "Zero data retention only exists by agreement with Anthropic. Ask Anthropic if you need it.",
+      "Claude Fable 5.2 is a model Anthropic only runs with 30-day retention switched on. If your workspace is set to zero retention, Fable fails and the other models carry on working. In the Anthropic Console, put your key in a workspace with Standard data retention.",
+      "PM keeps the part of a request that doesn't change in Anthropic's prompt cache for five minutes, so repeat requests cost less. Anthropic says it holds cached prompts in memory for that time.",
+      'Checking a key sends Anthropic one tiny test message ("Reply with OK."), which costs a tiny fraction of a cent and isn\'t listed in Usage.',
+      "These are Anthropic's terms when this version of PM was built. They can change. Anthropic's privacy centre is the one to trust.",
+    ],
+    rejectedHint:
+      "Check you copied the whole key from your Anthropic Console workspace (Anthropic keys start with sk-ant-). If it's an Admin key, make a normal API key instead.",
+    restrictedHint: "give the key access to the models in your Anthropic workspace",
+    accessWhat: "the models and chat",
+    warnsOnModel: true,
+    workspaceWord: "workspace",
+    billingPlace: "platform.claude.com",
+    noCredit: sharedNoCredit("Anthropic", "platform.claude.com"),
+    chipLabel: "Anthropic direct",
+    retention: {
+      paid: "Anthropic keeps requests for up to 30 days, or up to 2 years if it flags one for breaking its usage policy.",
+      free: "Anthropic keeps requests for up to 30 days, or up to 2 years if it flags one for breaking its usage policy.",
+    },
+  },
 };
+
+/** "OpenAI", "OpenAI or Anthropic", "OpenAI, Anthropic or Google Gemini". */
+export function orList(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+
+/** The provider names in card order (the order Rust lists them), for sentences that name them all. */
+export function directNames(): string[] {
+  return Object.values(DIRECT_PROVIDERS).map((i) => i.name);
+}
 
 /** The descriptor for a provider token, or null for OpenRouter and any token this version has no
  *  card for (a backup from a newer PM). */
@@ -317,11 +404,10 @@ export function effortOptions(role: RoleName, model: DirectModelView | undefined
     value: l,
     label: l === def ? `${effortLabel(l)} (PM's default)` : effortLabel(l),
   }));
-  // The model's own default is a real level (Gemini's), so say which one the person gets by leaving
-  // it alone.
-  // OpenAI's chat option keeps the wording it has always had.
+  // The model's own default is a real level (Gemini's and Anthropic's), so say which one the person
+  // gets by leaving it alone. OpenAI's chat option keeps the wording it has always had.
   const modelDefault =
-    model.effort_default && model.id.startsWith("gemini/")
+    model.effort_default && !model.id.startsWith("openai/")
       ? `Model default (${effortLabel(model.effort_default)})`
       : "Model default";
   return role === "chat" ? [{ value: "", label: modelDefault }, ...levels] : levels;
@@ -411,37 +497,45 @@ export function readsFree(p: DirectProviderView): boolean {
   return hasTiers(directInfo(p.provider)) && p.tier !== "paid";
 }
 
+const MYTHOS = /mythos/i;
+
 /** The catalogue as `ModelInfo` rows. Prices are per MILLION on the wire and per TOKEN in
  *  `ModelInfo`, which is what the picker multiplies back. */
 export function directPickerRows(p: DirectProviderView): DirectPickerRow[] {
   const listed = listingKnown(p) ? (p.key_check?.listed ?? null) : null;
   const free = readsFree(p);
-  return p.models.map((m) => {
-    // A model only a paid key can use, shown against a key that reads as free. Still selectable: the
-    // verdict may be stale, and Google's own answer says it plainly.
-    const needsPaid = free && m.free_tier === false;
-    const note = [m.note, needsPaid ? "Needs a paid key" : null].filter(Boolean).join(". ");
-    const cached =
-      m.price_cached_in != null
-        ? `${m.name}: cached input ${perM(m.price_cached_in)} per million tokens.`
-        : `${m.name}.`;
-    const next = m.next_price
-      ? ` Rises to ${perM(m.next_price.price_in)} in and ${perM(m.next_price.price_out)} out per million tokens on ${dayMonthYear(m.next_price.from)}.`
-      : "";
-    return {
-      id: m.id,
-      name: m.name,
-      description: "",
-      context_length: m.context,
-      prompt_price: m.price_in / 1_000_000,
-      completion_price: m.price_out / 1_000_000,
-      input_modalities: m.input_modalities,
-      note: note || null,
-      unlisted: listed !== null && !listed.includes(m.id),
-      retires: m.retires_on ? dayMonthYear(m.retires_on) : null,
-      tip: `${cached}${next} PM's list, checked on ${dayMonthYear(m.checked_on)}.`,
-    };
-  });
+  return (
+    p.models
+      // Mythos is never offered (Bobby, 2026-11-26). Rust refuses it in three layers and the bundled
+      // catalogue has no row for it; this is the last wall, so even a row that got through is not drawn.
+      .filter((m) => !MYTHOS.test(`${m.id} ${m.name}`))
+      .map((m) => {
+        // A model only a paid key can use, shown against a key that reads as free. Still selectable: the
+        // verdict may be stale, and Google's own answer says it plainly.
+        const needsPaid = free && m.free_tier === false;
+        const note = [m.note, needsPaid ? "Needs a paid key" : null].filter(Boolean).join(". ");
+        const cached =
+          m.price_cached_in != null
+            ? `${m.name}: cached input ${perM(m.price_cached_in)} per million tokens.`
+            : `${m.name}.`;
+        const next = m.next_price
+          ? ` Rises to ${perM(m.next_price.price_in)} in and ${perM(m.next_price.price_out)} out per million tokens on ${dayMonthYear(m.next_price.from)}.`
+          : "";
+        return {
+          id: m.id,
+          name: m.name,
+          description: "",
+          context_length: m.context,
+          prompt_price: m.price_in / 1_000_000,
+          completion_price: m.price_out / 1_000_000,
+          input_modalities: m.input_modalities,
+          note: note || null,
+          unlisted: listed !== null && !listed.includes(m.id),
+          retires: m.retires_on ? dayMonthYear(m.retires_on) : null,
+          tip: `${cached}${next} PM's list, checked on ${dayMonthYear(m.checked_on)}.`,
+        };
+      })
+  );
 }
 
 /** The picker's caption: what the last check can say about the list. */
@@ -688,6 +782,12 @@ export function keyVerdict(
     };
   }
   const untried = note === "chat_untried" ? ` ${CHAT_UNTRIED}` : "";
+  // "project" or "workspace", and what to ask for: each provider's own word, never another's.
+  const where = info?.workspaceWord ?? "project";
+  const hint =
+    info?.restrictedHint ??
+    `give the key access to the models and chat endpoints in your ${name} ${where}`;
+  const accessWhat = info?.accessWhat ?? "the models and chat endpoints";
   switch (outcome) {
     case "ok": {
       if (info && hasTiers(info)) return tieredOk(listedCount, info, ctx?.tier, untried);
@@ -720,10 +820,10 @@ export function keyVerdict(
         tone: "warn",
         text:
           note === "read_only"
-            ? `Saved. This key can list models but can't chat. Give it access to chat in your ${name} project, then press Check again.`
+            ? `Saved. This key can list models but can't chat. Give it access to chat in your ${name} ${where}, then press Check again.`
             : note === "no_access"
-              ? `Saved. This key can't list models or chat. Give it access to the models and chat endpoints in your ${name} project, then press Check again.`
-              : `Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models and chat endpoints in your ${name} project.${untried}`,
+              ? `Saved. This key can't list models or chat. Give it access to ${accessWhat} in your ${name} ${where}, then press Check again.`
+              : `Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, ${hint}.${untried}`,
       };
     case "no_credit":
       // Valid and kept: only chatting fails, and only until credit is added.
@@ -1010,6 +1110,16 @@ export function roleChangedAnnouncement(
 export function roleModel(p: DirectProviderView, role: RoleName): DirectModelView | undefined {
   const id = p.roles[role].model;
   return p.models.find((m) => m.id === id);
+}
+
+/** The effective model's WARNING, for a standing line, a link from the picker and a spoken
+ *  announcement. Only a provider whose notes are warnings has one (Anthropic's Fable): the notes of
+ *  the other cards are catalogue facts that show inside the open picker, as they always did. */
+export function modelWarning(
+  provider: string,
+  model: Pick<DirectModelView, "note"> | undefined,
+): string | null {
+  return directInfo(provider)?.warnsOnModel ? (model?.note ?? null) : null;
 }
 
 /** Whether the first-run wizard may let the person finish with no OpenRouter key: a direct

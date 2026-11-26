@@ -101,7 +101,8 @@ pub(crate) struct DirectModel {
     pub wire: String,
     pub name: String,
     pub context: u32,
-    #[allow(dead_code)]
+    /// The most PM can send as input: the window minus the output limit PM always reserves (the API
+    /// counts prompt plus `max_tokens` against the window). The chat context meter reads this.
     pub max_input: u32,
     /// The most the model can write in one reply. PM sends this as the output limit.
     pub max_output: u32,
@@ -128,6 +129,19 @@ pub(crate) struct DirectModel {
     /// Prices that change on a date the provider has announced, ascending by `from`. Empty for most.
     #[serde(default)]
     pub price_changes: Vec<PriceChange>,
+    /// How this model's thinking can be switched off, where the provider allows it: only
+    /// `"disabled"` is legal in this version (Anthropic's Haiku 5.5, at effort `low` or below
+    /// `xhigh`). Null on every other row: Fable and Opus cannot turn thinking off at all, and
+    /// Sonnet's own switch (`between_tools`) is parked. The data lives here so the next model line
+    /// edits a row, not code.
+    #[serde(default)]
+    pub thinking_off: Option<String>,
+}
+
+/// Whether a name (an id, a wire id or a display name) is Anthropic's restricted Mythos line, which
+/// PM never offers, saves or calls (Bobby, 2026-11-26: "never mythos"). Case-insensitive.
+pub(crate) fn names_mythos(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("mythos")
 }
 
 impl DirectModel {
@@ -380,6 +394,11 @@ mod tests {
                     );
                     assert_eq!(m.free_tier, None, "{}: OpenAI has no free tier", m.id);
                     assert!(m.price_changes.is_empty());
+                } else if s.provider == "anthropic" {
+                    assert_eq!(m.free_tier, None, "{}: Anthropic has no free tier", m.id);
+                    assert!(m.price_changes.is_empty());
+                    // Anthropic's own words are low..max; "none" and "minimal" are other providers'.
+                    assert!(!m.offers("none") && !m.offers("minimal"), "{}", m.id);
                 } else {
                     assert!(
                         m.free_tier.is_some(),
@@ -419,6 +438,18 @@ mod tests {
                 }
                 if let Some(d) = &m.effort_default {
                     assert!(m.offers(d), "{} defaults to a level it lacks", m.id);
+                }
+                // Mythos is never offered, in any field (Bobby, 2026-11-26). A future edit that adds
+                // a row for it fails the build here, the third of three layers (see `anthropic_direct`).
+                for field in [&m.id, &m.wire, &m.name] {
+                    assert!(!names_mythos(field), "{} names Mythos", m.id);
+                }
+                // Thinking can only be switched off the one way, and only on a row that offers `low`
+                // (Haiku's off switch is a 400 above `high`; the background default is low).
+                if let Some(off) = &m.thinking_off {
+                    assert_eq!(off, "disabled", "{}: only \"disabled\" is legal", m.id);
+                    assert!(m.offers("low"), "{} turns thinking off but lacks low", m.id);
+                    assert_eq!(s.provider, "anthropic", "{}", m.id);
                 }
                 assert!(is_date(&m.checked_on) && m.checked_on <= today);
                 if let Some(r) = &m.retires_on {
@@ -605,5 +636,112 @@ mod tests {
         assert!(!find("openai/gpt-6.2-astra").unwrap().offers("none"));
         assert!(find("openai/gpt-6-luna").unwrap().offers("none"));
         assert!(find("openai/gpt-6-luna").unwrap().offers("low"));
+    }
+
+    /// Anthropic's four rows, exactly: the ids, the one note, the one row that can switch thinking
+    /// off, the neutral long-context block on three and Haiku's whole-request 5x above 100,000, and
+    /// the defaults (Fable is never one).
+    #[test]
+    fn anthropics_four_rows_are_exactly_the_agreed_ones() {
+        let rows = models(CloudProvider::Anthropic);
+        let ids: Vec<&str> = rows.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "anthropic/claude-fable-5-2",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-sonnet-5-5",
+                "anthropic/claude-haiku-5-5",
+            ]
+        );
+        for m in rows {
+            assert_eq!(m.context, 1_000_000);
+            assert_eq!(m.max_output, 128_000);
+            // The room for input is the window minus the output PM always reserves.
+            assert_eq!(m.max_input, m.context - m.max_output, "{}", m.id);
+            assert_eq!(m.effort_levels, ["low", "medium", "high", "xhigh", "max"]);
+            assert!(m.price_cached_in.unwrap() <= m.price_in);
+            assert!(m.price_cache_write >= m.price_in);
+            let lc = &m.long_context;
+            if m.wire == "claude-haiku-5-5" {
+                assert_eq!(
+                    (
+                        lc.threshold,
+                        lc.in_mult,
+                        lc.cached_mult,
+                        lc.write_mult,
+                        lc.out_mult
+                    ),
+                    (100_000, 5.0, 5.0, 5.0, 5.0)
+                );
+            } else {
+                // Neutral: the threshold is the window itself and nothing multiplies.
+                assert_eq!(lc.threshold, i64::from(m.context), "{}", m.id);
+                assert_eq!(
+                    (lc.in_mult, lc.cached_mult, lc.write_mult, lc.out_mult),
+                    (1.0, 1.0, 1.0, 1.0)
+                );
+            }
+            // Only Haiku can switch thinking off, and only the one way.
+            assert_eq!(
+                m.thinking_off.as_deref(),
+                (m.wire == "claude-haiku-5-5").then_some("disabled"),
+                "{}",
+                m.id
+            );
+            // Only Fable carries a note, and it is Bobby's sentence.
+            assert_eq!(
+                m.note.as_deref(),
+                (m.wire == "claude-fable-5-2")
+                    .then_some("Anthropic keeps what you send to Fable for 30 days."),
+                "{}",
+                m.id
+            );
+        }
+        let s = section(CloudProvider::Anthropic).unwrap();
+        assert_eq!(s.default_chat, "anthropic/claude-sonnet-5-5");
+        assert_eq!(s.default_background, "anthropic/claude-haiku-5-5");
+        assert!(s.probe_models.is_empty());
+        // Every provider row has a section and the reverse.
+        for d in crate::direct_providers::PROVIDERS {
+            assert!(section(d.provider).is_some());
+        }
+        assert_eq!(
+            catalogue().providers.len(),
+            crate::direct_providers::PROVIDERS.len()
+        );
+    }
+
+    #[test]
+    fn mythos_is_recognised_by_name_in_any_case() {
+        for yes in [
+            "claude-mythos-5-2",
+            "Claude-MYTHOS-preview",
+            "anthropic/claude-mythos-5-1",
+            "Claude Mythos 5.2",
+        ] {
+            assert!(names_mythos(yes), "{yes}");
+        }
+        for no in ["claude-fable-5-2", "anthropic/claude-haiku-5-5", ""] {
+            assert!(!names_mythos(no), "{no}");
+        }
+    }
+
+    /// The Anthropic rows' cost arithmetic with the real numbers: no `price_changes`, so any date
+    /// prices the same, and a long Haiku request is billed whole at 5x.
+    #[test]
+    fn anthropic_costs_do_not_depend_on_the_day() {
+        let haiku = find("anthropic/claude-haiku-5-5").unwrap();
+        let u = usage(100_001, 1000);
+        assert_eq!(
+            cost_usd(haiku, &u, "2020-01-01"),
+            cost_usd(haiku, &u, "2099-01-01")
+        );
+        let near = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-9;
+        assert!(near(cost_usd(haiku, &u, "2026-11-26"), 0.0525005));
+        assert!(near(
+            cost_usd(haiku, &usage(100_000, 1000), "2026-11-26"),
+            0.0105
+        ));
     }
 }

@@ -8,7 +8,10 @@ import appSource from "../App.tsx?raw";
 import {
   adoptRoles,
   chatUpgradeApplies,
+  DIRECT_PROVIDERS,
   directInfo,
+  directNames,
+  orList,
   directPickerRows,
   directReady,
   effortAfterModelChange,
@@ -21,6 +24,7 @@ import {
   isEligible,
   flippedLine,
   keyVerdict,
+  modelWarning,
   movedLine,
   notThereLine,
   offersRecheck,
@@ -46,15 +50,20 @@ import {
   wizardModelsLine,
 } from "./directProviders";
 import {
+  anthropicView,
   directState,
+  FABLE,
   FLASH,
   FLASH_LITE,
   geminiView,
+  HAIKU,
   LUNA,
   openaiView,
+  OPUS,
   PRO,
   settingsFor,
   SOL,
+  SONNET,
   stateWith,
   TERRA,
 } from "./directProvidersFixture";
@@ -146,8 +155,9 @@ describe("provider words", () => {
     expect(providerName("openrouter")).toBe("OpenRouter");
     expect(providerName("openai")).toBe("OpenAI");
     expect(providerName("gemini")).toBe("Google Gemini");
+    expect(providerName("anthropic")).toBe("Anthropic");
     // A provider this version has no card for is still shown as its own word.
-    expect(providerName("anthropic")).toBe("anthropic");
+    expect(providerName("cohere")).toBe("cohere");
     expect(providerOptionLabel("openrouter")).toBe("OpenRouter (asks for zero data retention)");
     expect(providerOptionLabel("openai")).toBe("OpenAI, direct (no zero data retention)");
   });
@@ -189,6 +199,22 @@ describe("what a key check says", () => {
     });
     expect(keyVerdict("restricted", 0, "OpenAI", "no_access").text).toMatch(
       /^Saved\. This key can't list models or chat\..*press Check again\.$/,
+    );
+  });
+
+  it("keeps OpenAI's and Gemini's own 'models and chat endpoints' wording, word for word", () => {
+    // These two sentences predate Anthropic; only Anthropic's say "the models and chat" alone.
+    expect(keyVerdict("restricted", 0, "OpenAI", "no_access").text).toBe(
+      "Saved. This key can't list models or chat. Give it access to the models and chat endpoints in your OpenAI project, then press Check again.",
+    );
+    expect(keyVerdict("restricted", 0, "OpenAI").text).toBe(
+      "Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models and chat endpoints in your OpenAI project.",
+    );
+    expect(keyVerdict("restricted", 0, "Google Gemini", "no_access").text).toBe(
+      "Saved. This key can't list models or chat. Give it access to the models and chat endpoints in your Google Gemini project, then press Check again.",
+    );
+    expect(keyVerdict("restricted", 0, "Google Gemini").text).toBe(
+      "Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models and chat endpoints in your Google Gemini project.",
     );
   });
 
@@ -902,3 +928,263 @@ describe("the route labels", () => {
     );
   });
 });
+
+// ---- Anthropic (PR 3) ---------------------------------------------------------------------------
+
+/** Every string a descriptor says, including the one its function builds. */
+function wordsOf(id: "openai" | "anthropic"): string {
+  const info = DIRECT_PROVIDERS[id];
+  return `${JSON.stringify(info)} ${info.noCredit.role("Chat")}`;
+}
+
+describe("the Anthropic descriptor", () => {
+  const a = DIRECT_PROVIDERS.anthropic;
+
+  it("has the card words, the help id and no data-sharing tick-box or tiers", () => {
+    expect(a.name).toBe("Anthropic");
+    expect(a.toggleLabel).toBe("Use my own Anthropic key");
+    expect(a.keyHint).toBe("sk-ant-...");
+    expect(a.keyUrl).toBe("https://platform.claude.com/settings/keys");
+    expect(a.helpId).toBe("settings-anthropic-key");
+    expect(a.chipLabel).toBe("Anthropic direct");
+    expect(a.sharesDataOption).toBeUndefined();
+    expect(a.sharedHeadline).toBeUndefined();
+    expect(a.chipSharedLabel).toBeUndefined();
+    expect(a.tiers).toBeUndefined();
+    expect(a.workspaceWord).toBe("workspace");
+    expect(a.billingPlace).toBe("platform.claude.com");
+    expect(a.headline).toBe("This isn't zero data retention.");
+    expect(a.points).toHaveLength(3);
+  });
+
+  it("names Fable in the unfolded points and the folded details, and never Mythos", () => {
+    expect(a.points.join(" ")).toMatch(/Claude Fable always needs 30-day retention/);
+    expect(a.details.join(" ")).toMatch(/Claude Fable 5\.2/);
+    expect(wordsOf("anthropic")).not.toMatch(/mythos/i);
+  });
+
+  it("keeps each provider's words out of the other's copy", () => {
+    expect(wordsOf("anthropic")).not.toMatch(/OpenAI|GPT|platform\.openai/i);
+    expect(wordsOf("openai")).not.toMatch(/Anthropic|Claude|Fable|sk-ant/i);
+  });
+
+  it("lists the cards in the order Rust does, and joins their names", () => {
+    expect(directNames()).toEqual(["OpenAI", "Google Gemini", "Anthropic"]);
+    expect(orList(["OpenAI", "Anthropic"])).toBe("OpenAI or Anthropic");
+    expect(orList(["OpenAI"])).toBe("OpenAI");
+    expect(orList(["OpenAI", "Google Gemini", "Anthropic"])).toBe(
+      "OpenAI, Google Gemini or Anthropic",
+    );
+    expect(orList([])).toBe("");
+  });
+
+  it("says the retention and the route in one plain label", () => {
+    // 30 days is the usual; the flagged-request case is the longer one, so the figure is no hard cap.
+    expect(a.retention.paid).toBe(
+      "Anthropic keeps requests for up to 30 days, or up to 2 years if it flags one for breaking its usage policy.",
+    );
+    expect(routeLabel(a, null)).toBe("Anthropic direct");
+    expect(routeLabel(a, "paid", true)).toBe("Anthropic direct");
+    expect(
+      footerRow(settingsFor({ chat_provider: "anthropic", chat_cloud_model: SONNET.id }), "chat"),
+    ).toEqual({
+      id: SONNET.id,
+      fallbacks: 0,
+      via: "Anthropic direct",
+      viaTitle: null,
+      viaDue: false,
+    });
+  });
+});
+
+describe("what a key check says, for each provider's own words", () => {
+  it("words the shared no-credit sentence with the provider's name and billing place", () => {
+    expect(keyVerdict("no_credit", 4, "Anthropic").text).toBe(
+      "Saved. Your Anthropic account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.claude.com. Then press Check again.",
+    );
+    expect(keyVerdict("no_credit", 4, "OpenAI").text).toContain("at platform.openai.com.");
+    expect(DIRECT_PROVIDERS.anthropic.noCredit.role("Chat")).toBe(
+      "Your Anthropic account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
+    );
+  });
+
+  it("says workspace for Anthropic and project for OpenAI in the restricted sentences", () => {
+    expect(keyVerdict("restricted", 4, "Anthropic", "read_only").text).toBe(
+      "Saved. This key can list models but can't chat. Give it access to chat in your Anthropic workspace, then press Check again.",
+    );
+    expect(keyVerdict("restricted", 0, "Anthropic", "no_access").text).toBe(
+      "Saved. This key can't list models or chat. Give it access to the models and chat in your Anthropic workspace, then press Check again.",
+    );
+    expect(keyVerdict("restricted", 0, "Anthropic").text).toBe(
+      "Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models in your Anthropic workspace.",
+    );
+    expect(keyVerdict("restricted", 0, "OpenAI").text).toContain("in your OpenAI project.");
+    expect(keyVerdict("restricted", 0, "OpenAI", "read_only").text).toContain(
+      "your OpenAI project,",
+    );
+  });
+
+  it("counts Anthropic's models, and adds the chat-not-tried note", () => {
+    expect(keyVerdict("ok", 4, "Anthropic")).toEqual({
+      tone: "ok",
+      text: "Key works. 4 Anthropic models are ready to use.",
+    });
+    expect(keyVerdict("ok", 1, "Anthropic").text).toBe(
+      "Key works. 1 Anthropic model is ready to use.",
+    );
+    const v = keyVerdict("ok", 4, "Anthropic", "chat_untried");
+    expect(v.tone).toBe("warn");
+    expect(v.text).toBe(
+      "Key works. 4 Anthropic models are ready to use. PM couldn't try a chat just now.",
+    );
+  });
+
+  it("refuses with Anthropic's own hint, and says a key from another provider isn't a key", () => {
+    expect(keyVerdict("rejected", 0, "Anthropic").text).toBe(
+      "Not saved. Anthropic says this key isn't right. Check you copied the whole key from your Anthropic Console workspace (Anthropic keys start with sk-ant-). If it's an Admin key, make a normal API key instead.",
+    );
+    expect(keyVerdict("malformed", 0, "Anthropic").text).toBe(
+      "Not saved. That doesn't look like a key. Paste the whole key, with no spaces.",
+    );
+    expect(keyVerdict("unreachable", 0, "Anthropic").text).toBe(
+      "Not saved. PM couldn't reach Anthropic to check it. Check your connection and try again.",
+    );
+    expect(keyVerdict({ unexpected: 500 }, 0, "Anthropic").text).toBe(
+      "Not saved. Anthropic answered with an error (500). Try again shortly.",
+    );
+  });
+
+  it("shows an outcome it has no sentence for as itself", () => {
+    expect(keyVerdict("brand_new" as never, 0, "Anthropic").text).toContain("brand_new");
+    expect(recheckVerdict("brand_new" as never, 0, "Anthropic").text).toContain("brand_new");
+  });
+
+  it("drops 'Saved.' on a re-check and offers Check again for no credit, restricted and untried", () => {
+    expect(recheckVerdict("no_credit", 4, "Anthropic").text).toMatch(/^Your Anthropic account/);
+    expect(offersRecheck("no_credit")).toBe(true);
+    expect(offersRecheck("restricted")).toBe(true);
+    expect(offersRecheck("ok", "chat_untried")).toBe(true);
+    expect(offersRecheck("ok")).toBe(false);
+    expect(offersRecheckFor(DIRECT_PROVIDERS.anthropic, { outcome: "ok" }, null, null)).toBe(false);
+    expect(offersRecheckFor(DIRECT_PROVIDERS.anthropic, { outcome: "no_credit" }, null, null)).toBe(
+      true,
+    );
+  });
+
+  it("words a role on an Anthropic key with no credit as its own issue, and still offers it", () => {
+    const v = anthropicView({
+      key_check: { at: "2026-11-26T10:00:00Z", outcome: "no_credit", listed: [], listed_total: 0 },
+    });
+    expect(isEligible(v)).toBe(true);
+    const s = stateWith([v], { chat: "anthropic" });
+    expect(roleIssue(s, "chat")).toBe("no_credit");
+    expect(roleIssueLine("no_credit", "chat", "Anthropic", { id: "anthropic" })).toBe(
+      "Your Anthropic account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
+    );
+    expect(unavailableLabel("anthropic", s, "chat")).toBe("Anthropic");
+  });
+});
+
+describe("Anthropic's models in the pickers and the wizard", () => {
+  it("draws Fable's note on its row and no other row's, and never a Mythos row", () => {
+    const rows = directPickerRows(anthropicView());
+    expect(rows.map((r) => r.id)).toEqual([FABLE.id, OPUS.id, SONNET.id, HAIKU.id]);
+    expect(rows.find((r) => r.id === FABLE.id)?.note).toBe(
+      "Anthropic keeps what you send to Fable for 30 days.",
+    );
+    expect(rows.filter((r) => r.note).length).toBe(1);
+    expect(JSON.stringify(rows)).not.toMatch(/mythos/i);
+  });
+
+  it("converts per-million prices to per-token and never flags a listed model", () => {
+    const rows = directPickerRows(anthropicView());
+    expect(rows.find((r) => r.id === HAIKU.id)?.prompt_price).toBeCloseTo(0.0000001, 12);
+    expect(rows.every((r) => !r.unlisted)).toBe(true);
+    expect(pickerCaption(anthropicView())).toBe("Models your Anthropic key can use.");
+  });
+
+  it("names Model default with the model's own level in chat's first option", () => {
+    expect(effortOptions("chat", SONNET)[0]).toEqual({ value: "", label: "Model default (High)" });
+    expect(effortOptions("chat", FABLE)[0].label).toBe("Model default (High)");
+    expect(effortOptions("chat", OPUS)[0].label).toBe("Model default (Medium)");
+    expect(effortOptions("chat", HAIKU)[0].label).toBe("Model default (Medium)");
+    // OpenAI's keeps the wording it always had, even for a row with its own default.
+    expect(effortOptions("chat", LUNA)[0].label).toBe("Model default");
+  });
+
+  it("offers Low to Max for Opus, with the labels people read, and Low as background's default", () => {
+    expect(effortOptions("chat", OPUS).map((o) => o.label)).toEqual([
+      "Model default (Medium)",
+      "Low",
+      "Medium",
+      "High",
+      "Extra high",
+      "Max",
+    ]);
+    expect(effortOptions("background", HAIKU).map((o) => o.label)).toEqual([
+      "Low (PM's default)",
+      "Medium",
+      "High",
+      "Extra high",
+      "Max",
+    ]);
+  });
+
+  it("takes both roles for a good Anthropic key, and words the Sonnet and Haiku models line", () => {
+    const v = anthropicView();
+    expect(adoptRoles(v)).toEqual(["chat", "background"]);
+    expect(wizardModelsLine(v, true, true)).toBe(
+      "PM will use Claude Sonnet 5.5 for chat and Claude Haiku 5.5 for background work. You can change that later in Settings > AI & Models.",
+    );
+    expect(wizardModelsLine(v, true, true)).not.toMatch(/Fable/);
+  });
+
+  it("drops a Mythos row from the picker even if one got into the list (Bobby, 2026-11-26: never offered)", () => {
+    const base = anthropicView();
+    const injected = {
+      ...SONNET,
+      id: "anthropic/claude-mythos-5-2",
+      name: "Claude Mythos 5.2",
+    };
+    const byName = { ...SONNET, id: "anthropic/something-else", name: "Mythos Preview" };
+    const rows = directPickerRows({ ...base, models: [...base.models, injected, byName] });
+    expect(rows.map((r) => r.id)).toEqual([FABLE.id, OPUS.id, SONNET.id, HAIKU.id]);
+    expect(JSON.stringify(rows)).not.toMatch(/mythos/i);
+  });
+
+  it("warns about a model only for a provider whose notes are warnings", () => {
+    // Anthropic's note on Fable is a retention warning: a standing line, a link, an announcement.
+    expect(modelWarning("anthropic", FABLE)).toBe(
+      "Anthropic keeps what you send to Fable for 30 days.",
+    );
+    expect(modelWarning("anthropic", SONNET)).toBeNull();
+    expect(modelWarning("anthropic", undefined)).toBeNull();
+    // A Gemini note is a catalogue fact (price tier, preview), shown in the open picker only.
+    const note = "Gemini 4. Paid keys only. Thinks at medium by default.";
+    expect(modelWarning("gemini", { note })).toBeNull();
+    expect(modelWarning("openai", { note })).toBeNull();
+    expect(modelWarning("openrouter", { note })).toBeNull();
+  });
+
+  it("leaves the first provider's roles alone when a second one is saved afterwards", () => {
+    // Only the fixture's facts: OpenAI first, Anthropic eligible after it. That the wizard then
+    // adopts no role already on OpenAI is proved by OnboardingDirectKey.anthropic.test.tsx.
+    const s = stateWith([openaiView(), anthropicView()], { chat: "openai", background: "openai" });
+    expect(eligibleProviders(s).map((p) => p.provider)).toEqual(["openai", "anthropic"]);
+    expect(s.roles.chat.effective).toBe("openai");
+    expect(roleModel2(s)).toBe(SONNET.id);
+  });
+
+  it("says the role's route by Anthropic's name", () => {
+    expect(routeNote("chat", "Anthropic", "cloud")).toBe(
+      "Chat goes straight to Anthropic with your key. It isn't zero data retention.",
+    );
+    expect(routeNote("background", "Anthropic", "cloud")).toBe(
+      "Background work goes straight to Anthropic with your key and sends parts of your documents. It isn't zero data retention.",
+    );
+  });
+});
+
+function roleModel2(s: ReturnType<typeof stateWith>): string | undefined {
+  return s.providers.find((p) => p.provider === "anthropic")?.roles.chat.model;
+}

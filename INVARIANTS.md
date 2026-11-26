@@ -228,7 +228,7 @@ PM pins `zdr: true` and `data_collection: "deny"` on every OpenRouter request, a
 filtered to models with a ZDR endpoint. A model that cannot be served under ZDR is therefore not
 merely discouraged — it cannot be called at all through OpenRouter.
 
-A provider key the person adds themselves (today: their own OpenAI key) follows THAT provider's
+A provider key the person adds themselves (today: their own OpenAI, Google Gemini or Anthropic key) follows THAT provider's
 terms, which are not zero data retention. That carve-out is explicit and bounded: it is opt-in per
 provider and off by default; the warning is shown wherever the provider is chosen; the setting that
 points a role at it is read through an allow-list and demoted to OpenRouter while the provider isn't
@@ -242,6 +242,12 @@ is shown on the card, the chat chip, the sidebar footer, the role block and the 
 an unknown tier reads as free. A yes to the On-battery question is forgotten when a key PM knew as paid
 reads as free. The rule is a guard against mistakes, not a geofence, and it fails closed on a zone PM
 can't place.
+
+An Anthropic key follows Anthropic's terms: nothing is trained on without the customer's permission,
+and a request can be kept for up to 30 days (up to 2 years if Anthropic flags it). Claude Fable is
+only run on a workspace with 30-day retention, so it is offered with a warning (never a default) and
+Claude Mythos is never offered or sent: the catalogue refuses the name, and so do the setting reader
+and the adapter. There is no data-sharing tick-box for Anthropic, since it has no such programme.
 
 **Co-signers.** Any carve-out from that filter (today: router models, whose pins apply to whatever
 they resolve to, and a person's own provider key) is named in code with its reason. A silent

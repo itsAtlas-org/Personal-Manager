@@ -34,6 +34,9 @@ interface Props {
   roleName?: string;
   /** A friendlier name for a model id, shown in the row with the id as its tooltip. */
   nameFor?: (id: string) => string | undefined;
+  /** The id of a line that says something about the chosen model (Fable's warning). Joined into the
+   *  picker trigger's `aria-describedby`, so focusing the control reads it. */
+  describedBy?: string;
 }
 
 /**
@@ -57,6 +60,7 @@ export function ModelListEditor({
   allowCustom,
   roleName,
   nameFor,
+  describedBy,
 }: Props) {
   const headingId = useId();
   const single = maxModels === 1;
@@ -155,6 +159,7 @@ export function ModelListEditor({
         value=""
         triggerLabel={triggerLabel}
         ariaLabel={triggerName}
+        describedBy={describedBy}
         onChange={add}
         source={source}
         allowCustom={allowCustom}

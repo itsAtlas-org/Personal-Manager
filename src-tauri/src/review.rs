@@ -372,28 +372,37 @@ pub async fn propose_batch(
         Ok(crate::llm_gateway::LlmOutcome {
             completion: c,
             meta,
-        }) => {
-            // Filing is already the safest path in the tree — an unanswered slot is retried alone
-            // and then staged as Unsorted, so nothing is silently mis-filed. What it could not do
-            // was SAY why. A cut-off reply and a reply the model got wrong both surfaced as "the
-            // reply couldn't be read", which sends the user looking at their model instead of at
-            // their server's context window.
-            let reason = c.unusable_reason();
-            let proposals = match c.usable_text() {
-                Some(text) => parse_batch(text, docs.len()),
-                None => vec![None; docs.len()],
-            };
-            BatchOutcome {
-                proposals,
-                usage: Some((c.usage, c.model, meta)),
-                error: reason.map(|r| format!("Proposal request failed: {r}")),
-            }
-        }
+        }) => batch_outcome(c, meta, docs.len()),
         Err(e) => BatchOutcome {
             proposals: vec![None; docs.len()],
             usage: None,
             error: Some(format!("Proposal request failed: {e}")),
         },
+    }
+}
+
+/// What a reply that CAME BACK (HTTP 200) means for a batch of `n` documents. Split out of
+/// [`propose_batch`] so the refusal case can be tested without a model: a refused reply is empty and
+/// BILLED, so it keeps its usage (the caller logs it) AND carries the error that says why.
+fn batch_outcome(
+    c: openrouter::Completion,
+    meta: crate::llm_gateway::CallMeta,
+    n: usize,
+) -> BatchOutcome {
+    // Filing is already the safest path in the tree — an unanswered slot is retried alone
+    // and then staged as Unsorted, so nothing is silently mis-filed. What it could not do
+    // was SAY why. A cut-off reply and a reply the model got wrong both surfaced as "the
+    // reply couldn't be read", which sends the user looking at their model instead of at
+    // their server's context window.
+    let reason = c.unusable_reason();
+    let proposals = match c.usable_text() {
+        Some(text) => parse_batch(text, n),
+        None => vec![None; n],
+    };
+    BatchOutcome {
+        proposals,
+        usage: Some((c.usage, c.model, meta)),
+        error: reason.map(|r| format!("Proposal request failed: {r}")),
     }
 }
 
@@ -710,6 +719,45 @@ mod tests {
         let key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         let conn = crate::db::open(&dir.path().join("pm.sqlite"), key).unwrap();
         (dir, conn)
+    }
+
+    /// A refused batch is empty and BILLED: its usage must survive (the caller logs it, so the spend
+    /// shows) together with the error that names the safety stop, and every slot stays unanswered.
+    #[test]
+    fn a_refused_batch_keeps_its_usage_and_says_why() {
+        let meta = crate::llm_gateway::CallMeta {
+            provider: crate::llm_gateway::Provider::Cloud,
+            latency_ms: 5,
+            fallback: None,
+            displaced_local_model: None,
+        };
+        let refused = openrouter::Completion {
+            text: String::new(),
+            model: Some("anthropic/claude-haiku-5-5".into()),
+            usage: openrouter::Usage {
+                prompt_tokens: Some(1200),
+                completion_tokens: Some(7),
+                cost: Some(0.002),
+                refused: true,
+                ..Default::default()
+            },
+            truncated: false,
+        };
+        let out = batch_outcome(refused, meta, 3);
+        assert_eq!(out.proposals.len(), 3);
+        assert!(out.proposals.iter().all(Option::is_none));
+        let (usage, model, _) = out
+            .usage
+            .expect("a refusal is billed, so its usage is kept");
+        assert_eq!(
+            (usage.prompt_tokens, usage.completion_tokens, usage.cost),
+            (Some(1200), Some(7), Some(0.002))
+        );
+        assert_eq!(model.as_deref(), Some("anthropic/claude-haiku-5-5"));
+        assert_eq!(
+            out.error.as_deref(),
+            Some("Proposal request failed: Anthropic's safety system stopped this reply")
+        );
     }
 
     #[test]

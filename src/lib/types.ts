@@ -159,6 +159,9 @@ export interface DirectModelView {
   free_tier?: boolean | null;
   /** The next announced price change; `price_in`/`price_out` above are the prices in force today. */
   next_price?: { from: string; price_in: number; price_out: number } | null;
+  /** "disabled" on a model whose thinking Low effort switches off in the Background role (Anthropic's
+   *  Haiku), else null. Optional so a fixture that predates it still type-checks. */
+  thinking_off?: string | null;
 }
 /** What a role does on a provider, EFFECTIVELY: `effort` null means the field is omitted (chat's default). */
 export interface DirectRoleView {

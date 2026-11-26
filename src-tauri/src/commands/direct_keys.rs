@@ -133,11 +133,13 @@ pub async fn save_direct_key(
     if !(d.well_formed)(&key) {
         return Ok(refused(KeyOutcome::Malformed));
     }
-    // Pasting the OpenRouter key here would send it to another company. No network call.
-    if llm_gateway::is_a_stored_openrouter_key(&key) {
+    // Pasting a key PM already holds for another provider (the OpenRouter keys, or another direct
+    // provider's) would send it to another company. No network call.
+    if llm_gateway::is_a_stored_key_of_another_provider(d.provider, &key) {
         return Ok(refused(KeyOutcome::Malformed));
     }
-    // Nor does one company's key go to another (`sk-` to Google, `AIza` to OpenAI). No network call.
+    // Nor does one company's key go to another (`sk-` to Google, `AIza` to OpenAI or Anthropic,
+    // `sk-ant-` to OpenAI). No network call.
     if direct_providers::looks_like_another_providers_key(d.provider, &key) {
         return Ok(refused(KeyOutcome::Malformed));
     }
@@ -400,7 +402,8 @@ mod tests {
         assert!(parse_role("").is_err());
         assert_eq!(parse_provider("openai").unwrap().name, "OpenAI");
         assert_eq!(parse_provider("gemini").unwrap().name, "Google Gemini");
-        for bad in ["openrouter", "anthropic", "", "OpenAI", "Gemini"] {
+        assert_eq!(parse_provider("anthropic").unwrap().name, "Anthropic");
+        for bad in ["openrouter", "Anthropic", "", "OpenAI", "Gemini", "mythos"] {
             assert!(parse_provider(bad).is_err(), "{bad}");
         }
     }
@@ -497,6 +500,116 @@ mod tests {
         assert!((parse_provider("gemini").unwrap().well_formed)(
             "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
         ));
+        // Anthropic: `sk-ant-` is its own and turned away by OpenAI and Google; `AIza` is turned away by
+        // Anthropic. No prefix is REQUIRED of an Anthropic key.
+        let ant = CloudProvider::Anthropic;
+        assert!(direct_providers::looks_like_another_providers_key(
+            oa,
+            "sk-ant-api03-abcdefghijklmnopqrst"
+        ));
+        assert!(direct_providers::looks_like_another_providers_key(
+            gem,
+            "sk-ant-api03-abcdefghijklmnopqrst"
+        ));
+        assert!(direct_providers::looks_like_another_providers_key(
+            ant,
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+        assert!(!direct_providers::looks_like_another_providers_key(
+            ant,
+            "sk-ant-api03-abcdefghijklmnopqrst"
+        ));
+        assert!(!(parse_provider("openai").unwrap().well_formed)(
+            "sk-ant-api03-abcdefghijklmnopqrst"
+        ));
+        assert!(!(parse_provider("anthropic").unwrap().well_formed)(
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"
+        ));
+        assert!((parse_provider("anthropic").unwrap().well_formed)(
+            "sk-ant-api03-abcdefghijklmnopqrst"
+        ));
+        assert!((parse_provider("anthropic").unwrap().well_formed)(
+            "a-key-shape-nobody-has-seen-yet-0123"
+        ));
+        // An UNSAVED OpenRouter key (`sk-or-`) is nobody's but OpenRouter's, and an OpenAI project
+        // key (`sk-proj-`) is OpenAI's: neither goes to Anthropic, and OpenRouter's not to OpenAI.
+        for (p, key, other) in [
+            (ant, "sk-or-v1-abcdefghijklmnop", true),
+            (ant, "sk-proj-abcdefghijklmnopqrst", true),
+            (oa, "sk-or-v1-abcdefghijklmnop", true),
+            (oa, "sk-proj-abcdefghijklmnopqrst", false),
+            // Every OpenAI shape is turned away from Anthropic's box, not only the project key: the
+            // service-account and admin keys, and a plain legacy `sk-` key.
+            (ant, "sk-svcacct-abcdefghijklmnop", true),
+            (ant, "sk-admin-abcdefghijklmnop", true),
+            (ant, "sk-abcdefghijklmnopqrstuvwx", true),
+            // OpenRouter's own boxes turn away the other companies' prefixed keys and take their own.
+            (CloudProvider::OpenRouter, "sk-proj-abcdefghijklmnop", true),
+            (
+                CloudProvider::OpenRouter,
+                "sk-svcacct-abcdefghijklmnop",
+                true,
+            ),
+            (CloudProvider::OpenRouter, "sk-admin-abcdefghijklmnop", true),
+            (
+                CloudProvider::OpenRouter,
+                "sk-ant-api03-abcdefghijklmnop",
+                true,
+            ),
+            (
+                CloudProvider::OpenRouter,
+                "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456",
+                true,
+            ),
+            (
+                CloudProvider::OpenRouter,
+                "sk-or-v1-abcdefghijklmnop",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                direct_providers::looks_like_another_providers_key(p, key),
+                other,
+                "{key}"
+            );
+        }
+        // The shape check turns them away too, so `save_direct_key` answers `malformed` with no
+        // network, whatever sk- key was pasted into Anthropic's box.
+        for key in [
+            "sk-svcacct-abcdefghijklmnop",
+            "sk-admin-abcdefghijklmnop",
+            "sk-abcdefghijklmnopqrstuvwxyz0123",
+        ] {
+            assert!(
+                !(parse_provider("anthropic").unwrap().well_formed)(key),
+                "{key}"
+            );
+        }
+        assert!(!(parse_provider("anthropic").unwrap().well_formed)(
+            "sk-or-v1-abcdefghijklmnop"
+        ));
+        assert!(!(parse_provider("openai").unwrap().well_formed)(
+            "sk-or-v1-abcdefghijklmnop"
+        ));
+    }
+
+    /// Anthropic has no data-sharing option, and no tiers.
+    #[test]
+    fn anthropic_has_no_data_sharing_option_and_no_tiers() {
+        let d = parse_provider("anthropic").unwrap();
+        assert!(d.shares_data.is_none() && !d.tiers);
+        let (_dir, conn) = {
+            let dir = tempfile::tempdir().unwrap();
+            let conn = crate::db::open(
+                &dir.path().join("t.sqlite"),
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            )
+            .unwrap();
+            (dir, conn)
+        };
+        let e =
+            direct_providers::set_shares_data(&conn, CloudProvider::Anthropic, true).unwrap_err();
+        assert!(e.to_string().contains("no such option"), "{e}");
     }
 
     fn stored(outcome: KeyOutcome, note: Option<KeyNote>) -> direct_providers::StoredKeyCheck {

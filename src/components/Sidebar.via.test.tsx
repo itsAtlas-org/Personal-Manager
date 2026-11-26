@@ -85,6 +85,18 @@ describe("the model footer's route", () => {
     ).toHaveLength(2);
   });
 
+  it("says Anthropic direct, and names Anthropic in the row's title", () => {
+    renderSidebar({
+      chatModel: "anthropic/claude-sonnet-5-5",
+      chatVia: "Anthropic direct",
+      backgroundVia: null,
+    });
+    expect(screen.getAllByText("Anthropic direct")).toHaveLength(1);
+    expect(
+      screen.getAllByTitle("anthropic/claude-sonnet-5-5, straight to Anthropic with your own key"),
+    ).toHaveLength(2);
+  });
+
   it("says nothing extra on OpenRouter, as before", () => {
     renderSidebar({ chatModel: "anthropic/claude-sonnet-4.6" });
     expect(screen.queryByText("OpenAI direct")).toBeNull();
