@@ -19,6 +19,7 @@ import { PowerConsentStrip } from "./components/PowerConsentStrip";
 import { SignInStrip } from "./components/SignInStrip";
 import { ConversationTitle } from "./components/ConversationTitle";
 import { CommandPalette } from "./components/CommandPalette";
+import { PeopleView } from "./components/people/PeopleView";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { ContextMeter } from "./components/ContextMeter";
@@ -222,6 +223,15 @@ export default function App() {
     event: CalendarEvent;
     nonce: number;
   } | null>(null);
+  /** A person the palette (and later the meeting dialog) jumped to, for the People tab to show
+   *  once; cleared as it's taken, like the Calendar's. A uid that names nobody opens the tab with
+   *  nothing selected. */
+  const [peopleReveal, setPeopleReveal] = useState<{ uid: string; nonce: number } | null>(null);
+
+  function openPerson(uid: string) {
+    setPeopleReveal({ uid, nonce: Date.now() });
+    setView("people");
+  }
 
   function openProject(project: string, focusDocId?: number) {
     setSelectedProject(project);
@@ -1282,6 +1292,11 @@ export default function App() {
                       onRevealTaken={() => setCalendarReveal(null)}
                     />
                   </main>
+                ) : view === "people" ? (
+                  // Before the final Chat branch: a view with no branch here draws Chats.
+                  <main className="flex h-full min-w-0 flex-1 flex-col">
+                    <PeopleView reveal={peopleReveal} onRevealTaken={() => setPeopleReveal(null)} />
+                  </main>
                 ) : view === "documents" ? (
                   <main className="flex h-full flex-1 flex-col">
                     {/* No "to review" jump when the learning tools are out of the sidebar: hiding them
@@ -1454,6 +1469,7 @@ export default function App() {
                     setCalendarReveal({ event, nonce: Date.now() });
                     setView("calendar");
                   }}
+                  onOpenPerson={openPerson}
                   onNavigate={setView}
                   onOpenSettings={() => openSettings()}
                 />

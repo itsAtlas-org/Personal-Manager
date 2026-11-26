@@ -3677,6 +3677,8 @@ export interface PersonRow {
   /** The state of the person's first Google link, if any. */
   google_state: string | null;
   trashed_at: string | null;
+  /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
+  birthday: string | null;
 }
 
 /** One detail to save (`people::DetailDraft`). A detail that carries its `id` is updated in

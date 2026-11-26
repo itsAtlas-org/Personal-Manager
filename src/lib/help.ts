@@ -28,6 +28,18 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Calendar",
     body: "One place to see everything from the calendars you've connected (Google, Outlook and iCal subscriptions), laid over each other. PM keeps every event they've ever had: the first sync downloads each calendar's whole history, events that ended over a year ago are stored compressed, and months more than a year ahead load as you scroll to them. Switch between Day, Week, Month, Year and Agenda (your tasks on the Runway board, or a dated list of events), jump to today, and choose which calendars show. On a Google account with editing turned on you can do most of what Google Calendar does from here: create events, change, move and delete the ones you can edit, and answer invitations, and every change goes straight to Google. PM also reads these events to answer schedule questions in chat and to flag a project 'Due soon' when an event names it.",
   },
+  "nav-people": {
+    title: "People",
+    body: "Your own address book, kept on this computer and encrypted with the rest of your PM. Everyone you know lives here with their details, labels and a star. Search by name, nickname, email, company or phone number, and press Ctrl K anywhere to jump straight to someone. People you delete wait in Trash for 30 days. Right-click this tab in the sidebar to pin it to the top or hide it.",
+  },
+  "people-list": {
+    title: "The People list",
+    body: "Pick a filter on the left: everyone, starred people, a label, people with no label, or Trash. Sort by first name, last name or who you met most recently; the choice is remembered on this computer. Point at someone's circle to tick them, or press Tab to reach it, and Shift-click a second circle to tick everyone between. Once anyone is ticked, a bar offers Star, Label and Move to Trash for all of them. Birthdays in the next 30 days show at the top of the full list. Right-click a person (or press the Menu key) for the same actions.",
+  },
+  "people-trash": {
+    title: "People in Trash",
+    body: "Moving someone to Trash keeps everything about them for 30 days, then PM deletes them for good. Right after you move someone, a note at the bottom of the window has an Undo, and Ctrl+Z (Cmd+Z on a Mac) presses it when you aren't typing in a box. In the Trash filter, Restore brings people back with their labels and details. Delete now removes them for good after asking, and that can't be undone.",
+  },
   "nav-documents": {
     title: "Documents",
     body: "Your ingested files. Drag files or a folder in and PM converts them to Markdown, splits them into chunks, and indexes them so they become searchable.",

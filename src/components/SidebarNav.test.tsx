@@ -64,7 +64,16 @@ describe("SidebarNav", () => {
 
   it("draws the tabs it always had, in order", () => {
     renderNav();
-    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "review", "teach", "mods"]);
+    expect(tabs()).toEqual([
+      "focus",
+      "chat",
+      "calendar",
+      "people",
+      "documents",
+      "review",
+      "teach",
+      "mods",
+    ]);
   });
 
   it("lights Focus while a project is open, and keeps Chats' New and Review's count", () => {
@@ -103,8 +112,15 @@ describe("SidebarNav", () => {
 
     rightClick(screen.getByRole("button", { name: "Documents" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Unpin" }));
-    // Back in its own place, after Calendar and before the learning tools.
-    expect(tabs().slice(0, 5)).toEqual(["focus", "chat", "calendar", "documents", "review"]);
+    // Back in its own place, after People and before the learning tools.
+    expect(tabs().slice(0, 6)).toEqual([
+      "focus",
+      "chat",
+      "calendar",
+      "people",
+      "documents",
+      "review",
+    ]);
   });
 
   it("hides the learning tools together", () => {
@@ -129,7 +145,7 @@ describe("SidebarNav", () => {
   it("on Minimal, leaves the learning tools out until shown, which pins", () => {
     gates.depth = "min";
     renderNav();
-    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "mods"]);
+    expect(tabs()).toEqual(["focus", "chat", "calendar", "people", "documents", "mods"]);
     rightClick(screen.getByRole("button", { name: "Focus" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Show Review and Teach" }));
     expect(tabs().slice(0, 2)).toEqual(["review", "teach"]);
@@ -156,7 +172,7 @@ describe("SidebarNav", () => {
 // The mod tabs: installed mods' own entries, appended after PM's (spec §1.17) from the rows
 // `lib/modRows` shares, reachable from the same right-click menu as every other tab.
 describe("SidebarNav: mod tabs", () => {
-  const CORE = ["focus", "chat", "calendar", "documents", "review", "teach", "mods"];
+  const CORE = ["focus", "chat", "calendar", "people", "documents", "review", "teach", "mods"];
   const row = (id: string, navTab: string | null, name = "Acme Tool"): ModInfo =>
     ({ id, name, navTab }) as ModInfo;
 

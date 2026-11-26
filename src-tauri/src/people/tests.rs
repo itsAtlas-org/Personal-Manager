@@ -429,6 +429,18 @@ fn a_year_less_birthday_round_trips() {
 }
 
 #[test]
+fn the_list_rows_carry_the_birthday_for_the_upcoming_strip() {
+    let (_d, conn) = store();
+    let mut d = draft("Ivy", "Hale");
+    d.born_on = Some("--04-15".into());
+    create_person(&conn, &d).unwrap();
+    person(&conn, "Noel", "Park");
+    let rows = list_people(&conn, ListFilter::All, None, ListSort::First).unwrap();
+    let born: Vec<Option<&str>> = rows.iter().map(|r| r.born_on.as_deref()).collect();
+    assert_eq!(born, vec![Some("--04-15"), None]);
+}
+
+#[test]
 fn a_year_less_29_february_is_valid() {
     let (_d, conn) = store();
     let mut d = draft("Leap", "Day");

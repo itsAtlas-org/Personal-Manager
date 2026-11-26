@@ -19,6 +19,7 @@ const listConversations = vi.fn();
 const listDocuments = vi.fn();
 const listProjectOverviews = vi.fn();
 const searchCalendarEvents = vi.fn();
+const searchPeople = vi.fn();
 // The Calendar tab's hidden calendars live in the encrypted store, which no test hydrates.
 const hiddenCalendars = vi.hoisted(() => ({ ids: new Set<string>() }));
 vi.mock("../lib/calendarPrefs", () => ({ readHidden: () => hiddenCalendars.ids }));
@@ -28,6 +29,7 @@ vi.mock("../lib/ipc", () => ({
   listDocuments: () => listDocuments(),
   listProjectOverviews: () => listProjectOverviews(),
   searchCalendarEvents: (query: string, hidden: string[]) => searchCalendarEvents(query, hidden),
+  searchPeople: (query: string, limit: number) => searchPeople(query, limit),
 }));
 
 // The Depth and developer mode the "Go to" list is gated on (lib/nav), set per test.
@@ -59,20 +61,25 @@ vi.mock("../lib/capabilities", async (importOriginal) => ({
 }));
 
 import { CommandPalette } from "./CommandPalette";
-import type { CalendarEvent } from "../lib/types";
+import type { CalendarEvent, PersonRow } from "../lib/types";
 import { writeNavPlacement } from "../lib/nav";
 import { ModRowsContext, type ModRows } from "../lib/modRows";
 import type { ModInfo } from "../lib/modsTypes";
 
 const noop = () => {};
 
-function renderPalette(onClose: () => void, onOpenEvent: (event: CalendarEvent) => void = noop) {
+function renderPalette(
+  onClose: () => void,
+  onOpenEvent: (event: CalendarEvent) => void = noop,
+  onOpenPerson: (uid: string) => void = noop,
+) {
   return render(
     <CommandPalette
       onClose={onClose}
       onOpenProject={noop}
       onOpenConversation={noop}
       onOpenEvent={onOpenEvent}
+      onOpenPerson={onOpenPerson}
       onNavigate={noop}
       onOpenSettings={noop}
     />,
@@ -99,6 +106,7 @@ beforeEach(() => {
   listDocuments.mockResolvedValue([]);
   listProjectOverviews.mockResolvedValue([]);
   searchCalendarEvents.mockResolvedValue([]);
+  searchPeople.mockResolvedValue([]);
   // jsdom implements no layout, so it has no `scrollIntoView` at all; the palette keeps the
   // highlighted row in view on every arrow press. Same stub as ChatView.test.tsx.
   Element.prototype.scrollIntoView = vi.fn();
@@ -131,6 +139,7 @@ describe("CommandPalette's Go to", () => {
       "Focus",
       "Chats",
       "Calendar",
+      "People",
       "Documents",
       "Review",
       "Teach",
@@ -145,6 +154,7 @@ describe("CommandPalette's Go to", () => {
       "Focus",
       "Chats",
       "Calendar",
+      "People",
       "Documents",
       "Mods",
       "Settings",
@@ -157,6 +167,7 @@ describe("CommandPalette's Go to", () => {
       "Documents",
       "Focus",
       "Chats",
+      "People",
       "Review",
       "Teach",
       "Mods",
@@ -173,6 +184,7 @@ describe("CommandPalette's Go to", () => {
           onOpenProject={noop}
           onOpenConversation={noop}
           onOpenEvent={noop}
+          onOpenPerson={noop}
           onNavigate={onNavigate}
           onOpenSettings={noop}
         />
@@ -264,7 +276,7 @@ describe("CommandPalette", () => {
 
     expect(getByRole("dialog", { name: "Command palette" })).toBeTruthy();
     expect(
-      getByRole("combobox", { name: "Search projects, files, conversations and events" }),
+      getByRole("combobox", { name: "Search projects, files, conversations, events and people" }),
     ).toBeTruthy();
   });
 
@@ -316,6 +328,89 @@ describe("CommandPalette", () => {
     fireEvent.click(hit);
     expect(onOpenEvent).toHaveBeenCalledWith(standup);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("finds people through the backend's search, shows at most six, and opens one by uid", async () => {
+    // The backend does the match (accents, nicknames, phone digits); the palette only asks, with
+    // the words as typed, and a click or Enter opens the person by uid.
+    const person = (id: number, name: string, company: string | null): PersonRow => ({
+      id,
+      uid: `${id}`.padStart(32, "0"),
+      display_name: name,
+      primary: `p${id}@example.com`,
+      company,
+      labels: [],
+      starred: false,
+      last_met: null,
+      google_state: null,
+      trashed_at: null,
+      birthday: null,
+    });
+    const found = [1, 2, 3, 4, 5, 6, 7, 8].map((i) =>
+      person(i, `Sam Example ${i}`, i === 1 ? "Example Ltd" : null),
+    );
+    searchPeople.mockResolvedValue(found);
+    const onClose = vi.fn();
+    const onOpenPerson = vi.fn();
+    const { getByRole, findByRole } = renderPalette(onClose, noop, onOpenPerson);
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+    const box = getByRole("combobox");
+
+    // Blanks are nothing, so nothing is searched.
+    fireEvent.change(box, { target: { value: "  " } });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(searchPeople).not.toHaveBeenCalled();
+
+    fireEvent.change(box, { target: { value: "  Sam " } });
+    const group = await findByRole("group", { name: "People" });
+    expect(searchPeople).toHaveBeenCalledTimes(1);
+    expect(searchPeople.mock.calls[0][0]).toBe("sam");
+    const options = [...group.querySelectorAll('[role="option"]')];
+    expect(options).toHaveLength(6);
+    expect(options[0].textContent).toContain("Sam Example 1");
+    expect(options[0].textContent).toContain("Example Ltd");
+    expect(options[1].textContent).toContain("p2@example.com");
+
+    fireEvent.click(options[2]);
+    expect(onOpenPerson).toHaveBeenCalledWith(found[2].uid);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("searches people by the words as typed: an email keeps its @, one character is enough", async () => {
+    const { getByRole } = renderPalette(noop, noop, vi.fn());
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+    const box = getByRole("combobox");
+
+    fireEvent.change(box, { target: { value: " Ada@Example.com " } });
+    await waitFor(() => expect(searchPeople).toHaveBeenCalledWith("ada@example.com", 6));
+
+    fireEvent.change(box, { target: { value: "山" } });
+    await waitFor(() => expect(searchPeople).toHaveBeenCalledWith("山", 6));
+  });
+
+  it("opens the highlighted person with Enter", async () => {
+    searchPeople.mockResolvedValue([
+      {
+        id: 9,
+        uid: "9".padStart(32, "0"),
+        display_name: "Noor Example",
+        primary: null,
+        company: null,
+        labels: [],
+        starred: false,
+        last_met: null,
+        google_state: null,
+        trashed_at: null,
+        birthday: null,
+      } satisfies PersonRow,
+    ]);
+    const onOpenPerson = vi.fn();
+    const { getByRole, findByRole } = renderPalette(noop, noop, onOpenPerson);
+    await waitFor(() => expect(listDocuments).toHaveBeenCalled());
+    fireEvent.change(getByRole("combobox"), { target: { value: "noor" } });
+    await findByRole("option", { name: /Noor Example/ });
+    fireEvent.keyDown(getByRole("combobox"), { key: "Enter" });
+    expect(onOpenPerson).toHaveBeenCalledWith("9".padStart(32, "0"));
   });
 
   it("never shows an older search's answer under a newer query", async () => {

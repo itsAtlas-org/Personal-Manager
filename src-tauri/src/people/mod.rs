@@ -332,6 +332,10 @@ pub struct PersonRow {
     /// The state of the person's Google link (the first one), if any.
     pub google_state: Option<String>,
     pub trashed_at: Option<String>,
+    /// `YYYY-MM-DD` or `--MM-DD`: the list's upcoming-birthdays strip reads it without a second
+    /// round trip per person.
+    #[serde(rename = "birthday")]
+    pub born_on: Option<String>,
 }
 
 impl std::fmt::Debug for PersonRow {
@@ -1302,7 +1306,8 @@ fn query_rows(
         "SELECT p.id, p.uid, p.display_name, p.starred, p.trashed_at, p.family_name, p.sort_key, \
                 {email}, {phone}, {company}, lm.last_met, \
                 (SELECT s.state FROM person_sources s \
-                  WHERE s.person_id = p.id AND s.provider = 'google' ORDER BY s.id LIMIT 1) \
+                  WHERE s.person_id = p.id AND s.provider = 'google' ORDER BY s.id LIMIT 1), \
+                p.birthday \
            FROM people p \
            LEFT JOIN (SELECT ip.person_id AS pid, MAX(i.on_date) AS last_met \
                         FROM interaction_people ip JOIN interactions i ON i.id = ip.interaction_id \
@@ -1345,6 +1350,7 @@ fn query_rows(
                     last_met: r.get(10)?,
                     google_state: r.get(11)?,
                     trashed_at: r.get(4)?,
+                    born_on: r.get(12)?,
                 },
             })
         })?

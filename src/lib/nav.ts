@@ -37,7 +37,16 @@ import { isTearingDown } from "./teardown";
 /** PM's own views. "project" is a view with no sidebar entry: it's reached from Focus (and the
  *  palette), and Focus stays lit while it's open. */
 export type CoreView =
-  "focus" | "project" | "chat" | "calendar" | "documents" | "review" | "teach" | "mods" | "dev";
+  | "focus"
+  | "project"
+  | "chat"
+  | "calendar"
+  | "people"
+  | "documents"
+  | "review"
+  | "teach"
+  | "mods"
+  | "dev";
 
 /** A mod's own tab, `mod:<mod id>`. An installed mod that names a tab contributes one
  *  (`modNavEntries`, from the rows `lib/modRows` reads); App draws it through ModTab, which puts
@@ -124,6 +133,15 @@ export const CORE_NAV: readonly NavEntryDef[] = [
     label: "Calendar",
     source: "core",
     helpId: "nav-calendar",
+    hideable: true,
+    defaultShown: always,
+  },
+  // The address book (Contacts, PR A): a core tab at every Depth, pin- and hide-able like the rest.
+  {
+    id: "people",
+    label: "People",
+    source: "core",
+    helpId: "nav-people",
     hideable: true,
     defaultShown: always,
   },

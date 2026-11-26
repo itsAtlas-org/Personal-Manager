@@ -7,10 +7,18 @@ import {
   listDocuments,
   listProjectOverviews,
   searchCalendarEvents,
+  searchPeople,
 } from "../lib/ipc";
 import { readHidden } from "../lib/calendarPrefs";
 import { formatEventWhen } from "../lib/format";
-import type { CalendarEvent, Conversation, Document, ProjectOverview } from "../lib/types";
+import { secondaryLine } from "../lib/people";
+import type {
+  CalendarEvent,
+  Conversation,
+  Document,
+  PersonRow,
+  ProjectOverview,
+} from "../lib/types";
 import { useNav, type View } from "../lib/nav";
 import { Modal, STATUS_LABEL } from "./ui";
 import { useDepth } from "../theme";
@@ -22,11 +30,13 @@ interface Props {
   onOpenConversation: (id: number) => void;
   /** Show a calendar event: the Calendar tab, moved to its day, with its details open. */
   onOpenEvent: (event: CalendarEvent) => void;
+  /** Show a person: the People tab, with them selected. Takes the person's `uid`. */
+  onOpenPerson: (uid: string) => void;
   onNavigate: (view: View) => void;
   onOpenSettings: () => void;
 }
 
-type ItemKind = "project" | "file" | "conversation" | "event" | "goto";
+type ItemKind = "project" | "person" | "file" | "conversation" | "event" | "goto";
 
 interface PaletteItem {
   id: string;
@@ -40,6 +50,7 @@ interface PaletteItem {
 
 const KIND_HEADING: Record<ItemKind, string> = {
   project: "Projects",
+  person: "People",
   file: "Files",
   conversation: "Conversations",
   event: "Events",
@@ -48,6 +59,7 @@ const KIND_HEADING: Record<ItemKind, string> = {
 
 const KIND_BADGE: Record<ItemKind, string> = {
   project: "Project",
+  person: "Person",
   file: "File",
   conversation: "Chat",
   event: "Event",
@@ -55,12 +67,14 @@ const KIND_BADGE: Record<ItemKind, string> = {
 };
 
 /** Display/grouping order — entities first (spec §4), navigation last. */
-const KIND_ORDER: ItemKind[] = ["project", "file", "conversation", "event", "goto"];
+const KIND_ORDER: ItemKind[] = ["project", "person", "file", "conversation", "event", "goto"];
 
 /** The shortest query that searches the calendar: one letter would match most of it. */
 const EVENT_QUERY_MIN = 2;
 /** How long typing must pause before the calendar is searched (a query per keystroke otherwise). */
 const EVENT_SEARCH_DELAY_MS = 150;
+/** The most people the palette shows: the People tab is the place for a long list. */
+const PEOPLE_MAX = 6;
 
 /**
  * The query as the palette matches it. The chat's pin syntax, typed here: there is no pinning in
@@ -97,6 +111,7 @@ export function CommandPalette({
   onOpenProject,
   onOpenConversation,
   onOpenEvent,
+  onOpenPerson,
   onNavigate,
   onOpenSettings,
 }: Props) {
@@ -119,6 +134,11 @@ export function CommandPalette({
     q: "",
     events: [],
   });
+  // The same for people, searched in Rust (the match rules are the People tab's own).
+  const [peopleHits, setPeopleHits] = useState<{ q: string; rows: PersonRow[] }>({
+    q: "",
+    rows: [],
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Keep the latest navigation callbacks in a ref so the searchable index isn't
@@ -129,6 +149,7 @@ export function CommandPalette({
     onOpenProject,
     onOpenConversation,
     onOpenEvent,
+    onOpenPerson,
     onNavigate,
     onOpenSettings,
   });
@@ -137,10 +158,16 @@ export function CommandPalette({
     onOpenProject,
     onOpenConversation,
     onOpenEvent,
+    onOpenPerson,
     onNavigate,
     onOpenSettings,
   };
   const q = normalizeQuery(query);
+  // People are searched by the user's own words: `normalizeQuery` drops every "@" (the chat's pin
+  // syntax, meaningless here), which would turn "ada@example.com" into a string no address holds.
+  // One character is enough (a one-character CJK family name is a whole word); the backend caps
+  // the answer at six.
+  const pq = query.trim().toLowerCase();
 
   // Search the calendar once typing pauses. Only the latest query's answer lands (an older one is
   // cancelled), and a failed search just shows no events: the rest of the palette still works. A
@@ -161,6 +188,24 @@ export function CommandPalette({
       window.clearTimeout(timer);
     };
   }, [q]);
+
+  // Search people the same way: once typing pauses, only the latest answer lands, a failure shows
+  // none. People in Trash never come back from the search.
+  useEffect(() => {
+    if (pq === "") return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchPeople(pq, PEOPLE_MAX)
+        .catch(() => [] as PersonRow[])
+        .then((rows) => {
+          if (!cancelled) setPeopleHits({ q: pq, rows });
+        });
+    }, EVENT_SEARCH_DELAY_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [pq]);
 
   // Fetch the three lists once on open — fast local reads. If any fails, the
   // "Go to" destinations below are still built, so navigation always works.
@@ -283,6 +328,31 @@ export function CommandPalette({
     }));
   }, [eventHits, q]);
 
+  // The people the backend matched for this query, in its order, at most six. As with events, an
+  // older answer's rows stay while the new one is on its way, if they still hold every word.
+  const personItems = useMemo<PaletteItem[]>(() => {
+    if (pq === "") return [];
+    const words = pq.split(/\s+/).filter(Boolean);
+    const rows =
+      peopleHits.q === pq
+        ? peopleHits.rows
+        : peopleHits.rows.filter((r) => {
+            const text = `${r.display_name} ${secondaryLine(r)}`.toLowerCase();
+            return words.every((w) => text.includes(w));
+          });
+    return rows.slice(0, PEOPLE_MAX).map((r) => ({
+      id: `person:${r.id}`,
+      kind: "person",
+      label: r.display_name,
+      sublabel: secondaryLine(r) || undefined,
+      search: "",
+      activate: () => {
+        cbRef.current.onOpenPerson(r.uid);
+        cbRef.current.onClose();
+      },
+    }));
+  }, [peopleHits, pq]);
+
   // Filter + rank against the query, then regroup in display order. With a query,
   // each group is ordered by match score (best first); empty query keeps the
   // natural order so the palette doubles as a browse-everything list.
@@ -297,11 +367,13 @@ export function CommandPalette({
       items:
         kind === "event"
           ? eventItems
-          : scored.filter((s) => s.item.kind === kind).map((s) => s.item),
+          : kind === "person"
+            ? personItems
+            : scored.filter((s) => s.item.kind === kind).map((s) => s.item),
     })).filter((g) => g.items.length > 0);
 
     return { groups, flat: groups.flatMap((g) => g.items) };
-  }, [items, eventItems, q]);
+  }, [items, eventItems, personItems, q]);
 
   // The highlight follows the row it's on, not a position: when the lists or the calendar's hits land
   // and rows move, the arrowed row stays highlighted (an index used to snap back to the top, under a
@@ -364,12 +436,12 @@ export function CommandPalette({
         }}
         onKeyDown={onKeyDown}
         role="combobox"
-        aria-label="Search projects, files, conversations and events"
+        aria-label="Search projects, files, conversations, events and people"
         aria-expanded={flat.length > 0}
         aria-controls="pm-cmdk-listbox"
         aria-autocomplete="list"
         aria-activedescendant={flat.length > 0 ? `pm-cmdk-opt-${active}` : undefined}
-        placeholder="Jump to a project, file, conversation, event…"
+        placeholder="Jump to a project, file, conversation, event, person…"
         className="w-full border-b border-border bg-transparent px-4 py-3 text-sm text-ink placeholder:text-ink4 focus:outline-none"
       />
 
