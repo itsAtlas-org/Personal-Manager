@@ -367,6 +367,16 @@ fn a_revoked_apps_token_no_longer_verifies() {
 
 // --- How an app starts PM -----------------------------------------------------------------------
 
+/// `s` made absolute on this OS: a Windows path is absolute only with a drive, so `/usr/bin/pm` there
+/// is relative and is (rightly) never handed to an app. `s` stays as it is anywhere else.
+fn abs(s: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{s}")
+    } else {
+        s.to_owned()
+    }
+}
+
 fn os(s: &str) -> Option<OsString> {
     Some(OsString::from(s))
 }
@@ -378,30 +388,45 @@ fn path(s: &str) -> Option<PathBuf> {
 #[test]
 fn an_appimage_is_started_by_its_file_never_by_its_mount() {
     // Inside an AppImage the running binary lives in a temporary mount that is gone when PM quits.
-    let mounted = path("/tmp/.mount_PersonXYZ/usr/bin/pm");
+    let mounted = path(&abs("/tmp/.mount_PersonXYZ/usr/bin/pm"));
+    let appimage = abs("/home/me/Apps/PM.AppImage");
     assert_eq!(
-        launch_command(os("/home/me/Apps/PM.AppImage"), mounted.clone()).as_deref(),
-        Some("/home/me/Apps/PM.AppImage")
+        launch_command(os(&appimage), mounted.clone()).as_deref(),
+        Some(appimage.as_str())
     );
     // No AppImage variable and only the mount to go on: nothing, rather than a path that dies.
     assert_eq!(launch_command(None, mounted.clone()), None);
     // A mount in the variable itself is not used either.
+    let installed = abs("/usr/bin/pm");
     assert_eq!(
-        launch_command(os("/tmp/.mount_PersonXYZ/AppRun"), path("/usr/bin/pm")).as_deref(),
-        Some("/usr/bin/pm")
+        launch_command(os(&abs("/tmp/.mount_PersonXYZ/AppRun")), path(&installed)).as_deref(),
+        Some(installed.as_str())
     );
 }
 
 #[test]
 fn an_installed_pm_is_started_by_its_binary() {
+    let installed = abs("/usr/bin/personal-manager");
     assert_eq!(
-        launch_command(None, path("/usr/bin/personal-manager")).as_deref(),
-        Some("/usr/bin/personal-manager")
+        launch_command(None, path(&installed)).as_deref(),
+        Some(installed.as_str())
     );
     // An empty variable is no variable.
     assert_eq!(
-        launch_command(os(""), path("/usr/bin/personal-manager")).as_deref(),
-        Some("/usr/bin/personal-manager")
+        launch_command(os(""), path(&installed)).as_deref(),
+        Some(installed.as_str())
+    );
+}
+
+/// On Windows a path with a root but no drive is relative to the current drive, so it is never handed
+/// to an app either.
+#[cfg(windows)]
+#[test]
+fn a_windows_path_without_a_drive_is_never_handed_to_an_app() {
+    assert_eq!(launch_command(os("/home/me/Apps/PM.AppImage"), None), None);
+    assert_eq!(
+        launch_command(None, path(r"\Program Files\PM\pm.exe")),
+        None
     );
 }
 
