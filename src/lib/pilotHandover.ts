@@ -13,8 +13,9 @@
 //     this sidebar had left out (`placementAfterPilotLanded`).
 //
 //   - the Pinboard's three nags ("ask before deleting a card", "show past entries", "show completed
-//     entries"), kept in localStorage by the core Pinboard, go to the mod's `prefs` key through
-//     `adoptPinboardPrefs` the same way (dormant until PM's move of the Pinboard has run).
+//     entries"), kept in localStorage by PM's own Pinboard until it became a mod, go to the mod's
+//     `prefs` key through `adoptPinboardPrefs` the same way (once PM's move of the Pinboard has
+//     run). Nothing writes those keys any more and nothing clears them: they are only read.
 //
 // Both start from `modsHandoverState`, which is empty for a vault with no auto-install (a fresh one,
 // or one with no documents: v61 writes the Map's marker only where a document exists), so this does
@@ -41,8 +42,9 @@ export const MAP_MODE_KEY = "pm.map.layoutMode";
 export const MAP_COHESION_KEY = "pm.map.cohesion";
 export const MAP_LABELS_KEY = "pm.map.labels";
 
-// The core Pinboard's own localStorage keys (`lib/pinboard/prefs.ts`): each is "false" when the person
-// said "don't ask again" or hid that kind of entry, and anything else (or nothing) means the default.
+// PM's old Pinboard's own localStorage keys (it kept them in `lib/pinboard/prefs.ts` before it became
+// a mod): each is "false" when the person said "don't ask again" or hid that kind of entry, and
+// anything else (or nothing) means the default. They stay in the browser store for ever, by design.
 export const PINBOARD_CONFIRM_DELETE_KEY = "pm.pinboard.confirmDelete";
 export const PINBOARD_SHOW_PAST_KEY = "pm.pinboard.timeline.showPast";
 export const PINBOARD_SHOW_COMPLETED_KEY = "pm.pinboard.timeline.showCompleted";

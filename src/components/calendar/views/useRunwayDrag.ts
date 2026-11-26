@@ -4,7 +4,7 @@
 // The Runway's pointer drag (PA-2): pick up a task card (or a closed stack, as one) and drop it in
 // another column's lane or on the parked shelf. Hand-rolled on pointer events, no HTML5 drag and
 // drop (Tauri's native file-drop handler swallows in-page HTML5 drags on Windows), in the shape of
-// `lib/pinboard/useBoardDrag.ts`:
+// the Pinboard's board drag (now the mod's, `useBoardDrag.ts`):
 //
 //   - the listeners go on `window` for the gesture's life, so it survives the pointer leaving the
 //     card or the board;

@@ -19,9 +19,6 @@ import { runMutation } from "../lib/runMutation";
 import { DateField } from "./DateField";
 import { Button, Callout, Input, Select } from "./ui";
 
-// Still named here for PinboardView, which imports them from this file.
-export { MILESTONE_STATUSES, milestoneStatus };
-
 interface Props {
   project: string;
   /** The project's milestones, in the order the parent wants them shown (controlled). */
@@ -175,7 +172,6 @@ function MilestoneRow({
   // keyed by id, so the instance survives a refetch and would otherwise keep its MOUNT-time values
   // for ever — and `persist`'s no-op guard compares those locals against the LIVE prop, so a stale
   // local is exactly the case that fails to short-circuit and writes the outdated day back.
-  // Matches PinboardView's `useMilestoneEditor`, which has had these since #213.
   useEffect(() => setLabel(m.label), [m.label]);
   useEffect(() => setDate(m.due_date?.slice(0, 10) ?? ""), [m.due_date]);
 
