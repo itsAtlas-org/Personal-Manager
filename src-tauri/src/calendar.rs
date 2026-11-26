@@ -2148,7 +2148,8 @@ fn stored_text(text: Option<String>, aged: bool) -> rusqlite::types::Value {
 }
 
 /// A description or guest list column as text, unpacking one [`calendar_history::pack`] stored.
-fn text_at(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<String>> {
+/// Crate-visible so the owed-meetings read (`people::meet`) decodes guest lists the same way.
+pub(crate) fn text_at(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Option<String>> {
     match r.get_ref(i)? {
         ValueRef::Null => Ok(None),
         ValueRef::Text(t) => Ok(Some(String::from_utf8_lossy(t).into_owned())),

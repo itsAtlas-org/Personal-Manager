@@ -135,6 +135,13 @@ import type {
   ChecklistItem,
   ImportResult,
   DupesReport,
+  InteractionDraft,
+  MeetingAnswer,
+  MeetingAnswered,
+  OwedMeeting,
+  PersonRef,
+  TimelineCursor,
+  TimelinePage,
   MergeChoices,
   MergeDone,
   PeopleExportDone,
@@ -1281,6 +1288,52 @@ export const unlinkPersonProject = (id: number, project: string) =>
 /** Find people for Ctrl K and the pickers. Never returns anyone in Trash. */
 export const searchPeople = (query: string, limit: number) =>
   invoke<PersonRow[]>("search_people", { query, limit });
+
+/** One page of a person's timeline, newest first. Pass the last page's `next` as `before` for the
+ *  following page; `limit` defaults to 20 and is capped at 100. Main window only. */
+export const listTimeline = (
+  personId: number,
+  before: TimelineCursor | null = null,
+  limit?: number,
+) => invoke<TimelinePage>("list_timeline", { personId, before, limit: limit ?? null });
+
+/** Log a meeting, call, message or note naming one or more people. Never changes the people's own
+ *  records, so an open editor still saves. Resolves to the entry's id. */
+export const addInteraction = (draft: InteractionDraft) =>
+  invoke<number>("add_interaction", { draft });
+
+/** Save an edit over an entry: kind, date, time, note and people (its meeting link stays). */
+export const updateInteraction = (id: number, draft: InteractionDraft) =>
+  invoke<void>("update_interaction", { id, draft });
+
+/** Delete an entry, for everyone it names. */
+export const deleteInteraction = (id: number) => invoke<void>("delete_interaction", { id });
+
+/** The meetings owed an answer now, newest first: recent, with other human guests, not yet
+ *  answered. Worked out on each call (nothing in PM fires when an event ends); the main window and
+ *  the pop-out Calendar may both ask. */
+export const owedMeetings = () => invoke<OwedMeeting[]>("owed_meetings");
+
+/** Answer one meeting in a single step: log who was there (a guest PM doesn't know becomes a
+ *  person, anyone ticked from Trash comes back), skip it, or skip its whole series. Answering again
+ *  replaces an earlier skip. `uid` is empty for an event with no iCal id, which can only be logged;
+ *  `title` defaults to the mirrored event's. Main window or the pop-out Calendar. */
+export const answerMeeting = (
+  uid: string,
+  start: string,
+  people: PersonRef[],
+  answer: MeetingAnswer,
+  note?: string | null,
+  title?: string | null,
+) =>
+  invoke<MeetingAnswered>("answer_meeting", {
+    eventIcal: uid,
+    start,
+    people,
+    answer,
+    note: note ?? null,
+    title: title ?? null,
+  });
 
 /** The possible-duplicates snapshot: pairs with why they were flagged and what differs. Built off
  *  the database guard, read on mount and again on `people://changed`. */

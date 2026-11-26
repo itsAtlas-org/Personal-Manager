@@ -212,6 +212,7 @@ beforeEach(() => {
       details: [],
       labels: [],
       last_met: null,
+      timeline: { entries: [], next: null },
       sources: [],
       projects: [],
     };

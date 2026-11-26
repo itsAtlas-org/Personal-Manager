@@ -3657,6 +3657,8 @@ export interface Person {
   labels: PersonLabelRef[];
   /** The newest "met" entry's date, or null. */
   last_met: string | null;
+  /** The first page of their timeline, newest first. */
+  timeline: TimelinePage;
   sources: PersonSource[];
   /** The names of the projects they are linked to. */
   projects: string[];
@@ -3710,6 +3712,118 @@ export interface PersonDraft {
   notes: string;
   starred: boolean;
   details: PersonDetailDraft[];
+}
+
+// --- People: the timeline and "who did you meet?" (`people::timeline`, `people::meet`) ---
+
+/** What an entry on a timeline is. Mirrors `people::INTERACTION_KINDS`. */
+export type InteractionKind = "met" | "call" | "message" | "note";
+
+/** Someone else on a shared entry (`people::timeline::EntryPerson`). */
+export interface EntryPerson {
+  id: number;
+  display_name: string;
+}
+
+/** One entry on a person's timeline (`people::timeline::TimelineEntry`). */
+export interface TimelineEntry {
+  id: number;
+  kind: InteractionKind;
+  /** The user's civil date, `YYYY-MM-DD`. */
+  on_date: string;
+  /** An instant (ISO UTC) when the time is known. */
+  at: string | null;
+  note: string;
+  /** The calendar event's iCal id, when the entry came from one. */
+  event_uid: string | null;
+  /** That occurrence's start as the calendar stored it. */
+  event_start: string | null;
+  /** The event's title, copied. */
+  event_title: string | null;
+  /** Everyone else on the entry (never the viewer, never anyone in Trash). */
+  others: EntryPerson[];
+  created_at: string;
+}
+
+/** Where the next page of a timeline starts: pass the last page's `next` back unchanged. */
+export interface TimelineCursor {
+  on_date: string;
+  at: string;
+  id: number;
+}
+
+/** One page of a timeline, newest first (`people::timeline::TimelinePage`). */
+export interface TimelinePage {
+  entries: TimelineEntry[];
+  next: TimelineCursor | null;
+}
+
+/** The calendar occurrence an entry came from. */
+export interface InteractionEventLink {
+  uid: string;
+  start: string;
+  title: string;
+}
+
+/** One entry to add, or the edit to save over an existing one (an edit leaves `event` as it was). */
+export interface InteractionDraft {
+  kind: InteractionKind;
+  /** `YYYY-MM-DD`. */
+  on_date: string;
+  /** An RFC 3339 instant, or null when the time isn't known. */
+  at: string | null;
+  note: string;
+  /** Everyone the entry names: at least one, none in Trash. */
+  people: number[];
+  event?: InteractionEventLink | null;
+}
+
+/** A guest PM knows (someone in People, not in Trash): pre-ticked on the card. */
+export interface OwedKnownGuest {
+  id: number;
+  display_name: string;
+  email: string;
+}
+
+/** A guest PM doesn't know: listed unticked under "Not in People yet". */
+export interface OwedUnknownGuest {
+  /** The name on the invite (empty when it has none). */
+  name: string;
+  email: string;
+  /** Set when the address belongs only to someone in Trash: say "In Trash", and ticking them
+   *  sends `{ id }` so they come back instead of a second person being made. */
+  trashed_id: number | null;
+}
+
+/** One meeting owed an answer (`people::meet::OwedMeeting`). */
+export interface OwedMeeting {
+  /** The event's iCal id. */
+  uid: string;
+  /** The occurrence's start as the calendar stored it (an instant, or a date for all-day). */
+  start: string;
+  end: string | null;
+  title: string;
+  all_day: boolean;
+  /** Part of a series, so "Don't ask about this series" applies. */
+  recurs: boolean;
+  known: OwedKnownGuest[];
+  unknown: OwedUnknownGuest[];
+}
+
+/** Who a card ticked: someone in People (also one in Trash, who is brought back) or a new guest. */
+export type PersonRef = { id: number } | { new: { name: string; email: string } };
+
+/** What a card answered (`people::PROMPT_ANSWERS`). */
+export type MeetingAnswer = "logged" | "skipped" | "series_skipped";
+
+/** What answering did (`people::meet::MeetingAnswered`). */
+export interface MeetingAnswered {
+  /** The "met" entry written, when the answer was "logged". */
+  interaction: number | null;
+  /** People made from guests PM didn't know. */
+  created: number;
+  /** People brought back from Trash because they were ticked. */
+  restored: number;
 }
 
 /** What a save answers (`people::PersonSaved`). */

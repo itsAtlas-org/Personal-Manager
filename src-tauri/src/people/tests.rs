@@ -653,10 +653,11 @@ fn a_sentinel_name_never_reaches_an_error_or_debug_string() {
 // --- trash, restore, purge -----------------------------------------------------------------------------------
 
 #[test]
-fn a_trashed_person_is_invisible_to_search_and_lists() {
+fn a_trashed_person_is_invisible_to_search_list_dupes_and_other_timelines() {
     let (_d, conn) = store();
     let keep = person(&conn, "Kay", "Kept");
     let gone = person(&conn, "Tess", "Trashed");
+    let shared = add_meeting(&conn, "2026-11-01", "lunch", &[keep, gone]);
     let label = create_label(&conn, "Friends").unwrap();
     label_people(&conn, &[keep, gone], label).unwrap();
     star_people(&conn, &[keep, gone], true).unwrap();
@@ -693,12 +694,34 @@ fn a_trashed_person_is_invisible_to_search_and_lists() {
     assert!(p.trashed_at.is_some());
     assert!(update_person(&conn, gone, &draft("Tess", "Trashed"), &p.updated_at).is_err());
 
+    // The timeline half: the entry they shared still shows on Kay's timeline, but names nobody
+    // else while Tess is in Trash, and lists her again once she is back. Her own timeline opens.
+    let kay_entry = |conn: &Connection| {
+        let page = timeline::list_timeline(conn, keep, None, 10).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].id, shared);
+        page.entries[0]
+            .others
+            .iter()
+            .map(|o| o.display_name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(kay_entry(&conn).is_empty());
+    assert_eq!(
+        timeline::list_timeline(&conn, gone, None, 10)
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+
     // The duplicate finder never pairs someone in Trash with a live twin; restored, they pair.
     let twin = person(&conn, "Tess", "Trashed");
     let found = |conn: &Connection| dupes::scan(&dupes::load(conn).unwrap()).pairs.len();
     assert_eq!(found(&conn), 0);
     restore_people(&conn, &[gone]).unwrap();
     assert_eq!(found(&conn), 1);
+    assert_eq!(kay_entry(&conn), ["Tess Trashed"]);
     let _ = twin;
 }
 

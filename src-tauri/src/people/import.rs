@@ -40,7 +40,7 @@ use super::merge::{plan_details, DetailFacts, Fate};
 use super::sources::{merged_ident_owners, person_for_own_ident, person_for_source};
 use super::vcard::{network_of_url, VcfParse, Warning, FILE_CAP};
 use super::{
-    create_person_in, ensure_label_in, get_person, in_tx, new_ident, now, refuse,
+    create_person_in, ensure_label_in, get_person_core, in_tx, new_ident, now, refuse,
     require_transaction, restore_people_in, update_person_in, DetailDraft, PersonDraft,
     DETAILS_MAX, LABELS_PER_PERSON_MAX, PROVIDER_VCARD, STATE_LINKED,
 };
@@ -553,7 +553,7 @@ fn same_born_on(have: &str, card: &str) -> bool {
 /// join, a differing single value keeps PM's and is noted. The person is saved only if something
 /// changed, so re-importing a file that matches changes nothing.
 fn apply_card(tx: &Connection, id: i64, card: &Card) -> Result<Applied> {
-    let person = get_person(tx, id)?;
+    let person = get_person_core(tx, id)?;
     let mut draft = PersonDraft {
         display_name: person.display_name.clone(),
         given_name: person.given_name.clone(),
@@ -777,7 +777,9 @@ pub fn commit_in(
             Some(m) => {
                 if m.trashed {
                     restore_people_in(tx, &[m.id])?;
-                    result.restored.push(get_person(tx, m.id)?.display_name);
+                    result
+                        .restored
+                        .push(get_person_core(tx, m.id)?.display_name);
                 }
                 let applied = apply_card(tx, m.id, &card)?;
                 if applied.changed {
@@ -788,7 +790,7 @@ pub fn commit_in(
                 }
                 if !applied.kept.is_empty() {
                     result.kept.push(KeptNote {
-                        name: get_person(tx, m.id)?.display_name,
+                        name: get_person_core(tx, m.id)?.display_name,
                         fields: applied.kept.iter().map(|s| (*s).to_string()).collect(),
                     });
                 }

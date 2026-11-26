@@ -97,6 +97,7 @@ function bare(over: Partial<Person> = {}): Person {
     details: [],
     labels: [],
     last_met: null,
+    timeline: { entries: [], next: null },
     sources: [],
     projects: [],
     ...over,
@@ -111,6 +112,7 @@ function full(): Person {
     notes: "Likes tea.\nAllergic to cats.",
     labels: [{ id: 1, name: "Friends" }],
     last_met: "2026-11-12",
+    timeline: { entries: [], next: null },
     sources: [
       {
         id: 1,

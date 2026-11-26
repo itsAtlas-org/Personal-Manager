@@ -61,6 +61,7 @@ function person(details: PersonDetail[] = [], over: Partial<Person> = {}): Perso
     details,
     labels: [],
     last_met: null,
+    timeline: { entries: [], next: null },
     sources: [],
     projects: [],
     ...over,

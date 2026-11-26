@@ -72,6 +72,7 @@ function ada(over: Partial<Person> = {}): Person {
     ],
     labels: [],
     last_met: null,
+    timeline: { entries: [], next: null },
     sources: [],
     projects: [],
     ...over,

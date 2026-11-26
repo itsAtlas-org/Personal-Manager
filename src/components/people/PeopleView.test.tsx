@@ -195,6 +195,7 @@ beforeEach(() => {
       details: [],
       labels: r.labels,
       last_met: null,
+      timeline: { entries: [], next: null },
       sources: [],
       projects: [],
     };

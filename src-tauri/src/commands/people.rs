@@ -11,8 +11,10 @@
 //! command starts with `set_` (the Settings "Saved" tick). Not model-path code (E13): no model
 //! path may name this module.
 //!
-//! Later slices of the same PR add the duplicate finder and merge, the vCard commands and the
-//! timeline commands beside these; each adds its row to the window-tier table in the tests.
+//! The tiers: a read, and the meeting card's two commands (`owed_meetings`, `answer_meeting`),
+//! may come from the main window or the pop-out Calendar, where an event's "Log who you met" opens
+//! the same card; everything else is the main window's. A table in the tests pins every command's
+//! tier.
 
 use std::time::Instant;
 
@@ -23,7 +25,9 @@ use crate::error::{Error, Result};
 use crate::people::dupes::DupesReport;
 use crate::people::export::{ExportDone, ExportScope};
 use crate::people::import::{ImportOptions, ImportPreview, ImportResult};
+use crate::people::meet::{MeetingAnswer, MeetingAnswered, OwedMeeting, PersonRef};
 use crate::people::merge::{MergeChoices, MergeDone, MergePreview};
+use crate::people::timeline::{InteractionDraft, TimelineCursor, TimelinePage};
 use crate::people::{
     self, Label, ListFilter, ListSort, Person, PersonDraft, PersonRow, PersonSaved,
 };
@@ -576,6 +580,124 @@ pub async fn export_people(
     Ok(Some(done))
 }
 
+// --- the timeline (main window) ------------------------------------------------------------------------------
+
+/// One page of a person's timeline, newest first. `before` is the previous page's `next`.
+#[tauri::command]
+pub fn list_timeline(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    person_id: i64,
+    before: Option<TimelineCursor>,
+    limit: Option<usize>,
+) -> Result<TimelinePage> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    people::timeline::list_timeline(
+        &conn,
+        person_id,
+        before.as_ref(),
+        limit.unwrap_or(people::timeline::PAGE),
+    )
+}
+
+/// Log a meeting, call, message or note naming one or more people. Never changes the people's own
+/// records, so an open editor still saves. Returns the entry's id.
+#[tauri::command]
+pub fn add_interaction(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    draft: InteractionDraft,
+) -> Result<i64> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    let id = people::timeline::add_interaction(&conn, &draft)?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(id)
+}
+
+/// Save an edit over an entry: its kind, date, time, note and people (its meeting link stays).
+#[tauri::command]
+pub fn update_interaction(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    draft: InteractionDraft,
+) -> Result<()> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    people::timeline::update_interaction(&conn, id, &draft)?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(())
+}
+
+/// Delete an entry, for everyone it names.
+#[tauri::command]
+pub fn delete_interaction(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<()> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    people::timeline::delete_interaction(&conn, id)?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(())
+}
+
+// --- "who did you meet?" (main window or the pop-out Calendar) -----------------------------------------------
+
+/// The meetings owed an answer now, newest first (spec 6.2): recent, with other human guests,
+/// and not yet answered.
+#[tauri::command]
+pub fn owed_meetings(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<Vec<OwedMeeting>> {
+    require_people_window(&window)?;
+    let conn = state.conn()?;
+    people::meet::owed_meetings(&conn)
+}
+
+/// Answer one meeting in a single step: log who was there (guests PM doesn't know become people,
+/// anyone ticked from Trash comes back), skip it, or skip its whole series. Answering again
+/// replaces an earlier skip. `event_ical` is empty for an event with no iCal id, which can only be
+/// logged. `title` defaults to the mirrored event's.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn answer_meeting(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    event_ical: String,
+    start: String,
+    people: Vec<PersonRef>,
+    answer: MeetingAnswer,
+    note: Option<String>,
+    title: Option<String>,
+) -> Result<MeetingAnswered> {
+    require_people_window(&window)?;
+    let conn = state.conn()?;
+    let done = people::meet::answer_meeting(
+        &conn,
+        &event_ical,
+        &start,
+        &people,
+        answer,
+        note.as_deref(),
+        title.as_deref(),
+    )?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,7 +742,16 @@ mod tests {
         ("pick_vcard_and_preview", Tier::Main),
         ("commit_vcard_import", Tier::Main),
         ("export_people", Tier::Main),
+        ("list_timeline", Tier::Main),
+        ("add_interaction", Tier::Main),
+        ("update_interaction", Tier::Main),
+        ("delete_interaction", Tier::Main),
+        ("owed_meetings", Tier::Read),
+        ("answer_meeting", Tier::Read),
     ];
+
+    /// Commands the pop-out Calendar may call that also write: the meeting card answers from there.
+    const READ_TIER_WRITES: &[&str] = &["answer_meeting"];
 
     /// Main-window commands that only read (they announce nothing).
     const MAIN_READS: &[&str] = &[
@@ -630,6 +761,7 @@ mod tests {
         // The import's preview and the export write nothing in the store: the file is the write.
         "pick_vcard_and_preview",
         "export_people",
+        "list_timeline",
     ];
 
     /// The shipped part of this file, and each command's body in it (name, body).
@@ -710,7 +842,8 @@ mod tests {
     fn writes_announce_after_the_guard_drops_and_reads_do_not() {
         for (name, body) in commands() {
             let tier = TIERS.iter().find(|(n, _)| *n == name).expect("listed").1;
-            let reads_only = tier == Tier::Read || MAIN_READS.contains(&name.as_str());
+            let reads_only = (tier == Tier::Read && !READ_TIER_WRITES.contains(&name.as_str()))
+                || MAIN_READS.contains(&name.as_str());
             if reads_only {
                 assert!(
                     !body.contains("announce_changed"),

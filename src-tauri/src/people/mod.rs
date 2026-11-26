@@ -37,17 +37,23 @@ pub mod dupes;
 pub mod export;
 pub mod fold;
 pub mod import;
+pub mod meet;
 pub mod merge;
 pub mod partial_date;
 pub mod sources;
+pub mod timeline;
 pub mod vcard;
 
 #[cfg(test)]
 mod import_tests;
 #[cfg(test)]
+mod meet_tests;
+#[cfg(test)]
 mod merge_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeline_tests;
 #[cfg(test)]
 mod vcard_tests;
 
@@ -325,7 +331,7 @@ impl std::fmt::Debug for Label {
     }
 }
 
-/// One person, everything (spec 2.3 `get_person`). The timeline page joins in the timeline slice.
+/// One person, everything (spec 2.3 `get_person`), with the first page of their timeline.
 #[derive(Clone, Serialize)]
 pub struct Person {
     pub id: i64,
@@ -353,6 +359,8 @@ pub struct Person {
     pub labels: Vec<LabelRef>,
     /// The newest `met` entry's date, or none.
     pub last_met: Option<String>,
+    /// The first page of their timeline, newest first; the rest comes from `list_timeline`.
+    pub timeline: timeline::TimelinePage,
     pub sources: Vec<SourceInfo>,
     pub projects: Vec<String>,
 }
@@ -1105,18 +1113,6 @@ pub fn update_person(
 
 // --- reading one person -----------------------------------------------------------------------------------
 
-/// The newest `met` entry's date for a person, or none. (The timeline module owns the timeline;
-/// this one query is all the record needs from it.)
-fn last_met_of(conn: &Connection, id: i64) -> Result<Option<String>> {
-    Ok(conn.query_row(
-        "SELECT MAX(i.on_date) FROM interaction_people ip \
-           JOIN interactions i ON i.id = ip.interaction_id \
-          WHERE ip.person_id = ?1 AND i.kind = 'met'",
-        params![id],
-        |r| r.get(0),
-    )?)
-}
-
 fn labels_of(conn: &Connection, id: i64) -> Result<Vec<LabelRef>> {
     let mut stmt = conn.prepare(
         "SELECT l.id, l.name FROM person_labels pl JOIN contact_labels l ON l.id = pl.label_id \
@@ -1133,9 +1129,17 @@ fn labels_of(conn: &Connection, id: i64) -> Result<Vec<LabelRef>> {
     Ok(rows)
 }
 
-/// A person with everything: details, labels, last met, sources and projects. Works for a person
-/// in Trash too (the Trash list opens their record).
+/// A person with everything: details, labels, last met, sources and projects, and the first page
+/// of their timeline. Works for a person in Trash too (the Trash list opens their record).
 pub fn get_person(conn: &Connection, id: i64) -> Result<Person> {
+    let mut person = get_person_core(conn, id)?;
+    person.timeline = timeline::first_page(conn, id)?;
+    Ok(person)
+}
+
+/// [`get_person`] without the timeline page (it comes back empty). The export and import loops
+/// read a whole address book through this: a page of notes per person would be loaded and dropped.
+pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
     type Row = (
         String,
         String,
@@ -1251,7 +1255,11 @@ pub fn get_person(conn: &Connection, id: i64) -> Result<Person> {
         updated_at,
         details,
         labels: labels_of(conn, id)?,
-        last_met: last_met_of(conn, id)?,
+        last_met: timeline::last_met(conn, id)?,
+        timeline: timeline::TimelinePage {
+            entries: Vec::new(),
+            next: None,
+        },
         sources: sources::sources_of(conn, id)?,
         projects,
     })

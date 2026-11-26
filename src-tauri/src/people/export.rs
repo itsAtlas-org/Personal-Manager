@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::card::{Card, CardDetail};
 use super::vcard::network_of_label;
-use super::{get_person, refuse};
+use super::{get_person_core, refuse};
 use crate::error::Result;
 
 /// Who an export covers.
@@ -466,7 +466,7 @@ pub fn build(conn: &Connection, scope: &ExportScope, timeline: bool) -> Result<E
     }
     let mut vcf = String::new();
     for &id in &ids {
-        let person = get_person(conn, id)?;
+        let person = get_person_core(conn, id)?;
         write_card(&mut vcf, &Card::from_person(&person));
     }
     let csv = if timeline {
