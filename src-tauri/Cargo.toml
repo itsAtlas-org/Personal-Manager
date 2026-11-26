@@ -120,6 +120,12 @@ rrule = { version = "0.14", features = ["exrule"] }
 # only makes the edge direct. It reads /etc/localtime on Linux and never the TZ variable or the network.
 iana-time-zone = "0.1"
 
+# People (Contacts, E10): accent-insensitive matching. `fold_key` decomposes (NFKD), drops only the Latin
+# combining marks and recomposes, so "elodie" finds "Élodie" while Japanese voiced kana and Devanagari
+# vowel signs keep theirs. Licence: (MIT OR Apache-2.0) AND Unicode-3.0 (its tables); each is already
+# allowed in deny.toml and about.toml.
+unicode-normalization = "0.1.26"
+
 # Local-folder indexing (index-only connector). `file-id` reads a file's OS-stable
 # identity (NTFS FileId on Windows, inode on Unix) so a rename/move keeps the same
 # indexed item and its classification, rather than reading as delete-plus-add.

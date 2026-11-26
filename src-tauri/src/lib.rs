@@ -112,6 +112,10 @@ mod openrouter;
 mod outlook_calendar;
 mod pathguard;
 mod paths;
+// The commands that call into this arrive with the next slice of the People PR; until then most of it
+// has no caller. Drop this allow when `commands/people.rs` lands.
+#[allow(dead_code)]
+mod people;
 mod photos;
 mod pinboard_legacy;
 /// The Calendar in a window of its own (#1039).
@@ -942,6 +946,22 @@ impl AppState {
         // The Local AI switch (D7), decided on this store's first open and then read: the loops
         // park on it and the executor's gate reads it, and neither can read the store itself.
         self.learn_local_ai_switch();
+        // Remove the people who have been in Trash for 30 days (E4). After unlock by construction:
+        // `conn()` refuses on a locked vault, so a store that is still shut is never touched.
+        self.purge_expired_people();
+    }
+
+    /// Purge the people trashed more than 30 days ago, keeping only a Google tombstone of ids
+    /// ([`people::purge_expired`]). Best-effort like every open-time step: a failure is logged
+    /// without a single contact value (the error is a database or fixed-words one) and never blocks
+    /// the open; the next open tries again. A no-op while the vault is locked.
+    fn purge_expired_people(&self) {
+        let Ok(conn) = self.conn() else { return };
+        match people::purge_on_open(&conn) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("people: purged {n} from Trash"),
+            Err(e) => eprintln!("people: Trash purge skipped ({e})"),
+        }
     }
 
     /// Hand the open store's Local AI switch to the runtime, writing D7's default down first if the
