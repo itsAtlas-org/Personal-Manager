@@ -437,11 +437,15 @@ adding a holder needs no change to the script.
 
 ```bash
 npm install
-npm run tauri dev      # run the app (needs a desktop; GUI won't render headless)
+PM_DATA_DIR=/path/to/a/copy npm run tauri dev   # run the app (needs a desktop; GUI won't render headless)
 npm run build          # type-check + bundle the frontend
 cargo test  --manifest-path src-tauri/Cargo.toml   # backend tests (incl. the store)
 cargo build --manifest-path src-tauri/Cargo.toml   # compile the backend
 ```
+
+A dev build (`npm run tauri dev`, `cargo run`) refuses to start on the real data folder the
+installed app uses: set `PM_DATA_DIR` to a copy of it, or set `PM_DEV_REAL_DATA=1` to use the real
+folder on purpose. Release builds ignore both and are unaffected.
 
 The DB layer has a self-contained test (`src-tauri/src/db/mod.rs`) that proves
 encryption + vectors + keyword search without a keychain or GUI — keep it green.

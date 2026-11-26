@@ -170,8 +170,12 @@ For a full tour of the architecture and the rules for working in this repo, see
 
 ```bash
 npm install
-npm run tauri dev
+PM_DATA_DIR=/path/to/a/data/folder npm run tauri dev
 ```
+
+A dev build refuses to start on the real data folder the installed app uses. Point `PM_DATA_DIR`
+at another folder (a copy, or an empty one for a fresh start), or set `PM_DEV_REAL_DATA=1` to use
+the real folder on purpose.
 
 On first launch, paste your **OpenRouter API key** (from <https://openrouter.ai/keys>)
 into the welcome screen. It's stored in your OS keychain — never on disk or in this
@@ -280,7 +284,8 @@ source of truth). The folder is named **`Personal Manager`** for easy backup:
 
 The folder name is deliberately decoupled from the app's bundle identifier
 (`org.itsatlas.pm`, which stays fixed because the OS keychain is keyed to it). Override
-the location for development with the `PM_DATA_DIR` environment variable. Encryption and
+the location for development with the `PM_DATA_DIR` environment variable (a dev build refuses
+the real folder unless `PM_DATA_DIR` is set or `PM_DEV_REAL_DATA=1`). Encryption and
 API keys live in the OS keychain, never in the data directory.
 
 ## Privacy & security

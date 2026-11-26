@@ -1359,6 +1359,11 @@ pub fn run() {
         std::env::set_var("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1");
     }
 
+    // A dev build refuses the real folder the installed app uses, unless it was pointed at another
+    // one or told to use it on purpose. Before anything at all resolves the folder, the keychain or
+    // the single-instance lock, and never in a release build (`paths::real_data_refusal`).
+    paths::guard_real_data_folder();
+
     let builder = tauri::Builder::default();
     // macOS: a content process that died (a mod's frame can take it down) gets the frozen page's
     // recovery: the mod last active is paused, and the page reloads (`mods::watchdog`). Not

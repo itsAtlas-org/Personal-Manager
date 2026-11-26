@@ -22,6 +22,84 @@ fn dev_override(var: &str) -> Option<std::ffi::OsString> {
     }
 }
 
+/// The env var that points a dev build at another data folder. See [`data_dir`].
+const DATA_DIR_VAR: &str = "PM_DATA_DIR";
+
+/// The deliberate override: a dev build with this set to exactly `1` really uses the real folder.
+const REAL_DATA_VAR: &str = "PM_DEV_REAL_DATA";
+
+/// An empty `PM_DATA_DIR` is no override at all: [`data_dir`], [`data_dir_overridden`] and the guard
+/// all read the variable through this, so they cannot disagree about it.
+fn non_empty_override(value: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    value.filter(|v| !v.is_empty())
+}
+
+/// The data-folder override a dev build honours: `PM_DATA_DIR`, set and non-empty.
+fn data_dir_override() -> Option<std::ffi::OsString> {
+    non_empty_override(dev_override(DATA_DIR_VAR))
+}
+
+/// The exit code of a refused dev run (non-zero, and not 1 so a script can tell it from a crash).
+const REFUSAL_EXIT_CODE: i32 = 2;
+
+/// The one line a dev build prints (to stderr) when it refuses the real data folder.
+pub const REAL_DATA_REFUSAL: &str = "PM dev build refused to start: it would open the real data folder the installed app uses. Set PM_DATA_DIR to a copy of that folder, or set PM_DEV_REAL_DATA=1 to really use the real folder.";
+
+/// Whether a dev build may open the real data folder. Pure, so every branch is a unit test.
+///
+/// `dev_build` is the same compile-time gate as [`dev_override`] (debug builds only): a release
+/// build never refuses, whatever the environment says. In a dev build the real folder is refused
+/// unless `PM_DATA_DIR` names another one (set and non-empty) or `PM_DEV_REAL_DATA` is exactly
+/// `1`. Why: a dev run migrates and writes the store it opens, and the installed app does not know
+/// the newer schema, so a stray dev run on the real folder strands the installed app on a frozen
+/// copy of the data.
+pub fn real_data_refusal(
+    dev_build: bool,
+    data_dir_env: Option<&std::ffi::OsStr>,
+    allow_env: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if !dev_build {
+        return None;
+    }
+    if data_dir_env.is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    if allow_env.is_some_and(|v| v == "1") {
+        return None;
+    }
+    Some(REAL_DATA_REFUSAL)
+}
+
+/// Startup guard: a dev build with no `PM_DATA_DIR` (and no `PM_DEV_REAL_DATA=1`) prints
+/// [`REAL_DATA_REFUSAL`] and exits non-zero. Called first in `run()`, before anything resolves
+/// [`data_dir`], so no folder, store, vault or keychain entry is touched. A release build reads
+/// no environment here ([`dev_override`] is `None` there) and never exits.
+pub fn guard_real_data_folder() {
+    let data_dir_env = data_dir_override();
+    let allow_env = dev_override(REAL_DATA_VAR);
+    if let Some(code) = guard_outcome(
+        cfg!(debug_assertions),
+        data_dir_env.as_deref(),
+        allow_env.as_deref(),
+        &mut std::io::stderr(),
+    ) {
+        std::process::exit(code);
+    }
+}
+
+/// The guard's whole effect minus the `exit` itself: writes the refusal line to `out` and returns
+/// the exit code to use, or writes nothing and returns `None` when the run may go on.
+fn guard_outcome(
+    dev_build: bool,
+    data_dir_env: Option<&std::ffi::OsStr>,
+    allow_env: Option<&std::ffi::OsStr>,
+    out: &mut impl std::io::Write,
+) -> Option<i32> {
+    let line = real_data_refusal(dev_build, data_dir_env, allow_env)?;
+    let _ = writeln!(out, "{line}");
+    Some(REFUSAL_EXIT_CODE)
+}
+
 /// The stable directory that holds all of the user's data: the encrypted SQLite
 /// store and the Markdown vault. It lives *outside* the app bundle and the repo
 /// (spec §7) so updates never wipe it. `PM_DATA_DIR` overrides it in dev builds.
@@ -38,7 +116,7 @@ fn dev_override(var: &str) -> Option<std::ffi::OsString> {
 /// (`org.itsatlas.pm`) — the identifier stays fixed because the keychain service is
 /// keyed to it (`secrets.rs`), so it must never be renamed.
 pub fn data_dir(app: &AppHandle) -> Result<PathBuf> {
-    let dir = match dev_override("PM_DATA_DIR") {
+    let dir = match data_dir_override() {
         Some(value) => PathBuf::from(value),
         None => app
             .path()
@@ -52,7 +130,7 @@ pub fn data_dir(app: &AppHandle) -> Result<PathBuf> {
 /// Whether `PM_DATA_DIR` points this dev build at another data folder, usually a copy of the real
 /// one for a live test. Always false in a release build.
 pub fn data_dir_overridden() -> bool {
-    dev_override("PM_DATA_DIR").is_some()
+    data_dir_override().is_some()
 }
 
 /// Set once a full "remove PM completely" has taken the data directory away.
@@ -354,5 +432,135 @@ mod tests {
             mid.join("sidecar"),
             "the closer sidecar/ shadows the one further up"
         );
+    }
+}
+
+#[cfg(test)]
+mod real_data_guard_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn os(s: &str) -> Option<&OsStr> {
+        Some(OsStr::new(s))
+    }
+
+    #[test]
+    fn a_dev_build_with_no_data_dir_and_no_override_is_refused() {
+        assert_eq!(real_data_refusal(true, None, None), Some(REAL_DATA_REFUSAL));
+    }
+
+    #[test]
+    fn an_empty_data_dir_counts_as_unset() {
+        assert!(real_data_refusal(true, os(""), None).is_some());
+    }
+
+    #[test]
+    fn a_dev_build_with_a_data_dir_is_allowed() {
+        assert_eq!(real_data_refusal(true, os("/some/copy"), None), None);
+    }
+
+    #[test]
+    fn the_override_must_be_exactly_one() {
+        assert_eq!(real_data_refusal(true, None, os("1")), None);
+        for v in ["0", "", "true", "yes", "11", " 1", "1 "] {
+            assert!(
+                real_data_refusal(true, None, os(v)).is_some(),
+                "{v:?} is not the deliberate override"
+            );
+        }
+    }
+
+    #[test]
+    fn a_data_dir_wins_over_a_wrong_override() {
+        assert_eq!(real_data_refusal(true, os("/some/copy"), os("0")), None);
+    }
+
+    #[test]
+    fn a_release_build_never_refuses() {
+        for data in [None, os(""), os("/some/copy")] {
+            for allow in [None, os(""), os("0"), os("1")] {
+                assert_eq!(real_data_refusal(false, data, allow), None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_guard_is_gated_like_the_override_and_the_message_names_both_ways_out() {
+        // The guard reads its environment through `dev_override`, so a release build has nothing
+        // to refuse on; the decision itself is the `dev_build` argument above.
+        let src = include_str!("paths.rs");
+        let guard = src
+            .split("pub fn guard_real_data_folder()")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the guard function exists");
+        assert!(guard.contains("cfg!(debug_assertions)"));
+        assert!(guard.contains("data_dir_override()"));
+        assert!(guard.contains("dev_override(REAL_DATA_VAR)"));
+        assert!(!REAL_DATA_REFUSAL.contains('\n'));
+        assert!(REAL_DATA_REFUSAL.contains("PM_DATA_DIR"));
+        assert!(REAL_DATA_REFUSAL.contains("PM_DEV_REAL_DATA=1"));
+    }
+
+    #[test]
+    fn an_empty_data_dir_is_no_override_for_every_reader() {
+        use std::ffi::OsString;
+        assert_eq!(non_empty_override(Some(OsString::new())), None);
+        assert_eq!(non_empty_override(None), None);
+        assert_eq!(
+            non_empty_override(Some(OsString::from("/some/copy"))),
+            Some(OsString::from("/some/copy"))
+        );
+        // data_dir(), data_dir_overridden() and the guard all go through data_dir_override().
+        let src = include_str!("paths.rs");
+        let code = src
+            .split("mod real_data_guard_tests")
+            .next()
+            .expect("the file has code");
+        assert_eq!(code.matches("dev_override(DATA_DIR_VAR)").count(), 1);
+    }
+
+    #[test]
+    fn a_refused_run_prints_the_one_line_and_exits_2() {
+        let mut out = Vec::new();
+        assert_eq!(guard_outcome(true, None, None, &mut out), Some(2));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{REAL_DATA_REFUSAL}\n")
+        );
+    }
+
+    #[test]
+    fn an_allowed_or_release_run_prints_nothing_and_does_not_exit() {
+        for (dev, data, allow) in [
+            (true, os("/some/copy"), None),
+            (true, None, os("1")),
+            (false, None, None),
+            (false, os(""), os("0")),
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(guard_outcome(dev, data, allow, &mut out), None);
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn run_refuses_before_the_first_data_dir_use() {
+        let lib = include_str!("lib.rs");
+        let body = lib.split("pub fn run() {").nth(1).expect("run() exists");
+        let guard = body
+            .find("paths::guard_real_data_folder()")
+            .expect("run() calls the guard");
+        for later in [
+            "data_dir(",
+            "tauri::Builder::default()",
+            "tauri_plugin_single_instance::init",
+            ".setup(",
+            "secrets::",
+            "vault::",
+        ] {
+            let at = body.find(later).expect(later);
+            assert!(guard < at, "the guard must come before `{later}`");
+        }
     }
 }
