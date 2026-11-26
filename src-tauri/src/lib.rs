@@ -24,6 +24,7 @@ mod chat_prefs;
 mod chat_summary;
 mod chat_title;
 mod clock;
+mod cloud_openai;
 // The Google Drive + OneDrive sync engines, lifted out of `commands` so the IPC layer keeps only the
 // thin command wrappers. Two engines still (unifying them behind one driver is the next step); the
 // shared single-flight lifecycle lives in `connector_sync`.

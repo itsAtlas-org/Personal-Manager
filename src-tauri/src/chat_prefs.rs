@@ -36,7 +36,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::{Error, Result};
 use crate::preferences::{self, DraftPreference};
-use crate::{chat, entities, secrets, AppState};
+use crate::{chat, entities, AppState};
 
 /// Seed confidence for a chat-extracted record: an explicit statement, but auto-captured and not yet
 /// vouched for by the user — so it lands below 1.0 and unconfirmed, awaiting a "Keep" in Teach.
@@ -387,10 +387,7 @@ where
 fn ready(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     state.conn().is_ok()
-        && secrets::get_background_or_primary_key()
-            .ok()
-            .flatten()
-            .is_some()
+        && crate::llm_gateway::role_has_cloud(app, crate::llm_gateway::Role::Background)
 }
 
 /// Eagerly extract from the just-active conversation after its reply lands (the primary trigger).

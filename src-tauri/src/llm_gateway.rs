@@ -382,12 +382,30 @@ fn role_key(role: Role) -> Result<Option<Secret>> {
 }
 
 /// Whether this role has a cloud key — an in-memory read of the secrets cache.
-pub(crate) fn key_presence(role: Role) -> KeyPresence {
+///
+/// THE one place that answers "can this role reach a cloud provider": the first-run gate, the three
+/// follow-up jobs' `ready` checks and the On battery policy all ask here instead of reading a key
+/// themselves (a source scan pins it), so teaching it a second provider is one edit. It takes the
+/// app because which provider a role uses will be a setting, read from the store; today every role
+/// is OpenRouter and the answer is exactly the OpenRouter key's.
+pub(crate) fn key_presence(_app: &AppHandle, role: Role) -> KeyPresence {
     match role_key(role) {
         Ok(Some(_)) => KeyPresence::Present,
         Ok(None) => KeyPresence::Absent,
         Err(_) => KeyPresence::Unreadable,
     }
+}
+
+/// Whether this role has a usable cloud key: a key is there. No key, and a keychain that can't be
+/// read, both say no — the callers are gates that fail closed.
+pub(crate) fn role_has_cloud(app: &AppHandle, role: Role) -> bool {
+    key_presence(app, role) == KeyPresence::Present
+}
+
+/// [`role_has_cloud`] for a caller that reports a keychain it can't read as an error instead of
+/// folding it into "no" (the first-run status does, and always has).
+pub(crate) fn try_role_has_cloud(_app: &AppHandle, role: Role) -> Result<bool> {
+    Ok(role_key(role)?.is_some())
 }
 
 /// Which provider actually served a completion — recorded on every usage row so cost/latency
@@ -643,8 +661,37 @@ pub(crate) fn ping_status(app: &AppHandle) {
     let _ = app.emit("local-llm://status", ());
 }
 
-/// The cloud arm's hydrated inputs: the API key and the ordered model list (auto-switch fallback).
+/// Which cloud provider a [`CloudArm`] talks to, and so whose key it carries and whose terms its
+/// requests fall under. Every arm is OpenRouter today; the others are the providers a person's own
+/// key will be able to reach, named now so the seams (the two dispatch functions below, and what a
+/// mod may use) decide about them in one place each instead of by accident later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Nothing builds a non-OpenRouter arm yet; the tests do, and the provider that does comes next.
+#[allow(dead_code)]
+pub enum CloudProvider {
+    OpenRouter,
+    Anthropic,
+    Gemini,
+    OpenAi,
+}
+
+impl CloudProvider {
+    /// The stable token for the provider (a log line today, the stored setting value later; the
+    /// setting's parser must be an allow-list so an unknown stored value can never become an arm).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloudProvider::OpenRouter => "openrouter",
+            CloudProvider::Anthropic => "anthropic",
+            CloudProvider::Gemini => "gemini",
+            CloudProvider::OpenAi => "openai",
+        }
+    }
+}
+
+/// The cloud arm's hydrated inputs: the provider, its API key and the ordered model list
+/// (auto-switch fallback).
 pub struct CloudArm {
+    pub provider: CloudProvider,
     pub key: Secret,
     pub models: Vec<String>,
 }
@@ -885,7 +932,11 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
         let conn = state.conn()?;
         effective_models(&conn, models_key, auto_key)?
     };
-    Ok(Some(CloudArm { key, models }))
+    Ok(Some(CloudArm {
+        provider: CloudProvider::OpenRouter,
+        key,
+        models,
+    }))
 }
 
 /// The Background role's whole model list in the person's order, with auto-switch ignored (the
@@ -974,14 +1025,7 @@ pub async fn complete_capped(
     match plan {
         RoutePlan::Cloud(arm) => {
             let start = Instant::now();
-            let completion = openrouter::complete(
-                arm.key.expose(),
-                &arm.models,
-                messages,
-                cache_prefix,
-                max_tokens,
-            )
-            .await?;
+            let completion = cloud_complete_via(arm, messages, cache_prefix, max_tokens).await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud(start.elapsed()),
@@ -993,7 +1037,7 @@ pub async fn complete_capped(
         RoutePlan::LocalThenCloud { local, cloud } => {
             run_local_complete(app, local, messages, Some(cloud), max_tokens).await
         }
-        // Straight to OpenRouter with the caller's own `cache_prefix`, NOT through `cloud_complete`,
+        // Straight to the cloud arm with the caller's own `cache_prefix`, NOT through `cloud_complete`,
         // which hard-codes `false`: the review and retag batches ask for the cached prefix and a
         // power route must not quietly cost them it.
         RoutePlan::CloudForPower {
@@ -1001,14 +1045,7 @@ pub async fn complete_capped(
             displaced_local_model,
         } => {
             let start = Instant::now();
-            let completion = openrouter::complete(
-                cloud.key.expose(),
-                &cloud.models,
-                messages,
-                cache_prefix,
-                max_tokens,
-            )
-            .await?;
+            let completion = cloud_complete_via(cloud, messages, cache_prefix, max_tokens).await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud_fallback(
@@ -1228,18 +1265,46 @@ async fn cloud_complete(
 ) -> Result<LlmOutcome> {
     local_ai_gate(rt)?;
     let start = Instant::now();
-    let completion = openrouter::complete(
-        cloud.key.expose(),
-        &cloud.models,
-        messages,
-        false,
-        max_tokens,
-    )
-    .await?;
+    let completion = cloud_complete_via(cloud, messages, false, max_tokens).await?;
     Ok(LlmOutcome {
         completion,
         meta: CallMeta::cloud_fallback(start.elapsed(), reason, displaced),
     })
+}
+
+/// The one place a cloud completion picks its provider: every cloud leg of [`complete_capped`] comes
+/// through here, so a provider cannot be reached by some legs and not others, and the bound
+/// (`max_tokens`) is handed to the provider's call or to nothing. Each provider's call announces its
+/// own paid request on the call's wire mark (`wire_mark::send`); a provider without one yet must not
+/// be added here until it does.
+async fn cloud_complete_via(
+    arm: &CloudArm,
+    messages: &[ChatMessage],
+    cache_prefix: bool,
+    max_tokens: Option<u32>,
+) -> Result<Completion> {
+    match arm.provider {
+        CloudProvider::OpenRouter => {
+            openrouter::complete(
+                arm.key.expose(),
+                &arm.models,
+                messages,
+                cache_prefix,
+                max_tokens,
+            )
+            .await
+        }
+        other => Err(provider_not_available(other)),
+    }
+}
+
+/// What a person is told if a route names a provider whose call isn't built yet. Nothing builds such
+/// a route today, so this is the stop that keeps a half-added provider from reaching the network.
+fn provider_not_available(provider: CloudProvider) -> Error {
+    Error::Other(format!(
+        "Your {} key can't be used yet in this version of PM.",
+        provider.as_str()
+    ))
 }
 
 /// Stream a chat completion through the resolved route, forwarding each answer delta to `on_delta`,
@@ -1266,14 +1331,8 @@ where
     match plan {
         RoutePlan::Cloud(arm) => {
             let start = Instant::now();
-            let completion = openrouter::stream_chat(
-                arm.key.expose(),
-                &arm.models,
-                messages,
-                cache_through,
-                answers_only(&mut on_delta),
-            )
-            .await?;
+            let completion =
+                cloud_stream_via(arm, messages, cache_through, answers_only(&mut on_delta)).await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud(start.elapsed()),
@@ -1308,14 +1367,9 @@ where
             displaced_local_model,
         } => {
             let start = Instant::now();
-            let completion = openrouter::stream_chat(
-                cloud.key.expose(),
-                &cloud.models,
-                messages,
-                cache_through,
-                answers_only(&mut on_delta),
-            )
-            .await?;
+            let completion =
+                cloud_stream_via(cloud, messages, cache_through, answers_only(&mut on_delta))
+                    .await?;
             Ok(LlmOutcome {
                 completion,
                 meta: CallMeta::cloud_fallback(
@@ -1530,18 +1584,38 @@ where
 {
     local_ai_gate(rt)?;
     let start = Instant::now();
-    let completion = openrouter::stream_chat(
-        cloud.key.expose(),
-        &cloud.models,
-        messages,
-        cache_through,
-        answers_only(&mut on_delta),
-    )
-    .await?;
+    let completion =
+        cloud_stream_via(cloud, messages, cache_through, answers_only(&mut on_delta)).await?;
     Ok(LlmOutcome {
         completion,
         meta: CallMeta::cloud_fallback(start.elapsed(), reason, displaced),
     })
+}
+
+/// The streaming twin of [`cloud_complete_via`]: every cloud leg of [`stream_chat`] picks its
+/// provider here. The chat stream names no bound on the answer, so nothing here does either.
+async fn cloud_stream_via<F>(
+    arm: &CloudArm,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    on_token: F,
+) -> Result<Completion>
+where
+    F: FnMut(&str),
+{
+    match arm.provider {
+        CloudProvider::OpenRouter => {
+            openrouter::stream_chat(
+                arm.key.expose(),
+                &arm.models,
+                messages,
+                cache_through,
+                on_token,
+            )
+            .await
+        }
+        other => Err(provider_not_available(other)),
+    }
 }
 
 /// The message shown when NO provider is configured — provider-aware (a deliberate copy change from
@@ -1848,8 +1922,12 @@ mod tests {
                 .map(|(at, _)| region[at..].split(".await").next().unwrap())
                 .collect()
         };
+        // The three cloud legs ask `cloud_complete_via` (the cloud arm, the power route, and the
+        // fallback helper), and its one OpenRouter call is the only `openrouter::complete(`: each
+        // must name the bound, so a leg or the dispatch dropping it still fails here.
         for (needle, count) in [
-            ("openrouter::complete(", 3),
+            ("cloud_complete_via(", 3),
+            ("openrouter::complete(", 1),
             ("openai_compat::complete(", 1),
             ("cloud_complete(\n", 4),
             ("run_local_complete(app", 2),
@@ -1858,6 +1936,105 @@ mod tests {
             assert_eq!(found.len(), count, "{needle}");
             for site in found {
                 assert!(site.contains("max_tokens"), "{needle}: {site}");
+            }
+        }
+    }
+
+    /// The streaming cloud legs (the cloud arm, the power route and the fallback helper) all pick
+    /// their provider in `cloud_stream_via`, and nothing else in the file calls the OpenRouter stream:
+    /// a leg that went round it would be one a new provider never reached.
+    #[test]
+    fn every_streaming_cloud_leg_goes_through_the_provider_dispatch() {
+        let src = include_str!("llm_gateway.rs");
+        let live = src.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        let sites = |needle: &str| {
+            live.match_indices(needle)
+                .filter(|(at, _)| !live[..*at].ends_with("fn "))
+                .count()
+        };
+        assert_eq!(sites("cloud_stream_via("), 3);
+        assert_eq!(sites("openrouter::stream_chat("), 1);
+        assert_eq!(sites("openrouter::complete("), 1);
+    }
+
+    /// A route that names a provider whose call isn't built is stopped before any request is made,
+    /// on both the one-shot and the streaming path, and says so in words.
+    #[tokio::test]
+    async fn a_provider_without_a_call_yet_is_refused_without_touching_the_network() {
+        for provider in [
+            CloudProvider::Anthropic,
+            CloudProvider::Gemini,
+            CloudProvider::OpenAi,
+        ] {
+            let arm = CloudArm {
+                provider,
+                ..cloud(&["m"])
+            };
+            let e = cloud_complete_via(&arm, &msgs(1), false, Some(10))
+                .await
+                .err()
+                .expect("refused");
+            assert!(e.to_string().contains(provider.as_str()), "{e}");
+            let e = cloud_stream_via(&arm, &msgs(1), None, |_| {})
+                .await
+                .err()
+                .expect("refused");
+            assert!(e.to_string().contains("can't be used yet"), "{e}");
+        }
+        assert_eq!(CloudProvider::OpenRouter.as_str(), "openrouter");
+    }
+
+    /// Whether the app can reach a cloud provider is asked in one place. No module outside the
+    /// gateway and the secret store reads an OpenRouter key to find out: a second reader would be a
+    /// second place to forget a provider (a person with only their own Anthropic key would get the
+    /// first-run wizard forever). The exceptions read a key for another reason: the key fields in
+    /// Settings (`commands/keys.rs`) and the price fetch, which is OpenRouter's by #1069
+    /// (`commands/spend.rs`, held by its own scan). Names built from parts so this can't match itself.
+    /// The getter list below must grow with every direct-key getter the secret store gains, or the
+    /// scan quietly stops pinning "one readiness place".
+    #[test]
+    fn nothing_outside_the_gateway_reads_an_openrouter_key_for_readiness() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(files.len() > 50, "the walk found the source tree");
+        let allowed = [
+            "llm_gateway.rs",
+            "secrets.rs",
+            "secrets/wincred.rs",
+            "commands/keys.rs",
+            "commands/spend.rs",
+        ];
+        let getters = [
+            concat!("get_open", "router_key("),
+            concat!("get_open", "router_background_key("),
+            concat!("get_background_or_", "primary_key("),
+        ];
+        for file in files {
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if allowed.contains(&rel.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            for getter in getters {
+                assert!(
+                    !text.contains(getter),
+                    "{rel} reads a key with {getter}: ask llm_gateway::role_has_cloud instead"
+                );
             }
         }
     }
@@ -2546,12 +2723,14 @@ mod tests {
     #[test]
     fn primary_model_id_is_the_first_model() {
         let plan = RoutePlan::Cloud(CloudArm {
+            provider: CloudProvider::OpenRouter,
             key: Secret::from("k".to_string()),
             models: vec!["a/b".into(), "c/d".into()],
         });
         assert_eq!(plan.primary_model_id(), "a/b");
 
         let empty = RoutePlan::Cloud(CloudArm {
+            provider: CloudProvider::OpenRouter,
             key: Secret::from("k".to_string()),
             models: vec![],
         });
@@ -2604,6 +2783,7 @@ mod tests {
 
     fn cloud(models: &[&str]) -> CloudArm {
         CloudArm {
+            provider: CloudProvider::OpenRouter,
             key: Secret::from("k".to_string()),
             models: models.iter().map(|m| m.to_string()).collect(),
         }

@@ -100,16 +100,27 @@ mod tests {
     }
 
     /// The paid request of a mod's call is announced: it is the one `ai.complete` runs on, and a
-    /// plain `.send()` there would make every failure before the wire look unsent ("free").
+    /// plain `.send()` there would make every failure before the wire look unsent ("free"). The send
+    /// lives in the shared OpenAI-dialect core (`cloud_openai::complete`), which every provider of
+    /// that dialect goes through, and OpenRouter's completion is a call into it, not a send of its own.
     #[test]
     fn the_openrouter_completion_sends_through_the_mark() {
+        let core = include_str!("cloud_openai.rs");
+        let body = core
+            .split("pub(crate) async fn complete(")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("complete comes before the tests");
+        assert!(body.contains("crate::wire_mark::send("));
+        assert!(!body.contains(".send()"));
+
         let src = include_str!("openrouter.rs");
         let body = src
             .split("pub async fn complete(")
             .nth(1)
             .and_then(|rest| rest.split("#[cfg(test)]").next())
             .expect("complete comes before the tests");
-        assert!(body.contains("crate::wire_mark::send("));
+        assert!(body.contains("cloud_openai::complete("));
         assert!(!body.contains(".send()"));
     }
 

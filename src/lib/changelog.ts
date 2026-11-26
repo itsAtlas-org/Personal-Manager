@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.189.1-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Under-the-hood groundwork for using your own Anthropic, Gemini and OpenAI keys; nothing changes yet in how you use PM.",
+    ],
+  },
+  {
     version: "3.189.0-alpha",
     date: "2026-11-25",
     highlights: [
