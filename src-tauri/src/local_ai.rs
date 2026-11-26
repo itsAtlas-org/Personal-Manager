@@ -1227,8 +1227,8 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
                 false,
                 chat_bound.as_deref(),
                 background_bound.as_deref(),
-                llm_gateway::key_presence(Role::Chat),
-                llm_gateway::key_presence(Role::Background),
+                llm_gateway::key_presence(&app, Role::Chat),
+                llm_gateway::key_presence(&app, Role::Background),
             ),
         });
     }
@@ -1244,8 +1244,8 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
         base_url.as_deref().is_some_and(|b| !b.trim().is_empty()),
         chat_bound.as_deref(),
         background_bound.as_deref(),
-        llm_gateway::key_presence(Role::Chat),
-        llm_gateway::key_presence(Role::Background),
+        llm_gateway::key_presence(&app, Role::Chat),
+        llm_gateway::key_presence(&app, Role::Background),
     );
 
     let (in_cooldown, cooldown_remaining_s) = {

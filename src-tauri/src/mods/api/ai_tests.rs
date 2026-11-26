@@ -1189,9 +1189,10 @@ fn the_row_is_experimental_under_the_ai_family() {
 /// does not compile until it is decided.
 #[test]
 fn every_route_pm_has_may_serve_a_mod() {
-    use crate::llm_gateway::{CloudArm, LocalArm, RoutePlan};
+    use crate::llm_gateway::{CloudArm, CloudProvider, LocalArm, RoutePlan};
     use crate::secret::Secret;
     let cloud = || CloudArm {
+        provider: CloudProvider::OpenRouter,
         key: Secret::from("k".to_string()),
         models: vec!["a/b".into()],
     };
@@ -1214,4 +1215,44 @@ fn every_route_pm_has_may_serve_a_mod() {
     ] {
         assert!(ai::serves_a_mod(&plan));
     }
+}
+
+/// A person's own key (a provider outside ZDR) never carries a mod's text, on any route that can
+/// reach it: the cloud arm, the power route, and the cloud fallback of a local-first route, which
+/// would send the mod's prompt there the moment the local server failed. A local-only route has no
+/// cloud arm and stays served.
+#[test]
+fn a_route_with_a_non_openrouter_arm_never_serves_a_mod() {
+    use crate::llm_gateway::{CloudArm, CloudProvider, LocalArm, RoutePlan};
+    use crate::secret::Secret;
+    let cloud = |provider| CloudArm {
+        provider,
+        key: Secret::from("k".to_string()),
+        models: vec!["a/b".into()],
+    };
+    let local = || LocalArm {
+        base_url: "http://127.0.0.1:1".into(),
+        model: "m".into(),
+        token: None,
+    };
+    for provider in [
+        CloudProvider::Anthropic,
+        CloudProvider::Gemini,
+        CloudProvider::OpenAi,
+    ] {
+        for plan in [
+            RoutePlan::Cloud(cloud(provider)),
+            RoutePlan::LocalThenCloud {
+                local: local(),
+                cloud: cloud(provider),
+            },
+            RoutePlan::CloudForPower {
+                cloud: cloud(provider),
+                displaced_local_model: "m".into(),
+            },
+        ] {
+            assert!(!ai::serves_a_mod(&plan), "{}", provider.as_str());
+        }
+    }
+    assert!(ai::serves_a_mod(&RoutePlan::LocalOnly(local())));
 }

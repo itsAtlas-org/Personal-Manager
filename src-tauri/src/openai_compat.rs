@@ -37,7 +37,7 @@ use crate::openrouter::{drain_lines, ChatMessage, Completion, Usage};
 /// HTTP clients for local-endpoint calls. Two of them, differing in connect timeout and in whether
 /// they honour a system proxy: a loopback server that isn't listening RSTs instantly (2 s is ample),
 /// while a remote (LAN / Tailscale) endpoint may take longer to connect. Separate from
-/// `openrouter::HTTP` so the cloud path can never be perturbed (strict additivity), and — crucially
+/// `cloud_openai::HTTP` so the cloud path can never be perturbed (strict additivity), and — crucially
 /// — NEITHER sets a `read_timeout`: streaming manages a two-phase (first-token vs inter-token)
 /// deadline itself, and the non-streaming calls set a per-request total `timeout`. A single flat read
 /// timeout cannot tell a legitimate 60 s cold model load from a dead stream.

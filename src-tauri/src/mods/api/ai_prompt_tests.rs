@@ -291,6 +291,7 @@ fn the_models_told_are_the_routes_own_names_in_order_with_blanks_left_out() {
     use crate::llm_gateway::{CloudArm, LocalArm, RoutePlan};
     use crate::secret::Secret;
     let cloud = |models: &[&str]| CloudArm {
+        provider: crate::llm_gateway::CloudProvider::OpenRouter,
         key: Secret::from("k".to_string()),
         models: models.iter().map(|m| (*m).to_owned()).collect(),
     };
