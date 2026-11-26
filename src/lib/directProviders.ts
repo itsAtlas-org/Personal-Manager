@@ -12,6 +12,7 @@ import type {
   DirectModelView,
   DirectProvidersState,
   DirectProviderView,
+  KeyCheckResult,
   KeyOutcome,
   ModelInfo,
   RoleMove,
@@ -74,6 +75,7 @@ export const DIRECT_PROVIDERS: Record<DirectProviderId, DirectProviderInfo> = {
       "Requests are kept in abuse-monitoring logs for up to 30 days, longer if the law says so. You can't switch that off yourself. OpenAI may also use content from a limited group of API customers to train safety filters, without any opt-in.",
       "Zero data retention and Modified Abuse Monitoring need OpenAI's approval. Ask OpenAI if you need them.",
       "PM asks for no stored responses and never uses OpenAI's files, threads or batch tools. Prompt caching can keep parts of a request on OpenAI's machines for up to 24 hours.",
+      'Checking a key sends OpenAI one tiny test message ("Reply with OK."), which costs a tiny fraction of a cent and isn\'t listed in Usage.',
       "These are OpenAI's terms when this version of PM was built. They can change. OpenAI's data page is the one to trust.",
     ],
     sharesDataOption: {
@@ -225,10 +227,20 @@ function perM(n: number): string {
   return `$${n < 1 ? n.toFixed(2) : n % 1 === 0 ? n.toFixed(0) : n.toFixed(2)}`;
 }
 
+/** Whether the last check saw the key's model list: it did for a working key, a key with no credit
+ *  (it lists fine, it just can't chat yet) and a read-only one. */
+function listingKnown(p: DirectProviderView): boolean {
+  const c = p.key_check;
+  if (!c) return false;
+  if (c.outcome === "ok") return true;
+  // A listing refused outright (a restricted key tried through to a no-credit answer) shows none.
+  return (c.outcome === "no_credit" || c.note === "read_only") && c.listed_total > 0;
+}
+
 /** The catalogue as `ModelInfo` rows. Prices are per MILLION on the wire and per TOKEN in
  *  `ModelInfo`, which is what the picker multiplies back. */
 export function directPickerRows(p: DirectProviderView): DirectPickerRow[] {
-  const listed = p.key_check?.outcome === "ok" ? p.key_check.listed : null;
+  const listed = listingKnown(p) ? (p.key_check?.listed ?? null) : null;
   return p.models.map((m) => ({
     id: m.id,
     name: m.name,
@@ -249,7 +261,7 @@ export function directPickerRows(p: DirectProviderView): DirectPickerRow[] {
 
 /** The picker's caption: what the last check can say about the list. */
 export function pickerCaption(p: DirectProviderView): string {
-  return p.key_check?.outcome === "ok"
+  return listingKnown(p)
     ? `Models your ${p.name} key can use.`
     : "PM couldn't check which of these your key can use.";
 }
@@ -270,15 +282,47 @@ export function outcomeWord(outcome: KeyOutcome): string {
   return String(outcome);
 }
 
-/** What a key check found, in words. `listedCount` is how many catalogue models the key can see. An
- *  outcome this version has no sentence for is shown as itself and counted as not saved. */
-export function keyVerdict(outcome: KeyOutcome, listedCount: number, name: string): KeyVerdict {
+/** The sentence a test chat that couldn't be tried adds to the listing's verdict. */
+const CHAT_UNTRIED = "PM couldn't try a chat just now.";
+
+/** Whether a verdict is one the person can act on and press Check again for: no credit yet, a key
+ *  that can't chat, or a check that couldn't try a chat. A plain "works" has nothing to recheck. */
+export function offersRecheck(
+  outcome: KeyOutcome | undefined,
+  note?: KeyCheckResult["note"],
+): boolean {
+  return outcome === "no_credit" || outcome === "restricted" || note === "chat_untried";
+}
+
+/** The answers `recheck_direct_key` stores as the key's verdict (the backend's "says something"
+ *  list). Anything else (unreachable, an unexpected status) leaves the stored verdict standing, so
+ *  the card must keep drawing that one. */
+export function recheckStores(outcome: KeyOutcome): boolean {
+  return (
+    outcome === "ok" ||
+    outcome === "restricted" ||
+    outcome === "no_credit" ||
+    outcome === "rejected" ||
+    outcome === "region_blocked"
+  );
+}
+
+/** What a key check found, in words, for a key that was JUST typed (so a refusal is "Not saved").
+ *  `listedCount` is how many catalogue models the key can see. An outcome this version has no
+ *  sentence for is shown as itself and counted as not saved. */
+export function keyVerdict(
+  outcome: KeyOutcome,
+  listedCount: number,
+  name: string,
+  note?: KeyCheckResult["note"],
+): KeyVerdict {
   if (typeof outcome === "object" && outcome !== null && "unexpected" in outcome) {
     return {
       tone: "refused",
       text: `Not saved. ${name} answered with an error (${outcome.unexpected}). Try again shortly.`,
     };
   }
+  const untried = note === "chat_untried" ? ` ${CHAT_UNTRIED}` : "";
   switch (outcome) {
     case "ok": {
       const ready =
@@ -287,15 +331,24 @@ export function keyVerdict(outcome: KeyOutcome, listedCount: number, name: strin
           : listedCount === 1
             ? `Key works. 1 ${name} model is ready to use.`
             : `Key works. ${listedCount} ${name} models are ready to use.`;
-      return {
-        tone: "ok",
-        text: `${ready} A key can pass this check and still be read-only, which can't chat.`,
-      };
+      // A caveat is not a tick: "couldn't try a chat" is the very thing Check again is for.
+      return { tone: untried ? "warn" : "ok", text: `${ready}${untried}` };
     }
     case "restricted":
       return {
         tone: "warn",
-        text: "Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models and chat endpoints in your OpenAI project.",
+        text:
+          note === "read_only"
+            ? `Saved. This key can list models but can't chat. Give it access to chat in your ${name} project, then press Check again.`
+            : note === "no_access"
+              ? `Saved. This key can't list models or chat. Give it access to the models and chat endpoints in your ${name} project, then press Check again.`
+              : `Saved. This key is restricted, so PM can't see which models it can use. If a chat fails, give the key access to the models and chat endpoints in your ${name} project.${untried}`,
+      };
+    case "no_credit":
+      // Valid and kept: only chatting fails, and only until credit is added.
+      return {
+        tone: "warn",
+        text: `Saved. Your ${name} account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.`,
       };
     case "rejected":
       return {
@@ -322,18 +375,59 @@ export function keyVerdict(outcome: KeyOutcome, listedCount: number, name: strin
   }
 }
 
+/** What a check of a key that is ALREADY saved found. The same words for a key that works, is
+ *  restricted or has no credit; for a refusal the key stays saved, so it never says "Not saved". */
+export function recheckVerdict(
+  outcome: KeyOutcome,
+  listedCount: number,
+  name: string,
+  note?: KeyCheckResult["note"],
+): KeyVerdict {
+  if (typeof outcome === "object" && outcome !== null && "unexpected" in outcome) {
+    return {
+      tone: "refused",
+      text: `${name} answered with an error (${outcome.unexpected}). Try again shortly.`,
+    };
+  }
+  switch (outcome) {
+    case "rejected":
+      return {
+        tone: "refused",
+        text: `${name} now says this key isn't right. Replace it below, or remove it.`,
+      };
+    case "region_blocked":
+      return {
+        tone: "refused",
+        text: `${name} doesn't serve requests from where you are right now.`,
+      };
+    case "unreachable":
+      return {
+        tone: "refused",
+        text: `PM couldn't reach ${name} to check it. Check your connection and try again.`,
+      };
+    default: {
+      const v = keyVerdict(outcome, listedCount, name, note);
+      // The key was saved some time ago (or a moment ago by a first check, which uses keyVerdict):
+      // "Saved." would be news only the first time.
+      return { ...v, text: v.text.replace(/^Saved\. /, "") };
+    }
+  }
+}
+
 /** A stored verdict, shown only beside a key that is really there (a verdict carried in a backup is
  *  never drawn next to no key). */
 export function storedVerdict(p: DirectProviderView, name: string): KeyVerdict | null {
   if (p.key !== "present" || !p.key_check) return null;
-  return keyVerdict(p.key_check.outcome, p.key_check.listed.length, name);
+  const c = p.key_check;
+  return recheckVerdict(c.outcome, c.listed.length, name, c.note);
 }
 
 /** A stored verdict that says the key was turned away. Only a check that was never kept could say
- *  this, so it guards a hand-edited row and nothing more. */
+ *  this, so it guards a hand-edited row and nothing more. A key with no credit is NOT turned away:
+ *  it is valid, and the role's own line says it won't answer yet. */
 function turnedAway(c: StoredKeyCheck | null): boolean {
   if (!c) return false;
-  return c.outcome !== "ok" && c.outcome !== "restricted";
+  return c.outcome !== "ok" && c.outcome !== "restricted" && c.outcome !== "no_credit";
 }
 
 // ---- Who can be chosen, and what is wrong with a choice --------------------------------------------
@@ -355,7 +449,7 @@ export function providerView(
 }
 
 /** Why a role's stored provider can't answer, or null when nothing is wrong. */
-export type RoleIssue = "turned_off" | "key_missing" | "key_unreadable";
+export type RoleIssue = "turned_off" | "key_missing" | "key_unreadable" | "no_credit";
 
 export function roleIssue(state: DirectProvidersState, role: RoleName): RoleIssue | null {
   const r = state.roles[role];
@@ -365,6 +459,7 @@ export function roleIssue(state: DirectProvidersState, role: RoleName): RoleIssu
   if (!p) return "key_missing";
   if (p.key === "unreadable") return "key_unreadable";
   if (p.key === "absent") return "key_missing";
+  if (p.key_check?.outcome === "no_credit") return "no_credit";
   return null;
 }
 
@@ -378,6 +473,8 @@ export function roleIssueLine(issue: RoleIssue, role: RoleName, providerLabel: s
       return `${who} is set to ${providerLabel}, but PM can't read your ${providerLabel} key right now. ${who} won't answer until it can, or until you pick another provider.`;
     case "key_missing":
       return `Your ${providerLabel} key is missing on this device. Add it above, or move ${who} back to OpenRouter.`;
+    case "no_credit":
+      return `Your ${providerLabel} account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.`;
   }
 }
 

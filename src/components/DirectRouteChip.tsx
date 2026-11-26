@@ -45,19 +45,24 @@ function Chip({ provider, settings }: { provider: string; settings: Settings | n
   // so in their own words, and so does this.
   const unreadable = view.key === "unreadable";
   const noKey = view.key !== "present" && !unreadable;
-  const broken = noKey || unreadable;
+  const noCredit = !noKey && !unreadable && view.key_check?.outcome === "no_credit";
+  const broken = noKey || unreadable || noCredit;
   const label = unreadable
     ? `${info.name}: key unreadable`
     : noKey
       ? `${info.name}: no key`
-      : view.shares_data
-        ? info.chipSharedLabel
-        : info.chipLabel;
+      : noCredit
+        ? `${info.name}: no credit`
+        : view.shares_data
+          ? info.chipSharedLabel
+          : info.chipLabel;
   const title = unreadable
     ? `Chat is set to ${info.name}, but PM can't read your key right now. Chat can't answer until it can. Check Settings > AI & Models.`
     : noKey
       ? `Chat is set to ${info.name}, but there's no key to use. Chat can't answer until you fix this. Change it in Settings > AI & Models.`
-      : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
+      : noCredit
+        ? `Your ${info.name} account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.`
+        : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
   const token = broken ? "--st-due" : "--ink3";
   return (
     <span

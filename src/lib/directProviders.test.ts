@@ -16,11 +16,15 @@ import {
   effortToWrite,
   eligibleProviders,
   footerRow,
+  isEligible,
   keyVerdict,
   movedLine,
+  offersRecheck,
+  recheckStores,
   pickerCaption,
   providerName,
   providerOptionLabel,
+  recheckVerdict,
   roleDefaultEffort,
   roleIssue,
   roleIssueLine,
@@ -121,7 +125,7 @@ describe("what a key check says", () => {
   it("words every outcome, and counts models", () => {
     expect(keyVerdict("ok", 4, "OpenAI")).toEqual({
       tone: "ok",
-      text: "Key works. 4 OpenAI models are ready to use. A key can pass this check and still be read-only, which can't chat.",
+      text: "Key works. 4 OpenAI models are ready to use.",
     });
     expect(keyVerdict("ok", 1, "OpenAI").text).toContain(
       "Key works. 1 OpenAI model is ready to use.",
@@ -136,6 +140,110 @@ describe("what a key check says", () => {
     expect(keyVerdict("rejected", 0, "OpenAI").text).toContain("Admin key");
     expect(keyVerdict({ unexpected: 418 }, 0, "OpenAI").text).toBe(
       "Not saved. OpenAI answered with an error (418). Try again shortly.",
+    );
+  });
+
+  it("says a key with no credit is saved, and what to do", () => {
+    expect(keyVerdict("no_credit", 4, "OpenAI")).toEqual({
+      tone: "warn",
+      text: "Saved. Your OpenAI account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.",
+    });
+  });
+
+  it("words a key that lists models but can't chat, and one that can do neither", () => {
+    expect(keyVerdict("restricted", 4, "OpenAI", "read_only")).toEqual({
+      tone: "warn",
+      text: "Saved. This key can list models but can't chat. Give it access to chat in your OpenAI project, then press Check again.",
+    });
+    expect(keyVerdict("restricted", 0, "OpenAI", "no_access").text).toMatch(
+      /^Saved\. This key can't list models or chat\..*press Check again\.$/,
+    );
+  });
+
+  it("adds the chat-not-tried note to the listing's verdict, never a failure or no credit", () => {
+    const v = keyVerdict("ok", 4, "OpenAI", "chat_untried");
+    // A caveat is drawn as a warning, not a green tick.
+    expect(v.tone).toBe("warn");
+    expect(keyVerdict("ok", 4, "OpenAI").tone).toBe("ok");
+    expect(v.text).toBe(
+      "Key works. 4 OpenAI models are ready to use. PM couldn't try a chat just now.",
+    );
+    expect(keyVerdict("restricted", 0, "OpenAI", "chat_untried").text).toMatch(
+      /PM couldn't try a chat just now\.$/,
+    );
+    expect(v.text).not.toMatch(/credit/);
+  });
+
+  it("offers Check again for no credit, a restricted key and an untried chat, not a plain working key", () => {
+    expect(offersRecheck("no_credit")).toBe(true);
+    expect(offersRecheck("restricted")).toBe(true);
+    expect(offersRecheck("ok", "chat_untried")).toBe(true);
+    expect(offersRecheck("ok")).toBe(false);
+    expect(offersRecheck("ok", null)).toBe(false);
+    expect(offersRecheck(undefined)).toBe(false);
+  });
+
+  it("drops 'Saved.' when a key that is already saved is checked again", () => {
+    expect(recheckVerdict("no_credit", 4, "OpenAI").text).toMatch(
+      /^Your OpenAI account is out of credit or at a spend limit/,
+    );
+    expect(recheckVerdict("restricted", 4, "OpenAI", "read_only").text).toMatch(
+      /^This key can list models/,
+    );
+    expect(keyVerdict("no_credit", 4, "OpenAI").text).toMatch(/^Saved\. /);
+  });
+
+  it("says which answers a re-check stores, so trouble reaching the provider keeps the old verdict", () => {
+    for (const o of ["ok", "restricted", "no_credit", "rejected", "region_blocked"] as const) {
+      expect(recheckStores(o), o).toBe(true);
+    }
+    for (const o of ["unreachable", "malformed", { unexpected: 502 }] as const) {
+      expect(recheckStores(o)).toBe(false);
+    }
+  });
+
+  it("tells a refusal of a SAVED key without saying 'Not saved'", () => {
+    for (const o of ["rejected", "region_blocked", "unreachable"] as const) {
+      const v = recheckVerdict(o, 0, "OpenAI");
+      expect(v.tone).toBe("refused");
+      expect(v.text).not.toMatch(/Not saved/);
+    }
+    expect(recheckVerdict("ok", 4, "OpenAI")).toEqual(keyVerdict("ok", 4, "OpenAI"));
+  });
+
+  it("keeps a key with no credit eligible, and the picker's list from its listing", () => {
+    const noCredit = openaiView({
+      key_check: {
+        at: "x",
+        outcome: "no_credit",
+        listed: ["openai/gpt-6.2-sol"],
+        listed_total: 90,
+      },
+    });
+    expect(isEligible(noCredit)).toBe(true);
+    expect(directPickerRows(noCredit).find((r) => r.id === "openai/gpt-6-luna")?.unlisted).toBe(
+      true,
+    );
+    expect(pickerCaption(noCredit)).toBe("Models your OpenAI key can use.");
+    // A no-credit answer reached through a refused listing has no list to show.
+    const blind = openaiView({
+      key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0 },
+    });
+    expect(directPickerRows(blind).some((r) => r.unlisted)).toBe(false);
+    expect(pickerCaption(blind)).toBe("PM couldn't check which of these your key can use.");
+  });
+
+  it("names a role on a key with no credit, as its own issue", () => {
+    const state = directState({
+      view: openaiView({
+        key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0 },
+      }),
+      chat: "openai",
+    });
+    expect(roleIssue(state, "chat")).toBe("no_credit");
+    expect(roleIssue(state, "background")).toBeNull();
+    expect(roleIssueLine("no_credit", "chat", "OpenAI")).toBe(
+      "Your OpenAI account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
     );
   });
 

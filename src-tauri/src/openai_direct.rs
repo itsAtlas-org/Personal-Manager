@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::cloud_openai::{self, redact_detail, Flavour};
 use crate::direct_models::{self, DirectModel};
-use crate::direct_providers::{KeyCheck, KeyOutcome};
+use crate::direct_providers::{KeyCheck, KeyNote, KeyOutcome};
 use crate::error::{Error, Result};
 use crate::llm_gateway::CloudArm;
 use crate::openrouter::{ChatMessage, Completion, Usage};
@@ -508,13 +508,139 @@ fn listed_models(body: &str) -> (Vec<String>, usize) {
     (listed, seen.len())
 }
 
-/// Ask OpenAI which models the key can see. Not a paid request, so a plain send through the shared
-/// client (no attribution, no User-Agent, only the auth header). The key never appears in a URL, a
-/// log or an error.
-pub(crate) async fn check_key(key: &str) -> KeyCheck {
+/// The two URLs a key check talks to. The shipped pair is a const, so the key can only ever go to
+/// OpenAI; tests hand the private [`check_key_at`] a loopback pair.
+struct CheckUrls {
+    models: &'static str,
+    chat: &'static str,
+}
+
+const CHECK_URLS: CheckUrls = CheckUrls {
+    models: MODELS_ENDPOINT,
+    chat: ENDPOINT,
+};
+
+/// What the one test chat showed. PURE to read: [`read_probe`] maps a status and body onto it.
+#[derive(Debug, PartialEq)]
+enum Probe {
+    /// 200: the key can chat, and has credit.
+    Works,
+    /// The account has no credit or is at its spend limit.
+    NoCredit,
+    /// 401 or 403 from OpenAI: the key is valid but isn't allowed to chat.
+    Refused,
+    /// The model is gone or not this project's: try the next cheapest.
+    ModelGone,
+    /// A rate limit, a 5xx, a timeout or anything PM can't read: no verdict either way.
+    Untried,
+}
+
+/// What a test chat's reply means. PURE. A rate limit or a 5xx must never read as a failure of the
+/// key, so everything unlisted is `Untried`.
+fn read_probe(status: u16, body: &str) -> Probe {
+    if status == 200 {
+        return Probe::Works;
+    }
+    let f = fields_from_body(body);
+    // Only OpenAI's own JSON is a verdict: a captive portal's 403 page says nothing about the key.
+    let from_openai = serde_json::from_str::<Value>(body).is_ok_and(|v| v["error"].is_object());
+    match classify(Some(status), &f) {
+        Failure::OutOfCredit => Probe::NoCredit,
+        Failure::ModelUnavailable { .. } => Probe::ModelGone,
+        // The listing already worked, so a 401 here is a missing scope, not a mistyped key.
+        Failure::KeyRejected if from_openai && f.code != "invalid_api_key" => Probe::Refused,
+        Failure::NotAllowed if from_openai => Probe::Refused,
+        _ => Probe::Untried,
+    }
+}
+
+/// The test chat's body: PM's own shape (see [`chat_body`]) with the least spend that still proves
+/// a chat works. The model's LOWEST effort keeps a reasoning model from thinking on the meter, and
+/// `stream` is left out (non-streaming is the default) so one small JSON answers.
+fn probe_body(model: &DirectModel) -> Value {
+    let say_ok = [ChatMessage {
+        role: "user".into(),
+        content: "Reply with OK.".into(),
+    }];
+    let mut body = chat_body(
+        model,
+        model.effort_levels.first().map(String::as_str),
+        &say_ok,
+        false,
+        None,
+        // A 200 with empty content and finish_reason "length" still proves the key can chat.
+        16,
+    );
+    if let Some(map) = body.as_object_mut() {
+        map.remove("stream");
+    }
+    body
+}
+
+/// The models to try for the test chat, cheapest first: the catalogue rows the key lists, or every
+/// row when the listing was refused (or named none PM knows), so Luna is tried anyway.
+fn probe_order(listed: &[String]) -> Vec<&'static DirectModel> {
+    let all = direct_models::models(crate::llm_gateway::CloudProvider::OpenAi);
+    let mut rows: Vec<&DirectModel> = all
+        .iter()
+        .filter(|m| listed.is_empty() || listed.contains(&m.id))
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.price_out + a.price_in)
+            .partial_cmp(&(b.price_out + b.price_in))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    rows
+}
+
+/// Send the test chat. The key never appears in a URL, a log or an error. One small paid request
+/// (about a millionth of a dollar); it is not written to the usage log.
+async fn send_probe(key: &str, chat_url: &str, model: &DirectModel) -> Probe {
+    // A reply this size is a proxy's page or a runaway; the real answer is a few hundred bytes.
+    const MAX_BODY: usize = 64 * 1024;
     let request = cloud_openai::bearer(
         cloud_openai::http()
-            .get(MODELS_ENDPOINT)
+            .post(chat_url)
+            .timeout(std::time::Duration::from_secs(30)),
+        key,
+    )
+    .json(&probe_body(model));
+    let Ok(response) = request.send().await else {
+        return Probe::Untried;
+    };
+    let status = response.status().as_u16();
+    match response.text().await {
+        Ok(t) if t.len() <= MAX_BODY => read_probe(status, &t),
+        _ => Probe::Untried,
+    }
+}
+
+/// Try the test chat on the cheapest model, and once more on the next if the first is gone.
+async fn probe_chat(key: &str, chat_url: &str, listed: &[String]) -> Probe {
+    let mut order = probe_order(listed).into_iter();
+    let mut last = Probe::Untried;
+    for _ in 0..2 {
+        let Some(model) = order.next() else { break };
+        match send_probe(key, chat_url, model).await {
+            Probe::ModelGone => last = Probe::Untried,
+            verdict => return verdict,
+        }
+    }
+    last
+}
+
+/// Ask OpenAI which models the key can see (not a paid request: a plain send through the shared
+/// client, no attribution, no User-Agent, only the auth header), then send ONE tiny test chat so
+/// the verdict is about chatting and not only about listing. A key with no credit lists models
+/// fine and fails every chat, and a read-only key does the same.
+pub(crate) async fn check_key(key: &str) -> KeyCheck {
+    check_key_at(key, &CHECK_URLS).await
+}
+
+async fn check_key_at(key: &str, urls: &CheckUrls) -> KeyCheck {
+    let request = cloud_openai::bearer(
+        cloud_openai::http()
+            .get(urls.models)
             .timeout(std::time::Duration::from_secs(30)),
         key,
     );
@@ -529,16 +655,34 @@ pub(crate) async fn check_key(key: &str) -> KeyCheck {
         Ok(_) => return KeyCheck::of(KeyOutcome::Unexpected(status)),
         Err(_) => return KeyCheck::of(KeyOutcome::Unreachable),
     };
-    let outcome = interpret(status, &body);
-    if outcome == KeyOutcome::Ok {
-        let (listed, listed_total) = listed_models(&body);
-        return KeyCheck {
-            outcome,
-            listed,
-            listed_total,
-        };
+    let listing = interpret(status, &body);
+    let listed_all = if listing == KeyOutcome::Ok {
+        listed_models(&body)
+    } else {
+        (Vec::new(), 0)
+    };
+    // Only a key OpenAI accepted gets a test chat: a rejected, blocked or unreachable one is already
+    // answered, and PM never spends on it.
+    if !matches!(listing, KeyOutcome::Ok | KeyOutcome::Restricted) {
+        return KeyCheck::of(listing);
     }
-    KeyCheck::of(outcome)
+    let (listed, listed_total) = listed_all;
+    let (outcome, note) = match probe_chat(key, urls.chat, &listed).await {
+        Probe::Works => (listing, None),
+        Probe::NoCredit => (KeyOutcome::NoCredit, None),
+        Probe::Refused if listing == KeyOutcome::Ok => {
+            (KeyOutcome::Restricted, Some(KeyNote::ReadOnly))
+        }
+        Probe::Refused => (KeyOutcome::Restricted, Some(KeyNote::NoAccess)),
+        // The listing's verdict stands, said with the note: never a false failure.
+        Probe::ModelGone | Probe::Untried => (listing, Some(KeyNote::ChatUntried)),
+    };
+    KeyCheck {
+        outcome,
+        listed,
+        listed_total,
+        note,
+    }
 }
 
 #[cfg(test)]
@@ -833,6 +977,16 @@ mod tests {
         );
         assert!(text(403, &region).contains("isn't available in your country"));
         assert!(text(403, "{}").contains("isn't allowed to do this"));
+    }
+
+    /// OpenAI's real reply to a chat on a key with no credit (Bobby's unpaid key, 26-11-2026, verbatim;
+    /// it holds no key): it must read as out of credit, never as a rate limit or a bad key.
+    #[test]
+    fn a_real_no_credit_reply_reads_as_out_of_credit() {
+        let body = r#"{"error":{"message":"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.","type":"insufficient_quota","param":null,"code":"credit_balance_exhausted"}}"#;
+        let said = text(429, body);
+        assert!(said.contains("out of credit"), "{said}");
+        assert!(!said.contains("rate-limiting"), "{said}");
     }
 
     #[test]
@@ -1193,5 +1347,416 @@ mod tests {
         );
         let e = run(events).await.err().expect("an error");
         assert!(e.to_string().contains("out of credit"), "{e}");
+    }
+
+    // ---- the key check, end to end against a scripted server on loopback ------------------------
+
+    /// One scripted answer.
+    enum Reply {
+        /// A status and a JSON body.
+        Http(u16, String),
+        /// Accept the connection and hang up with no answer (a dropped connection).
+        Drop,
+    }
+
+    /// OpenAI's real reply to a chat on a key with no credit (Bobby's unpaid key, 26-11-2026).
+    const NO_CREDIT_BODY: &str = r#"{"error":{"message":"You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.","type":"insufficient_quota","param":null,"code":"credit_balance_exhausted"}}"#;
+
+    const ALL_FOUR: &[&str] = &[
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+    ];
+
+    fn listing_of(wires: &[&str]) -> Reply {
+        let data: Vec<Value> = wires.iter().map(|w| json!({"id": w})).collect();
+        Reply::Http(200, json!({"object": "list", "data": data}).to_string())
+    }
+
+    fn openai_error(status: u16, code: &str, kind: &str, message: &str) -> Reply {
+        Reply::Http(status, err_json(code, kind, message))
+    }
+
+    /// What the server saw: the request line's path and the body, per connection, in order.
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Vec<String>)>>>;
+
+    /// Serve the replies in order, one connection each, on loopback. The URLs are for the listing
+    /// and the chat; `Seen` is what each request carried (path, body, lowercased header names). No outside network.
+    fn scripted(replies: Vec<Reply>) -> (CheckUrls, Seen) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Default::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let (head_end, want) = loop {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break (raw.len(), 0);
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..i]).to_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (i + 4, len);
+                    }
+                };
+                while raw.len() < head_end + want {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                let body = String::from_utf8_lossy(&raw[head_end.min(raw.len())..]).to_string();
+                let names: Vec<String> = String::from_utf8_lossy(&raw[..head_end.min(raw.len())])
+                    .lines()
+                    .skip(1)
+                    .filter_map(|l| l.split_once(':'))
+                    .map(|(n, _)| n.trim().to_lowercase())
+                    .collect();
+                log.lock().unwrap().push((path, body, names));
+                match reply {
+                    Reply::Http(status, body) => {
+                        let head = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes());
+                        let _ = sock.write_all(body.as_bytes());
+                        let _ = sock.flush();
+                    }
+                    Reply::Drop => drop(sock),
+                }
+            }
+        });
+        let leak = |tail: &str| -> &'static str {
+            Box::leak(format!("http://127.0.0.1:{port}{tail}").into_boxed_str())
+        };
+        (
+            CheckUrls {
+                models: leak("/v1/models"),
+                chat: leak("/v1/chat/completions"),
+            },
+            seen,
+        )
+    }
+
+    fn chat_ok() -> Reply {
+        Reply::Http(
+            200,
+            r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}"#.into(),
+        )
+    }
+
+    async fn check(replies: Vec<Reply>) -> (KeyCheck, Seen) {
+        let (urls, seen) = scripted(replies);
+        (
+            check_key_at("test-key-not-real-0123456789", &urls).await,
+            seen,
+        )
+    }
+
+    fn chat_bodies(seen: &Seen) -> Vec<Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p.ends_with("/chat/completions"))
+            .map(|(_, b, _)| serde_json::from_str(b).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_listing_and_a_chat_that_both_work_is_ok_with_the_chat_verified() {
+        let (c, seen) = check(vec![listing_of(ALL_FOUR), chat_ok()]).await;
+        assert_eq!(c.outcome, KeyOutcome::Ok);
+        assert_eq!(c.note, None);
+        assert_eq!(c.listed.len(), 4);
+        assert_eq!(c.listed_total, 4);
+        let paths: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(paths, vec!["/v1/models", "/v1/chat/completions"]);
+    }
+
+    #[tokio::test]
+    async fn a_key_with_no_credit_lists_fine_and_reads_as_no_credit_but_is_kept() {
+        // OpenAI's real pair of answers for Bobby's unpaid key.
+        let (c, _) = check(vec![
+            listing_of(ALL_FOUR),
+            Reply::Http(429, NO_CREDIT_BODY.into()),
+        ])
+        .await;
+        assert_eq!(c.outcome, KeyOutcome::NoCredit);
+        assert!(c.outcome.keeps_key(), "the key is valid, so it is saved");
+        assert_eq!(c.note, None);
+        assert_eq!(c.listed.len(), 4, "what the key can see is still reported");
+    }
+
+    #[tokio::test]
+    async fn a_chat_refused_with_403_or_a_missing_scope_is_a_read_only_key() {
+        for reply in [
+            openai_error(403, "", "invalid_request_error", "Forbidden"),
+            openai_error(
+                401,
+                "",
+                "invalid_request_error",
+                "You have insufficient permissions for this operation. Missing scopes: model.request.",
+            ),
+        ] {
+            let (c, _) = check(vec![listing_of(ALL_FOUR), reply]).await;
+            assert_eq!(c.outcome, KeyOutcome::Restricted);
+            assert_eq!(c.note, Some(KeyNote::ReadOnly));
+            assert!(c.outcome.keeps_key());
+            assert_eq!(c.listed.len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn trouble_on_the_test_chat_leaves_the_listings_verdict_with_a_note() {
+        let rate = openai_error(
+            429,
+            "rate_limit_exceeded",
+            "requests",
+            "Rate limit reached for gpt-6-luna.",
+        );
+        for reply in [
+            rate,
+            Reply::Http(503, "<html>down</html>".into()),
+            Reply::Drop,
+            // A portal's 403 page is no verdict on the key.
+            Reply::Http(403, "<html>Forbidden</html>".into()),
+        ] {
+            let (c, _) = check(vec![listing_of(ALL_FOUR), reply]).await;
+            assert_eq!(c.outcome, KeyOutcome::Ok, "never a false failure");
+            assert_eq!(c.note, Some(KeyNote::ChatUntried));
+            assert_eq!(c.listed.len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_the_project_cant_use_moves_on_to_the_next_cheapest_once() {
+        let gone = || {
+            openai_error(
+                404,
+                "model_not_found",
+                "invalid_request_error",
+                "The model `gpt-6-luna` does not exist or you do not have access to it.",
+            )
+        };
+        let (c, seen) = check(vec![listing_of(ALL_FOUR), gone(), chat_ok()]).await;
+        assert_eq!(c.outcome, KeyOutcome::Ok);
+        assert_eq!(c.note, None);
+        let models: Vec<String> = chat_bodies(&seen)
+            .iter()
+            .map(|b| b["model"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(models, vec!["gpt-6-luna", "gpt-6.1-terra"]);
+
+        // Gone twice: the listing's verdict stands, and a third model is never tried.
+        let (c, seen) = check(vec![listing_of(ALL_FOUR), gone(), gone()]).await;
+        assert_eq!(c.outcome, KeyOutcome::Ok);
+        assert_eq!(c.note, Some(KeyNote::ChatUntried));
+        assert_eq!(chat_bodies(&seen).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_chat_goes_to_the_cheapest_model_the_key_lists() {
+        let (_, seen) = check(vec![
+            listing_of(&["gpt-6.2-sol", "gpt-6.2-astra"]),
+            chat_ok(),
+        ])
+        .await;
+        let bodies = chat_bodies(&seen);
+        assert_eq!(bodies[0]["model"], "gpt-6.2-sol");
+        assert_eq!(
+            bodies[0]["reasoning_effort"], "low",
+            "a model with no `none` level gets its lowest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_pm_cant_read_still_gets_luna_and_a_working_chat_stays_restricted() {
+        let (c, seen) = check(vec![
+            openai_error(
+                403,
+                "",
+                "invalid_request_error",
+                "You lack the required permission",
+            ),
+            chat_ok(),
+        ])
+        .await;
+        assert_eq!(
+            c.outcome,
+            KeyOutcome::Restricted,
+            "the listing is still refused"
+        );
+        assert_eq!(c.note, None);
+        assert_eq!(chat_bodies(&seen)[0]["model"], "gpt-6-luna");
+
+        // No credit is found through a refused listing too.
+        let (c, _) = check(vec![
+            openai_error(403, "", "invalid_request_error", "Forbidden"),
+            Reply::Http(429, NO_CREDIT_BODY.into()),
+        ])
+        .await;
+        assert_eq!(c.outcome, KeyOutcome::NoCredit);
+
+        // Neither listing nor chat.
+        let (c, _) = check(vec![
+            openai_error(403, "", "invalid_request_error", "Forbidden"),
+            openai_error(403, "", "invalid_request_error", "Forbidden"),
+        ])
+        .await;
+        assert_eq!(c.outcome, KeyOutcome::Restricted);
+        assert_eq!(c.note, Some(KeyNote::NoAccess));
+    }
+
+    #[tokio::test]
+    async fn a_key_openai_turns_away_is_never_charged_a_test_chat() {
+        for listing in [
+            openai_error(
+                401,
+                "invalid_api_key",
+                "invalid_request_error",
+                "Incorrect API key",
+            ),
+            openai_error(
+                403,
+                "unsupported_country_region_territory",
+                "x",
+                "Country, region, or territory not supported",
+            ),
+            Reply::Http(503, String::new()),
+        ] {
+            let (c, seen) = check(vec![listing]).await;
+            assert!(!c.outcome.keeps_key());
+            assert_eq!(seen.lock().unwrap().len(), 1, "only the listing was sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_chat_body_is_exactly_this_and_nothing_more() {
+        let (_, seen) = check(vec![listing_of(ALL_FOUR), chat_ok()]).await;
+        let (path, raw, _) = seen.lock().unwrap()[1].clone();
+        assert_eq!(path, "/v1/chat/completions");
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": "gpt-6-luna",
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "store": false,
+                "max_completion_tokens": 16,
+                "reasoning_effort": "none",
+            })
+        );
+        for absent in [
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "temperature",
+            "user",
+        ] {
+            assert!(body.get(absent).is_none(), "{absent} must not be sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_chat_carries_the_key_and_no_attribution_or_user_agent() {
+        let (_, seen) = check(vec![listing_of(ALL_FOUR), chat_ok()]).await;
+        for (path, _, names) in seen.lock().unwrap().iter() {
+            assert!(names.contains(&"authorization".to_string()), "{path}");
+            // Built from parts so the attribution scan in cloud_openai.rs doesn't match this test.
+            for banned in [
+                concat!("http-", "referer"),
+                concat!("x-", "title"),
+                concat!("user-", "agent"),
+                "openai-organization",
+            ] {
+                assert!(!names.iter().any(|n| n == banned), "{path} sent {banned}");
+            }
+            let extra: Vec<&String> = names
+                .iter()
+                .filter(|n| {
+                    ![
+                        "authorization",
+                        "host",
+                        "content-type",
+                        "content-length",
+                        "accept",
+                    ]
+                    .contains(&n.as_str())
+                })
+                .collect();
+            assert!(extra.is_empty(), "{path} sent unexpected headers {extra:?}");
+        }
+    }
+
+    #[test]
+    fn the_test_chat_order_is_cheapest_first_over_the_models_the_key_lists() {
+        let ids = |listed: &[&str]| -> Vec<String> {
+            let listed: Vec<String> = listed.iter().map(|s| s.to_string()).collect();
+            probe_order(&listed).iter().map(|m| m.id.clone()).collect()
+        };
+        assert_eq!(
+            ids(&[]),
+            vec![
+                "openai/gpt-6-luna",
+                "openai/gpt-6.1-terra",
+                "openai/gpt-6.2-sol",
+                "openai/gpt-6.2-astra"
+            ],
+            "nothing listed: every row, Luna first"
+        );
+        assert_eq!(
+            ids(&["openai/gpt-6.2-astra", "openai/gpt-6.2-sol"]),
+            vec!["openai/gpt-6.2-sol", "openai/gpt-6.2-astra"]
+        );
+    }
+
+    #[test]
+    fn a_test_chat_reply_reads_by_status_and_openais_own_words() {
+        assert_eq!(read_probe(200, ""), Probe::Works);
+        assert_eq!(read_probe(429, NO_CREDIT_BODY), Probe::NoCredit);
+        for code in ["insufficient_quota", "project_spend_limit_exceeded"] {
+            assert_eq!(
+                read_probe(429, &err_json(code, "x", "spend")),
+                Probe::NoCredit,
+                "{code}"
+            );
+        }
+        assert_eq!(
+            read_probe(429, &err_json("rate_limit_exceeded", "requests", "slow")),
+            Probe::Untried
+        );
+        assert_eq!(read_probe(429, ""), Probe::Untried);
+        assert_eq!(read_probe(500, ""), Probe::Untried);
+        assert_eq!(read_probe(404, ""), Probe::ModelGone);
+        assert_eq!(read_probe(403, &err_json("", "x", "no")), Probe::Refused);
+        assert_eq!(read_probe(403, "<html>no</html>"), Probe::Untried);
+        assert_eq!(
+            read_probe(401, &err_json("invalid_api_key", "x", "Incorrect")),
+            Probe::Untried,
+            "the listing just worked, so this is not a verdict"
+        );
+        assert_eq!(read_probe(400, &err_json("", "x", "bad")), Probe::Untried);
     }
 }

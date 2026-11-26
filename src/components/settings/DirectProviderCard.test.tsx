@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({
   setDirectOptIn: vi.fn(),
   saveDirectKey: vi.fn(),
+  recheckDirectKey: vi.fn(),
   clearDirectKey: vi.fn(),
   setDirectDataSharing: vi.fn(),
 }));
@@ -20,6 +21,7 @@ const m = vi.hoisted(() => ({
 vi.mock("../../lib/ipc", () => ({
   setDirectOptIn: (...a: unknown[]) => m.setDirectOptIn(...a),
   saveDirectKey: (...a: unknown[]) => m.saveDirectKey(...a),
+  recheckDirectKey: (...a: unknown[]) => m.recheckDirectKey(...a),
   clearDirectKey: (...a: unknown[]) => m.clearDirectKey(...a),
   setDirectDataSharing: (...a: unknown[]) => m.setDirectDataSharing(...a),
 }));
@@ -228,6 +230,181 @@ describe("checking a key", () => {
     submit();
     await waitFor(() => expect(screen.getByText(/^Saved\. This key is restricted/)).toBeTruthy());
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps a key with no credit, says so as a status and not an alert, and offers Check again", async () => {
+    m.saveDirectKey.mockResolvedValue({
+      outcome: "no_credit",
+      saved: true,
+      listed: ["openai/gpt-6.2-sol"],
+      listed_total: 90,
+    });
+    nextView.current = openaiView({
+      key_check: {
+        at: "x",
+        outcome: "no_credit",
+        listed: ["openai/gpt-6.2-sol"],
+        listed_total: 90,
+      },
+    });
+    render(<Harness initial={openaiView({ key: "absent", key_check: null })} />);
+    fireEvent.change(keyField(), { target: { value: "sk-nocredit-0123456789abcdef" } });
+    submit();
+    const line = await screen.findByText(
+      "Saved. Your OpenAI account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.",
+    );
+    expect(line.closest('[role="status"]')).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Check again for OpenAI" })).toBeTruthy();
+  });
+
+  it("says a read-only key can't chat, and a chat that couldn't be tried is a note, not a failure", async () => {
+    m.saveDirectKey.mockResolvedValue({
+      outcome: "restricted",
+      saved: true,
+      listed: ["openai/gpt-6.2-sol"],
+      listed_total: 90,
+      note: "read_only",
+    });
+    nextView.current = openaiView({
+      key_check: {
+        at: "x",
+        outcome: "restricted",
+        listed: ["openai/gpt-6.2-sol"],
+        listed_total: 90,
+        note: "read_only",
+      },
+    });
+    render(<Harness initial={openaiView({ key: "absent", key_check: null })} />);
+    fireEvent.change(keyField(), { target: { value: "sk-readonly-0123456789abcdef" } });
+    submit();
+    expect(
+      await screen.findByText(
+        "Saved. This key can list models but can't chat. Give it access to chat in your OpenAI project, then press Check again.",
+      ),
+    ).toBeTruthy();
+    cleanup();
+
+    m.saveDirectKey.mockResolvedValue({ ...OK, note: "chat_untried" });
+    nextView.current = openaiView({
+      key_check: {
+        at: "x",
+        outcome: "ok",
+        listed: OK.listed,
+        listed_total: 40,
+        note: "chat_untried",
+      },
+    });
+    render(<Harness initial={openaiView({ key: "absent", key_check: null })} />);
+    fireEvent.change(keyField(), { target: { value: "sk-untried-0123456789abcdef" } });
+    submit();
+    expect(
+      await screen.findByText(
+        /Key works\. 2 OpenAI models are ready to use\. PM couldn't try a chat just now\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/credit/)).toBeNull();
+    // A caveat, not a verified tick.
+    expect(screen.queryByText(/✓/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Check again for OpenAI" })).toBeTruthy();
+  });
+
+  it("has no Check again for a key that plainly works", () => {
+    render(<Harness initial={openaiView()} />);
+    expect(screen.queryByRole("button", { name: "Check again for OpenAI" })).toBeNull();
+  });
+
+  it("turns no credit into working with Check again: one call, the same busy button, focus kept", async () => {
+    const noCredit = openaiView({
+      key_check: { at: "x", outcome: "no_credit", listed: OK.listed, listed_total: 40 },
+    });
+    let finish: (r: KeyCheckResult) => void = () => {};
+    m.recheckDirectKey.mockReturnValue(new Promise<KeyCheckResult>((r) => (finish = r)));
+    nextView.current = openaiView();
+    render(<Harness initial={noCredit} />);
+    // A key saved earlier: the stored line has no "Saved." in front of it.
+    expect(
+      screen.getByText(/^Your OpenAI account is out of credit or at a spend limit/),
+    ).toBeTruthy();
+    const button = screen.getByRole("button", { name: "Check again for OpenAI" });
+    fireEvent.click(button);
+    const busy = await screen.findByRole("button", { name: "Check again for OpenAI" });
+    expect(busy).toBe(button);
+    expect(busy.textContent).toBe("Checking...");
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect((busy as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(busy);
+    fireEvent.click(busy);
+    expect(m.recheckDirectKey).toHaveBeenCalledTimes(1);
+    expect(m.recheckDirectKey).toHaveBeenCalledWith("openai");
+    await act(async () => finish(OK));
+    await waitFor(() => expect(screen.getByText(/Key works\. 2 OpenAI models/)).toBeTruthy());
+    expect(screen.queryByText(/out of credit or at a spend limit/)).toBeNull();
+    // Nothing left to recheck: the button goes, and focus lands on the key field and not <body>.
+    expect(screen.queryByRole("button", { name: "Check again for OpenAI" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(keyField()));
+  });
+
+  it("keeps Check again when the credit isn't there yet, and says a refusal of a saved key without 'Not saved'", async () => {
+    const noCredit = openaiView({
+      key_check: { at: "x", outcome: "no_credit", listed: OK.listed, listed_total: 40 },
+    });
+    m.recheckDirectKey.mockResolvedValueOnce({
+      outcome: "no_credit",
+      saved: true,
+      listed: OK.listed,
+      listed_total: 40,
+    });
+    nextView.current = noCredit;
+    render(<Harness initial={noCredit} />);
+    fireEvent.click(screen.getByRole("button", { name: "Check again for OpenAI" }));
+    await waitFor(() => expect(m.recheckDirectKey).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "Check again for OpenAI" })).toBeTruthy();
+
+    m.recheckDirectKey.mockResolvedValueOnce({
+      outcome: "unreachable",
+      saved: true,
+      listed: [],
+      listed_total: 0,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Check again for OpenAI" }));
+    expect(
+      await screen.findByText(
+        "PM couldn't reach OpenAI to check it. Check your connection and try again.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Not saved/)).toBeNull();
+    // Nothing was stored, so the stored verdict's button still stands, and focus has not moved off it.
+    const again = screen.getByRole("button", { name: "Check again for OpenAI" });
+    expect(again).toBeTruthy();
+    expect(document.activeElement).not.toBe(keyField());
+  });
+
+  it("announces a repeated verdict: the old one leaves while the check is out and comes back new", async () => {
+    const noCredit = openaiView({
+      key_check: { at: "x", outcome: "no_credit", listed: OK.listed, listed_total: 40 },
+    });
+    let finish: (r: KeyCheckResult) => void = () => {};
+    m.recheckDirectKey.mockReturnValue(new Promise<KeyCheckResult>((r) => (finish = r)));
+    nextView.current = noCredit;
+    render(<Harness initial={noCredit} />);
+    const line = /^Your OpenAI account is out of credit or at a spend limit/;
+    expect(screen.getByText(line)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Check again for OpenAI" }));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Check again for OpenAI" })
+          .getAttribute("aria-disabled"),
+      ).toBe("true"),
+    );
+    // Without this the identical answer would change nothing in the live region.
+    expect(screen.queryByText(line)).toBeNull();
+    await act(async () =>
+      finish({ outcome: "no_credit", saved: true, listed: OK.listed, listed_total: 40 }),
+    );
+    expect(await screen.findByText(line)).toBeTruthy();
   });
 
   it("asks for a key before checking an empty field", () => {

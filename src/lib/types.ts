@@ -72,11 +72,16 @@ export type RoleName = "chat" | "background";
 export type KeyOutcome =
   | "ok"
   | "restricted"
+  | "no_credit"
   | "rejected"
   | "region_blocked"
   | "malformed"
   | "unreachable"
   | { unexpected: number };
+/** An extra word about a verdict. OPEN like `KeyOutcome`: an unknown one is no note. `chat_untried`:
+ *  the test chat couldn't be tried, so the model listing's verdict stands. `read_only`: the key lists
+ *  models but can't chat. `no_access`: it can do neither. */
+export type KeyNote = "chat_untried" | "read_only" | "no_access";
 /** A role moved off a provider, in the same transaction as the change that moved it. `to` is
  *  "openrouter" in this version. The UI never computes a move: this is the command's own answer. */
 export interface RoleMove {
@@ -90,6 +95,7 @@ export interface KeyCheckResult {
   saved: boolean;
   listed: string[];
   listed_total: number;
+  note?: KeyNote | string | null;
 }
 /** The last verdict as stored. */
 export interface StoredKeyCheck {
@@ -97,6 +103,7 @@ export interface StoredKeyCheck {
   outcome: KeyOutcome;
   listed: string[];
   listed_total: number;
+  note?: KeyNote | string | null;
 }
 /** One bundled catalogue row. Prices are USD per MILLION tokens. */
 export interface DirectModelView {
