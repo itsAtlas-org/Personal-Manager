@@ -159,6 +159,7 @@ function ConversationRow({
         <button
           type="button"
           onClick={() => onMove(c)}
+          data-help="sidebar-chat-move"
           title="Move to a project"
           aria-label={`Move conversation “${c.title}” to a project`}
           className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] px-1.5 py-0.5 text-xs text-ink4 opacity-0 transition hover:bg-surface hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
@@ -168,6 +169,7 @@ function ConversationRow({
         <button
           type="button"
           onClick={() => onDelete(c)}
+          data-help="sidebar-chat-delete"
           title="Delete chat"
           aria-label={`Delete conversation “${c.title}”`}
           className="inline-flex min-h-[var(--tap-min,24px)] min-w-[var(--tap-min,24px)] items-center justify-center rounded-[var(--radius-sm)] px-1.5 py-0.5 text-xs text-ink4 opacity-0 transition hover:bg-surface hover:text-st-due focus-visible:opacity-100 group-hover:opacity-100"
@@ -395,6 +397,7 @@ export function Sidebar({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize sidebar"
+        data-help="sidebar-resize"
         title="Drag to resize · drag to the edge to hide"
         className={`absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize touch-none transition-colors hover:bg-[color-mix(in_oklab,var(--accent)_45%,transparent)] ${
           resizing ? "bg-[color-mix(in_oklab,var(--accent)_60%,transparent)]" : ""
@@ -550,6 +553,7 @@ export function Sidebar({
                 </p>
                 <button
                   onClick={onNewProjectChat}
+                  data-help="sidebar-new-project-chat"
                   title="New conversation in this project"
                   aria-label="New conversation in this project"
                   className="shrink-0 rounded-[var(--radius-sm)] px-1 py-0.5 text-xs text-ink4 transition hover:bg-surface hover:text-ink"
@@ -697,12 +701,14 @@ export function Sidebar({
         )}
         <button
           onClick={onOpenWhatsNew}
+          data-help="sidebar-whats-new"
           className="w-full rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm text-ink3 hover:bg-surface hover:text-ink"
         >
           What's New
         </button>
         <button
           onClick={onOpenSettings}
+          data-help="sidebar-settings"
           className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-3 py-2 text-left text-sm text-ink3 hover:bg-surface hover:text-ink"
         >
           <span className="min-w-0 flex-1 truncate">Settings</span>
