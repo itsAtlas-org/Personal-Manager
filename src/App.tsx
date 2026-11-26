@@ -10,6 +10,8 @@ import { isAnyDialogOpen } from "./lib/useDialogLayer";
 import { CalendarView } from "./components/calendar/CalendarView";
 import { watchHeldDeletes } from "./components/calendar/edit/useEventWrites";
 import { ChatView } from "./components/ChatView";
+import { DirectRouteChip } from "./components/DirectRouteChip";
+import { chatUpgradeApplies, footerRow } from "./lib/directProviders";
 import { ProviderChip } from "./components/ProviderChip";
 import { ThinkingToggle } from "./components/ThinkingToggle";
 import { FallbackStrip } from "./components/FallbackStrip";
@@ -1005,6 +1007,10 @@ export default function App() {
   // chosen model to primary, keep the others as auto-switch fallbacks, then re-read settings so the picker
   // and sidebar tag reflect it.
   function handleUpgrade(modelId: string) {
+    // The meter's larger-model list is OpenRouter's. A chat on a provider of the person's own has no
+    // such list (the backend sends none), and writing one here would change the OpenRouter list for
+    // a role that never reads it.
+    if (!chatUpgradeApplies(settings)) return Promise.resolve();
     const rest = (settings?.chat_models ?? []).filter((m) => m !== modelId);
     // Return the promise so the context meter can re-read AFTER the switch has landed.
     return setChatModels([modelId, ...rest])
@@ -1217,16 +1223,12 @@ export default function App() {
                   onOpenSettings={() => openSettings()}
                   onOpenWhatsNew={() => setShowWhatsNew(true)}
                   onOpenPalette={() => setShowPalette(true)}
-                  chatModel={settings?.chat_models[0] ?? null}
-                  backgroundModel={settings?.background_models[0] ?? null}
-                  chatFallbacks={
-                    settings?.chat_auto_switch ? Math.max(0, settings.chat_models.length - 1) : 0
-                  }
-                  backgroundFallbacks={
-                    settings?.background_auto_switch
-                      ? Math.max(0, settings.background_models.length - 1)
-                      : 0
-                  }
+                  chatModel={footerRow(settings, "chat").id}
+                  backgroundModel={footerRow(settings, "background").id}
+                  chatFallbacks={footerRow(settings, "chat").fallbacks}
+                  backgroundFallbacks={footerRow(settings, "background").fallbacks}
+                  chatVia={footerRow(settings, "chat").via}
+                  backgroundVia={footerRow(settings, "background").via}
                   localAi={localAi}
                 />
               )}
@@ -1376,6 +1378,7 @@ export default function App() {
                             onUpgrade={handleUpgrade}
                           />
                           <ProviderChip status={localAi} />
+                          <DirectRouteChip settings={settings} localAi={localAi} />
                           <ThinkingToggle status={localAi} />
                         </div>
                       }

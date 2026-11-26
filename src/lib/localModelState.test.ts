@@ -105,6 +105,7 @@ describe("localModelActivity", () => {
           local_model: "gemma3:4b",
           effective: "cloud_for_power",
           cloud_key: "present",
+          cloud_provider: "openrouter",
         },
       },
     });
@@ -124,6 +125,7 @@ describe("awaitsLocalModel", () => {
     local_model: null,
     effective: "nothing",
     cloud_key: "present",
+    cloud_provider: "openrouter",
     ...over,
   });
   const withRoles = (chat: PowerRoleView, background: PowerRoleView) =>

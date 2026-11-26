@@ -222,15 +222,22 @@ Where a `CHECK (x IN (…))` constrains a column, one Rust type owns the string 
 path nobody exercised. Relaxing a `CHECK` afterwards is a `writable_schema` text-patch — see the
 AGENTS.md rule-3 gotcha — which is far more expensive than getting the set right once.
 
-### I-13 · Models with no zero-data-retention endpoint are uncallable, and the carve-outs are visible — **Held**
+### I-13 · Models with no zero-data-retention endpoint are uncallable ON OPENROUTER, and the carve-outs are visible — **Held**
 
-PM pins `zdr: true` and `data_collection: "deny"` on every request, and the catalogue is filtered
-to models with a ZDR endpoint. A model that cannot be served under ZDR is therefore not merely
-discouraged — it cannot be called at all.
+PM pins `zdr: true` and `data_collection: "deny"` on every OpenRouter request, and the catalogue is
+filtered to models with a ZDR endpoint. A model that cannot be served under ZDR is therefore not
+merely discouraged — it cannot be called at all through OpenRouter.
+
+A provider key the person adds themselves (today: their own OpenAI key) follows THAT provider's
+terms, which are not zero data retention. That carve-out is explicit and bounded: it is opt-in per
+provider and off by default; the warning is shown wherever the provider is chosen; the setting that
+points a role at it is read through an allow-list and demoted to OpenRouter while the provider isn't
+opted in; the On battery consent is kept per provider, so a yes about a zero-retention route never
+covers one that isn't; and a mod can never use it (`serves_a_mod` refuses every non-OpenRouter arm).
 
 **Co-signers.** Any carve-out from that filter (today: router models, whose pins apply to whatever
-they resolve to) is named in code with its reason. A silent carve-out is a privacy regression that
-looks like a catalogue bug.
+they resolve to, and a person's own provider key) is named in code with its reason. A silent
+carve-out is a privacy regression that looks like a catalogue bug.
 
 ### I-14 · The DB mutex is not re-entrant — **Held**
 

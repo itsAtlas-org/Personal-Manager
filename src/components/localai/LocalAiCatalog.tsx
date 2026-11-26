@@ -227,8 +227,8 @@ export function LocalAiCatalog({
       <SectionInfo title="Does a local model cost anything?">
         <p>
           Local models don't appear in Settings → AI &amp; Models → Usage &amp; cost — that ledger
-          tracks only your paid cloud (OpenRouter) calls. Running a model on your own machine has no
-          per-use cost to count.
+          tracks only your paid cloud calls. Running a model on your own machine has no per-use cost
+          to count.
         </p>
       </SectionInfo>
     </div>

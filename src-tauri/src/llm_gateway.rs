@@ -35,7 +35,7 @@ use crate::local_slot::{
 };
 use crate::openai_compat::{self, LocalFailKind, LocalFailure};
 use crate::openrouter::{self, ChatMessage, Completion};
-use crate::power::{Consent, PowerScope, PowerSettings, PowerSnapshot, PowerState};
+use crate::power::{Consent, DirectConsent, PowerScope, PowerSettings, PowerSnapshot, PowerState};
 use crate::secret::Secret;
 use crate::settings::{
     effective_models, BACKGROUND_AUTO_SWITCH_KEY, BACKGROUND_MODELS_KEY, CHAT_AUTO_SWITCH_KEY,
@@ -45,7 +45,8 @@ use crate::{db, secrets, AppState};
 
 /// Which of PM's two AI roles a request belongs to. Chat is the interactive, user-facing model;
 /// Background is every unattended `complete()` consumer (summaries, titles, briefing, proposals).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     Chat,
     Background,
@@ -142,6 +143,11 @@ pub struct RuntimeContext {
     /// The roles the user has agreed may go to the cloud on battery (per role: see
     /// [`crate::power::Consent`]).
     pub consent: Consent,
+    /// The same for the providers a person reaches with their own key, kept apart so a yes given
+    /// for a zero-retention OpenRouter route never quietly covers a provider that isn't.
+    pub direct_consent: DirectConsent,
+    /// The provider each role is on now. A role's consent is the one given for THIS provider.
+    pub providers: RoleProviders,
     /// "Keep using local until I quit PM" is on.
     pub keep_local: bool,
 }
@@ -165,8 +171,18 @@ impl RuntimeContext {
             battery_low: true,
             scope: settings.scope,
             consent: settings.consent,
+            direct_consent: settings.direct_consent,
+            providers: settings.providers,
             keep_local,
         }
+    }
+
+    /// Whether the user has said yes to the cloud on battery for this role, for the provider the
+    /// role is on NOW: OpenRouter's consent for an OpenRouter role, that provider's own for a direct
+    /// one. "Chat said yes on OpenRouter, then moved to OpenAI" is therefore asked again, and the
+    /// question names OpenAI.
+    pub fn consent_for(&self, role: Role) -> bool {
+        crate::power::consent_for(role, &self.providers, self.consent, &self.direct_consent)
     }
 
     /// The one builder [`resolve`] uses. While the latch is not BatteryLow — which is nearly always
@@ -181,7 +197,7 @@ impl RuntimeContext {
 
     /// Whether the policy moves this role to the cloud right now.
     pub fn moves(&self, role: Role) -> bool {
-        self.battery_low && self.scope.covers(role) && self.consent.covers(role) && !self.keep_local
+        self.battery_low && self.scope.covers(role) && self.consent_for(role) && !self.keep_local
     }
 }
 
@@ -365,31 +381,148 @@ pub fn power_route(role: Role, ctx: &RuntimeContext, blocked: Option<PowerBlocke
         return PowerRoute::KeptLocal;
     }
     // Per role: a yes about background work is not a yes about chat.
-    if !ctx.consent.covers(role) {
+    if !ctx.consent_for(role) {
         return PowerRoute::NeedsConsent;
     }
     PowerRoute::Cloud
 }
 
-/// The one owner of the per-role key rule, shared by [`cloud_arm`] and the status: chat uses the
-/// primary key; background prefers the dedicated background key and falls back to the primary —
-/// exactly as the call sites did before this seam.
-fn role_key(role: Role) -> Result<Option<Secret>> {
+/// Settings keys for the cloud provider each role uses: "openrouter" or a direct provider's token
+/// ("openai"). Absent or anything else is OpenRouter ([`CloudProvider::from_setting`]), so a
+/// config-less install, and every install from before this setting, is untouched. Orthogonal to the
+/// routing keys above: "cloud" there means "this role's cloud provider".
+pub(crate) const CHAT_CLOUD_PROVIDER_KEY: &str = "chat_cloud_provider";
+pub(crate) const BACKGROUND_CLOUD_PROVIDER_KEY: &str = "background_cloud_provider";
+
+/// The role's cloud-provider setting key. Exhaustive, so a third role fails to compile here.
+pub(crate) fn cloud_provider_key(role: Role) -> &'static str {
     match role {
-        Role::Chat => secrets::get_openrouter_key(),
-        Role::Background => secrets::get_background_or_primary_key(),
+        Role::Chat => CHAT_CLOUD_PROVIDER_KEY,
+        Role::Background => BACKGROUND_CLOUD_PROVIDER_KEY,
     }
 }
 
-/// Whether this role has a cloud key — an in-memory read of the secrets cache.
+/// The role's stored provider through the allow-list, with no regard for whether it may be used:
+/// what the Settings state command shows as "stored", beside [`role_cloud_provider`]'s "effective".
+/// DB read only.
+pub(crate) fn stored_role_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    Ok(CloudProvider::from_setting(
+        db::get_setting(conn, cloud_provider_key(role))?.as_deref(),
+    ))
+}
+
+/// The provider that actually answers the role: its stored one, demoted to OpenRouter when it is a
+/// direct provider the person has not opted into. The setters keep that true, so a demotion here is
+/// defence in depth for a restored backup or a hand-edited row, and it is never silent: the state
+/// command reports both the stored and the effective value. DB read only.
+pub(crate) fn role_cloud_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    let stored = stored_role_provider(conn, role)?;
+    if stored.is_direct() && !crate::direct_providers::opted_in(conn, stored)? {
+        return Ok(CloudProvider::OpenRouter);
+    }
+    Ok(stored)
+}
+
+/// Both roles' effective providers, read once. What the power policy and its status copy need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoleProviders {
+    pub chat: CloudProvider,
+    pub background: CloudProvider,
+}
+
+impl Default for RoleProviders {
+    fn default() -> Self {
+        Self::OPENROUTER
+    }
+}
+
+impl RoleProviders {
+    /// Both roles on OpenRouter: every install's state until it opts into a provider of its own.
+    pub const OPENROUTER: Self = Self {
+        chat: CloudProvider::OpenRouter,
+        background: CloudProvider::OpenRouter,
+    };
+
+    pub(crate) fn read(conn: &Connection) -> Result<Self> {
+        Ok(Self {
+            chat: role_cloud_provider(conn, Role::Chat)?,
+            background: role_cloud_provider(conn, Role::Background)?,
+        })
+    }
+
+    pub fn for_role(&self, role: Role) -> CloudProvider {
+        match role {
+            Role::Chat => self.chat,
+            Role::Background => self.background,
+        }
+    }
+}
+
+/// The one owner of the per-role key rule, shared by [`cloud_arm`] and the status. OpenRouter: chat
+/// uses the primary key; background prefers the dedicated background key and falls back to the
+/// primary, exactly as the call sites did before this seam. A direct provider has one key for both
+/// roles (it has no separate background key), read through its row in the provider table.
+///
+/// Keychain only, no DB: so it is safe with or without the DB guard, which is not true of
+/// [`role_cloud_provider`] (see [`background_ready`]).
+fn key_for(provider: CloudProvider, role: Role) -> Result<Option<Secret>> {
+    match provider {
+        CloudProvider::OpenRouter => match role {
+            Role::Chat => secrets::get_openrouter_key(),
+            Role::Background => secrets::get_background_or_primary_key(),
+        },
+        direct => match crate::direct_providers::provider(direct) {
+            Some(row) => (row.get_key)(),
+            // A provider with no call yet has no key PM could read, which is "no key".
+            None => Ok(None),
+        },
+    }
+}
+
+/// Whether `candidate` is one of the stored OpenRouter keys (primary or background). The key check
+/// for a direct provider asks this BEFORE any request, so an OpenRouter key pasted into the wrong
+/// box is never sent to another company as a Bearer token. A comparison, so no prefix guess is
+/// needed; an unreadable keychain says no (the direct key's own write would fail there too).
+pub(crate) fn is_a_stored_openrouter_key(candidate: &str) -> bool {
+    let stored = [
+        secrets::get_openrouter_key(),
+        secrets::get_openrouter_background_key(),
+    ];
+    let stored: Vec<&str> = stored
+        .iter()
+        .filter_map(|k| k.as_ref().ok().and_then(|k| k.as_ref()))
+        .map(|k| k.expose())
+        .collect();
+    is_one_of(candidate, &stored)
+}
+
+/// The comparison alone, pure so it has a test: trimmed, and an empty candidate matches nothing.
+fn is_one_of(candidate: &str, stored: &[&str]) -> bool {
+    let candidate = candidate.trim();
+    !candidate.is_empty() && stored.iter().any(|s| s.trim() == candidate)
+}
+
+/// The role's effective provider from the open store, under a SHORT lock that is gone before this
+/// returns. `Err` when the store is closed or unreadable.
+fn role_provider_now(app: &AppHandle, role: Role) -> Result<CloudProvider> {
+    let state = app.state::<AppState>();
+    let conn = state.conn()?;
+    role_cloud_provider(&conn, role)
+}
+
+/// Whether this role has a cloud key — a read of the role's provider setting, then the keychain's
+/// in-memory cache.
 ///
 /// THE one place that answers "can this role reach a cloud provider": the first-run gate, the three
 /// follow-up jobs' `ready` checks and the On battery policy all ask here instead of reading a key
-/// themselves (a source scan pins it), so teaching it a second provider is one edit. It takes the
-/// app because which provider a role uses will be a setting, read from the store; today every role
-/// is OpenRouter and the answer is exactly the OpenRouter key's.
-pub(crate) fn key_presence(_app: &AppHandle, role: Role) -> KeyPresence {
-    match role_key(role) {
+/// themselves (a source scan pins it). It takes a short `state.conn()` lock itself, so it MUST NOT be
+/// called with the DB guard held: the mutex is not reentrant, and that is a self-deadlock. A closed
+/// store or a read error is `Unreadable`, never `Absent`: the role may well have a key.
+pub(crate) fn key_presence(app: &AppHandle, role: Role) -> KeyPresence {
+    let Ok(provider) = role_provider_now(app, role) else {
+        return KeyPresence::Unreadable;
+    };
+    match key_for(provider, role) {
         Ok(Some(_)) => KeyPresence::Present,
         Ok(None) => KeyPresence::Absent,
         Err(_) => KeyPresence::Unreadable,
@@ -397,15 +530,29 @@ pub(crate) fn key_presence(_app: &AppHandle, role: Role) -> KeyPresence {
 }
 
 /// Whether this role has a usable cloud key: a key is there. No key, and a keychain that can't be
-/// read, both say no — the callers are gates that fail closed.
+/// read, both say no — the callers are gates that fail closed. Same lock rule as [`key_presence`].
 pub(crate) fn role_has_cloud(app: &AppHandle, role: Role) -> bool {
     key_presence(app, role) == KeyPresence::Present
 }
 
 /// [`role_has_cloud`] for a caller that reports a keychain it can't read as an error instead of
-/// folding it into "no" (the first-run status does, and always has).
-pub(crate) fn try_role_has_cloud(_app: &AppHandle, role: Role) -> Result<bool> {
-    Ok(role_key(role)?.is_some())
+/// folding it into "no" (the first-run status does, and always has). Same lock rule as
+/// [`key_presence`]: call it BEFORE taking the guard.
+pub(crate) fn try_role_has_cloud(app: &AppHandle, role: Role) -> Result<bool> {
+    let provider = role_provider_now(app, role)?;
+    Ok(key_for(provider, role)?.is_some())
+}
+
+/// Whether the vault is open and the Background role has a cloud key: the gate the three
+/// follow-up jobs (chat summary, preferences, title) share.
+///
+/// The `let` is the point. Written inline as `conn().is_ok() && role_has_cloud(..)`, the guard that
+/// `conn()` returns is a temporary that lives to the end of the statement, so it would still be held
+/// while `role_has_cloud` took the lock again to read the role's provider, and the non-reentrant
+/// mutex would deadlock the app. A source scan pins the call sites.
+pub(crate) fn background_ready(app: &AppHandle) -> bool {
+    let open = app.state::<AppState>().conn().is_ok();
+    open && role_has_cloud(app, Role::Background)
 }
 
 /// Which provider actually served a completion — recorded on every usage row so cost/latency
@@ -665,25 +812,55 @@ pub(crate) fn ping_status(app: &AppHandle) {
 /// requests fall under. Every arm is OpenRouter today; the others are the providers a person's own
 /// key will be able to reach, named now so the seams (the two dispatch functions below, and what a
 /// mod may use) decide about them in one place each instead of by accident later.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// Nothing builds a non-OpenRouter arm yet; the tests do, and the provider that does comes next.
-#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
     OpenRouter,
+    // No arm for these two yet (Gemini is the next PR, Anthropic the one after); the tests build them.
+    #[allow(dead_code)]
     Anthropic,
+    #[allow(dead_code)]
     Gemini,
     OpenAi,
 }
 
 impl CloudProvider {
-    /// The stable token for the provider (a log line today, the stored setting value later; the
-    /// setting's parser must be an allow-list so an unknown stored value can never become an arm).
+    /// The stable token for the provider (a log line, and the stored setting value; the setting's
+    /// parser, [`Self::from_setting`], is an allow-list so an unknown stored value can never become
+    /// an arm). The serde form is the same word.
     pub fn as_str(self) -> &'static str {
         match self {
             CloudProvider::OpenRouter => "openrouter",
             CloudProvider::Anthropic => "anthropic",
             CloudProvider::Gemini => "gemini",
             CloudProvider::OpenAi => "openai",
+        }
+    }
+
+    /// Everything but OpenRouter is a provider the person's own key reaches: no zero-data-retention
+    /// pin, opt-in, and never served to a mod.
+    pub fn is_direct(self) -> bool {
+        self != CloudProvider::OpenRouter
+    }
+
+    /// Parse a stored provider choice. An ALLOW-LIST of the providers whose call exists: only
+    /// "openai" is a direct provider today, and anything else (absent, junk, or a "gemini" stored by a
+    /// newer PM before this one can answer it) is OpenRouter, so a stored value can never name an
+    /// arm that can't be built. Each provider PR adds its arm here.
+    pub fn from_setting(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            Some("openai") => CloudProvider::OpenAi,
+            _ => CloudProvider::OpenRouter,
+        }
+    }
+
+    /// The provider as a person names it.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            CloudProvider::OpenRouter => "OpenRouter",
+            CloudProvider::Anthropic => "Anthropic",
+            CloudProvider::Gemini => "Google Gemini",
+            CloudProvider::OpenAi => "OpenAI",
         }
     }
 }
@@ -694,6 +871,22 @@ pub struct CloudArm {
     pub provider: CloudProvider,
     pub key: Secret,
     pub models: Vec<String>,
+    /// The effort level for this role on this arm's primary model, already checked against that
+    /// model's levels. `None` omits the field (the model's own default). OpenRouter arms are always
+    /// `None`: its effort, if any, is the model's.
+    pub effort: Option<String>,
+}
+
+impl CloudArm {
+    /// An arm with no effort set, which is every arm but a direct one with a chosen level.
+    pub fn new(provider: CloudProvider, key: Secret, models: Vec<String>) -> Self {
+        Self {
+            provider,
+            key,
+            models,
+            effort: None,
+        }
+    }
 }
 
 /// The local arm's hydrated inputs: the normalized base URL, the single model id chosen for the
@@ -917,26 +1110,41 @@ pub(crate) fn power_route_error(e: Error) -> Error {
     Error::Other(format!("{e} — {POWER_ROUTED_FAILED_HINT}"))
 }
 
-/// Hydrate the cloud arm for a role: the role's key + effective model list, or `None` with no key.
+/// Hydrate the cloud arm for a role: the role's provider, its key and its models, or `None` with no
+/// key. One short lock reads the provider and, for a direct provider, its model and effort; the
+/// guard is gone before the keychain is asked.
 fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
-    let key = role_key(role)?;
-    let Some(key) = key else {
+    let state = app.state::<AppState>();
+    let (provider, direct) = {
+        let conn = state.conn()?;
+        let provider = role_cloud_provider(&conn, role)?;
+        let direct = if provider.is_direct() {
+            Some(crate::direct_providers::arm_inputs(&conn, provider, role)?)
+        } else {
+            None
+        };
+        (provider, direct)
+    };
+    let Some(key) = key_for(provider, role)? else {
         return Ok(None);
     };
+    if let Some(inputs) = direct {
+        return Ok(Some(CloudArm {
+            provider,
+            key,
+            models: inputs.models,
+            effort: inputs.effort,
+        }));
+    }
     let (models_key, auto_key) = match role {
         Role::Chat => (CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY),
         Role::Background => (BACKGROUND_MODELS_KEY, BACKGROUND_AUTO_SWITCH_KEY),
     };
-    let state = app.state::<AppState>();
     let models = {
         let conn = state.conn()?;
         effective_models(&conn, models_key, auto_key)?
     };
-    Ok(Some(CloudArm {
-        provider: CloudProvider::OpenRouter,
-        key,
-        models,
-    }))
+    Ok(Some(CloudArm::new(CloudProvider::OpenRouter, key, models)))
 }
 
 /// The Background role's whole model list in the person's order, with auto-switch ignored (the
@@ -1294,6 +1502,9 @@ async fn cloud_complete_via(
             )
             .await
         }
+        CloudProvider::OpenAi => {
+            crate::openai_direct::complete(arm, messages, cache_prefix, max_tokens).await
+        }
         other => Err(provider_not_available(other)),
     }
 }
@@ -1614,6 +1825,9 @@ where
             )
             .await
         }
+        CloudProvider::OpenAi => {
+            crate::openai_direct::stream_chat(arm, messages, cache_through, on_token).await
+        }
         other => Err(provider_not_available(other)),
     }
 }
@@ -1622,7 +1836,7 @@ where
 /// the old "No OpenRouter API key set", #297 PR3, changelog-noted). Neutral between the cloud and
 /// local paths so the keyless-onboarding direction (#295 PR7) reads right.
 pub fn no_provider_message() -> String {
-    "No AI provider is set up yet — add an OpenRouter key, or set up a local model in Settings → AI."
+    "No AI provider is set up yet. Add an OpenRouter key or your own OpenAI key, or set up a local model in Settings > AI."
         .to_string()
 }
 
@@ -1644,15 +1858,37 @@ pub(crate) fn no_provider_message_with(prefs: &RoutingPrefs, role: Role) -> Stri
 /// so a caller must not be holding it (the mutex is not reentrant). A store that cannot be read
 /// gets the general message.
 pub fn no_provider_message_for(app: &AppHandle, role: Role) -> String {
-    let prefs = app
-        .state::<AppState>()
-        .conn()
-        .ok()
-        .and_then(|conn| routing_prefs(&conn).ok());
-    match prefs {
-        Some(prefs) => no_provider_message_with(&prefs, role),
-        None => no_provider_message(),
+    let (prefs, provider) = {
+        let state = app.state::<AppState>();
+        let read = state.conn().map(|conn| {
+            (
+                routing_prefs(&conn).ok(),
+                role_cloud_provider(&conn, role).ok(),
+            )
+        });
+        read.unwrap_or((None, None))
+    };
+    let Some(prefs) = prefs else {
+        return no_provider_message();
+    };
+    // A role on your own key whose key isn't here: the state a restore onto a new machine leaves
+    // (settings travel in a backup, keychain secrets don't). Say what is missing, not "no provider".
+    if let Some(provider) = provider.filter(|p| p.is_direct()) {
+        if prefs.for_role(role) == ProviderPref::Cloud
+            && matches!(key_for(provider, role), Ok(None))
+        {
+            return missing_key_message(provider);
+        }
     }
+    no_provider_message_with(&prefs, role)
+}
+
+/// What a role on a direct provider says when that provider's key isn't on this device.
+pub(crate) fn missing_key_message(provider: CloudProvider) -> String {
+    format!(
+        "Your {name} key is missing on this device. Add it in Settings > AI & Models, or move this role back to OpenRouter.",
+        name = provider.display_name()
+    )
 }
 
 /// The window PM should SIZE a prompt against, and whether that number is proven.
@@ -1928,6 +2164,7 @@ mod tests {
         for (needle, count) in [
             ("cloud_complete_via(", 3),
             ("openrouter::complete(", 1),
+            ("openai_direct::complete(", 1),
             ("openai_compat::complete(", 1),
             ("cloud_complete(\n", 4),
             ("run_local_complete(app", 2),
@@ -1955,17 +2192,18 @@ mod tests {
         assert_eq!(sites("cloud_stream_via("), 3);
         assert_eq!(sites("openrouter::stream_chat("), 1);
         assert_eq!(sites("openrouter::complete("), 1);
+        // Your own OpenAI key is reached by the same two dispatch functions and nowhere else.
+        assert_eq!(sites("openai_direct::stream_chat("), 1);
+        assert_eq!(sites("openai_direct::complete("), 1);
     }
 
     /// A route that names a provider whose call isn't built is stopped before any request is made,
     /// on both the one-shot and the streaming path, and says so in words.
     #[tokio::test]
     async fn a_provider_without_a_call_yet_is_refused_without_touching_the_network() {
-        for provider in [
-            CloudProvider::Anthropic,
-            CloudProvider::Gemini,
-            CloudProvider::OpenAi,
-        ] {
+        // OpenAi is not here: its call exists, and a catalogue refusal before the network is held by
+        // `an_openai_arm_naming_a_model_not_in_the_catalogue_is_refused_before_the_network`.
+        for provider in [CloudProvider::Anthropic, CloudProvider::Gemini] {
             let arm = CloudArm {
                 provider,
                 ..cloud(&["m"])
@@ -2019,6 +2257,10 @@ mod tests {
             concat!("get_open", "router_key("),
             concat!("get_open", "router_background_key("),
             concat!("get_background_or_", "primary_key("),
+            // A direct provider's key is read by the gateway too; `direct_providers.rs` names the
+            // getter only as a function pointer in its table (no call), and `openai_direct.rs` is
+            // handed the key by the arm and never reads one.
+            concat!("get_open", "ai_key("),
         ];
         for file in files {
             let rel = file
@@ -2037,6 +2279,169 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_pasted_openrouter_key_is_recognised_without_a_prefix_guess() {
+        let stored = ["or-key-primary-0123456789", "or-key-background-0123456789"];
+        assert!(is_one_of("or-key-primary-0123456789", &stored));
+        assert!(is_one_of("  or-key-background-0123456789\n", &stored));
+        assert!(!is_one_of("another-key-0123456789abcd", &stored));
+        assert!(!is_one_of("", &stored));
+        assert!(!is_one_of("   ", &[""]));
+    }
+
+    /// `role_has_cloud(` and `key_presence(` take a short `state.conn()` lock themselves to read the
+    /// role's provider, so they must never be called with the DB guard held (the mutex is not
+    /// reentrant: a self-deadlock). They are named in exactly three places: this file,
+    /// `settings.rs` (`ai_provider_status`, BEFORE it takes its own guard) and `local_ai.rs` (after
+    /// its guard block has closed). The three follow-up jobs go through `background_ready`, whose
+    /// `let open = ...` ends the temporary guard before the call.
+    #[test]
+    fn the_readiness_reads_are_never_called_with_the_guard_held() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let needles = [concat!("role_has_", "cloud("), concat!("key_pres", "ence(")];
+        for file in files {
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if ["llm_gateway.rs", "settings.rs", "local_ai.rs"].contains(&rel.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            for needle in needles {
+                assert!(
+                    !text.contains(needle),
+                    "{rel} calls {needle}: ask background_ready, or call it where no guard is held"
+                );
+            }
+        }
+
+        // settings.rs asks BEFORE it takes its own guard.
+        let settings = include_str!("settings.rs");
+        let body = settings
+            .split("pub fn ai_provider_status(")
+            .nth(1)
+            .and_then(|r| r.split("pub fn set_onboarding_done").next())
+            .expect("ai_provider_status");
+        let asked = body
+            .find(concat!("try_role_has_", "cloud("))
+            .expect("it asks");
+        let locked = body.find("state.conn()").expect("it locks");
+        assert!(
+            asked < locked,
+            "ai_provider_status must ask before it takes the guard"
+        );
+
+        // local_ai.rs asks only after the status's guard block has closed.
+        let local = include_str!("local_ai.rs");
+        let status = local
+            .split("pub async fn local_llm_status(")
+            .nth(1)
+            .and_then(|r| r.split("let (in_cooldown, cooldown_remaining_s)").next())
+            .expect("local_llm_status");
+        let block_end = status
+            .find("    };\n    if !configured")
+            .expect("the guard block closes");
+        for (at, _) in status.match_indices(needles[1]) {
+            assert!(at > block_end, "key_presence called inside the guard block");
+        }
+    }
+
+    /// The gate's `let` is what ends the temporary guard. Written inline as
+    /// `conn().is_ok() && role_has_cloud(..)` the guard would still be held while the role's
+    /// provider is read, and the app would deadlock.
+    #[test]
+    fn background_ready_ends_its_guard_before_it_asks() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let body = live
+            .split("pub(crate) fn background_ready(")
+            .nth(1)
+            .and_then(|r| r.split("\n}\n").next())
+            .expect("background_ready");
+        let open = body.find("let open =").expect("a let ends the temporary");
+        let asks = body.find(concat!("role_has_", "cloud(")).expect("it asks");
+        assert!(open < asks);
+        assert!(!body.contains("conn().is_ok() &&"), "{body}");
+        // The three jobs use it and nothing else.
+        for file in [
+            include_str!("chat_summary.rs"),
+            include_str!("chat_prefs.rs"),
+            include_str!("chat_title.rs"),
+        ] {
+            assert!(file.contains("crate::llm_gateway::background_ready(app)"));
+        }
+    }
+
+    /// The setting's parser is an allow-list: only a provider whose call exists is ever an arm.
+    #[test]
+    fn a_stored_provider_is_an_arm_only_if_it_is_on_the_allow_list() {
+        assert_eq!(
+            CloudProvider::from_setting(Some("openai")),
+            CloudProvider::OpenAi
+        );
+        assert_eq!(
+            CloudProvider::from_setting(Some(" openai ")),
+            CloudProvider::OpenAi
+        );
+        for raw in [
+            None,
+            Some(""),
+            Some("openrouter"),
+            Some("gemini"),
+            Some("anthropic"),
+            Some("OPENAI"),
+            Some("x"),
+        ] {
+            assert_eq!(
+                CloudProvider::from_setting(raw),
+                CloudProvider::OpenRouter,
+                "{raw:?}"
+            );
+        }
+        assert!(CloudProvider::OpenAi.is_direct() && !CloudProvider::OpenRouter.is_direct());
+        assert_eq!(
+            serde_json::to_value(CloudProvider::OpenAi).unwrap(),
+            "openai"
+        );
+        assert_eq!(
+            serde_json::to_value(CloudProvider::OpenRouter).unwrap(),
+            "openrouter"
+        );
+        assert_eq!(CloudProvider::OpenAi.display_name(), "OpenAI");
+    }
+
+    /// The missing-key sentence (the state a restore onto a new machine leaves) names the provider
+    /// and both ways out.
+    #[test]
+    fn the_missing_key_message_names_the_provider_and_the_way_out() {
+        let m = missing_key_message(CloudProvider::OpenAi);
+        assert!(
+            m.contains("Your OpenAI key is missing on this device"),
+            "{m}"
+        );
+        assert!(
+            m.contains("Settings > AI & Models") && m.contains("OpenRouter"),
+            "{m}"
+        );
+        assert!(no_provider_message().contains("OpenAI key"));
     }
 
     fn arm() -> LocalArm {
@@ -2501,6 +2906,7 @@ mod tests {
             scope: PowerScope::Both,
             consent: Consent::ALL,
             keep_local: false,
+            ..RuntimeContext::default()
         };
         let compose =
             |role, prefs: &RoutingPrefs, ctx: &RuntimeContext, local: Option<LocalArm>| {
@@ -2600,6 +3006,7 @@ mod tests {
             scope: PowerScope::Both,
             consent: Consent::ALL,
             keep_local: false,
+            ..RuntimeContext::default()
         };
         for role in [Role::Chat, Role::Background] {
             for pref in [ProviderPref::Local, ProviderPref::LocalThenCloud] {
@@ -2722,18 +3129,18 @@ mod tests {
 
     #[test]
     fn primary_model_id_is_the_first_model() {
-        let plan = RoutePlan::Cloud(CloudArm {
-            provider: CloudProvider::OpenRouter,
-            key: Secret::from("k".to_string()),
-            models: vec!["a/b".into(), "c/d".into()],
-        });
+        let plan = RoutePlan::Cloud(CloudArm::new(
+            CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            vec!["a/b".into(), "c/d".into()],
+        ));
         assert_eq!(plan.primary_model_id(), "a/b");
 
-        let empty = RoutePlan::Cloud(CloudArm {
-            provider: CloudProvider::OpenRouter,
-            key: Secret::from("k".to_string()),
-            models: vec![],
-        });
+        let empty = RoutePlan::Cloud(CloudArm::new(
+            CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            vec![],
+        ));
         assert_eq!(empty.primary_model_id(), "");
     }
 
@@ -2762,6 +3169,7 @@ mod tests {
             threshold,
             scope,
             consent: yes(consent),
+            ..PowerSettings::OFF
         }
     }
 
@@ -2771,6 +3179,7 @@ mod tests {
             scope,
             consent: yes(consent),
             keep_local,
+            ..RuntimeContext::default()
         }
     }
 
@@ -2778,15 +3187,17 @@ mod tests {
         !ctx.battery_low
             && ctx.scope == PowerScope::Both
             && ctx.consent == Consent::NONE
+            && ctx.direct_consent == DirectConsent::NONE
+            && ctx.providers == RoleProviders::OPENROUTER
             && !ctx.keep_local
     }
 
     fn cloud(models: &[&str]) -> CloudArm {
-        CloudArm {
-            provider: CloudProvider::OpenRouter,
-            key: Secret::from("k".to_string()),
-            models: models.iter().map(|m| m.to_string()).collect(),
-        }
+        CloudArm::new(
+            CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            models.iter().map(|m| m.to_string()).collect(),
+        )
     }
 
     #[test]
@@ -2819,6 +3230,117 @@ mod tests {
         assert_eq!(ctx.scope, PowerScope::Chat);
         assert_eq!(ctx.consent, Consent::ALL);
         assert!(ctx.keep_local);
+    }
+
+    /// Settings whose Chat is on OpenAI, with the given yes on each row.
+    fn chat_on_openai(openrouter_yes: Consent, openai_yes: Consent) -> PowerSettings {
+        PowerSettings {
+            threshold: 60,
+            scope: PowerScope::Both,
+            consent: openrouter_yes,
+            direct_consent: openai_yes.as_scope().map_or(DirectConsent::NONE, |scope| {
+                DirectConsent::NONE.with(CloudProvider::OpenAi, scope)
+            }),
+            providers: RoleProviders {
+                chat: CloudProvider::OpenAi,
+                background: CloudProvider::OpenRouter,
+            },
+        }
+    }
+
+    /// A yes given while a role was on OpenRouter does NOT cover the role after it moves to a
+    /// provider with no zero data retention: the route is `NeedsConsent` again. The webview's wire
+    /// is unchanged; only which stored row answers moves.
+    #[test]
+    fn consent_given_on_openrouter_does_not_cover_the_role_on_openai() {
+        let snap = snap(PowerState::BatteryLow, Some(60));
+        let prefs = RoutingPrefs::uniform(ProviderPref::LocalThenCloud);
+        // OpenRouter's yes only (both roles). Chat is on OpenAI: not covered; Background still is.
+        let ctx =
+            RuntimeContext::from_parts(&snap, &chat_on_openai(Consent::ALL, Consent::NONE), false);
+        assert!(!ctx.consent_for(Role::Chat));
+        assert!(ctx.consent_for(Role::Background));
+        assert_eq!(
+            power_route(Role::Chat, &ctx, None),
+            PowerRoute::NeedsConsent
+        );
+        assert_eq!(power_route(Role::Background, &ctx, None), PowerRoute::Cloud);
+        assert_ne!(
+            resolve_provider(Role::Chat, &prefs, &ctx),
+            ProviderChoice::CloudForPower,
+            "the policy must not move a role to a provider nobody agreed to"
+        );
+        assert_eq!(
+            resolve_provider(Role::Background, &prefs, &ctx),
+            ProviderChoice::CloudForPower
+        );
+    }
+
+    /// A yes recorded for OpenAI covers the role that is on OpenAI, and only that role.
+    #[test]
+    fn consent_recorded_for_openai_covers_that_role_only() {
+        let snap = snap(PowerState::BatteryLow, Some(60));
+        let only_chat = PowerSettings {
+            direct_consent: DirectConsent::NONE.with(CloudProvider::OpenAi, PowerScope::Chat),
+            ..chat_on_openai(Consent::NONE, Consent::NONE)
+        };
+        let ctx = RuntimeContext::from_parts(&snap, &only_chat, false);
+        assert!(ctx.consent_for(Role::Chat));
+        assert!(
+            !ctx.consent_for(Role::Background),
+            "Background is on OpenRouter, which has no yes"
+        );
+        assert!(ctx.moves(Role::Chat));
+        assert!(!ctx.moves(Role::Background));
+        // And the status says the same thing the gateway does.
+        assert_eq!(
+            only_chat.effective_consent(),
+            Consent {
+                chat: true,
+                background: false
+            }
+        );
+    }
+
+    /// A direct arm is only ever built on a route that reaches the cloud. With Local AI off or a
+    /// "Local only" role, `resolve_provider` never returns a cloud choice, whatever provider the role
+    /// is on and however much consent is stored, so `resolve` never reaches `cloud_arm`.
+    #[test]
+    fn a_direct_role_behind_local_ai_off_or_local_only_never_builds_a_cloud_arm() {
+        let snap = snap(PowerState::BatteryLow, Some(60));
+        let ctx =
+            RuntimeContext::from_parts(&snap, &chat_on_openai(Consent::ALL, Consent::ALL), false);
+        let mut off = RoutingPrefs::uniform(ProviderPref::LocalThenCloud);
+        off.local_ai_on = false;
+        assert_eq!(
+            resolve_provider(Role::Chat, &off, &ctx),
+            ProviderChoice::LocalAiOff
+        );
+        off.chat = ProviderPref::Local;
+        assert_eq!(
+            resolve_provider(Role::Chat, &off, &ctx),
+            ProviderChoice::LocalAiOff
+        );
+        let local = RoutingPrefs::uniform(ProviderPref::Local);
+        assert_eq!(
+            resolve_provider(Role::Chat, &local, &ctx),
+            ProviderChoice::Local
+        );
+        // And `resolve` hydrates a cloud arm only for the three cloud choices.
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let resolve = live
+            .split("pub fn resolve(app: &AppHandle, role: Role)")
+            .nth(1)
+            .and_then(|r| {
+                r.split("/// The \"Local, fall back to cloud\" ladder")
+                    .next()
+            })
+            .expect("resolve");
+        assert!(resolve.contains("ProviderChoice::LocalAiOff => None"));
+        assert!(resolve.contains("ProviderChoice::Local => local_arm"));
     }
 
     #[test]
@@ -2873,6 +3395,7 @@ mod tests {
             scope: PowerScope::Both,
             consent: Consent::NONE.with(PowerScope::Background),
             keep_local: false,
+            ..RuntimeContext::default()
         };
         assert_eq!(
             resolve_provider(Role::Background, &prefs, &ctx),
@@ -3006,6 +3529,7 @@ mod tests {
                                             scope,
                                             consent,
                                             keep_local,
+                                            ..RuntimeContext::default()
                                         };
                                         let status = power_route(
                                             role,
@@ -3045,6 +3569,7 @@ mod tests {
             scope: PowerScope::Both,
             consent: Consent::ALL,
             keep_local: false,
+            ..RuntimeContext::default()
         };
         for role in [Role::Chat, Role::Background] {
             for pref in [

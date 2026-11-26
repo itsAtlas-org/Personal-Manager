@@ -88,6 +88,7 @@ describe("ProviderChip", () => {
               local_model: "gemma3:4b",
               effective: "cloud_for_power",
               cloud_key: "present",
+              cloud_provider: "openrouter",
             },
           },
         })}
@@ -114,6 +115,7 @@ describe("ProviderChip", () => {
                 local_model: "gemma3:4b",
                 effective: "local_then_cloud",
                 cloud_key: "present",
+                cloud_provider: "openrouter",
               },
             },
           })}

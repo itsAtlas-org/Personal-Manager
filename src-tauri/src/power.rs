@@ -35,7 +35,7 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::llm_gateway::Role;
+use crate::llm_gateway::{CloudProvider, Role, RoleProviders};
 
 /// Settings key: the charge level, in whole percent, at or below which PM moves to the cloud.
 /// `"0"` means never. Absent means [`DEFAULT_THRESHOLD`] — on, and made safe by the consent ask.
@@ -45,6 +45,13 @@ pub const SCOPE_KEY: &str = "local_llm_power_roles";
 /// Settings key: the roles the user has agreed may go to the cloud on battery — `"chat"` |
 /// `"background"` | `"both"`. Absent means not asked yet, and withdrawing deletes the row.
 pub const CONSENT_KEY: &str = "local_llm_power_cloud_consent";
+/// Settings key: the same consent for the providers a person reaches with their own key, a JSON
+/// object keyed by provider, `{"openai":"chat"|"background"|"both"}`. OpenRouter's consent stays in
+/// [`CONSENT_KEY`] unchanged (no migration, old values keep their meaning). A yes given for a
+/// zero-retention OpenRouter route must not quietly cover a role later moved to a provider that
+/// isn't, so a role's yes is recorded against the provider it is on when the yes is given and read
+/// against the provider it is on now. Absent means no consent for any direct provider.
+pub const DIRECT_CONSENT_KEY: &str = "local_llm_power_cloud_consent_direct";
 
 pub const DEFAULT_THRESHOLD: u8 = 60;
 /// The highest stored threshold, so [`return_at`] stays at or below 95 and every offered value
@@ -204,6 +211,102 @@ impl serde::Serialize for Consent {
     }
 }
 
+/// The providers whose own consent is kept (the ones a role can be pointed at). A small FIXED list
+/// so the settings struct keeps its `Copy` derive; a provider PR adds one entry.
+const DIRECT_CONSENT_PROVIDERS: [CloudProvider; 1] = [CloudProvider::OpenAi];
+
+/// On-battery consent per direct provider: which roles have said yes while on THAT provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectConsent([Consent; DIRECT_CONSENT_PROVIDERS.len()]);
+
+impl Default for DirectConsent {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl DirectConsent {
+    pub const NONE: Self = Self([Consent::NONE; DIRECT_CONSENT_PROVIDERS.len()]);
+
+    fn slot(p: CloudProvider) -> Option<usize> {
+        DIRECT_CONSENT_PROVIDERS.iter().position(|d| *d == p)
+    }
+
+    /// Reading, by ALLOW-LIST: only the providers in the list are looked up, and each scope word goes
+    /// through [`Consent::from_setting`], so an unknown provider id, an unknown scope word or broken
+    /// JSON covers nothing. A hand edit can only withdraw a yes.
+    pub fn from_setting(raw: Option<&str>) -> Self {
+        let map: std::collections::HashMap<String, String> = raw
+            .and_then(|r| serde_json::from_str(r).ok())
+            .unwrap_or_default();
+        let mut out = Self::NONE;
+        for (i, p) in DIRECT_CONSENT_PROVIDERS.iter().enumerate() {
+            out.0[i] = Consent::from_setting(map.get(p.as_str()).map(String::as_str));
+        }
+        out
+    }
+
+    /// What a provider's stored yes covers. Anything outside the list covers nothing.
+    pub fn get(&self, p: CloudProvider) -> Consent {
+        Self::slot(p).map_or(Consent::NONE, |i| self.0[i])
+    }
+
+    /// This consent plus the roles `scope` names, for `p`. Never removes a role.
+    pub fn with(mut self, p: CloudProvider, scope: PowerScope) -> Self {
+        if let Some(i) = Self::slot(p) {
+            self.0[i] = self.0[i].with(scope);
+        }
+        self
+    }
+
+    /// This consent with `p`'s yes taken away: a provider turned off or its key removed forgets the
+    /// answer to the battery question that named it, so turning it back on asks again.
+    pub fn without(mut self, p: CloudProvider) -> Self {
+        if let Some(i) = Self::slot(p) {
+            self.0[i] = Consent::NONE;
+        }
+        self
+    }
+
+    /// As stored: a JSON object with an entry for each provider that has a yes, or `None` when there
+    /// is none anywhere (the row is then deleted).
+    pub fn as_setting(&self) -> Option<String> {
+        let map: std::collections::BTreeMap<&str, &str> = DIRECT_CONSENT_PROVIDERS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| self.0[i].as_scope().map(|s| (p.as_str(), s.as_setting())))
+            .collect();
+        (!map.is_empty()).then(|| serde_json::to_string(&map).unwrap_or_default())
+    }
+}
+
+/// Whether a role has a yes for the provider it is on NOW: OpenRouter's consent for an OpenRouter
+/// role, the provider's own for a direct one. The ONE place the rule lives, shared by the routing
+/// context and the status, so the section can never say "asked" about a yes the gateway wouldn't honour.
+pub fn consent_for(
+    role: Role,
+    providers: &RoleProviders,
+    openrouter: Consent,
+    direct: &DirectConsent,
+) -> bool {
+    match providers.for_role(role) {
+        CloudProvider::OpenRouter => openrouter.covers(role),
+        provider => direct.get(provider).covers(role),
+    }
+}
+
+impl PowerSettings {
+    /// The consent the policy would honour for each role, for the provider each is on now. This is
+    /// what the status reports as the user's consent.
+    pub fn effective_consent(&self) -> Consent {
+        let yes = |role| consent_for(role, &self.providers, self.consent, &self.direct_consent);
+        Consent {
+            chat: yes(Role::Chat),
+            background: yes(Role::Background),
+        }
+    }
+}
+
 /// A stored threshold. Absent or unparseable is [`DEFAULT_THRESHOLD`]; anything above
 /// [`MAX_THRESHOLD`] is clamped to it; `"0"` is "never".
 pub fn threshold_from(stored: Option<&str>) -> u8 {
@@ -223,7 +326,14 @@ pub fn return_at(thr: u8) -> u8 {
 pub struct PowerSettings {
     pub threshold: u8,
     pub scope: PowerScope,
+    /// OpenRouter's consent (the original row).
     pub consent: Consent,
+    /// Each direct provider's own consent.
+    pub direct_consent: DirectConsent,
+    /// The provider each role is on, read with the policy because a role's consent is the one given
+    /// for the provider it is on NOW. An unreadable store reads as OpenRouter, which is inert here:
+    /// the same read error already made the whole policy [`Self::OFF`].
+    pub providers: RoleProviders,
 }
 
 impl PowerSettings {
@@ -232,6 +342,8 @@ impl PowerSettings {
         threshold: 0,
         scope: PowerScope::Both,
         consent: Consent::NONE,
+        direct_consent: DirectConsent::NONE,
+        providers: RoleProviders::OPENROUTER,
     };
 
     pub fn read(conn: &rusqlite::Connection) -> Self {
@@ -244,6 +356,10 @@ impl PowerSettings {
                 consent: Consent::from_setting(
                     crate::db::get_setting(conn, CONSENT_KEY)?.as_deref(),
                 ),
+                direct_consent: DirectConsent::from_setting(
+                    crate::db::get_setting(conn, DIRECT_CONSENT_KEY)?.as_deref(),
+                ),
+                providers: RoleProviders::read(conn)?,
             })
         };
         read().unwrap_or(Self::OFF)
@@ -1129,7 +1245,8 @@ mod tests {
             PowerSettings {
                 threshold: 60,
                 scope: PowerScope::Both,
-                consent: Consent::NONE
+                consent: Consent::NONE,
+                ..PowerSettings::OFF
             }
         );
         crate::db::set_setting(&conn, THRESHOLD_KEY, "40").unwrap();
@@ -1143,7 +1260,8 @@ mod tests {
                 consent: Consent {
                     chat: false,
                     background: true
-                }
+                },
+                ..PowerSettings::OFF
             }
         );
         // A value PM doesn't recognise is no consent — a bare "true" included.
@@ -1153,5 +1271,75 @@ mod tests {
         // No settings table at all: an unreadable policy is no policy, never the default 60.
         let bare = rusqlite::Connection::open_in_memory().unwrap();
         assert_eq!(PowerSettings::read(&bare), PowerSettings::OFF);
+    }
+
+    /// The consent for a direct provider is read by allow-list: a provider id PM doesn't list, a
+    /// scope word it doesn't know and JSON that isn't an object each cover nothing, so a hand edit
+    /// can only ever withdraw a yes.
+    #[test]
+    fn direct_consent_is_read_by_allow_list_and_a_hand_edit_only_withdraws() {
+        let oa = CloudProvider::OpenAi;
+        assert_eq!(DirectConsent::from_setting(None), DirectConsent::NONE);
+        assert_eq!(
+            DirectConsent::from_setting(Some(r#"{"openai":"chat"}"#)).get(oa),
+            Consent {
+                chat: true,
+                background: false
+            }
+        );
+        assert_eq!(
+            DirectConsent::from_setting(Some(r#"{"openai":"both"}"#)).get(oa),
+            Consent::ALL
+        );
+        for junk in [
+            r#"{"gemini":"both"}"#,
+            r#"{"openrouter":"both"}"#,
+            r#"{"openai":"true"}"#,
+            r#"{"openai":1}"#,
+            r#"["openai"]"#,
+            "both",
+            "",
+        ] {
+            assert_eq!(
+                DirectConsent::from_setting(Some(junk)),
+                DirectConsent::NONE,
+                "{junk}"
+            );
+        }
+        // A provider outside the list never reads a yes, however it is asked.
+        let all = DirectConsent::from_setting(Some(r#"{"openai":"both"}"#));
+        assert_eq!(all.get(CloudProvider::OpenRouter), Consent::NONE);
+        assert_eq!(all.get(CloudProvider::Gemini), Consent::NONE);
+    }
+
+    #[test]
+    fn direct_consent_round_trips_and_an_empty_one_deletes_the_row() {
+        let oa = CloudProvider::OpenAi;
+        assert_eq!(DirectConsent::NONE.as_setting(), None);
+        let c = DirectConsent::NONE.with(oa, PowerScope::Background);
+        assert_eq!(
+            c.as_setting().as_deref(),
+            Some(r#"{"openai":"background"}"#)
+        );
+        assert_eq!(DirectConsent::from_setting(c.as_setting().as_deref()), c);
+        // It only grows, and it never invents a yes for a provider it doesn't list.
+        let both = c.with(oa, PowerScope::Chat);
+        assert_eq!(both.get(oa), Consent::ALL);
+        assert_eq!(
+            DirectConsent::NONE.with(CloudProvider::Gemini, PowerScope::Both),
+            DirectConsent::NONE
+        );
+    }
+
+    #[test]
+    fn a_stored_direct_provider_is_read_with_the_policy() {
+        let (_dir, conn) = temp_db();
+        crate::db::set_setting(&conn, DIRECT_CONSENT_KEY, r#"{"openai":"both"}"#).unwrap();
+        crate::db::set_setting(&conn, "direct_openai_enabled", "true").unwrap();
+        crate::db::set_setting(&conn, "background_cloud_provider", "openai").unwrap();
+        let s = PowerSettings::read(&conn);
+        assert_eq!(s.direct_consent.get(CloudProvider::OpenAi), Consent::ALL);
+        assert_eq!(s.providers.background, CloudProvider::OpenAi);
+        assert_eq!(s.providers.chat, CloudProvider::OpenRouter);
     }
 }

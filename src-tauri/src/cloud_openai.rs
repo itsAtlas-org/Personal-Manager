@@ -35,9 +35,30 @@ pub(crate) struct Flavour {
     /// Add the provider's own fields to the body, given the ordered model list: how the model is
     /// named (one, or a fallback list), and anything that provider pins or asks for.
     pub decorate: fn(&mut serde_json::Value, &[String]),
-    /// Turn a failed response into the error the person sees.
+    /// Turn a failed response into the error the person sees. It is handed the RAW body (bounded to
+    /// 16 KiB, see `MAX_ERROR_BODY`), not a shortened one: a provider whose error JSON puts a long
+    /// `message` before its `code` would lose the code to a 500-character cut, and the code is what
+    /// tells "out of credit" from "slow down". Each flavour shortens the text for display itself.
     pub request_error: fn(reqwest::StatusCode, &str) -> Error,
+    /// The body field that carries the output limit. OpenRouter and the plain dialect take
+    /// `max_tokens`; OpenAI's reasoning models reject it and want `max_completion_tokens`.
+    pub max_tokens_field: &'static str,
+    /// A provider whose models can sit silent while they think. Such a flavour gets the patient
+    /// client (a long silence allowance) and never a total deadline, so a billed reasoning request
+    /// isn't cut off mid-thought. OpenRouter's stays on the 120 s client, unchanged.
+    pub patient: bool,
+    /// How a mid-stream `error` chunk reads, for a provider whose error codes are words rather than
+    /// numbers. `None` keeps the numeric-code path OpenRouter has always used.
+    pub stream_error: Option<fn(&serde_json::Value) -> Error>,
+    /// A stop reason that is a failure rather than an end (OpenAI's `content_filter`). Called with
+    /// every chunk's `finish_reason`; an `Err` drops the partial text like a mid-stream error chunk.
+    /// `None` for a provider that has no such reason.
+    pub stop_error: Option<fn(&str) -> Option<Error>>,
 }
+
+/// How much of a failed response's body is handed to `Flavour::request_error`. Far above any real
+/// error, and a bound for a hostile or runaway endpoint.
+const MAX_ERROR_BODY: usize = 16 * 1024;
 
 /// `Authorization: Bearer <key>`, which is how OpenRouter, OpenAI and Gemini's compatible endpoint
 /// all take a key.
@@ -67,8 +88,90 @@ static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| 
         .expect("reqwest client with static timeouts should build")
 });
 
+/// The client for a provider whose models can think silently for minutes (reasoning models at high
+/// effort send nothing until they have an answer to stream, and the output limit is the model's
+/// maximum). The same 30 s connect bound, but a 15 minute allowance for silence between chunks. It
+/// is still a dead-connection detector, just sized for a billed request that is really working.
+/// Live test L2 measures the real silence and decides the number.
+static HTTP_PATIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(900))
+        .build()
+        .expect("reqwest client with static timeouts should build")
+});
+
 pub(crate) fn http() -> &'static reqwest::Client {
     &HTTP
+}
+
+/// The client a flavour's paid requests go through.
+fn client(flavour: &Flavour) -> &'static reqwest::Client {
+    if flavour.patient {
+        &HTTP_PATIENT
+    } else {
+        &HTTP
+    }
+}
+
+/// Cut a failed response's body to [`MAX_ERROR_BODY`] characters, no more.
+fn bounded_error_body(text: &str) -> String {
+    text.chars().take(MAX_ERROR_BODY).collect()
+}
+
+/// Take anything key-shaped out of text a provider echoed back before it can reach the screen or a
+/// log. OpenAI's 401 message repeats a masked copy of the key, and a fallback sentence passes up to
+/// 200 characters of the provider's own words, so AGENTS rule 5 is enforced here by code and not only
+/// by the sentences PM maps. Replaces an `sk-` string (through the next whitespace, quote or bracket)
+/// and any run of 32 or more token characters with "[key]". Runs BEFORE any length cut so a key can't
+/// be cut in half and slip under the run length.
+pub(crate) fn redact_detail(text: &str) -> String {
+    fn token_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*' | '.')
+    }
+    fn ends_sk(c: char) -> bool {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+            )
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // An `sk-` that starts a word (not the middle of "task-").
+        let word_start = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+        if word_start
+            && chars[i] == 's'
+            && chars.get(i + 1) == Some(&'k')
+            && chars.get(i + 2) == Some(&'-')
+        {
+            let mut j = i + 3;
+            while j < chars.len() && !ends_sk(chars[j]) {
+                j += 1;
+            }
+            out.push_str("[key]");
+            i = j;
+            continue;
+        }
+        if token_char(chars[i]) {
+            let mut j = i;
+            while j < chars.len() && token_char(chars[j]) {
+                j += 1;
+            }
+            if j - i >= 32 {
+                out.push_str("[key]");
+            } else {
+                out.extend(&chars[i..j]);
+            }
+            i = j;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Build the request body: the dialect's own fields, then whatever the flavour adds.
@@ -120,7 +223,7 @@ pub(crate) fn build_body(
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
     if let Some(limit) = max_tokens {
-        body["max_tokens"] = serde_json::json!(limit);
+        body[flavour.max_tokens_field] = serde_json::json!(limit);
     }
     (flavour.decorate)(&mut body, models);
     body
@@ -136,6 +239,10 @@ pub(crate) fn build_body(
 /// Pure, so the shape-matching — the part that can silently be wrong — is testable without a socket.
 pub(crate) fn chunk_error(flavour: &Flavour, value: &serde_json::Value) -> Option<Error> {
     let err = value.get("error")?;
+    // A provider whose codes are words ("rate_limit_exceeded") reads the whole error object itself.
+    if let Some(read) = flavour.stream_error {
+        return Some(read(err));
+    }
     let detail = err
         .get("message")
         .and_then(|m| m.as_str())
@@ -165,6 +272,10 @@ pub(crate) fn parse_usage(value: &serde_json::Value) -> Usage {
         prompt_tokens: value["usage"]["prompt_tokens"].as_i64(),
         completion_tokens: value["usage"]["completion_tokens"].as_i64(),
         cost: value["usage"]["cost"].as_f64(),
+        // What a provider that prices its own cache reports: the part of the prompt read from the
+        // cache, and the part written to it (OpenAI bills a write above the plain input rate).
+        cached_tokens: value["usage"]["prompt_tokens_details"]["cached_tokens"].as_i64(),
+        cache_write_tokens: value["usage"]["prompt_tokens_details"]["cache_write_tokens"].as_i64(),
     }
 }
 
@@ -191,15 +302,20 @@ where
     // bounds now live on the shared `HTTP` client (F-16), so this request just adds NO total `.timeout()`.
     // Non-streaming `complete` keeps its total deadline via its own per-request `.timeout()`: there the
     // whole answer arrives at once, so a total bound fits.
-    let response = (flavour.auth)(HTTP.post(flavour.endpoint), api_key)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(body)
-        .send()
-        .await?;
+    // Through `wire_mark::send`: a plain send outside a mod's scope, so OpenRouter's chat stream
+    // behaves exactly as before. It is hardening for a direct arm (mods never reach one today): it
+    // keeps the booking-refund rule correct if a later change gives mods a paid stream.
+    let response = crate::wire_mark::send(
+        (flavour.auth)(client(flavour).post(flavour.endpoint), api_key)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(body),
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let detail = crate::error::truncate_detail(&response.text().await.unwrap_or_default());
+        // The raw body, bounded: each flavour shortens it for display (see `Flavour::request_error`).
+        let detail = bounded_error_body(&response.text().await.unwrap_or_default());
         return Err((flavour.request_error)(status, &detail));
     }
 
@@ -254,6 +370,17 @@ where
                         served = Some(m.to_string());
                     }
                 }
+                // A stop reason that is a failure (OpenAI's `content_filter`). Same rule as an error
+                // chunk: the partial text is dropped, because a reply the provider withheld
+                // halfway must not be kept as an answer.
+                if let (Some(read), Some(reason)) = (
+                    flavour.stop_error,
+                    value["choices"][0]["finish_reason"].as_str(),
+                ) {
+                    if let Some(e) = read(reason) {
+                        return Err(e);
+                    }
+                }
                 // Why the reply stopped. Flag, not error — the text is worth keeping; the caller
                 // marks the stored turn honest (see `Completion::truncated`).
                 if is_length_stop(&value) {
@@ -304,20 +431,17 @@ pub(crate) async fn complete(
 ) -> Result<Completion> {
     // Through `wire_mark::send` so a mod's `ai.complete` can tell a request that never connected
     // (its booking is given back) from one that may have left; a plain send for everyone else.
-    let response = crate::wire_mark::send(
-        (flavour.auth)(
-            HTTP.post(flavour.endpoint)
-                // A total deadline fits here (unlike `stream`): the whole answer arrives at once.
-                .timeout(std::time::Duration::from_secs(120)),
-            api_key,
-        )
-        .json(body),
-    )
-    .await?;
+    let mut request = client(flavour).post(flavour.endpoint);
+    if !flavour.patient {
+        // A total deadline fits here (unlike `stream`): the whole answer arrives at once. A patient
+        // flavour has none, and its own `complete` is a drained stream anyway.
+        request = request.timeout(std::time::Duration::from_secs(120));
+    }
+    let response = crate::wire_mark::send((flavour.auth)(request, api_key).json(body)).await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let detail = crate::error::truncate_detail(&response.text().await.unwrap_or_default());
+        let detail = bounded_error_body(&response.text().await.unwrap_or_default());
         return Err((flavour.request_error)(status, &detail));
     }
 
@@ -360,6 +484,74 @@ mod tests {
         assert!(!src.contains(concat!(".user_", "agent(")));
     }
 
+    /// The same line for the three files that build a request: the dialect core, OpenRouter's own
+    /// catalogue and ZDR feed, and OpenAI's key check (a plain GET with only the auth header). Names
+    /// built from parts so the test can't match itself.
+    #[test]
+    fn no_request_in_any_provider_file_carries_app_attribution() {
+        for src in [
+            include_str!("cloud_openai.rs"),
+            include_str!("openrouter.rs"),
+            include_str!("openai_direct.rs"),
+        ] {
+            let src = src.to_ascii_lowercase();
+            for header in [
+                concat!("http-", "referer"),
+                concat!("x-", "title"),
+                concat!("x-open", "router-"),
+                concat!("user-", "agent"),
+            ] {
+                assert!(!src.contains(&format!("\"{header}")), "{header} is back");
+            }
+            assert!(!src.contains(concat!("header::", "referer")));
+            assert!(!src.contains(concat!("header::", "user_agent")));
+            assert!(!src.contains(concat!(".user_", "agent(")));
+        }
+    }
+
+    /// Echoed upstream text never carries a key: OpenAI's 401 message repeats a masked copy of the
+    /// one it was sent, and a fallback sentence passes up to 200 characters of the provider's words.
+    #[test]
+    fn redact_detail_takes_key_shaped_text_out() {
+        let masked = "Incorrect API key provided: sk-inval*******-key. You can find your API key at https://platform.openai.com/account/api-keys.";
+        let out = redact_detail(masked);
+        assert!(!out.contains("sk-inval"), "{out}");
+        assert!(out.contains("[key]"), "{out}");
+        assert!(
+            out.contains("platform.openai.com"),
+            "ordinary text survives: {out}"
+        );
+
+        let proj = redact_detail("bad key sk-proj-abc_DEF-123456789 given");
+        assert_eq!(proj, "bad key [key] given");
+        let quoted = redact_detail("key \"sk-live-abcdef\" and (sk-x1) done");
+        assert_eq!(quoted, "key \"[key]\" and ([key]) done");
+
+        // A bare 40-character token run, with no sk- prefix at all.
+        let run = redact_detail(&format!("token {} end", "a1B2c3D4e5".repeat(4)));
+        assert_eq!(run, "token [key] end");
+        // 31 token characters is an ordinary word; 32 is not.
+        assert_eq!(redact_detail(&"a".repeat(31)), "a".repeat(31));
+        assert_eq!(redact_detail(&"a".repeat(32)), "[key]");
+
+        // Plain prose, an id and a URL are left alone; "task-" is not an sk- key.
+        let plain = "The model `gpt-6.2-sol` does not exist; see the task-list at /v1/models.";
+        assert_eq!(redact_detail(plain), plain);
+        assert_eq!(redact_detail(""), "");
+    }
+
+    #[test]
+    fn a_failed_body_is_bounded_but_never_shortened_to_the_display_cut() {
+        let big = "x".repeat(MAX_ERROR_BODY * 2);
+        assert_eq!(bounded_error_body(&big).chars().count(), MAX_ERROR_BODY);
+        // Long enough to push `code` past 500 characters, and still whole.
+        let body = format!(
+            "{{\"error\":{{\"message\":\"{}\",\"code\":\"insufficient_quota\"}}}}",
+            "m".repeat(900)
+        );
+        assert_eq!(bounded_error_body(&body), body);
+    }
+
     /// A made-up flavour that adds nothing and takes no cache marks: the flavour is what shapes the
     /// body, and the dialect's own fields are the same under any of them.
     fn plain_flavour() -> Flavour {
@@ -376,6 +568,10 @@ mod tests {
             cache_control_blocks: false,
             decorate,
             request_error,
+            max_tokens_field: "max_tokens",
+            patient: false,
+            stream_error: None,
+            stop_error: None,
         }
     }
 

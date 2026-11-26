@@ -434,23 +434,40 @@ export const HELP: Record<string, HelpEntry> = {
   // Settings
   "settings-api-key": {
     title: "OpenRouter API key",
-    body: "Powers chat. Stored only in your operating system's keychain — never on disk or in the code. Get one at openrouter.ai/keys.",
+    body: "Powers chat. Stored only in your operating system's keychain — never on disk or in the code. Get one at openrouter.ai/keys. Your own provider keys are under Your own keys.",
+  },
+  "settings-direct-keys": {
+    title: "Your own keys",
+    body: "Use your own key from a provider, such as OpenAI, instead of going through OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention: OpenAI keeps them in abuse logs for up to 30 days, and doesn't train on them unless your project shares data. Keys are stored in your keychain and never leave PM's engine.",
+  },
+  "settings-openai-key": {
+    title: "OpenAI API key",
+    body: "A normal project key from platform.openai.com/api-keys. PM checks it when you press Save and check: it asks OpenAI which models the key can use. A restricted key may not be able to answer that, and PM saves it anyway. A key that OpenAI refuses isn't saved.",
+  },
+  "settings-role-provider": {
+    title: "Provider",
+    body: "Which provider answers this job. Chat and Background each choose their own. OpenRouter asks for zero data retention. A provider you've added yourself doesn't give you zero data retention unless you arrange it with them. Turn a provider off above and its jobs go back to OpenRouter.",
+  },
+  "settings-role-effort": {
+    title: "Effort",
+    body: "How hard the model thinks before it answers, in that model's own levels. More effort is slower and costs more. Background work starts on Low. Chat uses the model's default until you choose.",
   },
   "settings-background-key": {
     title: "Background API key",
-    body: "An optional second key used for behind-the-scenes work (sorting suggestions and learning), so you can track that spend separately. Falls back to your main key if left blank.",
+    body: "An optional second key used for behind-the-scenes work (sorting suggestions and learning), so you can track that spend separately. While Background is on OpenRouter, it falls back to your main key if left blank.",
   },
   // "search every model on OpenRouter" stopped being true in v3.18.0-alpha (#369), which filters the
-  // picker to models with a zero-data-retention endpoint — PM pins ZDR on every request, so a
-  // non-compliant model is not merely leaky, it is uncallable. Same wrong claim #373 fixed in the
-  // README; the help said it too.
+  // picker to models with a zero-data-retention endpoint: PM asks for ZDR on every OpenRouter
+  // request, so a non-compliant model is not merely leaky, it is uncallable there. That is true of
+  // OpenRouter's list only. A provider the person adds with their own key has PM's own short list of
+  // that provider's models, with the provider's own terms, and says so (settings-direct-keys).
   "settings-chat-models": {
     title: "Chat model",
-    body: "Which model answers your chats. Add one from the picker — search the models PM can actually use, compare the input → output price per million tokens, sort by price, and use the tags (Free, Reasoning, Vision, Coding…). The list is OpenRouter's, filtered to models offering zero data retention: PM demands that on every request, so a model without it couldn't answer you at all. Add more than one and turn on auto-switch to fall through to the next when one hits its daily limit. PM is never locked to one model.",
+    body: "Which model answers your chats. On OpenRouter, add one from the picker: search the models PM can actually use, compare the input → output price per million tokens, sort by price, and use the tags (Free, Reasoning, Vision, Coding…). That list is OpenRouter's, filtered to models offering zero data retention, which PM asks for on every request. Add more than one and turn on auto-switch to fall through to the next when one hits its daily limit. With your own provider, the list is PM's own list of that provider's models, with prices, and holds one model. PM is never locked to one model.",
   },
   "settings-background-models": {
     title: "Background model",
-    body: "Which model does PM's behind-the-scenes work — the sorting proposals in Review and the Learning You profile. It can differ from your chat model; free models work well here. Chain several with auto-switch so background work keeps going when a free model's daily cap is reached.",
+    body: "Which model does PM's behind-the-scenes work — the sorting proposals in Review and the Learning You profile. It can differ from your chat model; free models work well here. On OpenRouter, chain several with auto-switch so background work keeps going when a free model's daily cap is reached. With your own provider, it's PM's own list of that provider's models, and holds one.",
   },
   "settings-indexing-speed": {
     title: "Indexing speed",
@@ -529,7 +546,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-usage-cost": {
     title: "Usage & cost",
-    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history.",
+    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history. Calls to your own provider key are priced from the tokens it reports times PM's built-in list of that provider's prices.",
   },
   "settings-usage-by-mod": {
     title: "Spend by mod",

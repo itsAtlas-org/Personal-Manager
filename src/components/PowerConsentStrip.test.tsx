@@ -34,6 +34,7 @@ const asking: PowerRoleView = {
   local_model: "gemma3:4b",
   effective: "local_then_cloud",
   cloud_key: "present",
+  cloud_provider: "openrouter",
 };
 const still: PowerRoleView = {
   route: "unchanged",
@@ -41,6 +42,7 @@ const still: PowerRoleView = {
   local_model: "gemma3:4b",
   effective: "local_then_cloud",
   cloud_key: "present",
+  cloud_provider: "openrouter",
 };
 
 const power = (over: Partial<PowerView> = {}): PowerView => ({

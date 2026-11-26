@@ -80,7 +80,7 @@ for: only PM's own sentence.
 | `MOD-5001` | PM is locked, or its data is closed (another profile has the vault open, or it's still locked). |
 | `MOD-5002` | The mod isn't running: it's paused, parked, still installing, or not turned on yet. |
 | `MOD-5003` | The mod's session ended before the call finished (its tab closed, it was updated or uninstalled, PM locked, or the vault changed). |
-| `MOD-5004` | PM has no AI model set up to answer with, so an AI request can't run. Choose a model in Settings. |
+| `MOD-5004` | PM has no AI model set up to answer with (or Background is on your own key, which mods can't use), so an AI request can't run. Choose a model in Settings. |
 | `MOD-5005` | PM can't tell what the AI model costs, so it can't be sure the request is within the mod's limit, and doesn't run it. |
 | `MOD-5006` | The AI model didn't answer (it was unreachable, refused, or failed). PM doesn't pass on why. |
 | `MOD-5007` | The call needs PM's document engine, which isn't set up yet. PM sets nothing up for a mod: set the engine up yourself, then try again. |

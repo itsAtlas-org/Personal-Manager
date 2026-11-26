@@ -49,6 +49,9 @@ const OPENROUTER_KEY: &str = "openrouter_api_key";
 /// the Learning-You profile distillation), so the user can see at a glance which
 /// OpenRouter spend is interactive chat vs background processing (Step 4).
 const OPENROUTER_BACKGROUND_KEY: &str = "openrouter_background_key";
+/// The person's own OpenAI key, for the opt-in direct route. One key for both roles: unlike
+/// OpenRouter it has no separate background key.
+const OPENAI_KEY: &str = "openai_api_key";
 /// Optional bearer token for a user-configured local OpenAI-compatible endpoint (#297). Most
 /// loopback servers need none; a remote (LAN / Tailscale) one may. Kept in the keychain like every
 /// other credential — never handed to the webview, never in settings.
@@ -609,6 +612,29 @@ pub fn get_background_or_primary_key() -> Result<Option<Secret>> {
     }
 }
 
+/// A stored key that is blank or whitespace is no key: a guard that only checks for `Some` would
+/// pass and `bearer_auth("")` would send an empty header. Pure, so the rule has a test.
+fn present(raw: Option<String>) -> Option<Secret> {
+    raw.filter(|v| !v.trim().is_empty()).map(Secret::from)
+}
+
+/// The person's own OpenAI key. It is never sent to the webview: the settings card only ever learns
+/// "present" or the verdict of the check (AGENTS rule 5).
+pub fn get_openai_key() -> Result<Option<Secret>> {
+    Ok(present(get(OPENAI_KEY)?))
+}
+
+pub fn set_openai_key(value: &str) -> Result<()> {
+    set(OPENAI_KEY, value)
+}
+
+/// Forget the OpenAI key. An error, never a quiet `Ok`, when PM can't read the keychain well enough
+/// to know the key is gone (see [`SecretCache::delete_known`]): a key left behind would keep billing
+/// a provider the person thought they had removed.
+pub fn clear_openai_key() -> Result<()> {
+    cache().delete_known(OPENAI_KEY, BUNDLED)
+}
+
 /// The bearer token for a user-configured local endpoint, if one was set. A blank stored value reads
 /// as absent (matching the OpenRouter keys), so a saved-then-cleared token doesn't send `Bearer `.
 pub fn get_local_llm_endpoint_token() -> Result<Option<Secret>> {
@@ -984,6 +1010,7 @@ pub fn known_cached_vault_ids() -> Vec<String> {
 const FIXED_KEYS: &[&str] = &[
     OPENROUTER_KEY,
     OPENROUTER_BACKGROUND_KEY,
+    OPENAI_KEY,
     LOCAL_LLM_ENDPOINT_TOKEN,
     DB_KEY,
     BACKUP_PASSPHRASE,
@@ -1143,6 +1170,22 @@ mod tests {
         // The registry names the per-vault keys, so a wipe that forgot it would leave a list of
         // exactly which vaults this profile once held keys for — after "remove everything".
         assert!(all_secret_keys(&[], &[], &[]).contains(&VAULT_KEY_IDS.to_string()));
+    }
+
+    #[test]
+    fn the_direct_provider_keys_are_in_the_wipe_list() {
+        // A key the person typed for their own provider must go with "remove everything", or it
+        // would keep working after the person was told the vault was wiped.
+        assert!(all_secret_keys(&[], &[], &[]).contains(&OPENAI_KEY.to_string()));
+    }
+
+    #[test]
+    fn a_blank_key_reads_as_absent() {
+        // A guard that only checks for `Some` would pass on "   " and send an empty bearer.
+        assert!(present(None).is_none());
+        assert!(present(Some(String::new())).is_none());
+        assert!(present(Some("  \t\n".into())).is_none());
+        assert!(present(Some("sk-real".into())).is_some());
     }
 
     #[test]

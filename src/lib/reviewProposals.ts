@@ -249,7 +249,9 @@ async function drainArrivals(): Promise<void> {
     // reads the key store — checking it every five files would mean dozens of keychain probes
     // across one sync for an answer that cannot meaningfully change mid-burst.
     const status = await aiProviderStatus();
-    if (!status.has_cloud_key && !status.local_configured) {
+    // Background work: the BACKGROUND role's key, which is not Chat's once a role can be on its own
+    // provider (a restore can leave Chat keyed and Background without a key here).
+    if (!status.background_has_cloud_key && !status.local_configured) {
       // No model linked, so stay quiet — and drop the queue rather than let it grow for the length
       // of a long sync. Nothing is stranded: both the post-sync sweep and the Review tab re-derive
       // what still needs proposing from the store once a model is linked.
@@ -348,7 +350,7 @@ export async function runProposalsAfterSync(): Promise<void> {
 
       // No model linked yet → stay quiet. Suggestions simply wait until one is.
       const status = await aiProviderStatus();
-      if (!status.has_cloud_key && !status.local_configured) return;
+      if (!status.background_has_cloud_key && !status.local_configured) return;
 
       await proposeMetadata((event) => {
         if (event.type === "proposed") publishProposal(event.document_id, event.proposal);

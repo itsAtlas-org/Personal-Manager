@@ -22,6 +22,11 @@ const SETTINGS = {
   background_models: [],
   chat_auto_switch: false,
   background_auto_switch: false,
+  // Both roles on OpenRouter, as every install starts.
+  chat_provider: "openrouter",
+  background_provider: "openrouter",
+  chat_cloud_model: null,
+  background_cloud_model: null,
 };
 
 // Spread over the real module, so a wrapper this tab doesn't call here stays as it is.

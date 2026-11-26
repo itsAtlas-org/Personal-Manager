@@ -46,6 +46,10 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
       background_models: [],
       chat_auto_switch: false,
       background_auto_switch: false,
+      chat_provider: "openrouter",
+      background_provider: "openrouter",
+      chat_cloud_model: null,
+      background_cloud_model: null,
       time_zone: "UTC",
       indexing_speed: "fast",
     }),
@@ -154,7 +158,7 @@ describe("onboarding's provider choice", () => {
     fireEvent.click(screen.getByRole("button", { name: "On this device" }));
     await waitFor(() => expect(screen.getByText("Connect your local server")).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "Cloud (OpenRouter)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cloud" }));
     fireEvent.change(screen.getByPlaceholderText("sk-or-..."), { target: { value: "sk-or-x" } });
     fireEvent.click(screen.getByRole("button", { name: "Get started" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -175,7 +179,7 @@ describe("onboarding's provider choice", () => {
     await waitFor(() => expect(getLocalAiSwitch).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "On this device" }));
     await waitFor(() => expect(screen.getByText("Connect your local server")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Cloud (OpenRouter)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cloud" }));
     fireEvent.click(screen.getByRole("button", { name: "Set up AI later" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(calls.filter((c) => c.startsWith("setLocalAiSwitch"))).toEqual([]);

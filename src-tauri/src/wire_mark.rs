@@ -124,6 +124,31 @@ mod tests {
         assert!(!body.contains(".send()"));
     }
 
+    /// The streamed request is announced too (hardening: no mod reaches a direct arm today, but if
+    /// one ever does, its booking is only refunded correctly when the stream's send is marked), and
+    /// your own OpenAI key's one-shot completion is a call into that stream, with no send of its
+    /// own. The key check is not a paid request and stays a plain send outside these slices.
+    #[test]
+    fn the_stream_and_the_direct_completion_send_through_the_mark() {
+        let core = include_str!("cloud_openai.rs");
+        let stream = core
+            .split("pub(crate) async fn stream<F>(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) async fn complete(").next())
+            .expect("stream comes before complete");
+        assert!(stream.contains("crate::wire_mark::send("));
+        assert!(!stream.contains(".send()"));
+
+        let direct = include_str!("openai_direct.rs");
+        let complete = direct
+            .split("pub(crate) async fn complete(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) async fn stream_chat").next())
+            .expect("complete comes before stream_chat");
+        assert!(complete.contains("cloud_openai::stream("));
+        assert!(!complete.contains(".send()"));
+    }
+
     #[test]
     fn a_fresh_mark_has_sent_nothing() {
         assert!(!WireMark::new().may_have_reached_the_wire());

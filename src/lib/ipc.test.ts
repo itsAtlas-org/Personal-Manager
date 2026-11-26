@@ -141,6 +141,52 @@ describe("argument marshalling", () => {
     expect(invokeMock).toHaveBeenCalledWith("set_indexing_speed", { speed: "gentle" });
   });
 
+  it("passes the provider-key commands' arguments under the names the Rust commands take", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await ipc.directProvidersState();
+    expect(invokeMock).toHaveBeenCalledWith("direct_providers_state", undefined);
+    await ipc.setDirectOptIn("openai", true);
+    expect(invokeMock).toHaveBeenCalledWith("set_direct_opt_in", {
+      provider: "openai",
+      enabled: true,
+    });
+    await ipc.saveDirectKey("openai", "typed-key");
+    expect(invokeMock).toHaveBeenCalledWith("save_direct_key", {
+      provider: "openai",
+      key: "typed-key",
+    });
+    await ipc.recheckDirectKey("openai");
+    expect(invokeMock).toHaveBeenCalledWith("recheck_direct_key", { provider: "openai" });
+    await ipc.clearDirectKey("openai");
+    expect(invokeMock).toHaveBeenCalledWith("clear_direct_key", { provider: "openai" });
+    await ipc.setRoleCloudProvider("background", "openrouter");
+    expect(invokeMock).toHaveBeenCalledWith("set_role_cloud_provider", {
+      role: "background",
+      provider: "openrouter",
+    });
+    await ipc.setDirectRole("openai", "chat", ["openai/gpt-6.2-sol"], null);
+    expect(invokeMock).toHaveBeenCalledWith("set_direct_role", {
+      provider: "openai",
+      role: "chat",
+      models: ["openai/gpt-6.2-sol"],
+      effort: null,
+    });
+    await ipc.setDirectDataSharing("openai", true);
+    expect(invokeMock).toHaveBeenCalledWith("set_direct_data_sharing", {
+      provider: "openai",
+      shares: true,
+    });
+  });
+
+  it("ticks 'Saved' for a provider setting and not for a key check, which can be refused", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    expect(
+      await savedTicks(() => ipc.setDirectRole("openai", "chat", ["openai/gpt-6.2-sol"], "high")),
+    ).toBe(1);
+    expect(await savedTicks(() => ipc.saveDirectKey("openai", "typed-key"))).toBe(0);
+    expect(await savedTicks(() => ipc.clearDirectKey("openai"))).toBe(0);
+  });
+
   it("carries the conversation into a retrieval explain, so the panel sees the answer's pool", async () => {
     // A live turn skips this chat's own in-window turns; without the id the panel explained a
     // strictly WIDER corpus than the answer came from, and the diagnostician reasoned from those

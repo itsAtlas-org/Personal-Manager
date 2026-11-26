@@ -65,6 +65,11 @@ pub struct Usage {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub cost: Option<f64>,
+    /// The part of the prompt the provider read from its cache, and the part it wrote to it. Only a
+    /// provider that prices its own cache reports them (OpenAI direct; OpenRouter folds them into
+    /// `cost`), and only `openai_direct::cost_usd` reads them.
+    pub cached_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
 }
 
 /// The result of a chat call: the assembled text, the model that actually served it
@@ -368,6 +373,8 @@ fn parse_price(s: Option<String>) -> Option<f64> {
 /// fails here rather than leaking data — but without the hint the user would see only an
 /// opaque 404/no-endpoints string and not realise the *model* (not PM) is the problem.
 fn request_error(status: reqwest::StatusCode, detail: &str) -> Error {
+    // The core hands over the raw bounded body now; shortening it here keeps the text identical.
+    let detail = &crate::error::truncate_detail(detail);
     let lower = detail.to_lowercase();
     let zdr_related = lower.contains("data policy")
         || lower.contains("data_collection")
@@ -422,6 +429,10 @@ pub(crate) const FLAVOUR: Flavour = Flavour {
     cache_control_blocks: true,
     decorate,
     request_error,
+    max_tokens_field: "max_tokens",
+    patient: false,
+    stream_error: None,
+    stop_error: None,
 };
 
 /// The fields only OpenRouter's body carries: usage accounting, how the model(s) are named, and the

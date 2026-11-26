@@ -272,7 +272,9 @@ export function ReviewView({ onChanged, onOpenSettings }: Props) {
         // file by hand" note rather than a red error, and never blocks manual filing.
         const status = await aiProviderStatus();
         if (runRef.current !== myRun) return;
-        if (!status.has_cloud_key && !status.local_configured) {
+        // The BACKGROUND role's key: this is background work, and Chat's key can be present while
+        // Background's (a provider of its own) is not.
+        if (!status.background_has_cloud_key && !status.local_configured) {
           setAiError("no AI model is linked yet");
           return;
         }
