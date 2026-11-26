@@ -12,6 +12,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Task } from "../../lib/types";
 import { CoreTaskList } from "./CoreTaskList";
+import { ContextMenuHost } from "../ui/ContextMenuHost";
+import { closeContextMenu } from "../../lib/contextMenu";
 
 let tasksChanged: (() => void) | null = null;
 
@@ -100,7 +102,10 @@ beforeEach(() => {
   mocked.listTasks.mockResolvedValue([]);
   mocked.listTaskStacks.mockResolvedValue([]);
 });
-afterEach(cleanup);
+afterEach(() => {
+  act(() => closeContextMenu());
+  cleanup();
+});
 
 describe("CoreTaskList", () => {
   it("lists the tasks and stacks ipc returns, scoped to the project", async () => {
@@ -246,5 +251,52 @@ describe("CoreTaskList", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mocked.updateTask).toHaveBeenCalled());
     await waitFor(() => expect(mocked.listTasks.mock.calls.length).toBeGreaterThan(reads));
+  });
+});
+
+describe("CoreTaskList right-click menu", () => {
+  it("Delete task… opens the shared confirm and deletes only once it is confirmed", async () => {
+    mocked.listTasks.mockResolvedValue([task({ id: 7, title: "Write the pitch" })]);
+    render(
+      <>
+        <CoreTaskList project="Atlas" />
+        <ContextMenuHost />
+      </>,
+    );
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "Edit Write the pitch" }), {
+      clientX: 5,
+      clientY: 5,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete task…" }));
+
+    // The same "Delete this task?" the editor and the Runway ask, and nothing deleted yet.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Delete this task?")).toBeTruthy();
+    expect(mocked.deleteTask).not.toHaveBeenCalled();
+
+    const reads = mocked.listTasks.mock.calls.length;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(mocked.deleteTask).toHaveBeenCalledWith(7));
+    // The list re-reads once the task has gone.
+    await waitFor(() => expect(mocked.listTasks.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  it("cancelling the question deletes nothing", async () => {
+    mocked.listTasks.mockResolvedValue([task({ id: 7 })]);
+    render(
+      <>
+        <CoreTaskList project="Atlas" />
+        <ContextMenuHost />
+      </>,
+    );
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "Edit Write the pitch" }), {
+      clientX: 5,
+      clientY: 5,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete task…" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }),
+    );
+    expect(mocked.deleteTask).not.toHaveBeenCalled();
   });
 });

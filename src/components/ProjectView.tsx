@@ -19,7 +19,6 @@ import {
   onTasksChanged,
   reapDeletedVaultDocuments,
   setDocumentMetadata,
-  setProjectArchived,
 } from "../lib/ipc";
 import { archivedSet, isArchived } from "../lib/archivedProjects";
 import { useResizable } from "../lib/useResizable";
@@ -39,6 +38,9 @@ import { DeleteDocumentButton, DeleteDocumentDialog } from "./DeleteDocumentDial
 import { CollapseTab } from "./CollapseTab";
 import { rankImportance } from "../lib/importance";
 import { useReader } from "../lib/reader";
+import { useArchiveProject } from "../lib/archiveProject";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { documentMenuItems, documentMenuLabel } from "../lib/documentMenu";
 import {
   readMilestoneSort,
   milestoneVisibility,
@@ -104,7 +106,7 @@ export function ProjectView({
   const [projectNames, setProjectNames] = useState<string[]>([]);
   // Clicking a file opens the shared document reader onto it (mounted at app scope), so a user can
   // read a project's document without hunting for it in the Documents tab.
-  const { openReader, current: readerDoc } = useReader();
+  const { openReader, current: readerDoc, onOpenProject } = useReader();
   // How the Files panel is ordered. Name A→Z by default; clicking a key again reverses it.
   const [sort, setSort] = useState<FileSort>({ key: "name", dir: "asc" });
   // The document whose delete is being confirmed, or null.
@@ -287,6 +289,7 @@ export function ProjectView({
   // archived project is opened from Focus's Archive folder and the Chats list no longer shows it.
   const [archived, setArchived] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const archiveProject = useArchiveProject();
   function refreshArchived() {
     listArchivedProjects()
       .then((names) => setArchived(isArchived(archivedSet(names), project)))
@@ -295,7 +298,8 @@ export function ProjectView({
   async function toggleArchived() {
     setArchiving(true);
     try {
-      await setProjectArchived(project, !archived);
+      // The one archive path (it regenerates the briefing, which this button never did).
+      await archiveProject(project, !archived);
       setArchived(!archived);
     } catch (e) {
       chat.setError(String(e));
@@ -406,6 +410,23 @@ export function ProjectView({
               key={d.id}
               data-doc-id={d.id}
               onClick={() => openReader(d)}
+              // The same menu as the Documents tab's rows. The keyboard route is the Menu key or
+              // Shift+F10 on the focused row (or its Delete button); the triage inputs inside keep
+              // the system menu.
+              onContextMenu={(e) => {
+                if (!wantsAppMenu(e)) return;
+                openContextMenu(
+                  e,
+                  documentMenuLabel(d),
+                  documentMenuItems(d, {
+                    open: () => openReader(d),
+                    // Inside this project, its own page is already the one on screen.
+                    openProject: d.project !== project ? onOpenProject : undefined,
+                    askDelete: () => setDeleting(d),
+                  }),
+                  { withFallback: true },
+                );
+              }}
               // Keyboard access without role="button" — the item can contain its own controls (the
               // triage inputs below), so open on Enter/Space only when the item itself has focus.
               tabIndex={0}

@@ -16,10 +16,12 @@
 // `useTheme` is stubbed the way ConnectorItemRow.test.tsx does it, so the row's Button/Input/Select
 // render without the full ThemeProvider (which pulls in IPC).
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Milestone } from "../lib/types";
 import { MilestoneList } from "./MilestoneList";
+import { ContextMenuHost } from "./ui/ContextMenuHost";
+import { closeContextMenu } from "../lib/contextMenu";
 
 vi.mock("../lib/ipc", () => ({
   addMilestone: vi.fn(async () => 1),
@@ -50,7 +52,13 @@ vi.mock("../kit/theme", async (importOriginal) => ({
   }),
 }));
 
-import { setMilestoneEvent, updateMilestone } from "../lib/ipc";
+import {
+  deleteMilestone,
+  reorderMilestones,
+  setMilestoneEvent,
+  setMilestoneStatus,
+  updateMilestone,
+} from "../lib/ipc";
 
 const mockUpdate = vi.mocked(updateMilestone);
 const mockSetEvent = vi.mocked(setMilestoneEvent);
@@ -167,6 +175,8 @@ describe("a refetch moving the milestone underneath the row", () => {
       />,
     );
     fireEvent.click(screen.getByTitle(/Unlink from calendar/));
+    // Unlinking can't be undone, so the button asks first.
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Unlink" }));
     await waitFor(() => expect(mockSetEvent).toHaveBeenCalledWith(1, null, "2026-09-01"));
 
     rerender(
@@ -253,5 +263,118 @@ describe("who made a milestone (PR C, K5)", () => {
       />,
     );
     expect(container.textContent).toContain("made by Atlas (unsigned)");
+  });
+});
+
+describe("removing and unlinking ask first", () => {
+  const confirm = (name: string) =>
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name }));
+
+  afterEach(() => act(() => closeContextMenu()));
+
+  it("the row's × asks, and removes only on Remove", async () => {
+    renderList(milestone());
+    fireEvent.click(screen.getByRole("button", { name: "Remove milestone pitch" }));
+    expect(deleteMilestone).not.toHaveBeenCalled();
+    expect(within(screen.getByRole("dialog")).getByText("Remove this milestone?")).toBeTruthy();
+    confirm("Remove");
+    await waitFor(() => expect(deleteMilestone).toHaveBeenCalledWith(1));
+  });
+
+  it("cancelling the question removes nothing", () => {
+    renderList(milestone());
+    fireEvent.click(screen.getByRole("button", { name: "Remove milestone pitch" }));
+    confirm("Cancel");
+    expect(deleteMilestone).not.toHaveBeenCalled();
+  });
+
+  it("a right-click inside the open question opens no row menu, and the dialog sits outside a met row", () => {
+    render(
+      <>
+        <MilestoneList
+          project="Atlas"
+          milestones={[milestone({ state: "met", status: "done" })]}
+          onChanged={() => {}}
+        />
+        <ContextMenuHost />
+      </>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Remove milestone pitch" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.contextMenu(within(dialog).getByText("Remove this milestone?"), {
+      clientX: 5,
+      clientY: 5,
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+    // Not inside the row, so a met row's opacity and stacking context can't fade or trap it.
+    expect(dialog.closest(".opacity-70")).toBeNull();
+  });
+
+  it("Unlink asks first and unlinks only on confirm", async () => {
+    mockSetEvent.mockClear();
+    renderList(milestone({ calendar_linked: true, event_uid: "u" }));
+    fireEvent.click(screen.getByTitle(/Unlink from calendar/));
+    expect(mockSetEvent).not.toHaveBeenCalled();
+    confirm("Unlink");
+    await waitFor(() => expect(mockSetEvent).toHaveBeenCalledWith(1, null, "2026-08-01"));
+    // The Unlink button is gone once unlinked, so focus is put on the row's progress control.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Milestone progress")),
+    );
+  });
+});
+
+describe("the milestone row's right-click menu", () => {
+  const confirm = (name: string) =>
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name }));
+  const open = () => {
+    // Its padding, not a field: the label, date and progress controls keep the system menu.
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Remove milestone pitch" }), {
+      clientX: 5,
+      clientY: 5,
+    });
+  };
+  const list = (milestones: Milestone[], onChanged = () => {}) =>
+    render(
+      <>
+        <MilestoneList project="Atlas" milestones={milestones} onChanged={onChanged} />
+        <ContextMenuHost />
+      </>,
+    );
+  afterEach(() => act(() => closeContextMenu()));
+
+  it("sets the progress through the row's own write", async () => {
+    list([milestone()]);
+    open();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Done" }));
+    await waitFor(() => expect(setMilestoneStatus).toHaveBeenCalledWith(1, "done"));
+  });
+
+  it("Remove… opens the confirm and removes nothing by itself", async () => {
+    list([milestone()]);
+    open();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove…" }));
+    expect(deleteMilestone).not.toHaveBeenCalled();
+    confirm("Remove");
+    await waitFor(() => expect(deleteMilestone).toHaveBeenCalledWith(1));
+  });
+
+  it("offers Unlink from calendar… only for a linked milestone", () => {
+    const { unmount } = list([milestone()]);
+    open();
+    expect(screen.queryByRole("menuitem", { name: "Unlink from calendar…" })).toBeNull();
+    act(() => closeContextMenu());
+    unmount();
+    list([milestone({ calendar_linked: true, event_uid: "u" })]);
+    open();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Unlink from calendar…" }));
+    expect(within(screen.getByRole("dialog")).getByText("Unlink from the calendar?")).toBeTruthy();
+  });
+
+  it("Move down reorders in manual order", async () => {
+    list([milestone({ id: 1 }), milestone({ id: 2, label: "second", sort_order: 1 })]);
+    open();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move down" }));
+    await waitFor(() => expect(reorderMilestones).toHaveBeenCalled());
   });
 });

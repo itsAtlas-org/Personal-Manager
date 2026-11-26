@@ -44,6 +44,7 @@ vi.mock("../lib/ipc", () => {
 
 import { ProjectView } from "./ProjectView";
 import { ReaderProvider } from "../lib/reader";
+import { BriefingProvider } from "../lib/briefing";
 import { CapabilityProvider } from "../lib/capabilities";
 import { ThemeProvider } from "../theme";
 import type { ProjectChat } from "../lib/useProjectChat";
@@ -159,7 +160,9 @@ function mount(ui: ReactElement) {
   return render(
     <ThemeProvider>
       <CapabilityProvider>
-        <ReaderProvider view="project:Atlas">{ui}</ReaderProvider>
+        <BriefingProvider autoRefresh={false}>
+          <ReaderProvider view="project:Atlas">{ui}</ReaderProvider>
+        </BriefingProvider>
       </CapabilityProvider>
     </ThemeProvider>,
   );

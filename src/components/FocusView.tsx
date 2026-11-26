@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   addMilestone,
   addPreference,
@@ -13,9 +13,11 @@ import {
   proposeProjectMetadata,
   resolveFlag,
   routeFocusInput,
-  setProjectArchived,
   setProjectMetadata,
 } from "../lib/ipc";
+import { useArchiveProject } from "../lib/archiveProject";
+import { projectMenuItems } from "../lib/projectMenu";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
 import { MilestoneList } from "./MilestoneList";
 import { MergeProjectDialog } from "./MergeProjectDialog";
 import { DeleteProjectDialog } from "./DeleteProjectDialog";
@@ -115,6 +117,8 @@ export function FocusView({ onOpenProject, onAsk }: Props) {
   // The briefing is owned by the app-scope provider (it has up to three surfaces mounted at once);
   // this view only needs to re-trigger it when a flag is resolved.
   const { refresh: regenerateBriefing } = useBriefing();
+  // Archive and Unarchive go through the one hook the project page and the sidebar use too.
+  const archiveProject = useArchiveProject();
   // Sequence guard so a stale in-flight refresh can't overwrite a newer one — the
   // initial pre-sync load and the post-sync reload can resolve out of order.
   const refreshSeqRef = useRef(0);
@@ -253,14 +257,15 @@ export function FocusView({ onOpenProject, onAsk }: Props) {
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })),
     [projects],
   );
-  // Archiving changes what the briefing and the flag layer reason over, so it re-runs both, the
-  // same pair a resolved flag re-runs.
+  // Archiving changes what the briefing and the flag layer reason over, so the hook re-runs the
+  // briefing, and this view re-reads its cards beside it, the same pair a resolved flag re-runs.
   async function setArchived(name: string, on: boolean) {
     setError(null);
     try {
-      await setProjectArchived(name, on);
-      setEditing(null);
-      await Promise.all([regenerateBriefing(), refresh()]);
+      await archiveProject(name, on, async () => {
+        setEditing(null);
+        await refresh();
+      });
     } catch (e) {
       setError(String(e));
     }
@@ -482,6 +487,21 @@ export function FocusView({ onOpenProject, onAsk }: Props) {
                 {archived.map((p) => (
                   <li
                     key={p.name}
+                    // The menu's keyboard route is the Menu key or Shift+F10 on the title or Unarchive.
+                    onContextMenu={(e) => {
+                      if (!wantsAppMenu(e)) return;
+                      openContextMenu(
+                        e,
+                        `Archived project ${p.name}`,
+                        projectMenuItems(
+                          {
+                            open: () => onOpenProject(p.name),
+                            unarchive: () => void setArchived(p.name, false),
+                          },
+                          { archived: true },
+                        ),
+                      );
+                    }}
                     className="flex items-center justify-between gap-3 rounded-[var(--radius-sm)] px-2 py-1.5 hover:bg-surface"
                   >
                     <button
@@ -708,78 +728,124 @@ function ProjectCard({
 }) {
   const { minimal, showMeta } = useDepth();
   const badge = <StatusBadge status={project.status} />;
+  // Merge and Delete are asked from here and not from the Triage editor, so the card's right-click
+  // menu can open them with the editor closed. Both dialogs are the same type-to-confirm ones.
+  const [merging, setMerging] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // One menu for the whole card, from a right-click on it or the Menu key / Shift+F10 on the open
+  // button, Triage or any control in the editor. Inputs inside the editor keep the system menu.
+  const onMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      `Project ${project.name}`,
+      projectMenuItems(
+        {
+          open: onOpen,
+          triage: onEdit,
+          archive: onArchive,
+          merge: otherProjects.length > 0 ? () => setMerging(true) : undefined,
+          askDelete: () => setDeleting(true),
+        },
+        { triageOpen: editing },
+      ),
+    );
+  };
 
   return (
     <li data-help="focus-card">
-      <Card className="overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <button onClick={onOpen} className="min-w-0 flex-1 text-left">
-            <div className="flex items-center gap-2">
-              <span className="shrink-0" data-help="focus-status-badge">
-                {badge}
-              </span>
-              <span
-                className={`truncate font-medium text-ink ${minimal ? "text-base" : "text-sm"}`}
-              >
-                {project.name}
-              </span>
-            </div>
-            {showMeta && (
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-xs text-ink4">
-                <span>
-                  {project.doc_count} doc{project.doc_count === 1 ? "" : "s"}
+      {/* The handler sits on this wrapper and not on the <li>: the type-to-confirm dialogs below are
+          siblings of it, so a right-click or Shift+F10 inside an open dialog never reaches the
+          card's menu. */}
+      <div onContextMenu={onMenu}>
+        <Card className="overflow-hidden">
+          <div className="flex items-center justify-between gap-3 px-4 py-3">
+            <button onClick={onOpen} className="min-w-0 flex-1 text-left">
+              <div className="flex items-center gap-2">
+                <span className="shrink-0" data-help="focus-status-badge">
+                  {badge}
                 </span>
-                {effectiveImportance(project) && (
-                  <span className="capitalize">
-                    {effectiveImportance(project)} priority
-                    {!project.importance && project.auto_importance ? " (auto)" : ""}
+                <span
+                  className={`truncate font-medium text-ink ${minimal ? "text-base" : "text-sm"}`}
+                >
+                  {project.name}
+                </span>
+              </div>
+              {showMeta && (
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-xs text-ink4">
+                  <span>
+                    {project.doc_count} doc{project.doc_count === 1 ? "" : "s"}
                   </span>
-                )}
-                {/* No size chip: `quick` is already carried by the Quick win badge to the left, and
+                  {effectiveImportance(project) && (
+                    <span className="capitalize">
+                      {effectiveImportance(project)} priority
+                      {!project.importance && project.auto_importance ? " (auto)" : ""}
+                    </span>
+                  )}
+                  {/* No size chip: `quick` is already carried by the Quick win badge to the left, and
                     the other two values told you nothing the card didn't. The FIELD stays — it is
                     still editable in Triage and still a sort key, so no stored sort gets coerced.
                     The milestone chip below stays too: it is the only place the governing date
                     shows, and Smart now sorts on that date first. */}
-                {project.governing_milestone?.due_date && (
-                  <span>
-                    {project.governing_milestone.label}{" "}
-                    {formatDateOnly(project.governing_milestone.due_date.slice(0, 10))}
-                    {project.milestones.length > 1 ? ` +${project.milestones.length - 1}` : ""}
-                  </span>
-                )}
-                {project.blocked_by && <span>blocked by {project.blocked_by}</span>}
-                {project.last_activity && <span>active {formatDate(project.last_activity)}</span>}
-              </div>
-            )}
-            {showMeta && project.calendar_event && (
-              <div className="mt-1 break-words text-xs text-accent-text">
-                📅 {project.calendar_event.summary} ·{" "}
-                {formatEventWhen(project.calendar_event.start)}
-              </div>
-            )}
-          </button>
-          <button
-            onClick={onEdit}
-            className="shrink-0 rounded-[var(--radius-sm)] px-2 py-1 text-xs text-ink3 transition hover:bg-surface hover:text-ink2"
-          >
-            {editing ? "Close" : "Triage"}
-          </button>
-        </div>
+                  {project.governing_milestone?.due_date && (
+                    <span>
+                      {project.governing_milestone.label}{" "}
+                      {formatDateOnly(project.governing_milestone.due_date.slice(0, 10))}
+                      {project.milestones.length > 1 ? ` +${project.milestones.length - 1}` : ""}
+                    </span>
+                  )}
+                  {project.blocked_by && <span>blocked by {project.blocked_by}</span>}
+                  {project.last_activity && <span>active {formatDate(project.last_activity)}</span>}
+                </div>
+              )}
+              {showMeta && project.calendar_event && (
+                <div className="mt-1 break-words text-xs text-accent-text">
+                  📅 {project.calendar_event.summary} ·{" "}
+                  {formatEventWhen(project.calendar_event.start)}
+                </div>
+              )}
+            </button>
+            <button
+              onClick={onEdit}
+              className="shrink-0 rounded-[var(--radius-sm)] px-2 py-1 text-xs text-ink3 transition hover:bg-surface hover:text-ink2"
+            >
+              {editing ? "Close" : "Triage"}
+            </button>
+          </div>
 
-        {editing && (
-          <MetaEditor
-            project={project}
-            otherProjects={otherProjects}
-            proposal={proposal}
-            suggesting={suggesting}
-            suggestDisabled={suggestDisabled}
-            onSuggest={onSuggest}
-            onArchive={onArchive}
-            onChanged={onChanged}
-            onSaved={onSaved}
-          />
-        )}
-      </Card>
+          {editing && (
+            <MetaEditor
+              project={project}
+              otherProjects={otherProjects}
+              proposal={proposal}
+              suggesting={suggesting}
+              suggestDisabled={suggestDisabled}
+              onSuggest={onSuggest}
+              onArchive={onArchive}
+              onMerge={() => setMerging(true)}
+              onDelete={() => setDeleting(true)}
+              onChanged={onChanged}
+              onSaved={onSaved}
+            />
+          )}
+        </Card>
+      </div>
+      {merging && (
+        <MergeProjectDialog
+          project={project.name}
+          otherProjects={otherProjects}
+          onClose={() => setMerging(false)}
+          onMerged={onSaved}
+        />
+      )}
+      {deleting && (
+        <DeleteProjectDialog
+          project={project.name}
+          onClose={() => setDeleting(false)}
+          onDeleted={onSaved}
+        />
+      )}
     </li>
   );
 }
@@ -794,6 +860,8 @@ function MetaEditor({
   suggestDisabled,
   onSuggest,
   onArchive,
+  onMerge,
+  onDelete,
   onChanged,
   onSaved,
 }: {
@@ -804,14 +872,15 @@ function MetaEditor({
   suggestDisabled: boolean;
   onSuggest: () => void;
   onArchive: () => void;
+  /** Open the card's "Merge into…" and "Delete…" dialogs (the card owns them, for its menu). */
+  onMerge: () => void;
+  onDelete: () => void;
   onChanged: () => void;
   onSaved: () => void;
 }) {
   const [size, setSize] = useState<ProjectSize>(project.size);
   const [importance, setImportance] = useState<Importance>(project.importance);
   const [blockedBy, setBlockedBy] = useState(project.blocked_by ?? "");
-  const [merging, setMerging] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -949,30 +1018,15 @@ function MetaEditor({
             Archive
           </Button>
           {otherProjects.length > 0 && (
-            <Button variant="tertiary" onClick={() => setMerging(true)}>
+            <Button variant="tertiary" onClick={onMerge}>
               Merge into…
             </Button>
           )}
-          <Button variant="tertiary" onClick={() => setDeleting(true)}>
+          <Button variant="tertiary" onClick={onDelete}>
             Delete…
           </Button>
         </div>
       </div>
-      {merging && (
-        <MergeProjectDialog
-          project={project.name}
-          otherProjects={otherProjects}
-          onClose={() => setMerging(false)}
-          onMerged={onSaved}
-        />
-      )}
-      {deleting && (
-        <DeleteProjectDialog
-          project={project.name}
-          onClose={() => setDeleting(false)}
-          onDeleted={onSaved}
-        />
-      )}
 
       <div className="mt-3">
         <span className="text-xs text-ink3">Milestones (the nearest unmet drives Due soon)</span>
