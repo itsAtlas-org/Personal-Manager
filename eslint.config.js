@@ -327,6 +327,9 @@ export default tseslint.config(
       "mods/*/dist",
       // The toolchain test's third-party fixture mod builds into its own dist the same way.
       "tests/mod-fixtures/*/dist",
+      // The starter mod's SDK file is generated (src/components/mods/modTemplate.test.ts writes it
+      // from src/kit/host.ts), so lint reads the source, not the output.
+      "mod-template/app/pm-host.js",
       "design-system-docs",
       // The spec + decision log + scratch notes (git-ignored, local-only — not first-party
       // source). Lint shouldn't reach into it (e.g. a stray docs/calendar-view/*.js prototype).
@@ -534,6 +537,17 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser },
     plugins: MODS_PLUGIN,
     rules: MODS_RULES,
+  },
+  // The starter mod (mod-template/): a plain classic script a mod author copies, so it is held to the
+  // mods' own bans (no HTML sinks, frame makers, dynamic import) but is not a module, and imports
+  // nothing from PM, so the core-import fence has nothing to check. `PmHost` is declared in the file.
+  {
+    files: ["mod-template/**/*.js"],
+    languageOptions: { sourceType: "script", globals: globals.browser },
+    rules: {
+      "no-restricted-imports": MODS_RULES["no-restricted-imports"],
+      "no-restricted-syntax": MODS_RULES["no-restricted-syntax"],
+    },
   },
   // A mod's tests may drive the sinks like src/'s do (a fixture's markup, a spy), and ship nowhere.
   // Only the sink and frame bans go: the import fence and the Tauri ban still hold, since a test that

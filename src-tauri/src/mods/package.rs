@@ -3467,6 +3467,55 @@ pub(crate) mod tests {
         }
     }
 
+    /// The starter mod (`mod-template/`, which `mods/README.md` tells a developer to copy) is a folder
+    /// PM's own loader takes, in a release build as well as a development one: a third-party id (not
+    /// `atlas.`), the two permissions its page needs and nothing else. Read twice: its manifest and the
+    /// repo's licence text through the verifier, and the real folder through the loader a developer's
+    /// "Load a test mod" uses, so a file the loader refuses (a link, a name outside the mod set, an
+    /// oversize file) fails here and not in a stranger's first try.
+    #[test]
+    fn the_mod_template_loads_in_a_dev_folder() {
+        let manifest = include_str!("../../../mod-template/manifest.json");
+        for allow_atlas in [false, true] {
+            let pkg = verify_folder(staged_folder(manifest), allow_atlas)
+                .expect("the template loads in a folder");
+            assert_eq!(pkg.manifest.id.as_str(), "example.hello");
+            assert_eq!(pkg.manifest.publisher.tier, Tier::Third);
+            assert_eq!(pkg.manifest.contributions.nav_tab.as_deref(), Some("Hello"));
+            let granted: Vec<&str> = pkg
+                .manifest
+                .permissions
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect();
+            assert_eq!(granted, ["ui.tab", "storage"]);
+            assert!(!pkg.manifest.answers_suspend);
+        }
+
+        // The real folder, as the loader reads it (cargo test runs from src-tauri/).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../mod-template");
+        let scan = crate::mods::folder::scan(&dir, false).expect("the template folder scans");
+        assert_eq!(scan.pkg.manifest.id.as_str(), "example.hello");
+        let paths: Vec<&str> = scan.pkg.files.keys().map(String::as_str).collect();
+        // `files` is a BTreeMap: sorted. The folder's README is not part of a mod, so it isn't read.
+        assert_eq!(
+            paths,
+            [
+                "LICENCE.txt",
+                "app/index.html",
+                "app/main.js",
+                "app/pm-host.js",
+                "app/style.css",
+                "manifest.json"
+            ]
+        );
+        // The licence is the repo's own text, as the folder loader requires.
+        assert_eq!(
+            scan.pkg.files[LICENCE_FILE].bytes,
+            include_bytes!("../../../LICENCE.txt")
+        );
+    }
+
     /// The other half of the format agreement. `scripts/pack-mod.mjs` wrote the archive in
     /// `tests/mod-fixtures/golden/hello.pmmod.b64` (scripts/pack-mod.test.mjs regenerates it from fixed
     /// inputs and fails if the bytes differ), and this is the real verifier reading it: the zip

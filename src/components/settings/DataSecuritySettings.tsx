@@ -10,6 +10,7 @@ import { ExportDataDialog } from "../ExportDataDialog";
 import { RemovePmData } from "../RemovePmData";
 import { VaultCard } from "../VaultCard";
 import { Button, Callout, SectionInfo, SettingRow, Toggle } from "../ui";
+import { ConnectedApps } from "./ConnectedApps";
 
 /** The Data & Security Settings tab. Self-contained: the app-lock toggle and the export/reveal
  *  actions each persist/run immediately through their own IPC calls, so there's nothing to batch —
@@ -113,6 +114,9 @@ export function DataSecuritySettings() {
           </SectionInfo>
         )}
       </div>
+
+      {/* Draws nothing (and the rail has no link to it) where PM doesn't offer connected apps. */}
+      <ConnectedApps />
 
       {/* Data and Vault were two sections about one folder, and the separation WAS the incident
           (#712): on a Mac the vault path sat as text in one of them while "Open data folder"

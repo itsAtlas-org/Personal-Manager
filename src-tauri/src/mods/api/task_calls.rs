@@ -31,11 +31,13 @@
 
 use std::collections::HashSet;
 
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::calls::{self, existing_project, internal, refusal, tasks_changed, Ctx};
+use super::calls::{
+    self, clip_texts, existing_project, internal, refusal, tasks_changed, Ctx, Fit,
+};
 use super::gifts::{self, Gift};
 use super::handlers::parse;
 use super::projection::{Dto, Needs, Projection};
@@ -64,8 +66,93 @@ struct ListArgs {
     limit: Option<usize>,
 }
 
+/// A list question, checked: which project (as typed, trimmed; `None` for all), after which task, and
+/// how many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListQuery {
+    pub project: Option<String>,
+    pub after: Option<(i64, i64)>,
+    pub limit: usize,
+}
+
+impl ListQuery {
+    /// The arguments as a question: `limit` an integer 1 to `max` (`default` when left out), `after` the
+    /// cursor a previous page gave. The frame's `default` and `max` are one number; the MCP server's
+    /// differ.
+    pub(crate) fn parse(args: &Value, default: usize, max: usize) -> Result<Self, ModError> {
+        let ListArgs {
+            project,
+            after,
+            limit,
+        } = parse(args)?;
+        let after = after.as_deref().map(parse_cursor).transpose()?;
+        let limit = limit.unwrap_or(default);
+        if limit == 0 || limit > max {
+            return Err(ModError::bad_args(format!("limit is 1 to {max}.")));
+        }
+        let project = project
+            .map(|p| p.trim().to_owned())
+            .filter(|p| !p.is_empty());
+        Ok(Self {
+            project,
+            after,
+            limit,
+        })
+    }
+}
+
+/// A page of the task list: the tasks as DTOs, the stacks (only when asked for, and only on a first
+/// page) and the cursor of the next page.
+#[derive(Debug)]
+pub(crate) struct TaskPage {
+    pub tasks: Vec<Value>,
+    pub stacks: Vec<Value>,
+    pub next: Option<String>,
+}
+
+/// The tasks a caller with this `projection` may read, as one page of `query`. The caller has already
+/// checked `tasks.read`; naming a project is reading about projects, so it needs the projection's
+/// `projects` too (a caller without it could otherwise ask which names have tasks). `fit` says how the
+/// page is held to a size.
+pub(crate) fn list_core(
+    conn: &Connection,
+    projection: &Projection,
+    query: &ListQuery,
+    fit: Fit,
+    with_stacks: bool,
+) -> Result<TaskPage, ModError> {
+    if query.project.is_some() && !projection.projects {
+        return Err(
+            ModError::new(Code::NotGranted, "That needs access to projects.")
+                .with_permission("projects.read"),
+        );
+    }
+    let today = crate::clock::today_sql_in(crate::commands::resolve_zone(conn));
+    let name = match &query.project {
+        Some(typed) => Some(tasks::canonical_project(conn, typed).map_err(internal)?),
+        None => None,
+    };
+    let all = tasks::list(conn, name.as_deref(), &today).map_err(internal)?;
+    let stacks = if with_stacks && query.after.is_none() {
+        tasks::list_stacks(conn).map_err(internal)?
+    } else {
+        Vec::new()
+    };
+    let (tasks, next) = match fit.text_cap {
+        None => list_page(&all, query.after, query.limit, fit.budget, *projection),
+        Some(cap) => list_page_by(&all, query.after, query.limit, fit.budget, |t| {
+            clip_texts(task_dto(t, *projection), cap)
+        }),
+    };
+    Ok(TaskPage {
+        tasks,
+        stacks: stacks.iter().map(stack_dto).collect(),
+        next,
+    })
+}
+
 /// A task as a mod with this `projection` gets it, field by field from the named columns.
-pub(super) fn task_dto(t: &Task, projection: Projection) -> Value {
+pub(crate) fn task_dto(t: &Task, projection: Projection) -> Value {
     Dto::new(projection)
         .field(Needs::Nothing, "id", t.id)
         .field(Needs::Nothing, "title", t.title.as_str())
@@ -143,6 +230,18 @@ pub(super) fn list_page(
     budget: usize,
     projection: Projection,
 ) -> (Vec<Value>, Option<String>) {
+    list_page_by(tasks, after, limit, budget, |t| task_dto(t, projection))
+}
+
+/// [`list_page`] over the DTO `dto` builds for each task (the MCP server cuts every text first, so a
+/// task's size is bounded before the page is measured).
+fn list_page_by(
+    tasks: &[Task],
+    after: Option<(i64, i64)>,
+    limit: usize,
+    budget: usize,
+    dto: impl Fn(&Task) -> Value,
+) -> (Vec<Value>, Option<String>) {
     let rest = tasks
         .iter()
         .filter(|t| after.is_none_or(|a| (t.ordinal, t.id) > a));
@@ -150,7 +249,7 @@ pub(super) fn list_page(
     let mut used = 0usize;
     let mut last: Option<&Task> = None;
     for task in rest {
-        let value = task_dto(task, projection);
+        let value = dto(task);
         let size = value.to_string().len() + 1;
         if page.len() == limit || (!page.is_empty() && used + size > budget) {
             return (page, last.map(cursor_of));
@@ -168,52 +267,21 @@ pub(super) async fn list<H: Host>(
     auth: &Authorised,
     args: &Value,
 ) -> Result<Reply, ModError> {
-    let ListArgs {
-        project,
-        after,
-        limit,
-    } = parse(args)?;
-    let after = after.as_deref().map(parse_cursor).transpose()?;
-    let limit = limit.unwrap_or(limits::MAX_TASKS_PER_CALL);
-    if limit == 0 || limit > limits::MAX_TASKS_PER_CALL {
-        return Err(ModError::bad_args(format!(
-            "limit is 1 to {}.",
-            limits::MAX_TASKS_PER_CALL
-        )));
-    }
-    let project = project
-        .map(|p| p.trim().to_owned())
-        .filter(|p| !p.is_empty());
+    let query = ListQuery::parse(args, limits::MAX_TASKS_PER_CALL, limits::MAX_TASKS_PER_CALL)?;
     let value = calls::read(host, auth, move |cx| {
         let sealed = cx.host.engine_sealed();
         // Naming a project is reading about projects: a mod without `projects.read` could otherwise
-        // ask which names have tasks.
-        if project.is_some() {
+        // ask which names have tasks. (The core refuses it too; this is the grant's own answer,
+        // which can be "ask the person".)
+        if query.project.is_some() {
             grants::check(cx.conn, cx.facts, "projects.read", sealed)?;
         }
         let projection = Projection::of_grants(cx.conn, cx.facts, sealed)?;
-        let today = crate::clock::today_sql_in(crate::commands::resolve_zone(cx.conn));
-        let name = match &project {
-            Some(typed) => Some(tasks::canonical_project(cx.conn, typed).map_err(internal)?),
-            None => None,
-        };
-        let all = tasks::list(cx.conn, name.as_deref(), &today).map_err(internal)?;
-        let stacks = if after.is_none() {
-            tasks::list_stacks(cx.conn).map_err(internal)?
-        } else {
-            Vec::new()
-        };
-        let (tasks, next) = list_page(
-            &all,
-            after,
-            limit,
-            limits::LIST_PAGE_BUDGET_BYTES,
-            projection,
-        );
+        let page = list_core(cx.conn, &projection, &query, Fit::FRAME, true)?;
         Ok(json!({
-            "tasks": tasks,
-            "stacks": stacks.iter().map(stack_dto).collect::<Vec<_>>(),
-            "next": next,
+            "tasks": page.tasks,
+            "stacks": page.stacks,
+            "next": page.next,
         }))
     })
     .await?;

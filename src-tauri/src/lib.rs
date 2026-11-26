@@ -83,6 +83,9 @@ mod localfolder;
 mod locations;
 mod lock_session;
 mod made_by;
+// `PM --mcp`: the pipe a connected app's MCP client talks through. Answered by `main` before `run()`.
+mod mcp_shim;
+pub use mcp_shim::run_mcp_shim;
 mod microsoft;
 mod milestones;
 mod model_gateway;
@@ -1406,6 +1409,9 @@ pub fn run() {
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
             app.manage(mods::api::Calls::default());
+            // The MCP server's core: its per-app limiter, and where this computer's own record of
+            // the switch and the paired apps lives (`mods::mcp::device`). No listener yet.
+            app.manage(mods::mcp::Supervisor::new(paths::data_dir(handle)?));
             // The events a frame is told (spec §1.5): what waits out its interval, and the one
             // place document writes are reported from (`ingest::delete_document`, the archive and
             // landing notes: `mods::api::events::Note`).
@@ -2216,6 +2222,13 @@ pub fn run() {
             mods::tab::dev_commands::dev_mode_state,
             mods::tab::dev_commands::dev_mode_switch,
             mods::tab::dev_commands::install_unsigned_file,
+            // Connected apps (Mods spec 1.16): whether Settings offers them, what it shows, the
+            // per-device switch, connecting an app (its token, once) and revoking one.
+            mods::mcp::commands::mcp_offered,
+            mods::mcp::commands::mcp_state,
+            mods::mcp::commands::mcp_set_on,
+            mods::mcp::commands::mcp_connect_app,
+            mods::mcp::commands::mcp_revoke,
             // The Developer kit's readouts (API version, endpoints, limits, engine seal): read-only.
             mods::tab::kit::dev_kit_info,
             // Developer test folders (Mods slice 6, part 4): load (the stark screen's first step;
@@ -2267,6 +2280,9 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.calendar_edit.abandon_held_deletes();
                 }
+                // The MCP socket and its pid file go by hand: `process::exit` follows, so no
+                // destructor runs, and a leftover socket would only be recovered at the next start.
+                mods::mcp::supervisor::shutdown(app);
                 if paths::data_dir_is_purged() {
                     wipe::final_sweep_after_purge(app);
                 }

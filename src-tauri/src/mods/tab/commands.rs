@@ -101,8 +101,9 @@ fn ready(app: &AppHandle) -> Result<()> {
 }
 
 /// Run `f` on a blocking thread, after the window check and the store gate. Everything a command
-/// does that touches a file or the store goes through here.
-pub(super) async fn blocking<T: Send + 'static>(
+/// does that touches a file or the store goes through here. (The connected apps' commands, in
+/// `mods::mcp`, take the same gate.)
+pub(crate) async fn blocking<T: Send + 'static>(
     webview: &Webview,
     f: impl FnOnce(&AppHandle) -> Result<T> + Send + 'static,
 ) -> Result<T> {

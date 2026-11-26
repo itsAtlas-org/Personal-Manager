@@ -2,8 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The Host API's dispatcher (Mods spec §1.5, §1.8, §1.9): the one core every mod call goes
-//! through, whoever makes it. Today the caller is a mod's sealed frame, relayed by PM's page through
-//! `mod_call`; the read-only MCP server (PR C) becomes a second [`Caller`] with no window.
+//! through, whoever makes it. The caller is a mod's sealed frame, relayed by PM's page through
+//! `mod_call`, or a connected app of the read-only MCP server ([`Caller::Mcp`], with no window).
+//!
+//! **Two fronts, one projection, one core.** An MCP app is not a mod: it has no session, no `mods`
+//! row, no grants. [`call`] therefore hands it to `mods::mcp::dispatch` BEFORE any of the mod-shaped
+//! steps below, which does its own ordered checks (store, lock, epoch, the app's pairing and scopes, its
+//! limiter) and then asks the same pure cores the frame handlers ask (`task_calls::list_core`,
+//! `milestone_calls::list_core`, `calendar_calls::agenda`, `project_calls::names`,
+//! `search_calls::answer`) over a [`projection::Projection`] built from the app's scopes. So the grant
+//! check lives in two places (a frame's grants, an app's scopes), over one projection and one core per
+//! call; `Authorised`, `calls::read` and `ModFacts` are never used for an app.
 //!
 //! **The check order** ([`dispatch`]), each step refusing with a stable `MOD-####` code:
 //! 1. the main window only (a frame's call came from PM's page in `main`; an MCP call has no
@@ -54,9 +63,12 @@ mod ai;
 mod ai_prompt_tests;
 #[cfg(test)]
 mod ai_tests;
+pub(crate) mod calendar_calls;
 #[cfg(test)]
-mod call_fixtures;
-mod calls;
+mod calendar_tests;
+#[cfg(test)]
+pub(crate) mod call_fixtures;
+pub(crate) mod calls;
 pub mod confirm;
 #[cfg(test)]
 mod confirm_tests;
@@ -74,7 +86,7 @@ pub mod limits;
 mod link_calls;
 #[cfg(test)]
 mod link_tests;
-mod milestone_calls;
+pub(crate) mod milestone_calls;
 #[cfg(test)]
 mod milestone_tests;
 pub(crate) mod net;
@@ -88,17 +100,20 @@ mod overlay_calls;
 #[cfg(test)]
 mod overlay_tests;
 pub mod permissions;
-mod project_calls;
+pub(crate) mod project_calls;
 #[cfg(test)]
 mod project_tests;
 pub mod projection;
+pub(crate) mod search_calls;
+#[cfg(test)]
+mod search_tests;
 mod second_read;
 mod storage;
 mod surface;
 #[cfg(test)]
 mod surface_tests;
 pub mod table;
-mod task_calls;
+pub(crate) mod task_calls;
 #[cfg(test)]
 mod task_tests;
 #[cfg(test)]
@@ -139,6 +154,11 @@ pub enum Caller {
     /// A mod's sealed frame: the window PM's page relayed the call from, and the session PM opened
     /// for that frame. The mod is the session's, never anything the frame said.
     Frame { window: String, session: String },
+    /// A connected app of the MCP server (`mods::mcp`): its row id in `mcp_clients` and the store
+    /// epoch its connection was made against. No window and no session; the method is a tool's name.
+    /// Everything the connection is allowed is re-read from the store and this device's file on
+    /// every call, never from what was true when it connected.
+    Mcp { client: i64, store_epoch: u64 },
 }
 
 /// The events PM posts to frames, each with its row in the table (`events.rs`).
@@ -156,6 +176,8 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn runtime(&self) -> &ModRuntime;
     fn calls(&self) -> &Calls;
     fn hub(&self) -> &events::Hub;
+    /// The MCP server's state: its limiter, its clock of last use and where this computer's files are.
+    fn mcp(&self) -> &super::mcp::Supervisor;
     fn engine_sealed(&self) -> bool;
     /// Whether PM is locked now. An error means the store is closed, which refuses the same way.
     fn app_locked(&self) -> crate::error::Result<bool>;
@@ -188,6 +210,17 @@ pub trait Host: Clone + Send + Sync + 'static {
         title: &str,
         body: &str,
     ) -> Result<i64, ModError>;
+
+    /// Search the user's documents for `query` (`documents.search`, and later the MCP server's
+    /// `search`): embed it, fuse, rerank when the user has that on, and return at most `limit` chunks
+    /// of what a mod may be shown (no chat, no archived document, no summary-less index-only one).
+    /// Blocking, and it holds no DB guard across the embed or the rerank. The engine is already
+    /// known to be ready.
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievedChunk>, ModError>;
 
     /// Hand `url` (a parsed, screened https address) to the system's browser, detached: it never
     /// waits for the launcher, so a desktop whose launcher blocks cannot hold a thread. Whether
@@ -249,6 +282,10 @@ impl Host for AppHandle {
         self.state::<events::Hub>().inner()
     }
 
+    fn mcp(&self) -> &super::mcp::Supervisor {
+        self.state::<super::mcp::Supervisor>().inner()
+    }
+
     /// Unsealed until the engine has said otherwise (`EngineState`), including before it is managed.
     fn engine_sealed(&self) -> bool {
         self.try_state::<EngineState>()
@@ -277,6 +314,14 @@ impl Host for AppHandle {
         crate::notes::save(self.store(), namespace, key, title, body)
             .map(|document| document.id)
             .map_err(ModError::internal)
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievedChunk>, ModError> {
+        search_calls::search_store(self.store(), query, limit)
     }
 
     fn open_link(&self, url: &str) -> bool {
@@ -460,7 +505,15 @@ async fn call<H: Host>(
     method: &str,
     args: &str,
 ) -> Result<Reply, ModError> {
-    let Caller::Frame { window, session } = caller;
+    let (window, session) = match caller {
+        Caller::Frame { window, session } => (window, session),
+        // An app is not a mod: none of the steps below (a session, a mod's row, grants) apply, and
+        // `mcp::dispatch` makes its own ordered checks before it asks the shared cores.
+        Caller::Mcp {
+            client,
+            store_epoch,
+        } => return super::mcp::dispatch(host, client, store_epoch, method, args).await,
+    };
     // 1. The main window only.
     if window != MAIN_LABEL {
         return Err(ModError::new(

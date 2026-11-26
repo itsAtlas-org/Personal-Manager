@@ -11,7 +11,8 @@
 //! older API gets [`super::Code::RemovedMethod`] rather than "unknown".
 //!
 //! `experimental` rows (D13) are outside the API freeze and may change in a minor: the four calls no
-//! pilot uses yet (`ai.complete`, `net.fetch`, `secrets.set`, `notify`, PR B) land marked so.
+//! pilot uses yet (`ai.complete`, `net.fetch`, `secrets.set`, `notify`, PR B) land marked so, and PR C3
+//! adds three (`documents.search`, `calendar.agenda`, and the event `calendar.synced`).
 
 use super::limits::Family;
 use super::permissions::Class;
@@ -57,11 +58,11 @@ const fn call(name: &'static str, permission: &'static str, class: Class) -> Row
     }
 }
 
-/// One of PR B's four experimental calls (D13: outside the API freeze, `ai.complete`, `net.fetch`,
-/// `secrets.set`, `notify`): a call row marked so, which the Developer tab and ERROR_CODES show as
-/// experimental. It needs a `family` because each of them waits on something outside PM (or, for
-/// `secrets.set` and `notify`, on the person), and a handler slice must say which limits it lives
-/// under rather than inherit "none" by default.
+/// One of the experimental calls (D13: outside the API freeze: PR B's `ai.complete`, `net.fetch`,
+/// `secrets.set`, `notify`, and PR C3's `documents.search` and `calendar.agenda`): a call row marked
+/// so, which the Developer tab and ERROR_CODES show as experimental. It needs a `family` because each
+/// of them waits on something outside PM (or, for `secrets.set` and `notify`, on the person), and a
+/// handler slice must say which limits it lives under rather than inherit "none" by default.
 const fn experimental_call(
     name: &'static str,
     permission: &'static str,
@@ -106,7 +107,21 @@ const fn event(name: &'static str, permission: Option<&'static str>, class: Clas
     }
 }
 
-/// Every row. PR B adds the experimental calls; PR C the Pinboard's calls and events.
+/// An event row that is experimental (PR C3's `calendar.synced`): like [`experimental_call`], outside
+/// the API freeze, and shown so by the Developer tab. An event is never admitted, so it has no family.
+const fn experimental_event(
+    name: &'static str,
+    permission: Option<&'static str>,
+    class: Class,
+) -> Row {
+    Row {
+        experimental: true,
+        ..event(name, permission, class)
+    }
+}
+
+/// Every row. PR B adds the experimental calls; PR C the Pinboard's calls and events, and PR C3 two
+/// more experimental calls and an experimental event.
 pub const ROWS: &[Row] = &[
     // The spec's table gives `theme.get` to `storage` and `ui.tab` alike, and its events table
     // gives `theme.changed` to `storage`; the call takes the event's permission, so a mod that may
@@ -175,12 +190,29 @@ pub const ROWS: &[Row] = &[
         Family::Embed,
     ),
     call("documents.statusOf", "documents.meta", Class::Read),
+    // PR C3's experimental `documents.search`: PM's own hybrid retrieval over the user's documents
+    // (never chats or the archived), excerpts only. It embeds the query, so the engine must be set up
+    // (MOD-5007) and it lives under the embed family's limits.
+    experimental_call(
+        "documents.search",
+        "documents.text",
+        Class::Read,
+        Family::Embed,
+    ),
     call("ui.openTaskEditor", "tasks.write", Class::Write),
     // A link in the person's browser: `links` is egress, so D3 judges it like `internet`.
     family_call("shell.openLink", "links", Class::Egress, Family::Links),
     // The caller's own calendar overlay, drawn by PM without running its code: `storage`, and the
     // handler requires the manifest to declare `contributions['calendar.overlay']`.
     call("calendar.overlay.set", "storage", Class::Local),
+    // PR C3's experimental `calendar.agenda`: what is coming up (not ended, not declined, no quiet
+    // calendar) as seven plain fields; it waits on PM's own database only.
+    experimental_call(
+        "calendar.agenda",
+        "calendar.read",
+        Class::Read,
+        Family::General,
+    ),
     // Events. Each carries the same narrow shape as the call it matches, or ids only (events.rs).
     // A document that landed, as `documents.list`'s DTO with every field.
     event("documents.added", Some("documents.meta"), Class::Read),
@@ -199,6 +231,9 @@ pub const ROWS: &[Row] = &[
     event("projects.renamed", Some("projects.read"), Class::Read),
     event("projects.merged", Some("projects.read"), Class::Read),
     event("projects.deleted", Some("projects.read"), Class::Read),
+    // PR C3's experimental event: events were written by a sync or a change check, or a calendar was
+    // ticked or unticked. A bare signal, no ids: the frame asks `calendar.agenda` again (events.rs).
+    experimental_event("calendar.synced", Some("calendar.read"), Class::Read),
     // PM's word to one frame before it takes it down: no permission, `{reason}`, answered `{flushed}`.
     event("lifecycle.suspend", None, Class::Local),
 ];
@@ -394,23 +429,29 @@ mod tests {
         ));
     }
 
-    /// The only experimental rows the live table may ever carry are PR B's four, each under the
-    /// family its limits are written for; every other row is general, or (a call only) under one of
-    /// PR C's families, the ones a call that writes the lists or waits on the outside uses.
+    /// The only experimental rows the live table may ever carry are PR B's four calls and PR C3's two
+    /// calls and one event, each under the family its limits are written for; every other row is
+    /// general, or (a call only) under one of PR C's families, the ones a call that writes the lists
+    /// or waits on the outside uses.
     #[test]
     fn the_live_tables_experimental_rows_are_held_to_their_families() {
+        let mut seen = Vec::new();
         for row in ROWS {
             if row.experimental {
-                let want = match row.name {
-                    "ai.complete" => Family::Ai,
-                    "net.fetch" => Family::Net,
-                    "secrets.set" | "notify" => Family::General,
-                    other => panic!("{other} is experimental but isn't one of PR B's four"),
+                seen.push(row.name);
+                let (want, kind) = match row.name {
+                    "ai.complete" => (Family::Ai, Kind::Call),
+                    "net.fetch" => (Family::Net, Kind::Call),
+                    "secrets.set" | "notify" => (Family::General, Kind::Call),
+                    "documents.search" => (Family::Embed, Kind::Call),
+                    "calendar.agenda" => (Family::General, Kind::Call),
+                    "calendar.synced" => (Family::General, Kind::Event),
+                    other => panic!("{other} is experimental but isn't one of the seven"),
                 };
                 assert_eq!(row.family, want, "{}", row.name);
-                assert_eq!(row.kind, Kind::Call, "{}", row.name);
+                assert_eq!(row.kind, kind, "{}", row.name);
             } else {
-                // Never one of the experimental families (`ai`, `net`): those are PR B's four's.
+                // Never one of the experimental families (`ai`, `net`): those are PR B's two's.
                 assert!(
                     !matches!(row.family, Family::Ai | Family::Net),
                     "{}: only an experimental call is under the AI or network family",
@@ -418,18 +459,45 @@ mod tests {
                 );
             }
         }
+        // Exactly these seven, in table order (the Developer tab lists them so).
+        assert_eq!(
+            seen,
+            [
+                "ai.complete",
+                "net.fetch",
+                "secrets.set",
+                "notify",
+                "documents.search",
+                "calendar.agenda",
+                "calendar.synced"
+            ]
+        );
+    }
+
+    /// The helper an experimental event is made with differs from a plain event in that flag alone.
+    #[test]
+    fn an_experimental_event_is_an_event_row_marked_so() {
+        let row = experimental_event("a.synced", Some("calendar.read"), Class::Read);
+        assert_eq!(
+            row,
+            Row {
+                experimental: true,
+                ..event("a.synced", Some("calendar.read"), Class::Read)
+            }
+        );
+        assert!(row.kind == Kind::Event && row.family == Family::General);
     }
 
     /// The family each of K2's calls must be admitted under, by name. A row left on `General` would
     /// run with no family bucket and no in-flight cap, and nothing else reads this wiring: the family
-    /// tests in `limits.rs` call `admit_family` directly (see [`family_wiring_faults`]). `search`
-    /// arrives with the MCP slice and is not in the table yet.
+    /// tests in `limits.rs` call `admit_family` directly (see [`family_wiring_faults`]). C3's
+    /// `documents.search` is experimental, and named here all the same: it embeds.
     const FAMILY_OF: &[(&str, Family)] = &[
         ("tasks.add", Family::Gifts),
         ("tasks.importChecklist", Family::Gifts),
         ("milestones.add", Family::Gifts),
         ("documents.saveNote", Family::Embed),
-        ("search", Family::Embed),
+        ("documents.search", Family::Embed),
         ("shell.openLink", Family::Links),
     ];
 

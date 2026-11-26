@@ -18,6 +18,7 @@
 //! `state.conn()` (or anything that does: `iso_now(&AppState)`) while it runs.
 
 use rusqlite::Connection;
+use serde_json::Value;
 
 use super::grants::ModFacts;
 use super::{blocking, recheck, still_current, Authorised, Host, ModError};
@@ -116,6 +117,43 @@ pub(super) async fn write<H: Host, T: Send + 'static>(
     // The guard and the transaction are gone: the views may now be told.
     host.settle(wrote.aftermath);
     Ok(wrote.value)
+}
+
+/// How a list core fits its page into an answer: the bytes of JSON it may use, and, for a caller that
+/// must hold a hostile row to a size (the MCP server's), the most characters one text value may keep.
+/// The frame's own calls cut nothing: the page budget alone bounds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fit {
+    pub budget: usize,
+    pub text_cap: Option<usize>,
+}
+
+impl Fit {
+    /// A mod's frame: the list budget, no text cut.
+    pub(crate) const FRAME: Self = Self {
+        budget: super::limits::LIST_PAGE_BUDGET_BYTES,
+        text_cap: None,
+    };
+}
+
+/// `value` with every text in it cut to `max` characters, at a character boundary. A row's text can
+/// be as long as whoever wrote it (a feed, a shared-vault member) chose; cutting it before a page is
+/// measured is what lets the page keep its bound whatever the rows hold.
+pub(crate) fn clip_texts(mut value: Value, max: usize) -> Value {
+    fn walk(value: &mut Value, max: usize) {
+        match value {
+            Value::String(s) => {
+                if let Some((at, _)) = s.char_indices().nth(max) {
+                    s.truncate(at);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(v, max)),
+            Value::Object(map) => map.values_mut().for_each(|v| walk(v, max)),
+            _ => {}
+        }
+    }
+    walk(&mut value, max);
+    value
 }
 
 /// A core error as the mod is told it: PM's own failure, with its detail kept out of the answer.

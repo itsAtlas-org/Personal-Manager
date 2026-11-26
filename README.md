@@ -329,8 +329,14 @@ was still running. And Proton Drive's command-line tool, once installed, reports
 Proton account's "Collect usage diagnostics" was on when the tool last signed in, and can send a
 crash report if it fails while starting up, before it has read that setting. Settings → Backup
 says where to turn the setting off; then disconnect and reconnect Proton Drive there, since the tool
-reads it only when it signs in. The repo holds code only — see
-[`SECURITY.md`](SECURITY.md) for the security policy and how to report an issue privately.
+reads it only when it signs in. That is everything PM sends. Apart from the moment a sign-in waits on this computer for its
+answer, there is one thing that can reach PM:
+an AI app on the same computer, if you connect one (Settings → Data & Security, hidden in release
+builds until PM has been tested on your system). It is off by default and per computer, talks to
+PM through a local socket in a folder only your account can enter (no network port), needs a
+token you generate for it, and can only read what you tick for it in this version, so it cannot change anything; what it
+reads goes on to that app's own AI provider, outside PM's zero-data-retention promise. The repo
+holds code only — see [`SECURITY.md`](SECURITY.md) for the security policy and how to report an issue privately.
 
 ## Contributing & releasing
 

@@ -77,6 +77,7 @@ pub mod index;
 pub mod index_state;
 pub mod keys;
 pub mod ledger;
+pub mod mcp;
 pub mod netfetch;
 pub mod outbox;
 pub mod package;

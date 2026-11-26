@@ -151,7 +151,7 @@ pub const GIFT_BURST: u64 = 50;
 /// it). Past it the call is refused `MOD-3003`.
 pub const MAX_GIFTS_PER_MOD: u64 = 10_000;
 
-/// Embed-family calls (`documents.saveNote`, later `search`) of one mod running at once: each holds a
+/// Embed-family calls (`documents.saveNote`, `documents.search`) of one mod running at once: each holds a
 /// CPU-heavy embed.
 pub const EMBED_MAX_IN_FLIGHT: usize = 1;
 /// Embed-family calls a mod may make per minute, sustained.
@@ -217,7 +217,7 @@ pub enum Family {
     /// The calls that add a task or a milestone to the user's lists (K1: `tasks.add`,
     /// `tasks.importChecklist`, `milestones.add`).
     Gifts,
-    /// The calls that hold a CPU-heavy embed (`documents.saveNote`; later `search`).
+    /// The calls that hold a CPU-heavy embed (`documents.saveNote`, `documents.search`).
     Embed,
     /// `shell.openLink`: it waits on the desktop's launcher.
     Links,

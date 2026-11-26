@@ -179,6 +179,8 @@ pub struct Parts {
     pub state: AppState,
     pub runtime: ModRuntime,
     pub calls: Calls,
+    /// The MCP server's core, over this host's own folder (its device file lives there).
+    pub mcp: crate::mods::mcp::Supervisor,
     pub hub: Hub,
     pub sealed: AtomicBool,
     /// PM locked, as `app_locked_for_mods` would say on a platform with a lock.
@@ -195,6 +197,11 @@ pub struct Parts {
     pub notes: Mutex<Vec<SavedNote>>,
     /// Every address the host was asked to open (`Host::open_link`), the launcher's spy.
     pub links: Mutex<Vec<String>>,
+    /// The vector every query embeds to (`Host::search`): the embedder is the sidecar's, so a test
+    /// says where its queries land in the vector space.
+    pub query_vector: Mutex<Vec<f32>>,
+    /// Every query the host was asked to search (`Host::search`), the engine's spy.
+    pub searches: Mutex<Vec<String>>,
     hook: Mutex<Option<Hook>>,
 }
 
@@ -247,6 +254,7 @@ impl TestHost {
                 state: AppState::new(Some(conn), None, sidecar, None, None),
                 runtime: ModRuntime::new(Platform::Linux, vec!["tauri://localhost".into()]),
                 calls: Calls::default(),
+                mcp: crate::mods::mcp::Supervisor::new(dir.path().to_path_buf()),
                 hub: Hub::with_delay(interval),
                 sealed: AtomicBool::new(true),
                 locked: AtomicBool::new(false),
@@ -256,6 +264,8 @@ impl TestHost {
                 engine: AtomicBool::new(false),
                 notes: Mutex::new(Vec::new()),
                 links: Mutex::new(Vec::new()),
+                query_vector: Mutex::new(Vec::new()),
+                searches: Mutex::new(Vec::new()),
                 hook: Mutex::new(None),
                 dir: dir.path().to_path_buf(),
             }),
@@ -283,6 +293,15 @@ impl TestHost {
         self.0.notes.lock().unwrap().clone()
     }
 
+    /// Where the queries of `Host::search` land in the vector space.
+    pub fn set_query_vector(&self, vector: Vec<f32>) {
+        *self.0.query_vector.lock().unwrap() = vector;
+    }
+
+    pub fn searched(&self) -> Vec<String> {
+        self.0.searches.lock().unwrap().clone()
+    }
+
     pub fn opened_links(&self) -> Vec<String> {
         self.0.links.lock().unwrap().clone()
     }
@@ -307,6 +326,10 @@ impl Host for TestHost {
 
     fn calls(&self) -> &Calls {
         &self.0.calls
+    }
+
+    fn mcp(&self) -> &crate::mods::mcp::Supervisor {
+        &self.0.mcp
     }
 
     fn hub(&self) -> &Hub {
@@ -383,6 +406,19 @@ impl Host for TestHost {
                 }
             }
         })
+    }
+
+    /// The app's own finishing step ([`super::search_calls::finish_search`], which `search_store` ends
+    /// in too) over the test's store, with the query's vector scripted and no reranker: only the embed
+    /// is replaced.
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievedChunk>, super::ModError> {
+        self.0.searches.lock().unwrap().push(query.into());
+        let vector = self.0.query_vector.lock().unwrap().clone();
+        super::search_calls::finish_search(&self.0.state, query, &vector, limit, false, None)
     }
 
     fn open_link(&self, url: &str) -> bool {

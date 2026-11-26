@@ -26,7 +26,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::calls::{self, internal, refusal, Wrote};
+use super::calls::{self, clip_texts, internal, refusal, Fit, Wrote};
 use super::confirm::{self, Target};
 use super::gifts::{self, Gift};
 use super::handlers::parse;
@@ -63,7 +63,7 @@ struct ListArgs {
 /// milestone's date follows its event), which names no event; whether a link exists is always said
 /// (`calendar_linked`) and the event's uid, and whether the event is still in the calendar, are
 /// `calendar.read`'s. Never the source or external id of a synced one.
-pub(super) fn milestone_dto(m: &Milestone, projection: Projection) -> Value {
+pub(crate) fn milestone_dto(m: &Milestone, projection: Projection) -> Value {
     Dto::new(projection)
         .field(Needs::Nothing, "id", m.id)
         .field(Needs::Nothing, "project_name", m.project_name.as_str())
@@ -78,20 +78,73 @@ pub(super) fn milestone_dto(m: &Milestone, projection: Projection) -> Value {
         .build()
 }
 
-/// A page of `all` (by id) after `after`, under `limit` and `budget`; the cursor is the last id when
-/// more follow.
+/// A list question, checked: after which milestone id, and how many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListQuery {
+    pub after: i64,
+    pub limit: usize,
+}
+
+impl ListQuery {
+    /// The arguments as a question: `after` a milestone id (0 or more, 0 when left out), `limit` an
+    /// integer 1 to `max` (`default` when left out).
+    pub(crate) fn parse(args: &Value, default: usize, max: usize) -> Result<Self, ModError> {
+        let ListArgs { after, limit } = parse(args)?;
+        let after = after.unwrap_or(0);
+        if after < 0 {
+            return Err(ModError::bad_args("after is a milestone id: 0 or more."));
+        }
+        let limit = limit.unwrap_or(default);
+        if limit == 0 || limit > max {
+            return Err(ModError::bad_args(format!("limit is 1 to {max}.")));
+        }
+        Ok(Self { after, limit })
+    }
+}
+
+/// One page of the milestone list: the milestones as DTOs and the cursor of the next page.
+#[derive(Debug)]
+pub(crate) struct MilestonePage {
+    pub milestones: Vec<Value>,
+    pub next: Option<i64>,
+}
+
+/// The milestones a caller with this `projection` reads, as one page of `query` held to `fit`. The
+/// caller has already checked that it may read milestones at all (a frame's `projects.read`, an MCP
+/// client's scope of the same name: a milestone always names its project).
+pub(crate) fn list_core(
+    conn: &Connection,
+    projection: &Projection,
+    query: &ListQuery,
+    fit: Fit,
+) -> Result<MilestonePage, ModError> {
+    let today = crate::clock::today_sql_in(crate::commands::resolve_zone(conn));
+    let mut all = milestones::list_all(conn, &today).map_err(internal)?;
+    all.sort_by_key(|m| m.id);
+    let (milestones, next) = list_page(&all, query.after, query.limit, fit.budget, |m| {
+        let dto = milestone_dto(m, *projection);
+        match fit.text_cap {
+            Some(cap) => clip_texts(dto, cap),
+            None => dto,
+        }
+    });
+    Ok(MilestonePage { milestones, next })
+}
+
+/// A page of `all` (by id) after `after`, under `limit` and `budget`, each milestone as `dto` builds
+/// it; the cursor is the last id when more follow.
 fn list_page(
     all: &[Milestone],
     after: i64,
     limit: usize,
     budget: usize,
-    projection: Projection,
+    dto: impl Fn(&Milestone) -> Value,
 ) -> (Vec<Value>, Option<i64>) {
     let mut page: Vec<Value> = Vec::new();
     let mut used = 0usize;
     let mut last = None;
     for m in all.iter().filter(|m| m.id > after) {
-        let value = milestone_dto(m, projection);
+        let value = dto(m);
         let size = value.to_string().len() + 1;
         if page.len() == limit || (!page.is_empty() && used + size > budget) {
             return (page, last);
@@ -109,31 +162,11 @@ pub(super) async fn list<H: Host>(
     auth: &Authorised,
     args: &Value,
 ) -> Result<Reply, ModError> {
-    let ListArgs { after, limit } = parse(args)?;
-    let after = after.unwrap_or(0);
-    if after < 0 {
-        return Err(ModError::bad_args("after is a milestone id: 0 or more."));
-    }
-    let limit = limit.unwrap_or(limits::MAX_TASKS_PER_CALL);
-    if limit == 0 || limit > limits::MAX_TASKS_PER_CALL {
-        return Err(ModError::bad_args(format!(
-            "limit is 1 to {}.",
-            limits::MAX_TASKS_PER_CALL
-        )));
-    }
+    let query = ListQuery::parse(args, limits::MAX_TASKS_PER_CALL, limits::MAX_TASKS_PER_CALL)?;
     let value = calls::read(host, auth, move |cx| {
         let projection = Projection::of_grants(cx.conn, cx.facts, cx.host.engine_sealed())?;
-        let today = crate::clock::today_sql_in(crate::commands::resolve_zone(cx.conn));
-        let mut all = milestones::list_all(cx.conn, &today).map_err(internal)?;
-        all.sort_by_key(|m| m.id);
-        let (page, next) = list_page(
-            &all,
-            after,
-            limit,
-            limits::LIST_PAGE_BUDGET_BYTES,
-            projection,
-        );
-        Ok(json!({"milestones": page, "next": next}))
+        let page = list_core(cx.conn, &projection, &query, Fit::FRAME)?;
+        Ok(json!({"milestones": page.milestones, "next": page.next}))
     })
     .await?;
     Ok(Reply::value(value))

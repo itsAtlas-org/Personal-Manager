@@ -713,3 +713,41 @@ export type ModsChangedCause =
 export interface ModsChanged {
   cause: ModsChangedCause;
 }
+
+// ---- Connected apps (Mods spec 1.16) ---------------------------------------------------------------
+
+/** What an app may read: permission ids, frozen by API 1.0. `calendar.details` is never offered. */
+export type McpScope = "tasks.read" | "projects.read" | "calendar.read" | "documents.text";
+
+/** One connected app as `mcpState` lists it. `paired` is false for a row this device holds no
+ *  pairing for (made on another computer sharing the vault, or whose pairing was lost): it cannot
+ *  connect here until it is connected again. */
+export interface McpClient {
+  id: number;
+  name: string;
+  scopes: McpScope[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  paired: boolean;
+}
+
+/** What `mcpState` answers: never a token. When `offered` is false nothing else is meaningful. */
+export interface McpState {
+  /** Whether this computer shows connected apps at all. */
+  offered: boolean;
+  /** This device's switch, for the open vault. */
+  on: boolean;
+  clients: McpClient[];
+  /** Whether the connection point is open now. */
+  listening: boolean;
+  /** PM's sentence for why it could not open, if it could not. */
+  error: string | null;
+}
+
+/** What `mcpConnectApp` answers, once: the only time the token is ever in the page. `snippet` is the
+ *  config text an app's client pastes, with the token inside it. */
+export interface McpConnected {
+  clientId: number;
+  token: string;
+  snippet: string;
+}

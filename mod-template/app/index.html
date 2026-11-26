@@ -1,0 +1,26 @@
+<!-- SPDX-FileCopyrightText: 2026 Bobby Yu -->
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hello</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+
+  <body>
+    <main>
+      <h1>Hello</h1>
+      <p id="status">Connecting to PM...</p>
+      <label for="greeting">Your greeting</label>
+      <input id="greeting" type="text" maxlength="100" disabled />
+      <button id="save" type="button" disabled>Save</button>
+    </main>
+    <!-- Two classic scripts, no inline code: a mod's page may load only files from its own app/
+         folder, and a module script is refused by the packer. pm-host.js (PM's page-side SDK)
+         comes first and defines PmHost; main.js is yours. -->
+    <script src="./pm-host.js"></script>
+    <script src="./main.js"></script>
+  </body>
+</html>

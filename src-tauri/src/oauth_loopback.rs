@@ -157,7 +157,8 @@ fn request_target(request: &str) -> Option<String> {
 
 /// Constant-time equality for the OAuth CSRF `state` token, so the comparison can't be turned into a
 /// timing oracle. (The length check is fine to short-circuit — the token length is fixed, not secret.)
-fn ct_eq(a: &str, b: &str) -> bool {
+/// The MCP server compares token hashes with it too (`mods::mcp::clients`).
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

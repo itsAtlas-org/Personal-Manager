@@ -118,6 +118,7 @@ const ALLOWED_ROOT = new Set([
   "index.html",
   "justfile",
   "mods", // first-party mods' source (Mods spec §7); built output is git-ignored, never tracked
+  "mod-template", // the starter folder a mod author copies (Mods spec 1.15, PR C3)
   "package-lock.json",
   "package.json",
   "ruff.toml",

@@ -14,6 +14,7 @@
 //! | `projects.renamed` | `projects.read` | `{from, to}` | a rename, after its commit |
 //! | `projects.merged` | `projects.read` | `{from, into}` | a merge, after its commit |
 //! | `projects.deleted` | `projects.read` | `{name}` | a project delete, after its commit |
+//! | `calendar.synced` | `calendar.read` | `{}` | [`crate::commands::calendars`]' `announce_synced`, events written by a sync or a change check, or a calendar ticked or unticked, coalesced (experimental) |
 //! | `lifecycle.suspend` | none | `{reason}` | PM, to one frame, before it takes the frame down ([`lifecycle_suspend`]); PM waits for the answer only from a mod whose manifest says `answersSuspend: true` |
 //!
 //! **Rust filters before anything is sent.** [`emit_with`] is the one way an event reaches a frame. For
@@ -67,8 +68,14 @@
 //! after its commit by the command layer ([`project_changed`]); its names were captured inside the
 //! mutation, so what is announced is what was done, not what is true by then.
 //!
-//! **Not built here:** `calendar.synced` (an MCP-only event, PR C3). Adding one is a row in the
-//! table, a name in [`EVENTS`] and a call to [`emit_with`].
+//! **`calendar.synced` is a bare signal too** (experimental, PR C3). It fires only from
+//! `announce_synced`, the one seam the Calendar views' own `calendar://synced` comes through: when a
+//! sync or a change check wrote events, and when the user ticks or unticks a calendar (unticking
+//! prunes that calendar's events, so a frame needs to hear it). An event the user edits in PM, or a
+//! calendar they only mute (the quiet toggle), does not raise it, so a frame that wants those
+//! re-reads when it is shown. It carries nothing; the frame asks `calendar.agenda` again.
+//!
+//! Adding an event is a row in the table, a name in [`EVENTS`] and a call to [`emit_with`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -94,6 +101,7 @@ pub const MOD_TASKS_CHANGED: &str = "tasks.changed";
 pub const PROJECTS_RENAMED: &str = "projects.renamed";
 pub const PROJECTS_MERGED: &str = "projects.merged";
 pub const PROJECTS_DELETED: &str = "projects.deleted";
+pub const CALENDAR_SYNCED: &str = "calendar.synced";
 pub const LIFECYCLE_SUSPEND: &str = "lifecycle.suspend";
 
 /// Every event this PM sends: a table row each (a test holds the two together), and the names the
@@ -110,6 +118,7 @@ pub const EVENTS: &[&str] = &[
     PROJECTS_RENAMED,
     PROJECTS_MERGED,
     PROJECTS_DELETED,
+    CALENDAR_SYNCED,
     LIFECYCLE_SUSPEND,
 ];
 
@@ -274,13 +283,14 @@ struct Raised {
 }
 
 /// What is waiting for its interval to end: the documents that landed, the ids that may have gone,
-/// and the task views' bare "something changed". Managed state (`lib.rs`); a test makes its own,
-/// with a short interval.
+/// the task views' bare "something changed", and a calendar sync's. Managed state (`lib.rs`); a test
+/// makes its own, with a short interval.
 #[derive(Default)]
 pub struct Hub {
     landed: Mutex<Pending>,
     deleted: Mutex<Pending>,
     tasks: Mutex<Raised>,
+    calendar: Mutex<Raised>,
     /// A test's interval, in place of [`limits::EVENT_COALESCE_MS`].
     delay: Option<Duration>,
 }
@@ -361,6 +371,13 @@ impl Hub {
         (r.raised, r.scheduled)
     }
 
+    /// Whether the calendar signal is up, and whether its timer is running.
+    #[cfg(test)]
+    fn calendar_state(&self) -> (bool, bool) {
+        let r = self.calendar.lock().unwrap();
+        (r.raised, r.scheduled)
+    }
+
     /// Ids waiting, and ids dropped for the cap since the last take: (landed, deleted).
     #[cfg(test)]
     fn counts(&self) -> ((usize, u64), (usize, u64)) {
@@ -374,6 +391,7 @@ enum Which {
     Landed,
     Deleted,
     Tasks,
+    Calendar,
 }
 
 /// Start the timer for one set: when it ends the set is flushed on the blocking pool. The host is
@@ -387,6 +405,7 @@ fn schedule<H: Host>(host: &H, which: Which) {
             Which::Landed => drop(flush_landed(&host)),
             Which::Deleted => drop(settle_deleted(&host)),
             Which::Tasks => drop(flush_tasks_changed(&host)),
+            Which::Calendar => drop(flush_calendar_synced(&host)),
         })
         .await;
     });
@@ -730,6 +749,46 @@ pub(super) fn flush_tasks_changed<H: Host>(host: &H) -> Emitted {
         return Emitted::default();
     }
     emit_with(host, MOD_TASKS_CHANGED, &Audience::Everyone, |_| {
+        stays_over(host, epoch)?;
+        Ok(vec![json!({})])
+    })
+}
+
+// ---- calendar.synced ----------------------------------------------------------------------------
+
+/// Events were written by a sync or a change check, or a calendar was ticked or unticked, and the DB
+/// guard is gone ([`crate::commands::calendars`]' `announce_synced`): tell the frames that hold
+/// `calendar.read`, after the interval.
+/// Cheap when no frame is live. The payload is `{}`: the frame asks `calendar.agenda` again.
+pub fn calendar_synced<H: Host>(host: &H) {
+    if !host.runtime().any_live() {
+        return;
+    }
+    let epoch = host.store().store_epoch();
+    if Hub::raise(&host.hub().calendar, epoch) {
+        schedule(host, Which::Calendar);
+    }
+}
+
+/// [`calendar_synced`] for the app, which may call it before the mods' state is managed (the
+/// calendar's own tests have no app at all): then there is nobody to tell.
+pub fn app_calendar_synced(app: &AppHandle) {
+    if app.try_state::<Hub>().is_some()
+        && app.try_state::<ModRuntime>().is_some()
+        && app.try_state::<AppState>().is_some()
+    {
+        calendar_synced(app);
+    }
+}
+
+/// The end of the interval: one `calendar.synced` if the signal is still up and the store is the one
+/// it was raised over.
+pub(super) fn flush_calendar_synced<H: Host>(host: &H) -> Emitted {
+    let (epoch, raised) = Hub::lower(&host.hub().calendar);
+    if !raised {
+        return Emitted::default();
+    }
+    emit_with(host, CALENDAR_SYNCED, &Audience::Everyone, |_| {
         stays_over(host, epoch)?;
         Ok(vec![json!({})])
     })

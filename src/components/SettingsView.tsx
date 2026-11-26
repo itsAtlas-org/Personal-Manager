@@ -26,6 +26,7 @@ import {
 } from "../lib/localAiSwitch";
 import { directReady } from "../lib/directProviders";
 import { useDirectProviders } from "../lib/useDirectProviders";
+import { useMcpOffered } from "../lib/mcpOffered";
 import { BackupSettings } from "./BackupSettings";
 import { AttentionDot } from "./Sidebar";
 import { ConnectorsSettings } from "./ConnectorsSettings";
@@ -51,6 +52,7 @@ import {
   fallbackTab,
   SETTINGS_GROUPS,
   sectionsFor,
+  shownSections,
   visibleGroups,
   type SettingsTab,
 } from "./settings/registry";
@@ -116,6 +118,9 @@ export function SettingsView({
   // device" choice is what switches it on for a brand-new user.
   const localAi = useLocalAiSwitch();
   const features = { localAi: localAiShown(localAi) };
+  // Whether this computer offers connected apps (Data & Security): the rail leaves the section out
+  // with the page, so a link never points at nothing.
+  const mcpOffered = useMcpOffered();
   // Onboarding switched it on itself, so finishing with the cloud choice switches it back off.
   // A switch that was already on (an existing local user back in the wizard) is theirs, and left.
   const switchedOnHere = useRef(false);
@@ -193,7 +198,7 @@ export function SettingsView({
   // hook simply finds no anchors and stays inert.
   const activeSectionId = useScrollSpy(
     contentRef,
-    sectionsFor(tab).map((s) => s.id),
+    shownSections(sectionsFor(tab), mcpOffered).map((s) => s.id),
   );
 
   // Jump to a section AND say so. Scrolling alone is invisible feedback on a tab short enough to fit
@@ -662,7 +667,7 @@ export function SettingsView({
                         {/* The active tab's sub-nav: it animates open via the grid 0fr↔1fr trick and
                             is kept mounted-but-collapsed (and non-interactive) for the others, so
                             switching tabs slides smoothly. Tabs with no sections render nothing. */}
-                        {t.sections.length > 0 && (
+                        {shownSections(t.sections, mcpOffered).length > 0 && (
                           <div
                             className="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
                             style={{ gridTemplateRows: active ? "1fr" : "0fr" }}
@@ -675,7 +680,7 @@ export function SettingsView({
                                 )}
                                 aria-hidden={!active}
                               >
-                                {t.sections.map((s) => (
+                                {shownSections(t.sections, mcpOffered).map((s) => (
                                   <button
                                     key={s.id}
                                     type="button"

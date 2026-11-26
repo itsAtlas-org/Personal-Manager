@@ -37,3 +37,7 @@ docs
 # a reflow would turn 85 KB of vectors into thousands of lines. Same for the openTSNE oracle.
 mods/atlas.map/src/fixtures/pca-numpy.json
 mods/atlas.map/src/fixtures/tsne-opentsne.json
+
+# The starter mod's SDK file: generated from src/kit/host.ts by src/components/mods/modTemplate.test.ts
+# (`vitest -u` rewrites it), so its format is the build's, not ours.
+mod-template/app/pm-host.js

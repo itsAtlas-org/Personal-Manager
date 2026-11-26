@@ -556,6 +556,10 @@ export const HELP: Record<string, HelpEntry> = {
     title: "App lock",
     body: "Optionally require an OS check before PM opens — Windows Hello (face, fingerprint, or PIN) on Windows; not available on macOS or Linux yet. It's a convenience lock for the window only: your store is always encrypted at rest, so this isn't a second password on your data. It's off until you turn it on, only available where your device can actually verify, and takes effect the next time you open PM. If your device can't verify, you can still get in — you're never locked out of your own app.",
   },
+  "settings-connected-apps": {
+    title: "Connected apps",
+    body: "Lets an AI app on this computer read part of your PM data, such as your tasks or calendar events, through a private connection that only your account can reach. It is off until you turn it on, it applies to this computer only (a restored backup or a shared vault never turns it on somewhere else), and in this version apps can only read, so they cannot change anything. Each app gets its own key, shown once when you connect it and never again, and you choose what it may read: documents search starts off because it sends text from your documents. Be aware that the AI provider behind a connected app is outside PM's zero-data-retention promise, and that any program running as you can read the app's saved configuration and use its key. Revoke an app to cut it off at once.",
+  },
   "settings-connectors": {
     title: "Connectors",
     body: "Connect external accounts so PM can find and use what's in them, grouped by provider — Google, Microsoft, Apple. A provider's sign-in is set up once at the top of its group and shared across all of that provider's services (Google: Calendar + Drive; Microsoft: OneDrive + Outlook Calendar). Calendar subscriptions (iCal) need no sign-in and sit in their own section. Every connection is independently opt-in and removable, and nothing cascades or auto-enables. Credentials and tokens live only in your keychain.",

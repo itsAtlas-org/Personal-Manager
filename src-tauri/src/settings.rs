@@ -525,6 +525,9 @@ pub fn set_app_lock(
         if let Some(runtime) = app.try_state::<crate::mods::runtime::ModRuntime>() {
             runtime.bump_all();
         }
+        // A connected app's open connections end too (every request is refused while PM is locked
+        // either way; this is the eager half).
+        crate::mods::mcp::supervisor::on_lock(&app);
     }
     Ok(())
 }

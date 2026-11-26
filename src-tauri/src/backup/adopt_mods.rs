@@ -24,7 +24,9 @@
 //! connected apps or the mods' keys there would do it for them (the keys are the vault's own, typed
 //! by whoever can open it). Dev mode is per device (a joiner's device has no
 //! entry in the record, so it reads off, and nothing else ever switches it on: the old row is
-//! never read, `mods::devmode`), and the connected apps have a seam where PR C makes that true
+//! never read, `mods::devmode`), and so are the connected apps and the MCP switch: they live in this
+//! device's own file (`mods::mcp::device`), a row another computer made in the shared store has no
+//! pairing here and never verifies, and a joiner's device has no entry, so the server is off
 //! ([`joiner_accepts_only_its_own_clients`], which takes no store, so it cannot write one). The
 //! join has no dev-mode step at all; `a_join_names_no_developer_mode_code_and_a_restore_resets_before_it_attaches`
 //! reads its source to keep it so.
@@ -46,6 +48,7 @@ use crate::mods::autoinstall;
 use crate::mods::devmode;
 use crate::mods::ids::ModId;
 use crate::mods::ledger::ServeCheck;
+use crate::mods::mcp;
 use crate::mods::runtime::ModRuntime;
 use crate::mods::safety::SafetyCheck;
 use crate::mods::secrets;
@@ -63,7 +66,6 @@ pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Re
     // strip existed. Either way it would be sent to a host as the user's credential, so none is
     // believed; the person types the keys again, as the restore card says.
     secrets::purge_all(&tx)?;
-    switch_mcp_off(&tx)?;
     // The mod's files are per computer and a backup carries none. A pilot (the Document Map) whose
     // catalogue row came with the backup is owed its files here, as it was owed them at the
     // migration: the marker says so, and the open's pass puts them back (`autoinstall`), so a
@@ -74,6 +76,9 @@ pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Re
     // transaction, is what brings that board back into the mod (`autoinstall::rearm_pinboard` says
     // when it fires and what it writes). Only a restore does this; a join writes nothing.
     autoinstall::rearm_pinboard(&tx)?;
+    // The MCP switch, this device's file, after every store step above: a reset that fails there
+    // changes nothing in the file, and one that fails below leaves the server OFF, the safe side.
+    switch_mcp_off(data_dir, vault_id)?;
     // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
     // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no
     // write here: the load that follows the store's open reads the record first and pauses each
@@ -89,17 +94,25 @@ pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Re
     Ok(())
 }
 
-/// Switch the MCP server off. PR C adds the switch (its `settings` key, §1.16); until it does there
-/// is nothing to turn off, and none is invented here. PR C: write the switch's off value in this
-/// function and add its test beside `adopting_turns_dev_mode_off_and_clears_connected_apps`.
-fn switch_mcp_off(_conn: &Connection) -> Result<()> {
-    Ok(())
+/// Switch the MCP server off for this vault on this device: forget the vault in this device's own
+/// MCP file (`mods::mcp::device`), which holds the switch AND the pairings. There is no switch in the
+/// store (and none may be added: a restored or shared store must never carry one in), so the file is
+/// the whole of it. A restore keeps the vault id, so without this the file would still say on, and
+/// its pairs would still name the ids the `DELETE FROM mcp_clients` above removed. A file that can't
+/// be read or rewritten is an error, so the restore is refused rather than left switched on.
+fn switch_mcp_off(data_dir: &Path, vault_id: &str) -> Result<()> {
+    mcp::device::all_off(data_dir, vault_id)
+        .map_err(|e| crate::error::Error::Other(format!("the MCP switch couldn't be reset ({e})")))
 }
 
-/// PR C: `mcp_clients` are per device; a joiner never accepts another device's clients. PR C binds
-/// each connected app to the device that issued its token, and the MCP server here accepts only
-/// this device's, so the rows other devices made in the shared store stay theirs and are never
-/// deleted by a join. Called by `commands::vaults::adopt_shared_vault`; takes no store on purpose.
+/// `mcp_clients` are per device, and a joiner never accepts another device's clients: a row another
+/// computer made in the shared store has no pairing in THIS device's file, and
+/// `mods::mcp::clients::verify` accepts only a row whose (id, hash) pair this device holds, with the
+/// scopes the pair was made for. So the rows other devices made stay theirs, are never deleted by a
+/// join, and never work here; and a joiner's device has no entry in its file, so the server is off
+/// in the joined vault until its person switches it on. Nothing is enforced by this function, which
+/// is why it takes no store: it is the join's named seam, and `commands::vaults::adopt_shared_vault`
+/// calls it so the join's source says where the rule lives.
 pub fn joiner_accepts_only_its_own_clients() {}
 
 /// One installed mod as a restored store lists it.
@@ -326,6 +339,7 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::mods::pinboard_move;
+    use sha2::Digest;
 
     fn store_conn() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();
@@ -452,6 +466,91 @@ mod tests {
         )
         .unwrap();
         assert!(!devmode::is_on(&conn, &me).unwrap());
+    }
+
+    /// The MCP switch and the pairings are in this device's own file. A restore keeps the vault id, so
+    /// without the reset the file would still say on, and its pairs would name ids the restore's
+    /// `DELETE FROM mcp_clients` removed. After it the vault is off and unpaired here (the device's
+    /// other vaults are not touched), and a token from before verifies nobody.
+    #[test]
+    fn adopting_turns_the_mcp_server_off_and_forgets_its_pairs() {
+        let (_d, conn) = store_conn();
+        let dir = dir_of(&_d, A);
+        let me = devmode::Here::new(A, VAULT, &dir);
+        let elsewhere = devmode::Here::new(A, "vault-2", &dir);
+        let held = vec!["tasks.read".to_owned()];
+        let (_, token) = mcp::clients::mint(&conn, &me, "Desk", &held).unwrap();
+        mcp::device::set_on(&me, true).unwrap();
+        mcp::device::set_on(&elsewhere, true).unwrap();
+        assert!(mcp::clients::verify(&conn, &me, &token).is_some());
+
+        reset_for_adopt(&conn, &dir, VAULT).unwrap();
+
+        assert_eq!(
+            mcp::device::device_state(&me),
+            mcp::device::DeviceState::default()
+        );
+        assert!(
+            mcp::device::device_state(&elsewhere).on,
+            "another vault's switch is its own"
+        );
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM mcp_clients", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(mcp::clients::verify(&conn, &me, &token).is_none());
+        // The restored copy of the rows put back (a replay of the backup's store) is not paired
+        // here either, and switching the file back on is somebody's click, not a replay's.
+        conn.execute(
+            "INSERT INTO mcp_clients(name, token_hash, scopes) VALUES ('Desk', 'x', '[\"tasks.read\"]')",
+            [],
+        )
+        .unwrap();
+        assert!(mcp::clients::verify(&conn, &me, &token).is_none());
+    }
+
+    /// A reset that cannot clear the MCP file is refused, and the store's rows stay: a restore never
+    /// goes ahead with a switch it could not turn off.
+    #[test]
+    fn a_reset_that_cannot_clear_the_mcp_file_fails_and_changes_nothing() {
+        let (_d, conn) = store_conn();
+        let dir = dir_of(&_d, A);
+        conn.execute(
+            "INSERT INTO mcp_clients(name, token_hash) VALUES ('one', 'h1')",
+            [],
+        )
+        .unwrap();
+        // A folder where the file goes: it exists and can't be read as a file.
+        std::fs::create_dir(dir.join(mcp::device::DEVICE_FILE)).unwrap();
+        assert!(reset_for_adopt(&conn, &dir, VAULT).is_err());
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM mcp_clients", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the rows were deleted by a reset that failed");
+    }
+
+    /// A join writes nothing and accepts nobody's apps but this device's own: a row another computer
+    /// made in the shared store is still there afterwards and never verifies here, and the server is
+    /// off in the joined vault (this device has no entry for it).
+    #[test]
+    fn a_foreign_apps_row_is_left_alone_and_never_verifies_on_this_device() {
+        let (_d, conn) = store_conn();
+        let me = devmode::Here::new(A, VAULT, &dir_of(&_d, A));
+        let token = format!("pmcp_1_{}", "ab".repeat(32));
+        let hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+        conn.execute(
+            "INSERT INTO mcp_clients(id, name, token_hash, scopes) \
+             VALUES (1, 'Elsewhere', ?1, '[\"tasks.read\"]')",
+            [hash],
+        )
+        .unwrap();
+        joiner_accepts_only_its_own_clients();
+        assert!(mcp::clients::verify(&conn, &me, &token).is_none());
+        assert!(!mcp::device::device_state(&me).on);
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM mcp_clients", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     /// A reset that cannot make this device forget is refused, and the store is left as it was.
