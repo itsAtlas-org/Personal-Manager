@@ -172,19 +172,30 @@ impl Freshness {
 
     /// Google refused a check or a fetch, or answered it wrongly: wait before the next try (doubling
     /// each time), and stop altogether while the account needs signing in again.
-    pub fn failed(&mut self, calendar_id: &str, now: Instant, needs_sign_in: bool) {
+    ///
+    /// Returns how many failures in a row that makes and how long the calendar now waits, for the
+    /// log line (`failure_line` in `commands::calendars`).
+    pub fn failed(
+        &mut self,
+        calendar_id: &str,
+        now: Instant,
+        needs_sign_in: bool,
+    ) -> (u32, Duration) {
         let c = self.calendars.entry(calendar_id.to_string()).or_default();
         c.failures = c.failures.saturating_add(1);
-        c.retry_at = Some(now + backoff(c.failures));
+        let wait = backoff(c.failures);
+        c.retry_at = Some(now + wait);
         c.needs_sign_in |= needs_sign_in;
+        (c.failures, wait)
     }
 
     /// A check or fetch never reached Google (offline, no DNS, a connection that timed out): try again
     /// with the next check, without counting it. Google's back-off is for its own refusals; counting
     /// a dropped hotspot would leave PM up to 15 minutes behind once the connection came back.
-    pub fn unreachable(&mut self, calendar_id: &str, now: Instant) {
+    pub fn unreachable(&mut self, calendar_id: &str, now: Instant) -> Duration {
         let c = self.calendars.entry(calendar_id.to_string()).or_default();
         c.retry_at = Some(now + MIN_GAP);
+        MIN_GAP
     }
 }
 
@@ -349,6 +360,18 @@ mod tests {
         assert_eq!(f.plan("cal", now + Duration::from_secs(3600)), Plan::Skip);
         f.fetched("cal", Some(t("2026-10-10T11:00:00Z")), &[], now);
         assert_eq!(f.plan("cal", now), Plan::Check(t("2026-10-10T10:59:00Z")));
+    }
+
+    /// What the log line reports: how many failures in a row, and the wait they earned. An offline
+    /// calendar is never counted and waits just the minimum gap.
+    #[test]
+    fn a_failure_reports_its_count_and_wait() {
+        let now = Instant::now();
+        let mut f = Freshness::default();
+        assert_eq!(f.failed("cal", now, false), (1, Duration::from_secs(30)));
+        assert_eq!(f.failed("cal", now, false), (2, Duration::from_secs(60)));
+        assert_eq!(f.failed("other", now, false), (1, Duration::from_secs(30)));
+        assert_eq!(f.unreachable("cal", now), MIN_GAP);
     }
 
     /// A fetch that didn't give PM Google's clock isn't repeated on every check.
