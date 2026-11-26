@@ -14,9 +14,13 @@
 //! Later slices of the same PR add the duplicate finder and merge, the vCard commands and the
 //! timeline commands beside these; each adds its row to the window-tier table in the tests.
 
+use std::time::Instant;
+
 use tauri::{AppHandle, State};
 
 use crate::error::Result;
+use crate::people::dupes::DupesReport;
+use crate::people::merge::{MergeChoices, MergeDone, MergePreview};
 use crate::people::{
     self, Label, ListFilter, ListSort, Person, PersonDraft, PersonRow, PersonSaved,
 };
@@ -295,6 +299,138 @@ pub fn unlink_person_project(
     Ok(())
 }
 
+// --- duplicates and merging (main window) -----------------------------------------------------------------------
+
+/// The finder's snapshot: possible duplicates, grouped by what differs. The rows are read under the
+/// DB guard, which is dropped before anything is compared (a big address book never holds the one
+/// connection while it thinks).
+#[tauri::command]
+pub fn people_duplicates_snapshot(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<DupesReport> {
+    require_people_main_window(&window)?;
+    let input = {
+        let conn = state.conn()?;
+        people::dupes::load(&conn)?
+    };
+    Ok(people::dupes::scan(&input))
+}
+
+/// What merging `from` into `into` would move, and which single-value fields differ.
+#[tauri::command]
+pub fn merge_people_preview(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    into: i64,
+    from: i64,
+) -> Result<MergePreview> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    people::merge::preview(&conn, into, from)
+}
+
+/// Merge `from` into `into`. `choices` answers each single-value field that differs; the value not
+/// chosen is dropped. The answer carries the Undo token for 30 seconds.
+#[tauri::command]
+pub fn merge_people(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    into: i64,
+    from: i64,
+    choices: MergeChoices,
+) -> Result<MergeDone> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    let (mut done, step) = people::merge::merge_people(&conn, into, from, &choices)?;
+    done.undo = people::shelve(&state.people_undo, state.store_epoch(), vec![step]);
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(done)
+}
+
+/// Merge every listed pair that loses nothing (each is judged again here). One Undo for all.
+#[tauri::command]
+pub fn merge_identical_pairs(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pairs: Vec<(i64, i64)>,
+) -> Result<MergeDone> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    let (mut done, steps) = people::merge::merge_identical_pairs(&conn, &pairs)?;
+    done.undo = people::shelve(&state.people_undo, state.store_epoch(), steps);
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(done)
+}
+
+/// Take a merge back, if its Undo is still good. Returns how many people came back.
+#[tauri::command]
+pub fn undo_merge_people(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: String,
+) -> Result<usize> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    let steps = people::unshelve(
+        &state.people_undo,
+        &token,
+        state.store_epoch(),
+        Instant::now(),
+    )?;
+    // A refusal (`Error::Other`) is final: the merge can't be undone any more. Anything else (a busy
+    // or failing database) wrote nothing, so the offer goes back on the shelf for a retry.
+    let back = match people::merge::undo_steps(&conn, &steps) {
+        Ok(n) => n,
+        Err(e) => {
+            if !matches!(e, crate::error::Error::Other(_)) {
+                people::reshelve(&state.people_undo, token, state.store_epoch(), steps);
+            }
+            return Err(e);
+        }
+    };
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(back)
+}
+
+/// Say two people are not the same: the finder never offers the pair again.
+#[tauri::command]
+pub fn mark_people_distinct(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    a: i64,
+    b: i64,
+) -> Result<()> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    people::dupes::mark_distinct(&conn, a, b)?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(())
+}
+
+/// Offer the hidden pairs again. Returns how many were hidden.
+#[tauri::command]
+pub fn restore_people_distinct(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize> {
+    require_people_main_window(&window)?;
+    let conn = state.conn()?;
+    let shown = people::dupes::restore_distinct(&conn)?;
+    drop(conn);
+    people::announce_changed(&app);
+    Ok(shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +465,20 @@ mod tests {
         ("unlabel_people", Tier::Main),
         ("link_person_project", Tier::Main),
         ("unlink_person_project", Tier::Main),
+        ("people_duplicates_snapshot", Tier::Main),
+        ("merge_people_preview", Tier::Main),
+        ("merge_people", Tier::Main),
+        ("merge_identical_pairs", Tier::Main),
+        ("undo_merge_people", Tier::Main),
+        ("mark_people_distinct", Tier::Main),
+        ("restore_people_distinct", Tier::Main),
+    ];
+
+    /// Main-window commands that only read (they announce nothing).
+    const MAIN_READS: &[&str] = &[
+        "list_labels",
+        "people_duplicates_snapshot",
+        "merge_people_preview",
     ];
 
     /// The shipped part of this file, and each command's body in it (name, body).
@@ -408,7 +558,7 @@ mod tests {
     fn writes_announce_after_the_guard_drops_and_reads_do_not() {
         for (name, body) in commands() {
             let tier = TIERS.iter().find(|(n, _)| *n == name).expect("listed").1;
-            let reads_only = tier == Tier::Read || name == "list_labels";
+            let reads_only = tier == Tier::Read || MAIN_READS.contains(&name.as_str());
             if reads_only {
                 assert!(
                     !body.contains("announce_changed"),

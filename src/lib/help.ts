@@ -34,7 +34,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "people-list": {
     title: "The People list",
-    body: "Pick a filter on the left: everyone, starred people, a label, people with no label, or Trash. Sort by first name, last name or who you met most recently; the choice is remembered on this computer. Point at someone's circle to tick them, or press Tab to reach it, and Shift-click a second circle to tick everyone between. Once anyone is ticked, a bar offers Star, Label and Move to Trash for all of them. Birthdays in the next 30 days show at the top of the full list. Right-click a person (or press the Menu key) for the same actions.",
+    body: "Pick a filter on the left: everyone, starred people, a label, people with no label, or Trash. Sort by first name, last name or who you met most recently; the choice is remembered on this computer. Point at someone's circle to tick them, or press Tab to reach it, and Shift-click a second circle to tick everyone between. Once anyone is ticked, a bar offers Star, Label and Move to Trash for all of them, and Merge when exactly two are ticked. Birthdays in the next 30 days show at the top of the full list. Right-click a person (or press the Menu key) for the same actions.",
   },
   "people-record": {
     title: "A person's record",
@@ -47,6 +47,14 @@ export const HELP: Record<string, HelpEntry> = {
   "people-labels": {
     title: "Labels",
     body: "Labels group people any way you like, and a person can carry several. Add a label under the filter list, then put it on people from their record, the selection bar or the right-click menu. The three dots beside a label rename it or delete it. Deleting a label never deletes anyone: the people stay in PM, and a note at the bottom of the window has an Undo that puts the label back on the same people.",
+  },
+  "people-duplicates": {
+    title: "Possible duplicates",
+    body: "PM looks for people you may have twice: the same email address, the same phone number, the same name, or names that are alike, like Sam and Samuel. The button shows how many pairs it found and only appears when there are some, or when PM couldn't compare everyone or you have hidden pairs. Each pair is shown side by side with the reason. Merge asks you to choose where the two differ, Not the same person hides the pair for good (Show them again brings hidden pairs back), and Decide later leaves it for now. Pairs that differ in nothing can be merged in one go. PM never merges on its own, and a group of 200 or more people with one key is skipped and said so rather than called clean.",
+  },
+  "people-merge": {
+    title: "Merging two people",
+    body: "A merge puts everything from both records on one: details, labels, timeline, project links and where each came from, with the same detail kept once. Where the two differ, in the name, birthday, where and when you met, or the notes, you choose which to keep, and the one you don't choose is dropped (for notes you can also keep both). Right after, a note at the bottom has an Undo for 30 seconds, and Ctrl+Z (Cmd+Z on a Mac) presses it. It stops working if you change that person in the meantime, and then PM says so. Select exactly two people and press Merge, or right-click one and choose Merge with.",
   },
   "people-trash": {
     title: "People in Trash",

@@ -13,7 +13,10 @@
 // A row in Trash offers only Restore and Delete now: nothing else makes sense there. Edit… repeats
 // the record's Edit button, for a row that isn't the one open.
 //
-// Log a meeting and Merge with… join in the slices that build them, one entry each.
+// Merge sits beside Star: "Merge with…" on one person (it asks who with), "Merge these two…" on a
+// selection of exactly two (the dialog opens at once); both end in an ellipsis because a dialog
+// follows, and a merge has an Undo strip, so neither asks again. A selection of three or more has
+// no merge. Log a meeting joins in the slice that builds it, one entry.
 
 import type { MenuItem } from "../kit/lib/contextMenu";
 
@@ -33,6 +36,8 @@ export interface PersonMenuHandlers {
   restore: () => void;
   /** Ask "Delete for good?"; the dialog does the delete. */
   askDeleteNow: () => void;
+  /** Start a merge: with one person, a picker for the other; with exactly two, the dialog. */
+  merge: () => void;
 }
 
 export interface PersonMenuState {
@@ -66,6 +71,12 @@ export function personMenuItems(s: PersonMenuState, h: PersonMenuHandlers): Menu
   // Edit… ends in an ellipsis because a dialog follows. It sits with Open: both are about the one
   // record, so a selection of several has neither.
   const edit: MenuItem[] = s.count === 1 ? [{ label: "Edit…", onSelect: h.edit }] : [];
+  const merge: MenuItem[] =
+    s.count === 1
+      ? [{ label: "Merge with…", onSelect: h.merge }]
+      : s.count === 2
+        ? [{ label: "Merge these two…", onSelect: h.merge }]
+        : [];
   return [
     ...open,
     ...edit,
@@ -73,6 +84,7 @@ export function personMenuItems(s: PersonMenuState, h: PersonMenuHandlers): Menu
       label: s.allStarred ? "Unstar" : "Star",
       onSelect: () => h.star(!s.allStarred),
     },
+    ...merge,
     { kind: "separator" },
     ...s.labels.map((l): MenuItem => ({
       label: `Label: ${l.name}`,

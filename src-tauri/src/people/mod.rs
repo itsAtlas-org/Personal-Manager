@@ -32,10 +32,14 @@
 //! Not model-path code: nothing here may be named from `chat`, `briefing`, `mods` or the MCP tools
 //! (E13, gated in a later slice).
 
+pub mod dupes;
 pub mod fold;
+pub mod merge;
 pub mod partial_date;
 pub mod sources;
 
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod tests;
 
@@ -140,6 +144,48 @@ pub const PEOPLE_CHANGED: &str = "people://changed";
 pub fn announce_changed(app: &tauri::AppHandle) {
     use tauri::Emitter;
     let _ = app.emit(PEOPLE_CHANGED, ());
+}
+
+// --- the merge Undo shelf (AppState holds the mutex; the rules live in `merge`) -----------------------
+
+/// Put a merge's before-images on the shelf, for the store open now. Returns the Undo token, or
+/// none if there was nothing to hold (or the shelf is unusable: the merge then simply has no Undo).
+/// Call it while still holding the DB guard, so the epoch is the store the merge wrote to.
+pub fn shelve(
+    shelf: &std::sync::Mutex<merge::UndoShelf>,
+    epoch: u64,
+    steps: Vec<merge::UndoStep>,
+) -> Option<String> {
+    shelf
+        .lock()
+        .ok()?
+        .put(epoch, steps, std::time::Instant::now())
+}
+
+/// Take a merge's steps off the shelf, or refuse in the words of [`merge::NO_LONGER`].
+pub fn unshelve(
+    shelf: &std::sync::Mutex<merge::UndoShelf>,
+    token: &str,
+    epoch: u64,
+    at: std::time::Instant,
+) -> Result<Vec<merge::UndoStep>> {
+    shelf
+        .lock()
+        .map_err(|_| refuse(merge::NO_LONGER))?
+        .take(token, epoch, at)
+}
+
+/// Put steps back under their token after an Undo that wrote nothing failed for a reason other than
+/// a refusal (the database was busy, say): the offer is still good and a retry can use it.
+pub fn reshelve(
+    shelf: &std::sync::Mutex<merge::UndoShelf>,
+    token: String,
+    epoch: u64,
+    steps: Vec<merge::UndoStep>,
+) {
+    if let Ok(mut shelf) = shelf.lock() {
+        shelf.put_back(token, epoch, steps, std::time::Instant::now());
+    }
 }
 
 // --- errors: fixed words, never a value -------------------------------------------------------------

@@ -32,12 +32,16 @@ const ipc = vi.hoisted(() => ({
   createPerson: vi.fn(),
   getPerson: vi.fn(),
   changed: null as null | (() => void),
+  // The tab has two readers of the change notice (the list and the duplicate snapshot): a test's
+  // `changed()` reaches all of them, as the real event does.
+  listeners: [] as (() => void)[],
 }));
 vi.mock("../../lib/ipc", () => {
   const known: Record<string, unknown> = {
     ...ipc,
     onPeopleChanged: vi.fn(async (h: () => void) => {
-      ipc.changed = h;
+      ipc.listeners.push(h);
+      ipc.changed = () => ipc.listeners.forEach((f) => f());
       return () => {};
     }),
     getPref: vi.fn(async () => null),
@@ -141,6 +145,7 @@ beforeEach(() => {
   store.labels = LABELS;
   store.results = [];
   ipc.changed = null;
+  ipc.listeners.length = 0;
   ipc.listPeople.mockImplementation(async (filter: PeopleFilter) => answer(filter));
   ipc.listLabels.mockImplementation(async () => store.labels);
   ipc.searchPeople.mockImplementation(async () => store.results);

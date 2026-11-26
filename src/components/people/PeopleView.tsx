@@ -24,10 +24,12 @@ import {
   labelPeople,
   listLabels,
   listPeople,
+  mergeIdenticalPairs,
   renameLabel,
   restorePeople,
   starPeople,
   trashPeople,
+  undoMergePeople,
   unlabelPeople,
 } from "../../lib/ipc";
 import {
@@ -40,11 +42,22 @@ import {
   upcomingBirthdays,
   writePeopleSort,
 } from "../../lib/people";
+import { duplicatesButtonLabel, mergedNotice } from "../../lib/peopleMerge";
 import { personMenuItems, personMenuLabel } from "../../lib/personMenu";
 import type { SectionId } from "../../lib/personRecord";
-import type { PeopleFilter, PeopleSort, Person, PersonLabel, PersonRow } from "../../lib/types";
+import type {
+  MergeDone,
+  PeopleFilter,
+  PeopleSort,
+  Person,
+  PersonLabel,
+  PersonRow,
+} from "../../lib/types";
 import { Button, Callout, ConfirmDialog, Input, Select, Skeleton } from "../ui";
+import { DuplicatePeoplePanel } from "./DuplicatePeoplePanel";
 import { LabelNameDialog, LabelPicker } from "./LabelPicker";
+import { MergePeopleDialog } from "./MergePeopleDialog";
+import { MergeWithDialog } from "./MergeWithDialog";
 import { PeopleList } from "./PeopleList";
 import { BirthdayStrip, FilterRail, NoPersonPane } from "./PeopleSide";
 import { PersonEditor } from "./PersonEditor";
@@ -52,11 +65,15 @@ import { PersonRecord } from "./PersonRecord";
 import { SelectionBar } from "./SelectionBar";
 import { UndoStrip, useUndoNotices, useUndoShortcut } from "./UndoStrip";
 import { usePeopleData } from "./usePeopleData";
+import { usePeopleDupes } from "./usePeopleDupes";
 
 /** How long typing must pause before the search runs. */
 const SEARCH_DELAY_MS = 200;
 /** How long a plain notice ("2 people came back from Trash.") stays. */
 const NOTE_MS = 6_000;
+/** How long a merge's Undo stays on offer (spec 4.3); the backend keeps the before-image a little
+ *  longer, so a click in the last second still lands. */
+const MERGE_UNDO_MS = 30_000;
 
 interface Props {
   /** A person to show, once: the `uid` and a nonce so the same person can be asked for again. */
@@ -81,6 +98,7 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
   const [sort, setSort] = useState<PeopleSort>(readPeopleSort);
   const data = usePeopleData(filter, query, sort);
   const { rows, reload } = data;
+  const dupes = usePeopleDupes();
 
   const [checked, setChecked] = useState<ReadonlySet<number>>(new Set());
   const anchor = useRef<number | null>(null);
@@ -97,6 +115,11 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
   const [dropping, setDropping] = useState<PersonLabel | null>(null);
   const [dropBusy, setDropBusy] = useState(false);
   const [editor, setEditor] = useState<{ person: Person | null; section?: SectionId } | null>(null);
+  // The duplicate review replaces the two panes while it is open; a merge dialog is two ids (the
+  // older one stays); "Merge with…" first asks who the other person is.
+  const [dupesOpen, setDupesOpen] = useState(false);
+  const [merging, setMerging] = useState<{ a: number; b: number } | null>(null);
+  const [picking, setPicking] = useState<PersonRow | null>(null);
   // Moves after every write of this tab's own, so the open record reads again even in a build
   // where the change notice is slow; the notice itself moves `data.changes`.
   const [bump, setBump] = useState(0);
@@ -362,6 +385,57 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
     }
   }
 
+  // --- merging -----------------------------------------------------------------------------------------------
+  /** A merge went through: close what led to it, show the survivor (the folded row unmounts, so
+   *  focus goes to them once the list has caught up), and offer Undo for 30 seconds. */
+  function afterMerge(done: MergeDone, folded: number[]) {
+    setMerging(null);
+    setPicking(null);
+    setChecked(new Set());
+    setProblem(null);
+    if (done.merged > 0) {
+      pendingFocus.current = { id: done.survivor, gone: folded };
+      anchor.current = done.survivor;
+      setActiveId(done.survivor);
+    }
+    reload();
+    dupes.reload();
+    setBump((n) => n + 1);
+    const words = mergedNotice(done);
+    const token = done.undo;
+    if (!token) {
+      setNote(words);
+      return;
+    }
+    undo.push(
+      words,
+      async () => {
+        try {
+          await undoMergePeople(token);
+        } catch (err) {
+          setProblem(errorWords(err));
+        } finally {
+          reload();
+          dupes.reload();
+          setBump((n) => n + 1);
+        }
+      },
+      MERGE_UNDO_MS,
+      "people-merge",
+    );
+  }
+
+  /** "Merge these N": the backend judges every pair again and merges only those that lose nothing. */
+  async function mergeIdentical(pairs: [number, number][]) {
+    const done = await mergeIdenticalPairs(pairs);
+    if (done.merged === 0) {
+      setNote("Those pairs have changed since PM looked, so nothing was merged.");
+      dupes.reload();
+      return;
+    }
+    afterMerge(done, []);
+  }
+
   // --- the editor ----------------------------------------------------------------------------------------------
   function saved(id: number, created: boolean) {
     setEditor(null);
@@ -462,6 +536,10 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               ids,
               name: targets.length === 1 ? targets[0].display_name : `${ids.length} people`,
             }),
+          merge: () => {
+            if (targets.length === 2) setMerging({ a: targets[0].id, b: targets[1].id });
+            else setPicking(row);
+          },
         },
       ),
       { withFallback: true },
@@ -474,6 +552,9 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
     [filter, searching, rows],
   );
   const active = rows.find((r) => r.id === activeId) ?? null;
+  // Only when there is something to look at: a background result nobody can see is not a result.
+  const dupesButton = duplicatesButtonLabel(dupes.report);
+  const showDupes = dupesOpen && (dupesButton !== null || dupes.report !== null);
   const filterName =
     typeof filter === "object"
       ? (data.labels.find((l) => l.id === filter.Label)?.name ?? "Label")
@@ -505,6 +586,18 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               onChange={(e) => setTyped(e.target.value)}
             />
           </div>
+          {dupesButton && (
+            <Button
+              variant="secondary"
+              size="md"
+              className="shrink-0"
+              data-help="people-duplicates"
+              aria-pressed={dupesOpen}
+              onClick={() => setDupesOpen((open) => !open)}
+            >
+              {dupesButton}
+            </Button>
+          )}
           <Button
             variant="primary"
             size="md"
@@ -517,7 +610,16 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      {showDupes && (
+        <DuplicatePeoplePanel
+          report={dupes.report}
+          onMerge={(a, b) => setMerging({ a, b })}
+          onMergeIdentical={mergeIdentical}
+          onChanged={dupes.reload}
+          onClose={() => setDupesOpen(false)}
+        />
+      )}
+      <div className={showDupes ? "hidden" : "flex min-h-0 flex-1"}>
         <aside className="w-44 shrink-0 overflow-y-auto border-r border-border">
           <FilterRail
             filter={filter}
@@ -629,6 +731,16 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
                     }
                     onNew={() => setLabelling(selected.map((r) => r.id))}
                   />
+                  {selected.length === 2 && (
+                    <Button
+                      variant="secondary"
+                      size="xs"
+                      data-help="people-merge"
+                      onClick={() => setMerging({ a: selected[0].id, b: selected[1].id })}
+                    >
+                      Merge…
+                    </Button>
+                  )}
                   <Button variant="danger" size="xs" onClick={() => void toTrash(selected)}>
                     Move to Trash
                   </Button>
@@ -729,6 +841,24 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
           in PM, and you can undo this right after.
         </p>
       </ConfirmDialog>
+      {picking && (
+        <MergeWithDialog
+          from={picking}
+          onClose={() => setPicking(null)}
+          onPick={(other) => {
+            setMerging({ a: picking.id, b: other.id });
+            setPicking(null);
+          }}
+        />
+      )}
+      {merging && (
+        <MergePeopleDialog
+          a={merging.a}
+          b={merging.b}
+          onClose={() => setMerging(null)}
+          onMerged={(done) => afterMerge(done, [Math.max(merging.a, merging.b)])}
+        />
+      )}
       {editor && (
         <PersonEditor
           person={editor.person}

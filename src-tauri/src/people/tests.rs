@@ -10,15 +10,15 @@ use serde_json::{json, Value};
 use super::sources::{retire, tombstone_snapshot};
 use super::*;
 
-const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+pub(super) const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-fn store() -> (tempfile::TempDir, Connection) {
+pub(super) fn store() -> (tempfile::TempDir, Connection) {
     let dir = tempfile::tempdir().unwrap();
     let conn = crate::db::open(&dir.path().join("t.sqlite"), KEY).unwrap();
     (dir, conn)
 }
 
-fn draft(given: &str, family: &str) -> PersonDraft {
+pub(super) fn draft(given: &str, family: &str) -> PersonDraft {
     PersonDraft {
         given_name: given.into(),
         family_name: family.into(),
@@ -26,7 +26,7 @@ fn draft(given: &str, family: &str) -> PersonDraft {
     }
 }
 
-fn detail(kind: &str, value: &str) -> DetailDraft {
+pub(super) fn detail(kind: &str, value: &str) -> DetailDraft {
     DetailDraft {
         kind: kind.into(),
         value: value.into(),
@@ -34,19 +34,19 @@ fn detail(kind: &str, value: &str) -> DetailDraft {
     }
 }
 
-fn person(conn: &Connection, given: &str, family: &str) -> i64 {
+pub(super) fn person(conn: &Connection, given: &str, family: &str) -> i64 {
     create_person(conn, &draft(given, family)).unwrap()
 }
 
-fn count(conn: &Connection, sql: &str) -> i64 {
+pub(super) fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
-fn text(conn: &Connection, sql: &str) -> String {
+pub(super) fn text(conn: &Connection, sql: &str) -> String {
     conn.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
-fn names(rows: &[PersonRow]) -> Vec<String> {
+pub(super) fn names(rows: &[PersonRow]) -> Vec<String> {
     rows.iter().map(|r| r.display_name.clone()).collect()
 }
 
@@ -58,7 +58,7 @@ fn age_in_trash(conn: &Connection, id: i64, days: i64) {
     .unwrap();
 }
 
-fn add_source(
+pub(super) fn add_source(
     conn: &Connection,
     person_id: i64,
     provider: &str,
@@ -77,7 +77,7 @@ fn add_source(
     conn.last_insert_rowid()
 }
 
-fn add_meeting(conn: &Connection, on_date: &str, note: &str, people: &[i64]) -> i64 {
+pub(super) fn add_meeting(conn: &Connection, on_date: &str, note: &str, people: &[i64]) -> i64 {
     conn.execute(
         "INSERT INTO interactions(kind, on_date, note) VALUES ('met', ?1, ?2)",
         params![on_date, note],
@@ -692,6 +692,14 @@ fn a_trashed_person_is_invisible_to_search_and_lists() {
     let p = get_person(&conn, gone).unwrap();
     assert!(p.trashed_at.is_some());
     assert!(update_person(&conn, gone, &draft("Tess", "Trashed"), &p.updated_at).is_err());
+
+    // The duplicate finder never pairs someone in Trash with a live twin; restored, they pair.
+    let twin = person(&conn, "Tess", "Trashed");
+    let found = |conn: &Connection| dupes::scan(&dupes::load(conn).unwrap()).pairs.len();
+    assert_eq!(found(&conn), 0);
+    restore_people(&conn, &[gone]).unwrap();
+    assert_eq!(found(&conn), 1);
+    let _ = twin;
 }
 
 #[test]

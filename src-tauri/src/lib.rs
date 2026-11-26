@@ -576,6 +576,10 @@ pub struct AppState {
     /// from the store, so persisting it would be a second copy of a derived thing to keep in step
     /// with deletions, re-embeds and dismissals.
     pub duplicate_watch: Mutex<duplicates::DuplicateWatch>,
+    /// The people merges that can still be taken back (spec 4.3): before-images in memory only,
+    /// each bound to the store epoch it was made in. Always locked while holding (or after) the DB
+    /// guard, never the other way round.
+    pub people_undo: Mutex<people::merge::UndoShelf>,
     /// Snapshot of the currently-running index rebuild, so the Documents tab (and the Settings
     /// rebuild modal) can resume showing progress after the user navigates away and back — the
     /// ingest sibling of `drive_sync`.
@@ -743,6 +747,7 @@ impl AppState {
             local_sync: Mutex::new(LocalFolderSyncState::default()),
             local_sync_cancel: AtomicBool::new(false),
             duplicate_watch: Mutex::new(duplicates::DuplicateWatch::default()),
+            people_undo: Mutex::new(people::merge::UndoShelf::default()),
             ingest_job: Mutex::new(IngestJobState::default()),
             retag_job: Mutex::new(RetagJobState::default()),
             retag_busy: AtomicBool::new(false),
@@ -907,6 +912,7 @@ impl AppState {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // The same rule as `take_conn`: a new store never inherits another's notes.
             direct_providers::forget_all_seen();
+            self.clear_people_undo();
         }
         // The one choke point that heals fault state: every successful open path (retry,
         // unlock, adopt, repair, curtain take-over) lands here, so none can leave a stale
@@ -1010,7 +1016,16 @@ impl AppState {
         // What failed calls learned about a direct provider's key (free, paid, a spent allowance)
         // belongs to the store it was learned in: a locked or replaced vault starts clean.
         direct_providers::forget_all_seen();
+        self.clear_people_undo();
         Ok(guard.take())
+    }
+
+    /// Forget every merge's before-image: they hold contact values of a store that is now closed.
+    /// Called under `db`'s guard, the same order every People command takes the two locks in.
+    fn clear_people_undo(&self) {
+        if let Ok(mut shelf) = self.people_undo.lock() {
+            shelf.clear();
+        }
     }
 
     /// Which store is open: changes with every [`AppState::open_session`] and
@@ -2055,6 +2070,13 @@ pub fn run() {
             commands::unlabel_people,
             commands::link_person_project,
             commands::unlink_person_project,
+            commands::people_duplicates_snapshot,
+            commands::merge_people_preview,
+            commands::merge_people,
+            commands::merge_identical_pairs,
+            commands::undo_merge_people,
+            commands::mark_people_distinct,
+            commands::restore_people_distinct,
             commands::search_people,
             commands::calendar_overview,
             commands::request_calendar_access,

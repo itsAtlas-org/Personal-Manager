@@ -28,12 +28,14 @@ export interface UndoNotice {
   text: string;
   /** Put it back. May be async; a failure is the closure's to report. */
   undo: () => void | Promise<void>;
+  /** Which Help entry a right-click on the notice opens; the Trash one when not given. */
+  helpId?: string;
 }
 
 export interface UndoNotices {
   notices: readonly UndoNotice[];
-  /** Show a notice. Resolves to its id. `ttlMs` is how long it stays. */
-  push: (text: string, undo: UndoNotice["undo"], ttlMs?: number) => number;
+  /** Show a notice. Resolves to its id. `ttlMs` is how long it stays; `helpId` names its Help entry. */
+  push: (text: string, undo: UndoNotice["undo"], ttlMs?: number, helpId?: string) => number;
   dismiss: (id: number) => void;
   /** Press one notice's Undo (and dismiss it). */
   undo: (id: number) => void;
@@ -55,9 +57,9 @@ export function useUndoNotices(): UndoNotices {
   }, []);
 
   const push = useCallback(
-    (text: string, undo: UndoNotice["undo"], ttlMs = UNDO_NOTICE_MS) => {
+    (text: string, undo: UndoNotice["undo"], ttlMs = UNDO_NOTICE_MS, helpId?: string) => {
       const id = next.current++;
-      setNotices((all) => [...all, { id, text, undo }]);
+      setNotices((all) => [...all, { id, text, undo, helpId }]);
       timers.current.set(
         id,
         window.setTimeout(() => dismiss(id), ttlMs),
@@ -120,45 +122,43 @@ export function UndoStrip({ notices, onUndo, onDismiss }: Props) {
   if (notices.length === 0) return null;
   const newest = notices[notices.length - 1].id;
   return (
-    <div
-      className="fixed bottom-4 left-1/2 z-[48] flex w-max max-w-md -translate-x-1/2 flex-col gap-2"
-      data-help="people-trash"
-    >
+    <div className="fixed bottom-4 left-1/2 z-[48] flex w-max max-w-md -translate-x-1/2 flex-col gap-2">
       {notices.map((n) => (
-        <Callout
-          key={n.id}
-          tone="info"
-          size="md"
-          body="ink"
-          live
-          className="flex items-center justify-between gap-3 text-ink2 shadow-lg"
-          style={{
-            background: `color-mix(in oklab, var(${TONE_TOKEN.info}) ${TONE_MIX.surface}%, var(--bg))`,
-          }}
-        >
-          <span>{n.text}</span>
-          <span className="flex shrink-0 items-center gap-2">
-            <Tooltip label={n.id === newest ? `Undo · ${UNDO_KEY}` : "Undo"}>
-              <Button
-                variant="secondary"
-                size="xs"
-                aria-label={`Undo: ${n.text}`}
-                aria-keyshortcuts={n.id === newest ? "Control+Z Meta+Z" : undefined}
-                onClick={() => onUndo(n.id)}
+        <div key={n.id} data-help={n.helpId ?? "people-trash"}>
+          <Callout
+            tone="info"
+            size="md"
+            body="ink"
+            live
+            className="flex items-center justify-between gap-3 text-ink2 shadow-lg"
+            style={{
+              background: `color-mix(in oklab, var(${TONE_TOKEN.info}) ${TONE_MIX.surface}%, var(--bg))`,
+            }}
+          >
+            <span>{n.text}</span>
+            <span className="flex shrink-0 items-center gap-2">
+              <Tooltip label={n.id === newest ? `Undo · ${UNDO_KEY}` : "Undo"}>
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  aria-label={`Undo: ${n.text}`}
+                  aria-keyshortcuts={n.id === newest ? "Control+Z Meta+Z" : undefined}
+                  onClick={() => onUndo(n.id)}
+                >
+                  Undo
+                </Button>
+              </Tooltip>
+              <button
+                type="button"
+                onClick={() => onDismiss(n.id)}
+                aria-label="Dismiss"
+                className="text-ink4 hover:text-ink"
               >
-                Undo
-              </Button>
-            </Tooltip>
-            <button
-              type="button"
-              onClick={() => onDismiss(n.id)}
-              aria-label="Dismiss"
-              className="text-ink4 hover:text-ink"
-            >
-              ×
-            </button>
-          </span>
-        </Callout>
+                ×
+              </button>
+            </span>
+          </Callout>
+        </div>
       ))}
     </div>
   );

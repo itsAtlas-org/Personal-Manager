@@ -134,7 +134,11 @@ import type {
   MilestoneStatus,
   ChecklistItem,
   ImportResult,
+  DupesReport,
+  MergeChoices,
+  MergeDone,
   PeopleFilter,
+  PeopleMergePreview,
   PeopleSort,
   Person,
   PersonDraft,
@@ -1272,6 +1276,33 @@ export const unlinkPersonProject = (id: number, project: string) =>
 /** Find people for Ctrl K and the pickers. Never returns anyone in Trash. */
 export const searchPeople = (query: string, limit: number) =>
   invoke<PersonRow[]>("search_people", { query, limit });
+
+/** The possible-duplicates snapshot: pairs with why they were flagged and what differs. Built off
+ *  the database guard, read on mount and again on `people://changed`. */
+export const peopleDuplicatesSnapshot = () => invoke<DupesReport>("people_duplicates_snapshot");
+
+/** What merging `from` into `into` would move, and which single-value fields differ. */
+export const mergePeoplePreview = (into: number, from: number) =>
+  invoke<PeopleMergePreview>("merge_people_preview", { into, from });
+
+/** Merge `from` into `into` (who keeps their id and record). `choices` answers each field that
+ *  differs; the value not chosen is dropped. Resolves with the Undo token, good for 30 seconds. */
+export const mergePeople = (into: number, from: number, choices: MergeChoices) =>
+  invoke<MergeDone>("merge_people", { into, from, choices });
+
+/** Merge every listed pair that loses nothing (the backend judges each again). One Undo for all. */
+export const mergeIdenticalPairs = (pairs: [number, number][]) =>
+  invoke<MergeDone>("merge_identical_pairs", { pairs });
+
+/** Take a merge back, if its Undo is still good. Resolves to how many people came back. */
+export const undoMergePeople = (token: string) => invoke<number>("undo_merge_people", { token });
+
+/** Say two people are not the same: the finder never offers the pair again. */
+export const markPeopleDistinct = (a: number, b: number) =>
+  invoke<void>("mark_people_distinct", { a, b });
+
+/** Offer the pairs marked "not the same person" again. Resolves to how many were hidden. */
+export const restorePeopleDistinct = () => invoke<number>("restore_people_distinct");
 
 /** Fire after any people write, from any surface. The People tab debounces its refetch. */
 export const onPeopleChanged = (handler: () => void): Promise<UnlistenFn> =>

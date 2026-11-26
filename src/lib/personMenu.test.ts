@@ -25,6 +25,7 @@ function handlers() {
     trash: vi.fn(),
     restore: vi.fn(),
     askDeleteNow: vi.fn(),
+    merge: vi.fn(),
   };
 }
 
@@ -51,6 +52,7 @@ describe("personMenuItems", () => {
       "Open",
       "Edit…",
       "Star",
+      "Merge with…",
       "—",
       "Label: Family",
       "Label: Climbing",
@@ -73,6 +75,7 @@ describe("personMenuItems", () => {
     pick(items, "Open").onSelect();
     pick(items, "Edit…").onSelect();
     pick(items, "Star").onSelect();
+    pick(items, "Merge with…").onSelect();
     pick(items, "Label: Family").onSelect();
     pick(items, "Label: Climbing").onSelect();
     pick(items, "New label…").onSelect();
@@ -80,6 +83,7 @@ describe("personMenuItems", () => {
     expect(h.open).toHaveBeenCalledOnce();
     expect(h.edit).toHaveBeenCalledOnce();
     expect(h.star).toHaveBeenCalledWith(true);
+    expect(h.merge).toHaveBeenCalledOnce();
     expect(h.toggleLabel).toHaveBeenNthCalledWith(1, 1, true);
     expect(h.toggleLabel).toHaveBeenNthCalledWith(2, 2, false);
     expect(h.newLabel).toHaveBeenCalledOnce();
@@ -102,6 +106,21 @@ describe("personMenuItems", () => {
     expect(names(items)).not.toContain("Open");
     expect(names(items)).not.toContain("Edit…");
     expect(names(items)[0]).toBe("Star");
+    expect(names(items).some((n) => n.startsWith("Merge"))).toBe(false);
+  });
+
+  it("offers a merge for one person (it asks who with) or exactly two (the dialog opens)", () => {
+    const h = handlers();
+    const two = personMenuItems(state({ count: 2 }), h);
+    expect(names(two)).toContain("Merge these two…");
+    expect(names(two)).not.toContain("Merge with…");
+    pick(two, "Merge these two…").onSelect();
+    expect(h.merge).toHaveBeenCalledOnce();
+  });
+
+  it("has no merge in Trash", () => {
+    const items = personMenuItems(state({ trashed: true }), handlers());
+    expect(names(items).some((n) => n.startsWith("Merge"))).toBe(false);
   });
 
   it("offers only Restore and Delete now… in Trash, Delete now… last", () => {
@@ -121,6 +140,7 @@ describe("personMenuItems", () => {
       "Open",
       "Edit…",
       "Star",
+      "Merge with…",
       "—",
       "New label…",
       "—",

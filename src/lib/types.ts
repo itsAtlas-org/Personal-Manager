@@ -3724,3 +3724,92 @@ export type PeopleFilter = "All" | "Starred" | "Trash" | "Unlabelled" | { Label:
 
 /** How the list is ordered. */
 export type PeopleSort = "First" | "Last" | "RecentlyMet";
+
+// --- People: possible duplicates and merging (`people::dupes`, `people::merge`) ---
+
+/** Why two people look like one. Mirrors `people::dupes::Reason`, strongest first. */
+export type DupeReason = "Email" | "Phone" | "Name" | "Similar";
+
+/** Which single-value fields differ between two people (`people::merge::Differs`). */
+export interface MergeDiffers {
+  name: boolean;
+  birthday: boolean;
+  met: boolean;
+  notes: boolean;
+}
+
+/** Two people who may be one (`people::dupes::DupePair`). `a` is the older record. */
+export interface DupePair {
+  a: number;
+  b: number;
+  reasons: DupeReason[];
+  differs: MergeDiffers;
+  /** A merge of the two loses nothing (the "Nothing differs" group). */
+  nothing_differs: boolean;
+}
+
+/** One detail on a duplicate card. */
+export interface DupeCardDetail {
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+}
+
+/** What a pair shows of one person (`people::dupes::DupeCard`). */
+export interface DupeCard {
+  id: number;
+  uid: string;
+  display_name: string;
+  birthday: string | null;
+  met_where: string;
+  met_on: string | null;
+  /** The start of the note, or "A long note". */
+  note: string;
+  details: DupeCardDetail[];
+}
+
+/** The finder's snapshot (`people::dupes::DupesReport`). */
+export interface DupesReport {
+  pairs: DupePair[];
+  /** Everyone in `pairs`, once. */
+  cards: DupeCard[];
+  /** Pairs found that were marked "not the same person". */
+  hidden: number;
+  /** Groups too big to compare: a report with any is never "clean". */
+  skipped: { reason: DupeReason; people: number }[];
+  /** The scan stopped at its pair limit: there may be more. */
+  cut_short: boolean;
+  scanned: number;
+}
+
+/** What a merge would do, counted from the rows (`people::merge::PeopleMergePreview`). Counts are of the
+ *  merged record. */
+export interface PeopleMergePreview {
+  details: number;
+  details_dropped: number;
+  labels: number;
+  timeline: number;
+  projects: number;
+  sources: number;
+  differs: MergeDiffers;
+  lossless: boolean;
+}
+
+/** Which person's value a merge keeps: the survivor's (the older record) or the folded one's. */
+export type MergeSide = "Survivor" | "Folded";
+
+/** The answers a merge needs, one per field that differs (`people::merge::MergeChoices`). */
+export interface MergeChoices {
+  name?: MergeSide | null;
+  birthday?: MergeSide | null;
+  met?: MergeSide | null;
+  notes?: MergeSide | "Both" | null;
+}
+
+/** What a merge answers (`people::merge::MergeDone`). `undo` is the token for 30 seconds. */
+export interface MergeDone {
+  survivor: number;
+  display_name: string;
+  merged: number;
+  undo: string | null;
+}
