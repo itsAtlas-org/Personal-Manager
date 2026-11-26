@@ -196,7 +196,7 @@ describe("a role that can't be answered", () => {
     });
     render(<Harness initial={state} />);
     const line = screen.getByText(
-      "Your OpenAI account has no credit yet, so this won't answer until you add some.",
+      "Your OpenAI account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
     );
     expect(line.closest('[role="status"]')).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();

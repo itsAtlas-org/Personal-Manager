@@ -61,7 +61,7 @@ function Chip({ provider, settings }: { provider: string; settings: Settings | n
     : noKey
       ? `Chat is set to ${info.name}, but there's no key to use. Chat can't answer until you fix this. Change it in Settings > AI & Models.`
       : noCredit
-        ? `Your ${info.name} account has no credit yet, so chat won't answer until you add some. Then press Check again in Settings > AI & Models.`
+        ? `Your ${info.name} account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.`
         : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
   const token = broken ? "--st-due" : "--ink3";
   return (

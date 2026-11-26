@@ -64,7 +64,7 @@ describe("the composer chip", () => {
     render(<DirectRouteChip settings={direct} localAi={null} />);
     const chip = await screen.findByText("OpenAI: no credit");
     expect(chip.getAttribute("title")).toBe(
-      "Your OpenAI account has no credit yet, so chat won't answer until you add some. Then press Check again in Settings > AI & Models.",
+      "Your OpenAI account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.",
     );
     expect(chip.getAttribute("style")).toContain("--st-due");
   });

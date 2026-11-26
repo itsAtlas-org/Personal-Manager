@@ -348,7 +348,7 @@ export function keyVerdict(
       // Valid and kept: only chatting fails, and only until credit is added.
       return {
         tone: "warn",
-        text: `Saved. Your ${name} account has no credit yet, so chats won't work until you add some at platform.openai.com. Then press Check again.`,
+        text: `Saved. Your ${name} account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.`,
       };
     case "rejected":
       return {
@@ -474,7 +474,7 @@ export function roleIssueLine(issue: RoleIssue, role: RoleName, providerLabel: s
     case "key_missing":
       return `Your ${providerLabel} key is missing on this device. Add it above, or move ${who} back to OpenRouter.`;
     case "no_credit":
-      return `Your ${providerLabel} account has no credit yet, so this won't answer until you add some.`;
+      return `Your ${providerLabel} account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.`;
   }
 }
 

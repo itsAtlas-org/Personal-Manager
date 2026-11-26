@@ -251,7 +251,7 @@ describe("checking a key", () => {
     fireEvent.change(keyField(), { target: { value: "sk-nocredit-0123456789abcdef" } });
     submit();
     const line = await screen.findByText(
-      "Saved. Your OpenAI account has no credit yet, so chats won't work until you add some at platform.openai.com. Then press Check again.",
+      "Saved. Your OpenAI account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.",
     );
     expect(line.closest('[role="status"]')).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
@@ -323,7 +323,9 @@ describe("checking a key", () => {
     nextView.current = openaiView();
     render(<Harness initial={noCredit} />);
     // A key saved earlier: the stored line has no "Saved." in front of it.
-    expect(screen.getByText(/^Your OpenAI account has no credit yet/)).toBeTruthy();
+    expect(
+      screen.getByText(/^Your OpenAI account is out of credit or at a spend limit/),
+    ).toBeTruthy();
     const button = screen.getByRole("button", { name: "Check again for OpenAI" });
     fireEvent.click(button);
     const busy = await screen.findByRole("button", { name: "Check again for OpenAI" });
@@ -337,7 +339,7 @@ describe("checking a key", () => {
     expect(m.recheckDirectKey).toHaveBeenCalledWith("openai");
     await act(async () => finish(OK));
     await waitFor(() => expect(screen.getByText(/Key works\. 2 OpenAI models/)).toBeTruthy());
-    expect(screen.queryByText(/no credit yet/)).toBeNull();
+    expect(screen.queryByText(/out of credit or at a spend limit/)).toBeNull();
     // Nothing left to recheck: the button goes, and focus lands on the key field and not <body>.
     expect(screen.queryByRole("button", { name: "Check again for OpenAI" })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(keyField()));
@@ -387,7 +389,7 @@ describe("checking a key", () => {
     m.recheckDirectKey.mockReturnValue(new Promise<KeyCheckResult>((r) => (finish = r)));
     nextView.current = noCredit;
     render(<Harness initial={noCredit} />);
-    const line = /^Your OpenAI account has no credit yet/;
+    const line = /^Your OpenAI account is out of credit or at a spend limit/;
     expect(screen.getByText(line)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Check again for OpenAI" }));
     await waitFor(() =>

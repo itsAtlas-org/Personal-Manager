@@ -146,7 +146,7 @@ describe("what a key check says", () => {
   it("says a key with no credit is saved, and what to do", () => {
     expect(keyVerdict("no_credit", 4, "OpenAI")).toEqual({
       tone: "warn",
-      text: "Saved. Your OpenAI account has no credit yet, so chats won't work until you add some at platform.openai.com. Then press Check again.",
+      text: "Saved. Your OpenAI account is out of credit or at a spend limit, so chats won't work until you add credit or raise the limit at platform.openai.com. Then press Check again.",
     });
   });
 
@@ -185,7 +185,7 @@ describe("what a key check says", () => {
 
   it("drops 'Saved.' when a key that is already saved is checked again", () => {
     expect(recheckVerdict("no_credit", 4, "OpenAI").text).toMatch(
-      /^Your OpenAI account has no credit yet/,
+      /^Your OpenAI account is out of credit or at a spend limit/,
     );
     expect(recheckVerdict("restricted", 4, "OpenAI", "read_only").text).toMatch(
       /^This key can list models/,
@@ -243,7 +243,7 @@ describe("what a key check says", () => {
     expect(roleIssue(state, "chat")).toBe("no_credit");
     expect(roleIssue(state, "background")).toBeNull();
     expect(roleIssueLine("no_credit", "chat", "OpenAI")).toBe(
-      "Your OpenAI account has no credit yet, so this won't answer until you add some.",
+      "Your OpenAI account is out of credit or at a spend limit, so this won't answer until you add credit or raise the limit.",
     );
   });
 
