@@ -106,7 +106,7 @@ describe("a save is the stored board with only the person's changes applied", ()
     const patch = diffBoards(base, now);
     const out = applyBoard(stored, patch);
     expect(out.widgets[0]).toEqual({ ...stored.widgets[0], text: "edited" });
-    // Every other card is the very same stored object, byte for byte, including the one the view
+    // Every other card is the very same stored object, including the one the view
     // reflowed (its stored rect is still x: 30) and the one this build cannot read.
     expect(out.widgets.slice(1)).toEqual(stored.widgets.slice(1));
     for (let i = 1; i < 4; i += 1) expect(out.widgets[i]).toBe(stored.widgets[i]);
@@ -161,7 +161,7 @@ describe("a save is the stored board with only the person's changes applied", ()
     const ids = out.widgets.map((w) => (w as { id: string }).id);
     expect(ids).not.toContain("f");
     expect(ids).toContain("c");
-    // The unreadable child "k" is still in the board, byte for byte, and "c" is there exactly once.
+    // The unreadable child "k" is still in the board as it was, and "c" is there exactly once.
     expect(out.widgets).toContainEqual(stored.widgets[3].children![1]);
     expect(ids.filter((id) => id === "c")).toHaveLength(1);
   });

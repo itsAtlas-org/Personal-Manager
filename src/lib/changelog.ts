@@ -36,6 +36,14 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
+    version: "3.190.1-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Under the hood: the Pinboard's mod, the copy of the Pinboard being moved out of PM (it is not what you use yet), no longer folds two cards into a new folder or files a card away when you simply click a card that your window happened to draw on top of another card of the same size or on top of a folder. Only moving a card to a new place does that now.",
+      "The Pinboard you use today is not changed by this, and your board is not touched.",
+    ],
+  },
+  {
     version: "3.190.0-alpha",
     date: "2026-11-26",
     highlights: [

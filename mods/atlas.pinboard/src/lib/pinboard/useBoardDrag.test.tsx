@@ -9,6 +9,7 @@
 import { act, renderHook } from "@testing-library/react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { CELL } from "./grid";
 import { useBoardDrag } from "./useBoardDrag";
 import type { Widget } from "./types";
 
@@ -63,5 +64,37 @@ describe("a drag captures the pointer", () => {
     const { result } = setup();
     act(() => result.current.startDrag(grab(undefined), widget, "move"));
     expect(result.current.draggingId).toBe("a");
+  });
+});
+
+describe("the drop-target ring agrees with the drop", () => {
+  const surface = { getBoundingClientRect: () => ({ left: 0, top: 0 }) } as unknown as HTMLElement;
+  function aim() {
+    const onPointerCell = vi.fn();
+    const hook = renderHook(() =>
+      useBoardDrag({
+        boundsRef: { current: { cols: 40, rows: 30 } },
+        surfaceRef: { current: surface },
+        onMoveEnd: vi.fn(),
+        onResizeEnd: vi.fn(),
+        onPointerCell,
+      }),
+    );
+    return { ...hook, onPointerCell };
+  }
+  const moveTo = (x: number, y: number) =>
+    act(() => void window.dispatchEvent(new MouseEvent("pointermove", { clientX: x, clientY: y })));
+
+  it("a card still at its own rect aims at no folder, however the pointer wobbles; a moved card aims at the cell under the pointer", () => {
+    const { result, onPointerCell } = aim();
+    act(() => result.current.startDrag(grab(vi.fn()), widget, "move"));
+    moveTo(101, 102);
+    expect(onPointerCell).toHaveBeenLastCalledWith("a", null);
+    moveTo(100 + CELL * 6, 100);
+    const calls = onPointerCell.mock.calls;
+    expect(calls[calls.length - 1][1]).not.toBeNull();
+    // and back to where it started: no ring again
+    moveTo(100, 100);
+    expect(onPointerCell).toHaveBeenLastCalledWith("a", null);
   });
 });

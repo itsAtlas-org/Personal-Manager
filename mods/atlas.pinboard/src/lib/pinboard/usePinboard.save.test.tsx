@@ -222,7 +222,7 @@ describe("reflow is display-only", () => {
       note("b", { rect: { x: 8, y: 0, w: 7, h: 5 } }),
     ]);
 
-  it("a board that reflows, with one card moved: every other stored rect is byte for byte what it was", async () => {
+  it("a board that reflows, with one card moved: every other stored rect is sent exactly as it was", async () => {
     const before = crowded();
     const { result } = await open(before);
     // The view really did reflow them (otherwise this proves nothing).
