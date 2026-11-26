@@ -26,7 +26,7 @@ default:
 # `just ci-membership` asserts BOTH directions of that claim: every member below has a
 # step in pr.yml AND a hook in .pre-commit-config.yaml. The claim used to be prose only,
 # and pre-commit had drifted to 9 of the 13 — missing, of all things, the drift guards.
-check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence tasks-emit script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
+check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence tasks-emit people-emit script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
 
 # Everything a PR is gated on (adds the compile/test/supply-chain/security checks).
 check: check-fast frontend-test build-frontend build-mods clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
@@ -285,6 +285,12 @@ calendar-write-fence:
 # can't emit it a different way, or forget to, or send it while the DB guard is held.
 tasks-emit:
     node scripts/check-tasks-emit.mjs
+
+# "The address book changed" (`people://changed`) is announced from one place,
+# `people::announce_changed`, for the same reason: no command, import, merge or sync pass can emit
+# it a different way, or forget to, or send it while the DB guard is held.
+people-emit:
+    node scripts/check-people-emit.mjs
 
 # scripts/ stays zero-dependency (INVARIANTS.md I-18): node: builtins and repo-relative paths only,
 # plus a small allowlist of justified exceptions inside the check itself. Not taste — pr.yml's

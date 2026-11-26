@@ -398,6 +398,8 @@ jobs:
         run: just calendar-write-fence
       - name: The task list's change event has one emit
         run: just tasks-emit
+      - name: The address book's change event has one emit
+        run: just people-emit
       - name: scripts/ stays zero-dependency (allowlisted exceptions only)
         run: just script-deps
       - name: Every workflow `uses:` is SHA-pinned

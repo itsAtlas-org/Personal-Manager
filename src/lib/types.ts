@@ -3566,3 +3566,159 @@ export interface SweepPlan {
   orphans: string[];
   refusal: SweepRefusal | null;
 }
+
+// --- People (Contacts, PR A): mirrors of `people::*` ---
+//
+// Field names are the wire names, not the Rust ones: a person's `uid` is `people::Person::ident`
+// and a birthday is `born_on`, renamed in serde so CodeQL's name heuristics stay quiet.
+
+/** What a detail is. Mirrors `people::DETAIL_KINDS`. */
+export type PersonDetailKind =
+  | "email"
+  | "phone"
+  | "address"
+  | "web"
+  | "work"
+  | "school"
+  | "nickname"
+  | "former_name"
+  | "date"
+  | "relation"
+  | "custom"
+  | "location";
+
+/** One stored detail of a person (an email, a phone, an address, a job…). `parts` is the flat
+ *  string map a structured kind (address, work, school) keeps beside its one-line `value`. */
+export interface PersonDetail {
+  id: number;
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+  parts: Record<string, string> | null;
+  from_date: string | null;
+  to_date: string | null;
+  is_current: boolean;
+  position: number;
+}
+
+/** A label as a person carries it. */
+export interface PersonLabelRef {
+  id: number;
+  name: string;
+}
+
+/** A label and how many people outside Trash carry it (`people::Label`). */
+export interface PersonLabel {
+  id: number;
+  uid: string;
+  name: string;
+  people: number;
+}
+
+/** One link from a person to a vCard file or a Google contact (`people::sources::SourceInfo`).
+ *  Never holds the contact's own copy. */
+export interface PersonSource {
+  id: number;
+  provider: "vcard" | "google";
+  /** The account the link belongs to (a lowercased address); empty for a file. */
+  account: string;
+  state: string;
+  synced_at: string | null;
+  created_at: string;
+  /** PM changed something since the last write to the source. */
+  dirty: boolean;
+  /** How many "same field changed" questions are open. */
+  open_conflicts: number;
+}
+
+/** One person, everything (`people::Person`). */
+export interface Person {
+  id: number;
+  uid: string;
+  display_name: string;
+  given_name: string;
+  middle_name: string;
+  family_name: string;
+  name_prefix: string;
+  name_suffix: string;
+  /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
+  birthday: string | null;
+  met_where: string;
+  /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. */
+  met_on: string | null;
+  notes: string;
+  starred: boolean;
+  /** When they went to Trash, or null. */
+  trashed_at: string | null;
+  created_at: string;
+  /** Moves on every change; the editor sends it back as `base_updated_at`. */
+  updated_at: string;
+  details: PersonDetail[];
+  labels: PersonLabelRef[];
+  /** The newest "met" entry's date, or null. */
+  last_met: string | null;
+  sources: PersonSource[];
+  /** The names of the projects they are linked to. */
+  projects: string[];
+}
+
+/** One row of the People list (`people::PersonRow`). */
+export interface PersonRow {
+  id: number;
+  uid: string;
+  display_name: string;
+  /** The primary email, else the primary phone. */
+  primary: string | null;
+  /** The first work organisation. */
+  company: string | null;
+  labels: PersonLabelRef[];
+  starred: boolean;
+  last_met: string | null;
+  /** The state of the person's first Google link, if any. */
+  google_state: string | null;
+  trashed_at: string | null;
+}
+
+/** One detail to save (`people::DetailDraft`). A detail that carries its `id` is updated in
+ *  place; one without is new; a stored one the draft leaves out is deleted. */
+export interface PersonDetailDraft {
+  id: number | null;
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+  parts: Record<string, string> | null;
+  from_date: string | null;
+  to_date: string | null;
+  is_current: boolean;
+}
+
+/** One person to create or save (`people::PersonDraft`): the whole record. Every field is
+ *  required on purpose: Rust defaults an omitted one, and a save writes every column, so a
+ *  draft that left out `notes` or `starred` would blank them on the stored person. */
+export interface PersonDraft {
+  display_name: string;
+  given_name: string;
+  middle_name: string;
+  family_name: string;
+  name_prefix: string;
+  name_suffix: string;
+  birthday: string | null;
+  met_where: string;
+  met_on: string | null;
+  notes: string;
+  starred: boolean;
+  details: PersonDetailDraft[];
+}
+
+/** What a save answers (`people::PersonSaved`). */
+export interface PersonSaved {
+  id: number;
+  display_name: string;
+  updated_at: string;
+}
+
+/** Which people the list shows. Everything but "Trash" hides people in Trash. */
+export type PeopleFilter = "All" | "Starred" | "Trash" | "Unlabelled" | { Label: number };
+
+/** How the list is ordered. */
+export type PeopleSort = "First" | "Last" | "RecentlyMet";

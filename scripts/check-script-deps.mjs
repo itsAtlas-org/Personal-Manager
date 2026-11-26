@@ -105,6 +105,13 @@ const ALLOWED = [
       "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
   },
   {
+    file: "scripts/check-people-emit.test.mjs",
+    specifier: "vitest",
+    why: 'The repo\'s existing test runner, on the same terms as the entries around it. This gate keeps "the address book changed" announced from one place as writers are added (an import, a merge, the Google sync), and a text gate is only as good as the shapes it is shown, so each rule is pinned against a tree that breaks it; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.',
+    pinExempt:
+      "Same reason as the neighbouring entries: vitest is the repo-wide test runner on a `^` range, governed by the normal npm/Dependabot flow. A scripts/ test must not dictate the whole repo's runner version.",
+  },
+  {
     file: "scripts/gates-inspect-something.test.mjs",
     specifier: "vitest",
     why: "The repo's existing test runner, on the same terms as the entries around it. This is the floor under every other gate — each one already PRINTED how much it inspected, and not one FAILED on a zero, so a glob typo or a moved directory would have left a gate scanning nothing and still reporting green; `just frontend-test` already collects this file through a vitest include glob, so no dependency is added.",

@@ -112,6 +112,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: people-emit
+        name: the address book's change event has one emit
+        entry: just people-emit
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: script-deps
         name: scripts/ stays zero-dependency
         entry: just script-deps

@@ -134,6 +134,13 @@ import type {
   MilestoneStatus,
   ChecklistItem,
   ImportResult,
+  PeopleFilter,
+  PeopleSort,
+  Person,
+  PersonDraft,
+  PersonLabel,
+  PersonRow,
+  PersonSaved,
   Task,
   TaskInput,
   TaskLane,
@@ -1195,6 +1202,80 @@ export const deleteTaskStack = (id: number) => invoke<void>("delete_task_stack",
  *  delete, which re-key or unlink tasks). */
 export const onTasksChanged = (handler: () => void): Promise<UnlistenFn> =>
   listen("tasks://changed", () => handler());
+
+// --- People (Contacts, PR A) ---
+//
+// PM's own address book, one owner (`people/`). The People tab and the pop-out Calendar's meeting
+// card read through these wrappers and re-read on `onPeopleChanged`, which every write fires. A
+// read (`listPeople`, `getPerson`, `searchPeople`) may come from the main window or the pop-out
+// Calendar; everything else is the main window's, and the backend refuses it elsewhere.
+
+/** The People list: one filter, an optional search, one sort. Trash shows only under "Trash". */
+export const listPeople = (filter: PeopleFilter, query: string | null, sort: PeopleSort) =>
+  invoke<PersonRow[]>("list_people", { filter, query, sort });
+
+/** One person with everything (also one in Trash). */
+export const getPerson = (id: number) => invoke<Person>("get_person", { id });
+
+/** Add a person. Resolves to their id. */
+export const createPerson = (draft: PersonDraft) => invoke<number>("create_person", { draft });
+
+/** Save the whole record. Refused ("changed somewhere else") when `baseUpdatedAt` is no longer the
+ *  record's `updated_at`. */
+export const updatePerson = (id: number, draft: PersonDraft, baseUpdatedAt: string) =>
+  invoke<PersonSaved>("update_person", { id, draft, baseUpdatedAt });
+
+/** Move people to Trash. `googleDelete` names Google sources to also delete at Google; empty until
+ *  the Google PR. Resolves to how many moved. */
+export const trashPeople = (ids: number[], googleDelete: number[] = []) =>
+  invoke<number>("trash_people", { ids, googleDelete });
+
+/** Bring people back from Trash. Resolves to how many came back. */
+export const restorePeople = (ids: number[]) => invoke<number>("restore_people", { ids });
+
+/** Delete people for good; only people already in Trash are deleted. Resolves to how many were. */
+export const deletePeopleNow = (ids: number[]) => invoke<number>("delete_people_now", { ids });
+
+/** Star or unstar people. Resolves to how many changed. */
+export const starPeople = (ids: number[], starred: boolean) =>
+  invoke<number>("star_people", { ids, starred });
+
+/** Every label and how many people (outside Trash) carry it. */
+export const listLabels = () => invoke<PersonLabel[]>("list_labels");
+
+/** Add a label. Resolves to its id. */
+export const createLabel = (name: string) => invoke<number>("create_label", { name });
+
+/** Rename a label. */
+export const renameLabel = (labelId: number, name: string) =>
+  invoke<void>("rename_label", { labelId, name });
+
+/** Delete a label; nobody is deleted with it. Resolves to how many people had it. */
+export const deleteLabel = (labelId: number) => invoke<number>("delete_label", { labelId });
+
+/** Put a label on people. Resolves to how many gained it. */
+export const labelPeople = (ids: number[], labelId: number) =>
+  invoke<number>("label_people", { ids, labelId });
+
+/** Take a label off people. Resolves to how many carried it. */
+export const unlabelPeople = (ids: number[], labelId: number) =>
+  invoke<number>("unlabel_people", { ids, labelId });
+
+/** Link a person to a project by the name typed. Resolves to the project's own spelling. */
+export const linkPersonProject = (id: number, project: string) =>
+  invoke<string>("link_person_project", { id, project });
+
+/** Unlink a person from a project. */
+export const unlinkPersonProject = (id: number, project: string) =>
+  invoke<void>("unlink_person_project", { id, project });
+
+/** Find people for Ctrl K and the pickers. Never returns anyone in Trash. */
+export const searchPeople = (query: string, limit: number) =>
+  invoke<PersonRow[]>("search_people", { query, limit });
+
+/** Fire after any people write, from any surface. The People tab debounces its refetch. */
+export const onPeopleChanged = (handler: () => void): Promise<UnlistenFn> =>
+  listen("people://changed", () => handler());
 
 // --- Personal Assistant: Calendar connectors (multi-provider, read-only — cards 6A/6B) ---
 
