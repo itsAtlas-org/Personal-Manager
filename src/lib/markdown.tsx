@@ -34,7 +34,6 @@ import remarkGfm from "remark-gfm";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeExternalLinks from "rehype-external-links";
 
-import { DASH_LIST_CLASS, remarkDashLists } from "./markdownDashLists";
 import { remarkPlainLines } from "./markdownPlainLines";
 
 // Taken from react-markdown's own props rather than importing `unified` directly: `unified` is a
@@ -42,32 +41,16 @@ import { remarkPlainLines } from "./markdownPlainLines";
 type RehypePlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
 type RemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
 
-// Extend the default (safe) schema in exactly two places, both of them a SINGLE PINNED LITERAL
-// VALUE rather than an open attribute:
-//   * `a` gets `target`/`rel`, so the external-links plugin's output survives sanitization;
-//   * `ul` gets `className="pm-dash-list"`, so a note's dash points can be styled apart from its
-//     bullets. The value form (`["className", "…"]`) is the same one hast-util-sanitize's own github
-//     schema uses to admit `contains-task-list` and nothing else — so no OTHER class can pass, and
-//     because raw HTML is dropped upstream (no `rehype-raw`), no ingested document can carry a
-//     `class` attribute to the sanitizer in the first place. The widening is therefore inert for
-//     untrusted content: the only thing that can ever produce this class is PM's own remark plugin.
-// Everything else stays at the conservative default allowlist. Exported for the T-07 unit test,
-// which locks the allowlist against a regression that widens it further.
+// Extend the default (safe) schema in exactly one place: `a` gets `target`/`rel`, so the
+// external-links plugin's output survives sanitization. Everything else stays at the conservative
+// default allowlist, including the one class a `ul` may carry (the library's own
+// `contains-task-list`, by pinned literal value). Exported for the T-07 unit test, which locks the
+// allowlist against a regression that widens it further.
 export const SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
     a: [...(defaultSchema.attributes?.a ?? []), "target", "rel"],
-    // ONE `className` entry listing BOTH allowed literals, not two entries. `findDefinition` in
-    // hast-util-sanitize returns the FIRST entry matching a property name, so a second
-    // `["className", …]` appended here is dead code — the library's own `contains-task-list` entry
-    // wins and the added value is stripped, silently and with every test still green.
-    ul: [
-      ...(defaultSchema.attributes?.ul ?? []).filter(
-        (entry) => !(Array.isArray(entry) && entry[0] === "className"),
-      ),
-      ["className", "contains-task-list", DASH_LIST_CLASS],
-    ],
   },
 };
 
@@ -111,15 +94,14 @@ export const REHYPE_PLUGINS: RehypePlugins = [
 ];
 
 // The remark side. Both arrays are module-level constants so a re-render hands react-markdown the
-// same identity rather than a fresh array every time. `remarkDashLists` is OPT-IN — it changes how a
-// `+`-bulleted list renders, and only the pinboard note (whose dialect emits that marker on purpose)
-// should be affected. Every other surface renders other people's Markdown and must keep rendering it
-// exactly as before. Unlike the rehype array, order here carries no security property: remark
-// plugins run on mdast, upstream of the entire rehype chain and therefore of the sanitizer.
+// same identity rather than a fresh array every time. Every surface renders other people's Markdown
+// and keeps rendering it exactly as the parser reads it: a `-` or `+` bullet is an ordinary list item
+// (the Pinboard's own dash points are drawn by the Pinboard mod's editor, not here). Unlike the
+// rehype array, order here carries no security property: remark plugins run on mdast, upstream of
+// the entire rehype chain and therefore of the sanitizer.
 export const REMARK_PLUGINS: RemarkPlugins = [remarkGfm];
-export const REMARK_PLUGINS_WITH_DASH_LISTS: RemarkPlugins = [remarkGfm, remarkDashLists];
 
-// `remarkPlainLines` is opt-in too, for an event's description (see `markdownPlainLines`).
+// `remarkPlainLines` is opt-in, for an event's description (see `markdownPlainLines`).
 export const REMARK_PLUGINS_PLAIN_LINES: RemarkPlugins = [remarkGfm, remarkPlainLines];
 
 /**
@@ -145,8 +127,6 @@ const COMPONENTS_NO_LINKS = { img: MarkdownImage, a: InertLink };
  * the `.pm-markdown` block in `src/index.css` (bound to design tokens — no typography plugin), so this
  * component stays purely about the parse+sanitize pipeline.
  *
- * `dashLists` opts into the note dialect's second bullet kind (see `markdownDashLists`). Off by
- * default, deliberately: it is a rendering claim about a `+` bullet that only a PM note means.
  * `plainLines` reads plain typed lines as such (see `remarkPlainLines`): an event's description.
  * `links={false}` draws every link as its text only. For words a third party wrote that PM shows in
  * its own voice (a mod's help): a link there would be a button PM seems to vouch for, and a click
@@ -154,25 +134,17 @@ const COMPONENTS_NO_LINKS = { img: MarkdownImage, a: InertLink };
  */
 export function Markdown({
   children,
-  dashLists = false,
   plainLines = false,
   links = true,
 }: {
   children: string;
-  dashLists?: boolean;
   plainLines?: boolean;
   links?: boolean;
 }) {
   return (
     <div className="pm-markdown">
       <ReactMarkdown
-        remarkPlugins={
-          dashLists
-            ? REMARK_PLUGINS_WITH_DASH_LISTS
-            : plainLines
-              ? REMARK_PLUGINS_PLAIN_LINES
-              : REMARK_PLUGINS
-        }
+        remarkPlugins={plainLines ? REMARK_PLUGINS_PLAIN_LINES : REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
         urlTransform={safeUrl}
         components={links ? COMPONENTS : COMPONENTS_NO_LINKS}
