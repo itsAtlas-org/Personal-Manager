@@ -244,6 +244,14 @@ export default function App() {
   const chatPrimeLoaded = useRef(false);
   // The on-screen conversation's row (for the editable title header); null on a fresh, unsent chat.
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
+  // The conversation whose header title a sidebar row's Rename asked to edit. It names the chat and
+  // not a bare flag, so the title of the chat that is still loading can't start editing in its place.
+  const [renameId, setRenameId] = useState<number | null>(null);
+  // A request that never got its chat on screen (the select failed, or the user went elsewhere first)
+  // is dropped once another chat is active, so it can't start editing a title unprompted later.
+  useEffect(() => {
+    setRenameId((r) => (r !== null && activeId !== null && activeId !== r ? null : r));
+  }, [activeId]);
   // Chat send/stream state lives in a shared hook so the global chat and the
   // per-project chat can't drift apart (see useChatStream). The guard key is the
   // conversation currently on screen.
@@ -1183,6 +1191,16 @@ export default function App() {
                           void selectConversation(id);
                         }
                   }
+                  onRename={
+                    // Global chats only: a project chat has no title control anywhere.
+                    inProject
+                      ? undefined
+                      : (id) => {
+                          setView("chat");
+                          void selectConversation(id);
+                          setRenameId(id);
+                        }
+                  }
                   onDelete={inProject ? projectChat.deleteConversation : handleDeleteConversation}
                   onMove={inProject ? projectChat.moveConversation : handleMoveConversation}
                   // Two handlers, because the sidebar now has two New buttons that make two
@@ -1308,6 +1326,8 @@ export default function App() {
                         <ConversationTitle
                           conversationId={activeConv.id}
                           title={activeConv.title}
+                          startEditing={renameId === activeConv.id}
+                          onEditStarted={() => setRenameId(null)}
                           onRenamed={(title) =>
                             setConversations((prev) =>
                               prev.map((c) => (c.id === activeConv.id ? { ...c, title } : c)),

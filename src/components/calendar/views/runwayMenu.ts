@@ -18,7 +18,7 @@ import {
   type RunwayColumn,
   type TaskPlan,
 } from "../../../lib/runway";
-import { TASK_STATUS_LABEL } from "../../../kit/lib/tasks";
+import { statusItems } from "../../../kit/tasks/taskMenu";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { openContextMenu, wantsAppMenu, type MenuItem } from "../../../kit/lib/contextMenu";
 import type { CalendarEvent, Milestone, Task, TaskStatus } from "../../../lib/types";
@@ -37,18 +37,6 @@ export interface RunwayMenuCtx {
   askDelete: (task: Task) => void;
   onOpenProject?: (project: string) => void;
   onEventClick?: (ev: CalendarEvent, anchor: DOMRect) => void;
-}
-
-/** To do, Doing, Done as one choice among three, the current one ticked. Choosing the status a task
- *  already has does nothing, so a stray press can't send a write that changes nothing. */
-export function statusItems(current: TaskStatus, pick: (next: TaskStatus) => void): MenuItem[] {
-  return (["todo", "doing", "done"] as const).map((s) => ({
-    label: TASK_STATUS_LABEL[s],
-    checked: s === current,
-    onSelect: () => {
-      if (s !== current) pick(s);
-    },
-  }));
 }
 
 /** `choices` as flat menu items, a separator between groups: "Move up", "Move down", then "Move to

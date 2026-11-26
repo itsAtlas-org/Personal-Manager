@@ -9,16 +9,36 @@ interface Props {
   title: string;
   /** Called with the saved (trimmed/clamped) title after a successful rename. */
   onRenamed: (title: string) => void;
+  /** Open in edit mode, as if the title had been clicked: the sidebar row menu's Rename asks for it
+   *  from outside. `onEditStarted` is called once it has, so the asker can drop the request and a
+   *  later remount doesn't start editing on its own. */
+  startEditing?: boolean;
+  onEditStarted?: () => void;
 }
 
 /** The active conversation's title, click-to-edit (board card 7E). Auto-generated titles are editable;
  *  committing a change latches it as user-chosen so the background title pass never overwrites it. Enter or
  *  blur commits, Escape cancels. Kept presentational + reusable so the chat header and the project sidebar's
  *  history header share one affordance. */
-export function ConversationTitle({ conversationId, title, onRenamed }: Props) {
+export function ConversationTitle({
+  conversationId,
+  title,
+  onRenamed,
+  startEditing,
+  onEditStarted,
+}: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!startEditing) return;
+    setDraft(title);
+    setEditing(true);
+    onEditStarted?.();
+    // Only the request matters; the title it seeds from is read once, as a click reads it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startEditing]);
 
   // Re-sync the draft whenever the conversation or its title changes underneath us (e.g. the background
   // pass renamed it, or the user switched chats) — but never while actively editing.
@@ -27,7 +47,10 @@ export function ConversationTitle({ conversationId, title, onRenamed }: Props) {
   }, [title, conversationId, editing]);
 
   useEffect(() => {
-    if (editing) inputRef.current?.select();
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
   }, [editing]);
 
   async function commit() {
