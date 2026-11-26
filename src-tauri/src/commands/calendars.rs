@@ -2345,7 +2345,8 @@ mod tests {
     /// the account's email and a provider's reply can echo anything.
     #[test]
     fn a_failed_check_logs_a_category_and_nothing_from_the_error() {
-        let secret_words = ["me@x.com", "gcal:", "token", "SECRET", "calendars/"];
+        // What must never reach a line. (Not printed on failure either: the line alone shows the leak.)
+        let never_logged = ["me@x.com", "gcal:", "token", "SECRET", "calendars/"];
         let errors = [
             Error::Other(
                 "Google API request failed (403 Forbidden): me@x.com gcal:me@x.com token=SECRET \
@@ -2360,8 +2361,8 @@ mod tests {
         assert_eq!(categories, ["HTTP 403", "sign-in needed", "other", "other"]);
         for category in &categories {
             let line = failure_line(3, Duration::from_secs(120), category);
-            for word in secret_words {
-                assert!(!line.contains(word), "{word} leaked: {line}");
+            for fragment in never_logged {
+                assert!(!line.contains(fragment), "the failure line leaks: {line}");
             }
         }
         assert_eq!(
@@ -2378,8 +2379,11 @@ mod tests {
             history,
             "calendar: a calendar's history not brought up to date (HTTP 403); tried again at the next sync"
         );
-        for word in secret_words {
-            assert!(!history.contains(word), "{word} leaked: {history}");
+        for fragment in never_logged {
+            assert!(
+                !history.contains(fragment),
+                "the history line leaks: {history}"
+            );
         }
     }
 
