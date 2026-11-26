@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.190.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "The Pinboard is now a mod. If you used it, PM downloads it for you once, from the same place as every other mod, and copies your board across exactly as it was. Nothing was deleted: the old copy is still in PM's store. You turn the Pinboard on the first time you open it.",
+      "The timeline dots on the Calendar and the Pinboard entries on the Runway are still there, and clicking one opens the Pinboard. Project renames still carry through to your board. If you remove the Pinboard, PM offers to save your notes first.",
+      "If you never used the Pinboard, you won't see a Pinboard tab now. You can add it from the Mods tab whenever you like. The Pinboard's tab also sits after Mods in the sidebar now, unless you've pinned it somewhere else.",
+      "Links in a Pinboard note open only if they are https links to a website name. Email links, plain http links and links to a bare IP address now show as text instead of opening.",
+      "If you restore a backup that was made with “Also save mod data in my backups” turned off, and your board had moved into the Pinboard mod, PM puts the board back into the Pinboard, as it was when it moved, and tells you so. This needs the Pinboard to be installed. Edits you made after the move are not in such a backup.",
+      "Under the hood: the Pinboard's editor libraries are used only to build the mod now, so PM itself no longer carries them.",
+    ],
+  },
+  {
     version: "3.189.0-alpha",
     date: "2026-11-25",
     highlights: [

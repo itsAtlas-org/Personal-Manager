@@ -24,7 +24,8 @@
 //!   the restore and not here: a Pinboard that moved into its mod still has its legacy snapshot in
 //!   `settings` (never stripped), and the restore copies that back into the mod, so a backup then
 //!   holds the board as it was when the Pinboard moved, and not the edits made since
-//!   (`autoinstall::rearm_pinboard`).
+//!   (`autoinstall::rearm_pinboard`). Someone whose board never moved (no legacy board, or a blank
+//!   one) has nothing to give back: their backup taken with this off holds no Pinboard board at all.
 //! - **Never taken out:** `mod_overlay` and the gift rows (`mod_ledger` and the tasks and
 //!   milestones they name). The overlay is calendar entries a mod published into a core table; it
 //!   is derived and carries nothing private, so it stays. Gifts are core tasks and milestones that

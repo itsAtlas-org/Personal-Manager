@@ -53,7 +53,7 @@ describe("BackupModDataSection", () => {
     // The Pinboard is the one mod whose board a restore does bring back, as it was at the move.
     expect(
       screen.getByText(
-        /a backup holds only the board as it was when the Pinboard moved into a mod\./,
+        /a backup taken with this off still holds the board as it was when it moved\./,
       ),
     ).toBeTruthy();
   });

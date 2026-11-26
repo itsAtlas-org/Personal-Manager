@@ -233,7 +233,7 @@ describe("the sidebar's pilot tables and the backend's PILOTS", () => {
   });
 
   it("makes the Pinboard's old tab the mod's now that PM's own list has none", () => {
-    // PR C2: the core Pinboard tab is gone, so a pin or a hide stored for `pinboard` is the mod's.
+    // The core Pinboard tab is gone, so a pin or a hide stored for `pinboard` is the mod's.
     expect(CORE.has("pinboard")).toBe(false);
     expect(renamedNavId("pinboard")).toBe("mod:atlas.pinboard");
     expect(parsePlacement('{"hidden":["pinboard"],"pinned":["pinboard"]}')).toEqual({

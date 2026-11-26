@@ -3,7 +3,7 @@
 
 // The kit's task list (src/kit/tasks/TaskList.tsx) wired to core: its `TaskData` is the `lib/ipc` task
 // calls, and "edit" opens core's own `TaskEditor` (which stays in core: it needs update, delete and
-// stack calls a mod is not given). The Project view and the core Pinboard draw this; the Pinboard mod
+// stack calls a mod is not given). The Project view draws this; the Pinboard mod
 // draws the kit's list with its own `TaskData` (Host API calls, and `ui.openTaskEditor` for edit).
 
 import { useMemo, useState } from "react";

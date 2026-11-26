@@ -538,16 +538,16 @@ store" are held by their code-or-literal gates, which need a keychain or a live 
 
 **Why.** Before this, `run` simply skipped a newer store and opened it as if current, which was safe
 only while every migration was additive. Mods v61 is the first that isn't safe to ignore (it drops
-the Map's `doc_layout` cache; the Pinboard's move into its mod, built and dormant, waits for a later
-migration that never deletes it, I-36), and from here on a newer
+the Map's `doc_layout` cache; v62 asks for the Pinboard's move into its mod, which copies the board and
+never deletes the old row, I-36), and from here on a newer
 store is the user's whole library at a schema this build can't name. Opening it would misread it; any recovery that treats it as damaged deletes it.
 
 **Co-signers.** A new open path goes through `db::open`, never `open_keyed` plus its own migrate. A new
 recovery that deletes, resets, re-keys or overwrites a store after an open failure branches on the
 fault's code and refuses `NewerStore`, and never matches error text to decide. A migration that an
 older build must not survive also bumps the backup `FORMAT_VERSION` (`backup/format.rs`), unless
-the format already keeps that build out: v61 did not bump it, because a format-2 archive may hold a
-store at v60 or later and a build that predates this invariant already refuses format 2. A migration
+the format already keeps that build out: v61 and v62 did not bump it, because a format-2 archive may
+hold a store at v60 or later and a build that predates this invariant already refuses format 2. A migration
 may drop only a derived cache nothing reads or refills any more, and the guard
 (`RETIRED_DERIVED_CACHES` in `db/migrations.rs`, AGENTS.md rule 3) allows exactly that one drop at
 exactly that one index.
@@ -697,10 +697,16 @@ fixtures. The test reads every page of the stripped file decrypted (free pages i
 value left in the file is found where grepping the encrypted bytes could not. A restore's commit
 (`switch_to_vault`) runs `backup::adopt_mods::reset_for_adopt`: developer mode off for EVERY device
 (`devmode::all_devices_off`: an empty per-device record, and the old row written `"false"` for an
-older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, MCP off (PR C's switch), all in one
+older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, MCP off (PR C's switch), and
+the Pinboard's re-arm (`autoinstall::rearm_pinboard`, I-36), all in one
 transaction, before the store is attached, so before the first load of its mods; that load pauses
 each active unsigned mod with the reason `dev-mode` (I-34), the same state switching developer mode
-off leaves. A reset that fails refuses the switch. Joining a shared vault (`adopt_shared_vault`)
+off leaves. The re-arm is the one step that gives something back: a backup taken with "Also save mod
+data in my backups" off holds the Pinboard's legacy row but not the mod's board, so it owes the copy
+again. It only INSERTs `pinboard_move_pending` and `pinboard_move_restored` (it never touches
+`settings['pinboard']` or any mod row) and deletes the move's own bookkeeping keys (`pinboard_moved_sha`,
+`pinboard_move_conflict`, `pinboard_move_repaired`); it writes nothing unless every condition in I-36
+holds. A reset that fails refuses the switch. Joining a shared vault (`adopt_shared_vault`)
 writes nothing: developer mode is per device (I-34), so the joiner's device has no entry in the
 record and reads as off while the vault's other devices keep theirs, and the connected apps are per
 device too; the store is the vault's, in use by its other accounts and machines. The join has no
@@ -895,10 +901,9 @@ the live database either strips them or says why it can't carry one.
 ### I-36 · The Pinboard's board is copied into its mod, never moved: nothing deletes `settings['pinboard']`, and the copy is read back before the install commits — **Held**
 
 The Pinboard's move (`mods/pinboard_move.rs`, run by `autoinstall::finish` and `finish_manual` inside the
-install's transaction) is **dormant until a later migration writes `pinboard_move_pending`**, and
-what it may do is fixed in advance, because the board is a person's own words and the old row is
-the only pre-mod copy of it. Nothing in PM deletes the `pinboard` row of `settings`, and the move
-never writes it;
+install's transaction) runs when `pinboard_move_pending` is there, and what it may do is fixed in
+advance, because the board is a person's own words and the old row is the only pre-mod copy of it.
+Nothing in PM deletes the `pinboard` row of `settings`, and the move never writes it;
 the move binds its bytes **unchanged** (no parse and re-serialise on the normal path, so no field,
 key order or number is rewritten; the one exception is a copy with lone surrogate escapes replaced,
 flagged by `pinboard_move_repaired`, while the legacy bytes stay) as the mod's `board`, and reads the
@@ -911,14 +916,31 @@ bindings (`rekey_pinboard_project`, as before the mod existed); from then on tha
 snapshot, the mod's own `projectRefs` take over, and the Calendar reads the mod's `mod_overlay`
 rows with no fallback to the legacy row (SYNC-SET.md, `settings`).
 
+Core no longer has a Pinboard (v62 and the swap), so the mod is the only place the board is edited; the
+row stays as a frozen snapshot. **Two writers set the pending key, and only these two:** migration v62 (two
+`INSERT OR IGNORE`s: `mods_autoinstall_pinboard` for a store that used the Pinboard, and
+`pinboard_move_pending` for a non-blank board), and the restore's re-arm
+(`autoinstall::rearm_pinboard`, from `reset_for_adopt`, I-32). The re-arm fires only when ALL hold:
+the move is recorded (`pinboard_moved_sha` is non-blank text), the legacy row is a board the move can
+copy (`pinboard_move::plan` accepts it: not blank, UTF-8 JSON, within the size cap), the mod holds no
+`board`, and a signed catalogue `atlas.pinboard` row is in the store. Then, in the restore's own
+transaction, it inserts the pending key, deletes `pinboard_moved_sha`, `pinboard_move_conflict` and
+`pinboard_move_repaired` (they describe boards this copy no longer has), and sets
+`pinboard_move_restored`, which the strip reads after the copy lands. It deletes no board and
+rewrites no mod row; a backup that carries the mod's board keeps it (it is newer than the snapshot).
+The move's own copy is byte for byte; the mod's later saves are not (PM's mod storage writes object
+keys in sorted order), so after the mod's first save its board equals the legacy row in value, not
+in bytes. Any comparison made after a save is of value.
+
 **Why.** A copy that a bug or a crash could turn into a move would be the one way PM loses someone's
 planning for good. Copy, read back, keep the old row costs a few kilobytes and makes every failure
 recoverable by doing nothing.
 
-**Co-signers.** The later migration (and any later cleanup of the old row, which is its own change on
-Bobby Yu's word) writes `pinboard_move_pending` from the board's content and deletes no row. A new
-reader of the Pinboard's data asks `pinboard_move_recorded` which copy is live. A mod's `projectRefs`
-rewrite (`mods/refs.rs`) runs inside the rename, merge or delete's own transaction, holding the DB
+**Co-signers.** A new writer of `pinboard_move_pending` is a change to this invariant, and a test
+(`the_pending_key_has_two_writers_and_this_file_never_writes_the_legacy_row`) counts them. Migration v62 and
+the restore re-arm write it from the board's content and delete no board (any later cleanup of the old
+row is its own change on Bobby Yu's word). A new reader of the Pinboard's data asks `pinboard_move_recorded` which copy is
+live. A mod's `projectRefs` rewrite (`mods/refs.rs`) runs inside the rename, merge or delete's own transaction, holding the DB
 mutex (I-14), on data a shared vault's member may have written: it never raises on what a member
 stored (that is skipped and counted; a database failure still ends the rename, merge or delete, as
 for any other statement in it), never takes the connection again, and puts no stored text in an
