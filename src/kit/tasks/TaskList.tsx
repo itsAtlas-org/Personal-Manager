@@ -12,10 +12,17 @@
 // that start closed. Below Standard depth the list is a plain summary with no controls, as the
 // milestones panel is.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import type { Task, TaskStack } from "../../lib/types";
 import { useDepth } from "../design/depth";
 import { startOfDay } from "../lib/calendar-layout";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
 import { runMutation } from "../lib/runMutation";
 import { subscribeUntilCleanup } from "../lib/subscribe";
 import {
@@ -39,6 +46,7 @@ import { DateField } from "../ui/DateField";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { DeadlineChip, MadeByChip, ProjectChip, StackChip, TaskStatusButton } from "./TaskBits";
+import { taskRowMenuItems } from "./taskMenu";
 
 export interface TaskListProps {
   /** One project's tasks; undefined lists every task. */
@@ -150,6 +158,8 @@ export function TaskList({
       today={today}
       onCycle={(next) => mutate(() => data.setStatus(t.id, next))}
       onEdit={() => edit({ task: t })}
+      // The host asks and deletes; the list only re-reads once it has.
+      onRemove={data.remove ? () => data.remove?.(t, reload) : undefined}
       isFirst={i === 0}
       isLast={i === list.length - 1}
       onMove={
@@ -310,6 +320,7 @@ function TaskRow({
   today,
   onCycle,
   onEdit,
+  onRemove,
   onMove,
   isFirst,
   isLast,
@@ -321,6 +332,8 @@ function TaskRow({
   today: Date;
   onCycle: (next: Task["status"]) => void;
   onEdit: () => void;
+  /** Ask to delete the task; absent where the host can't, and the menu leaves it out. */
+  onRemove?: () => void;
   /** Reorder within the list; absent hides the ↑/↓ arrows. */
   onMove?: (dir: -1 | 1) => void;
   isFirst: boolean;
@@ -332,8 +345,21 @@ function TaskRow({
     "min-w-0 break-words text-left text-xs text-ink2",
     done && "line-through opacity-60",
   );
+  // One menu for the row, from a right-click anywhere on it or the Menu key / Shift+F10 on one of its
+  // buttons (the row itself isn't focusable, so the key comes from the control that has focus and
+  // bubbles here). The title's text stays selectable, so the fallback's Copy follows the items.
+  const onMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      `Task ${t.title}`,
+      taskRowMenuItems(t, { onCycle, onEdit, onMove, isFirst, isLast, onRemove }),
+      { withFallback: true },
+    );
+  };
   return (
     <div
+      onContextMenu={onMenu}
       className={cn(
         "flex items-start gap-1.5 rounded-[var(--radius-sm)] border border-border bg-surface",
         compact ? "px-1.5 py-0.5" : "px-2 py-1",

@@ -1,7 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { reviewRowMenuItems } from "../lib/reviewMenu";
 import {
   aiProviderStatus,
   cachedProposals,
@@ -721,8 +730,26 @@ function ReviewRow({
   const { openReader, current: readerDoc } = useReader();
   const value = edit ?? { project: doc.project, tags: doc.tags, importance: doc.importance };
 
+  // One menu for the row: a right-click on it, or the Menu key / Shift+F10 on the title, Approve or
+  // any control in it. The Project field and the tag input keep the system menu, and the AI's
+  // reasoning stays selectable, so the fallback's Copy follows the items.
+  const onMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      `Review ${doc.title}`,
+      reviewRowMenuItems(doc.title, {
+        open: () => openReader(doc),
+        approve: disabled ? undefined : onApprove,
+        applyFolder: folderApplyCount > 0 && !disabled ? onApplyFolder : undefined,
+        applyCount: folderApplyCount,
+      }),
+      { withFallback: true },
+    );
+  };
+
   return (
-    <li>
+    <li onContextMenu={onMenu}>
       <Card className="p-4" data-help="review-row">
         <div className="flex items-center gap-2">
           <button

@@ -9,7 +9,20 @@
 // makes a second save of the same answer update it in place instead of duplicating it. Message ids
 // are AUTOINCREMENT, so a deleted chat's id is never handed to a new answer.
 
+import { formatDateLocal } from "./format";
+import { ingestNote } from "./ipc";
+
 /** The note id for a saved chat answer. */
 export function chatNoteId(messageId: number): string {
   return `chat-${messageId}`;
+}
+
+/** Keep an assistant answer as a searchable vault note: the one path the "Save as note" button under
+ *  the answer and the answer's right-click menu both take. Keyed on the message id, so saving twice
+ *  re-embeds in place and never duplicates; the note is standalone, so deleting the chat never
+ *  removes it. A soft "saved from a chat" date marks where it came from. Rejects with the write's
+ *  error, which the caller shows as its own state. */
+export async function saveAnswerAsNote(message: { id: number; content: string }): Promise<void> {
+  const stamp = `_Saved from a chat, ${formatDateLocal(new Date())}_`;
+  await ingestNote(chatNoteId(message.id), "", `${message.content}\n\n${stamp}`);
 }

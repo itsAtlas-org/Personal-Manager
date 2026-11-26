@@ -24,11 +24,21 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "3.189.2-alpha",
+    version: "3.190.1-alpha",
     date: "2026-11-26",
     highlights: [
       "Under the hood: the Pinboard's mod, the copy of the Pinboard being moved out of PM (it is not what you use yet), no longer folds two cards into a new folder or files a card away when you simply click a card that your window happened to draw on top of another card of the same size or on top of a folder. Only moving a card to a new place does that now.",
       "The Pinboard you use today is not changed by this, and your board is not touched.",
+    ],
+  },
+  {
+    version: "3.190.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Right-click now works on more of PM. A file in the Documents tab or a project's file list offers Open, Open source (or Reveal in file manager), Open project, Copy title, Copy link and Delete…. A chat in the sidebar offers Open, Rename, Move to project… and Delete…, and a project there offers Open and Archive. A project card on Focus offers Open, Triage, Archive, Merge into… and Delete…, and an archived one Open and Unarchive. A row in Review offers Open, Approve and Apply to the rest of its folder.",
+      "On a project's page, right-click a task for Edit, To do / Doing / Done, moving it and Delete task…, a milestone for its progress, order, Unlink and Remove, and a file as above. Right-click a chat answer to copy it, save it as a note or rate it, and there is now a Copy button under every answer, because an answer itself can't be reached from the keyboard.",
+      "Every choice that changes something repeats a button that was already there, and delete and merge still ask before anything goes. Copy title, Copy link, Open project and Delete task… are the plainly new ones. From the keyboard, Shift+F10 (or the Menu key) opens the same menu on a focused row or one of its buttons. A choice that doesn't apply is simply left out.",
+      "Two fixes on the way. Removing a milestone with × and unlinking it from the calendar used to happen at once; both now ask first. And archiving a project from its own page now refreshes the briefing, as archiving it from Focus always did.",
     ],
   },
   {

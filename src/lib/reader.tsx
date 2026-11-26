@@ -24,6 +24,9 @@ interface ReaderState {
    *  document; if it has since been deleted, surfaces {@link missing} instead of doing nothing. */
   openReaderById: (id: number) => void;
   closeReader: () => void;
+  /** Navigate to a project, as the reader's own project name does; the document rows' right-click
+   *  menu offers it too. Absent when App gave none. */
+  onOpenProject?: (project: string) => void;
   /** Set when a citation pointed at a document that no longer exists — the answer's citations are a
    *  JSON snapshot taken at answer time, so they outlive the file. Null when nothing is amiss. */
   missing: string | null;
@@ -85,7 +88,15 @@ export function ReaderProvider({
 
   return (
     <ReaderContext.Provider
-      value={{ current, openReader, openReaderById, closeReader, missing, dismissMissing }}
+      value={{
+        current,
+        openReader,
+        openReaderById,
+        closeReader,
+        onOpenProject,
+        missing,
+        dismissMissing,
+      }}
     >
       {children}
       {/* The one callout that overrides the tone surface, and the reason `Callout` lets the

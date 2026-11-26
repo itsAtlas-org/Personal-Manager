@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type Ref } from "react";
 import type { Milestone, MilestoneStatus } from "../lib/types";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { milestoneMenuItems } from "../lib/milestoneMenu";
 import { madeByText } from "../kit/lib/madeBy";
 import { MILESTONE_STATUSES, milestoneStatus } from "../kit/lib/milestoneStatus";
 import { MadeByChip } from "../kit/tasks/TaskBits";
@@ -17,7 +19,7 @@ import {
 import { formatDateOnly } from "../lib/format";
 import { runMutation } from "../lib/runMutation";
 import { DateField } from "./DateField";
-import { Button, Callout, Input, Select } from "./ui";
+import { Button, Callout, ConfirmDialog, Input, Select } from "./ui";
 
 // Still named here for PinboardView, which imports them from this file.
 export { MILESTONE_STATUSES, milestoneStatus };
@@ -170,6 +172,67 @@ function MilestoneRow({
   const [date, setDate] = useState(m.due_date?.slice(0, 10) ?? "");
   const met = m.state === "met";
   const status = milestoneStatus(m);
+  // The question being asked about this row, from its own button or its menu: both open the same
+  // dialog, so neither removes nor unlinks on a bare click. Neither can be undone from here.
+  const [asking, setAsking] = useState<"remove" | "unlink" | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The row's own element, kept beside the list's optional scroll anchor so focus can return into it.
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const setRow = (el: HTMLDivElement | null) => {
+    rowRef.current = el;
+    if (typeof anchorRef === "function") anchorRef(el);
+    else if (anchorRef) anchorRef.current = el;
+  };
+
+  async function confirmAsk() {
+    const which = asking;
+    if (!which) return;
+    setBusy(true);
+    await runMutation(async () => {
+      if (which === "remove") await deleteMilestone(m.id);
+      else await setMilestoneEvent(m.id, null, m.due_date?.slice(0, 10) ?? null);
+      onChanged();
+    }, onError);
+    setBusy(false);
+    setAsking(null);
+    // The Unlink button that opened this question is gone once the row is unlinked, so the dialog's
+    // focus restore would land on <body>: put focus on the row's progress control instead. (A removed
+    // row is gone altogether; its list keeps the focus restore's fallback.) Deferred so it runs after
+    // the dialog has closed and restored its own.
+    if (which === "unlink") {
+      setTimeout(
+        () =>
+          rowRef.current?.querySelector<HTMLElement>('[aria-label="Milestone progress"]')?.focus(),
+        0,
+      );
+    }
+  }
+
+  const chooseStatus = (next: MilestoneStatus) =>
+    void runMutation(async () => {
+      await setMilestoneStatus(m.id, next);
+      onChanged();
+    }, onError);
+
+  // The row's menu: from a right-click on its padding or gaps, or the Menu key / Shift+F10 on one of
+  // its buttons (the row isn't focusable). The label, date and progress controls keep the system
+  // menu, as every text field does.
+  const onMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      `Milestone ${m.label}`,
+      milestoneMenuItems(m, status, {
+        setStatus: chooseStatus,
+        onMove,
+        isFirst,
+        isLast,
+        askUnlink: () => setAsking("unlink"),
+        askRemove: () => setAsking("remove"),
+      }),
+      { withFallback: true },
+    );
+  };
 
   // Adopt fresh values when a refetch brings them in (e.g. a calendar-linked date syncing). Rows are
   // keyed by id, so the instance survives a refetch and would otherwise keep its MOUNT-time values
@@ -210,135 +273,142 @@ function MilestoneRow({
   // look to learn one answer. The dropdown is the single writer; `set_milestone_status` carries
   // `state` along with it (and reopens the flag when a milestone moves OFF done, exactly as
   // un-ticking used to), so nothing downstream can tell the difference.
+  //
+  // The confirm is a SIBLING of the row div, not a child. A child would inherit a met row's
+  // `opacity-70` and its stacking context (a faded dialog that later rows can paint over), and a
+  // right-click on the dialog would bubble to the row's menu handler and pop the row menu over an
+  // aria-modal prompt.
   return (
-    <div
-      ref={anchorRef}
-      className={`rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 ${
-        met ? "opacity-70" : ""
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <Input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          onBlur={() => void persist()}
-          placeholder="label"
-          className={`h-7 min-w-0 flex-1 text-xs ${met ? "line-through" : ""}`}
-        />
-        <Button
-          variant="tertiary"
-          size="xs"
-          onClick={() =>
-            void runMutation(async () => {
-              await deleteMilestone(m.id);
-              onChanged();
-            }, onError)
-          }
-          title="Remove milestone"
-          className="shrink-0 hover:text-st-blocked"
-        >
-          ×
-        </Button>
-      </div>
-
-      {m.madeBy && (
-        <div className="mt-1 flex">
-          <MadeByChip made={m.madeBy} />
-        </div>
-      )}
-
-      <div className="mt-1 flex flex-wrap items-center gap-2">
-        {m.calendar_linked ? (
-          <span
-            className={`flex min-w-0 flex-1 items-center gap-1 text-xs text-accent-text ${
-              met ? "line-through" : ""
-            }`}
-            title={
-              m.event_missing
-                ? "Linked event not found in your synced calendars"
-                : "Synced from calendar"
-            }
-          >
-            <span className="truncate">
-              📅 {m.due_date ? formatDateOnly(m.due_date.slice(0, 10)) : "—"}
-            </span>
-            {m.event_missing && <span className="shrink-0 text-st-due">⚠</span>}
-            <Button
-              variant="tertiary"
-              size="xs"
-              onClick={() =>
-                void runMutation(async () => {
-                  await setMilestoneEvent(m.id, null, m.due_date?.slice(0, 10) ?? null);
-                  onChanged();
-                }, onError)
-              }
-              title="Unlink from calendar — the date becomes editable, but it can't be re-linked"
-              className="shrink-0"
-            >
-              Unlink
-            </Button>
-          </span>
-        ) : (
-          <DateField
-            value={date}
-            onCommit={(iso) => {
-              const prev = date;
-              setDate(iso);
-              // A refused write is followed by no refetch, so `m` never changes and the adopt effect
-              // above cannot undo this — put the field back rather than leave it showing, and later
-              // silently re-committing, a date the backend rejected.
-              void persist(iso).then((ok) => {
-                if (!ok) setDate(prev);
-              });
-            }}
-            ariaLabel="Milestone deadline"
-            wrapperClassName="min-w-0 flex-1"
-            className={`h-7 px-1.5 text-xs ${met ? "line-through" : ""}`}
+    <>
+      <div
+        ref={setRow}
+        onContextMenu={onMenu}
+        className={`rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 ${
+          met ? "opacity-70" : ""
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <Input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onBlur={() => void persist()}
+            placeholder="label"
+            className={`h-7 min-w-0 flex-1 text-xs ${met ? "line-through" : ""}`}
           />
-        )}
-        <Select
-          compact
-          value={status}
-          aria-label="Milestone progress"
-          title="How far along this milestone is"
-          onChange={(e) =>
-            void runMutation(async () => {
-              await setMilestoneStatus(m.id, e.target.value as MilestoneStatus);
-              onChanged();
-            }, onError)
-          }
-          className="shrink-0"
-        >
-          {MILESTONE_STATUSES.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
-            </option>
-          ))}
-        </Select>
-        {onMove && (
-          <div className="flex shrink-0 items-center">
-            <Button
-              variant="tertiary"
-              size="xs"
-              onClick={() => onMove(-1)}
-              disabled={isFirst}
-              title="Move up"
-            >
-              ↑
-            </Button>
-            <Button
-              variant="tertiary"
-              size="xs"
-              onClick={() => onMove(1)}
-              disabled={isLast}
-              title="Move down"
-            >
-              ↓
-            </Button>
+          <Button
+            variant="tertiary"
+            size="xs"
+            onClick={() => setAsking("remove")}
+            title="Remove milestone"
+            aria-label={`Remove milestone ${m.label}`}
+            className="shrink-0 hover:text-st-blocked"
+          >
+            ×
+          </Button>
+        </div>
+
+        {m.madeBy && (
+          <div className="mt-1 flex">
+            <MadeByChip made={m.madeBy} />
           </div>
         )}
+
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          {m.calendar_linked ? (
+            <span
+              className={`flex min-w-0 flex-1 items-center gap-1 text-xs text-accent-text ${
+                met ? "line-through" : ""
+              }`}
+              title={
+                m.event_missing
+                  ? "Linked event not found in your synced calendars"
+                  : "Synced from calendar"
+              }
+            >
+              <span className="truncate">
+                📅 {m.due_date ? formatDateOnly(m.due_date.slice(0, 10)) : "—"}
+              </span>
+              {m.event_missing && <span className="shrink-0 text-st-due">⚠</span>}
+              <Button
+                variant="tertiary"
+                size="xs"
+                onClick={() => setAsking("unlink")}
+                title="Unlink from calendar — the date becomes editable, but it can't be re-linked"
+                className="shrink-0"
+              >
+                Unlink
+              </Button>
+            </span>
+          ) : (
+            <DateField
+              value={date}
+              onCommit={(iso) => {
+                const prev = date;
+                setDate(iso);
+                // A refused write is followed by no refetch, so `m` never changes and the adopt effect
+                // above cannot undo this — put the field back rather than leave it showing, and later
+                // silently re-committing, a date the backend rejected.
+                void persist(iso).then((ok) => {
+                  if (!ok) setDate(prev);
+                });
+              }}
+              ariaLabel="Milestone deadline"
+              wrapperClassName="min-w-0 flex-1"
+              className={`h-7 px-1.5 text-xs ${met ? "line-through" : ""}`}
+            />
+          )}
+          <Select
+            compact
+            value={status}
+            aria-label="Milestone progress"
+            title="How far along this milestone is"
+            onChange={(e) => chooseStatus(e.target.value as MilestoneStatus)}
+            className="shrink-0"
+          >
+            {MILESTONE_STATUSES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </Select>
+          {onMove && (
+            <div className="flex shrink-0 items-center">
+              <Button
+                variant="tertiary"
+                size="xs"
+                onClick={() => onMove(-1)}
+                disabled={isFirst}
+                title="Move up"
+              >
+                ↑
+              </Button>
+              <Button
+                variant="tertiary"
+                size="xs"
+                onClick={() => onMove(1)}
+                disabled={isLast}
+                title="Move down"
+              >
+                ↓
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+      <ConfirmDialog
+        open={asking !== null}
+        title={asking === "unlink" ? "Unlink from the calendar?" : "Remove this milestone?"}
+        confirmLabel={asking === "unlink" ? "Unlink" : "Remove"}
+        danger
+        busy={busy}
+        onConfirm={() => void confirmAsk()}
+        onClose={() => (busy ? undefined : setAsking(null))}
+      >
+        {asking === "unlink"
+          ? `“${m.label}” keeps its date, which becomes editable, but it can’t be linked to the calendar event again.`
+          : `“${m.label}” goes from the project and the calendar. Tasks linked to it stay, without the link.`}
+      </ConfirmDialog>
+    </>
   );
 }
 

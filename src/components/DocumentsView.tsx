@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -95,6 +102,8 @@ import {
 } from "./ui";
 import { DevTableGrid } from "./dev/DevTableGrid";
 import { ImportancePicker } from "./ImportancePicker";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { documentMenuItems, documentMenuLabel } from "../lib/documentMenu";
 import {
   DeleteDocumentButton,
   DeleteDocumentDialog,
@@ -258,7 +267,7 @@ export function DocumentsView({ onReviewClick }: Props) {
   // that document — a read-only view onto existing state (rendered body + optional chunk overlay).
   // For an index-only item the reader now fetches the full live body itself, so there's no separate
   // "show full text" here anymore.
-  const { openReader, current: readerDoc } = useReader();
+  const { openReader, current: readerDoc, onOpenProject } = useReader();
 
   // The duplicate check (#282, moved here by #711). It used to be gated by a Settings toggle, with a
   // dismissible nudge in this view so an off-by-default tool buried in a Settings tab was findable
@@ -308,6 +317,37 @@ export function DocumentsView({ onReviewClick }: Props) {
     } finally {
       setPromoting(null);
     }
+  }
+
+  // One right-click handler for the whole table body: the row under the pointer is found by its
+  // `data-doc-id`, and every item calls the handler the row's own control calls (see documentMenu).
+  // The Menu key or Shift+F10 on the focused row, or on its Edit or Delete button, arrives here too.
+  // The title is selectable text, so the fallback's Copy follows the items.
+  function onRowMenu(e: ReactMouseEvent) {
+    if (!wantsAppMenu(e)) return;
+    const row =
+      e.target instanceof Element ? e.target.closest<HTMLElement>("tr[data-doc-id]") : null;
+    const doc = row ? tableDocuments.find((d) => d.id === Number(row.dataset.docId)) : undefined;
+    if (!doc) return;
+    openContextMenu(
+      e,
+      documentMenuLabel(doc),
+      documentMenuItems(doc, {
+        open: () => openReader(doc),
+        openProject: onOpenProject,
+        edit: teachVisible ? () => openEditor(doc) : undefined,
+        importFully: promoting == null ? () => void promote(doc.id) : undefined,
+        askDelete: () => setDeletingDoc(doc),
+      }),
+      { withFallback: true },
+    );
+  }
+
+  // Open a row's inline editor with the document's own project and importance. The Edit button and
+  // the row's right-click menu both come here, so what they seed can't differ.
+  function openEditor(doc: Document) {
+    setEditDraft({ projects: projectsOf(doc), importance: doc.importance });
+    setEditingId(doc.id);
   }
 
   // Persist the open editor's project/importance for one already-filed document (issue #333) in a
@@ -1408,11 +1448,12 @@ export function DocumentsView({ onReviewClick }: Props) {
                     )}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody onContextMenu={onRowMenu}>
                   {tableDocuments.map((doc) => {
                     return (
                       <Fragment key={doc.id}>
                         <tr
+                          data-doc-id={doc.id}
                           onClick={() => openReader(doc)}
                           // Keyboard access without claiming role="button" (which would break the row's
                           // table semantics and nest a button inside a button): make the row focusable and
@@ -1465,11 +1506,7 @@ export function DocumentsView({ onReviewClick }: Props) {
                                       if (editingId === doc.id) {
                                         setEditingId(null);
                                       } else {
-                                        setEditDraft({
-                                          projects: projectsOf(doc),
-                                          importance: doc.importance,
-                                        });
-                                        setEditingId(doc.id);
+                                        openEditor(doc);
                                       }
                                     }}
                                     // Quiet until the row is hovered or focused, like Delete beside
