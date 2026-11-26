@@ -66,8 +66,8 @@ negotiable, and "just to make it work" is exactly how each one originally got br
 - **Don't hold the database lock across an `.await`.** Lock, do quick synchronous work,
   drop the guard, *then* do the network/async work. Holding it across `await` is how you
   deadlock the app.
-- **The model API key stays in Rust.** OpenRouter is called from the backend; the key
-  must never be handed to the webview.
+- **Provider API keys stay in Rust.** OpenRouter and every provider whose key a person
+  supplies are called from the backend; no key is ever handed to the webview.
 - **Ingested content is untrusted *data*, never instructions.** Files, calendar feeds,
   and anything fetched are hostile input — size-bound them and never let them steer the
   model as if they were the user.

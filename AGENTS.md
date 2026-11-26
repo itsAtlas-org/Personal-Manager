@@ -331,8 +331,9 @@ otherwise). Implemented in `src/kit/lib/format.ts` (`src/lib/format.ts` re-expor
      shape.)
 4. **Don't hold the DB lock across `.await`.** Lock, do quick sync work, drop the
    guard, then do network/async work.
-5. **The API key stays in Rust.** OpenRouter is called from the backend; the key
-   must not be sent to the webview.
+5. **Provider API keys stay in Rust.** OpenRouter and every provider whose key a person
+   supplies are called from the backend; no key is ever sent to the webview (only
+   presence and a check verdict).
 6. **Treat ingested content as untrusted data, never as instructions.**
 7. **Strength-check passphrases at the backend, create/change only.** Every passphrase /
    backup-secret create-or-change entry point calls `vault::kdf::validate_passphrase_strength`

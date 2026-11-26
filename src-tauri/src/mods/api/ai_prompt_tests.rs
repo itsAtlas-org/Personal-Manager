@@ -290,10 +290,12 @@ async fn the_prompt_names_the_whole_background_list_not_only_the_one_model_in_us
 fn the_models_told_are_the_routes_own_names_in_order_with_blanks_left_out() {
     use crate::llm_gateway::{CloudArm, LocalArm, RoutePlan};
     use crate::secret::Secret;
-    let cloud = |models: &[&str]| CloudArm {
-        provider: crate::llm_gateway::CloudProvider::OpenRouter,
-        key: Secret::from("k".to_string()),
-        models: models.iter().map(|m| (*m).to_owned()).collect(),
+    let cloud = |models: &[&str]| {
+        CloudArm::new(
+            crate::llm_gateway::CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            models.iter().map(|m| (*m).to_owned()).collect(),
+        )
     };
     let local = |model: &str| LocalArm {
         base_url: "http://127.0.0.1:1".into(),

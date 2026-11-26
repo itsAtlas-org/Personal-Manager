@@ -631,6 +631,7 @@ mod tests {
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
             cost: Some(0.01),
+            ..Default::default()
         };
         log_usage(&conn, "chat", Some("a/m"), &usage, &meta());
         log_usage_as(&conn, "background", Some("a/m"), &usage, &meta(), None);

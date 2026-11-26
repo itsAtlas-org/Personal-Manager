@@ -573,10 +573,12 @@ impl FakeModel {
     }
 
     fn build(spec: PlanSpec) -> Option<RoutePlan> {
-        let cloud = |ids: &[&str]| CloudArm {
-            provider: crate::llm_gateway::CloudProvider::OpenRouter,
-            key: Secret::from("k".to_string()),
-            models: ids.iter().map(|s| s.to_string()).collect(),
+        let cloud = |ids: &[&str]| {
+            CloudArm::new(
+                crate::llm_gateway::CloudProvider::OpenRouter,
+                Secret::from("k".to_string()),
+                ids.iter().map(|s| s.to_string()).collect(),
+            )
         };
         let local = || LocalArm {
             base_url: "http://127.0.0.1:11434".into(),
@@ -684,6 +686,7 @@ impl ModelEdge for FakeModel {
                         prompt_tokens: tokens.map(|t| t.0),
                         completion_tokens: tokens.map(|t| t.1),
                         cost,
+                        ..Default::default()
                     },
                     truncated,
                 },

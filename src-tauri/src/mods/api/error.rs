@@ -287,7 +287,7 @@ impl ModError {
     }
 
     pub fn no_model() -> Self {
-        Self::new(Code::NoModel, "PM has no AI model set up to answer with.")
+        Self::new(Code::NoModel, NO_MODEL_MESSAGE)
     }
 
     pub fn price_unknown() -> Self {
@@ -394,6 +394,14 @@ impl ModError {
 /// [`Code::Internal`]'s only message.
 pub const INTERNAL_MESSAGE: &str = "PM couldn't complete that call.";
 
+/// [`Code::NoModel`]'s message. It also covers a Background role on a person's own provider key,
+/// which a mod can never use (that route isn't zero data retention), so the person who reads it
+/// isn't sent looking for a model they already set up. Short on purpose: every experimental code's
+/// sentence is held to 80 characters with nothing from a request in it, so ERROR_CODES.md carries
+/// the full explanation ("...which mods can't use").
+const NO_MODEL_MESSAGE: &str =
+    "PM has no AI model to answer with, or Background uses your own key.";
+
 impl fmt::Display for ModError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.code.as_str(), self.message)
@@ -424,6 +432,28 @@ mod tests {
                     .then(|| (code.to_owned(), cells.get(2).unwrap_or(&"").to_string()))
             })
             .collect()
+    }
+
+    /// The sentence a mod sees for MOD-5004 and the one ERROR_CODES.md gives it are the same words:
+    /// a Background role on your own key refuses a mod's AI call with this code, and the
+    /// explanation has to be where the person looks.
+    #[test]
+    fn the_no_model_sentence_and_its_documented_meaning_agree() {
+        let (_, meaning) = documented()
+            .into_iter()
+            .find(|(c, _)| c == "MOD-5004")
+            .expect("MOD-5004 is documented");
+        // The code's own sentence is short (the 80-character rule), so it says "Background uses your
+        // own key" and the table says why that is no answer: mods can't use it.
+        assert!(
+            meaning.contains("Background is on your own key, which mods can't use"),
+            "{meaning}"
+        );
+        let message = ModError::no_model().to_string();
+        assert!(
+            message.contains("Background uses your own key"),
+            "{message}"
+        );
     }
 
     #[test]

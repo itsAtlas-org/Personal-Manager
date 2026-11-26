@@ -246,6 +246,7 @@ const role = (over: Partial<PowerRoleView> = {}): PowerRoleView => ({
   local_model: null,
   effective: "cloud",
   cloud_key: "present",
+  cloud_provider: "openrouter",
   ...over,
 });
 

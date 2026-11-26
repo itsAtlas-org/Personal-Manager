@@ -65,6 +65,7 @@ const movable = (over: Partial<PowerRoleView> = {}): PowerRoleView => ({
   local_model: "gemma3:4b",
   effective: "local_then_cloud",
   cloud_key: "present",
+  cloud_provider: "openrouter",
   ...over,
 });
 
@@ -173,7 +174,7 @@ describe("when the section can't act", () => {
         "Running a local model on a dedicated GPU uses significant power. This setting can send requests to a cloud provider while you're on battery instead to save power. There are currently no cloud providers set up, but don't worry, PM works without it!",
       ),
     ).toBeTruthy();
-    expect(screen.getByText("Linking an OpenRouter key would make this available.")).toBeTruthy();
+    expect(screen.getByText("Adding a cloud key would make this available.")).toBeTruthy();
     // A nudge, not a sales pitch: no button invites a key.
     expect(within(container).queryAllByRole("button", { name: /key/i })).toHaveLength(0);
     expectAllDisabled();

@@ -12,7 +12,9 @@ import {
   REDUCES_POWER,
   askPhrase,
   blockedReason,
+  cloudNames,
   consentText,
+  directRetentionNote,
   powerGate,
   powerReadout,
   powerSummary,
@@ -30,6 +32,7 @@ const movable = (over: Partial<PowerRoleView> = {}): PowerRoleView => ({
   local_model: "gemma3:4b",
   effective: "local_then_cloud",
   cloud_key: "present",
+  cloud_provider: "openrouter",
   ...over,
 });
 
@@ -461,5 +464,67 @@ describe("powerSummary — one case per branch, first match wins", () => {
     for (const gate of gates) {
       expect(powerSummary(gate, power()) ?? "").not.toMatch(/stops? draining/i);
     }
+  });
+});
+
+describe("On battery with a cloud role on a provider of the person's own", () => {
+  const onOpenAi = (over: Partial<PowerRoleView> = {}) =>
+    movable({ cloud_provider: "openai", ...over });
+  const asking = (chat: PowerRoleView, background: PowerRoleView) =>
+    power({ source: "battery", percent: 41, chat, background });
+
+  it("keeps the OpenRouter question word for word when no asked role is on a direct provider", () => {
+    const text = consentText(asking(movable({ route: "needs_consent" }), movable()));
+    expect(text).toBe(
+      "You're on battery at 41%. To reduce power use, PM can send your chats to your OpenRouter cloud model instead of running them on your graphics card, until you plug in. While it does, what you send leaves this machine and is billed to your OpenRouter key at your cloud model's usual rates. Until you answer, PM keeps using your local model.",
+    );
+  });
+
+  it("names the provider, and says it isn't zero data retention, when the asked role is on it", () => {
+    const text = consentText(asking(onOpenAi({ route: "needs_consent" }), movable()));
+    expect(text).toContain("to your OpenAI cloud model instead of running them");
+    expect(text).toContain("goes straight to OpenAI, which isn't zero data retention");
+    expect(text).toContain("billed to your OpenAI key");
+    expect(text).not.toContain("OpenRouter");
+  });
+
+  it("asks only about the roles waiting, so an OpenAI role not asked about is not named", () => {
+    const text = consentText(
+      asking(movable({ route: "needs_consent" }), onOpenAi({ route: "unchanged" })),
+    );
+    expect(text).not.toContain("OpenAI");
+  });
+
+  it("names both providers, role by role, when the two roles are on two", () => {
+    const text = consentText(
+      asking(movable({ route: "needs_consent" }), onOpenAi({ route: "needs_consent" })),
+    );
+    expect(text).toContain("OpenRouter for Chat and OpenAI for Background");
+    expect(text).toContain(
+      "what goes to OpenAI goes straight there, which isn't zero data retention",
+    );
+  });
+
+  it("says whose key is missing, and drops the OpenRouter-only background-key rule for it", () => {
+    const p = power({
+      any_cloud_key: true,
+      chat: onOpenAi({ blocked: "no_key" }),
+      background: onOpenAi({ blocked: "no_key" }),
+    });
+    expect(blockedReason("chat", "no_key", p)).toBe("Chat has no OpenAI key to use");
+    expect(blockedReason("background", "no_key", p)).toBe(
+      "Background work has no OpenAI key to use",
+    );
+  });
+
+  it("names the cloud, and its retention, in the cost line", () => {
+    expect(cloudNames(null)).toBe("OpenRouter");
+    expect(cloudNames(power())).toBe("OpenRouter");
+    expect(cloudNames(power({ chat: onOpenAi() }))).toBe("OpenAI and OpenRouter");
+    expect(directRetentionNote(power())).toBeNull();
+    expect(directRetentionNote(null)).toBeNull();
+    expect(directRetentionNote(power({ background: onOpenAi() }))).toBe(
+      "OpenAI keeps requests for up to 30 days.",
+    );
   });
 });

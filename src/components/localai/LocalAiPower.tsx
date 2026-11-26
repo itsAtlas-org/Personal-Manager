@@ -6,7 +6,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { keepLocalOnBattery, setLocalPowerPolicy } from "../../lib/ipc";
 import {
   blockedReason,
+  cloudNames,
   consentLine,
+  directRetentionNote,
   powerGate,
   powerOf,
   powerReadout,
@@ -114,6 +116,8 @@ export function LocalAiPower({
 
   const gate = powerGate(configured, anyLocalRoleWithModel, status);
   const power = status ? powerOf(status) : null;
+  // Set only when a role's cloud is a provider of the person's own, which keeps requests.
+  const retention = directRetentionNote(power);
   const ready = gate === "ready";
   // A machine PM found no battery on. Only a positive reading counts: no power readout yet is not
   // evidence of a desktop.
@@ -144,8 +148,10 @@ export function LocalAiPower({
         {/* Unfolded: what a choice saves and costs is the reason to make it, not prose. */}
         <p className="text-xs text-ink4">
           Saves: sending requests to your cloud model {REDUCES_POWER}. Costs: what you send leaves
-          this computer and is billed to your OpenRouter key, and PM asks you before the first time.
-          Needs: a cloud key, and a job set to Local, fall back to cloud.
+          this computer and is billed to your {cloudNames(power)} key, and PM asks you before the
+          first time.
+          {retention ? ` ${retention}` : ""} Needs: a cloud key, and a job set to Local, fall back
+          to cloud.
         </p>
         <SettingRow label="Switch to the cloud at" helpId="settings-localai-power">
           {(a11y) => (
@@ -313,8 +319,8 @@ export function LocalAiPower({
           used for that role, on battery or not.
         </p>
         <p>
-          Requests sent to the cloud are billed to your OpenRouter key like any other, and count
-          towards Usage & cost under your cloud model.
+          Requests sent to the cloud are billed to the key of the cloud provider that role uses, and
+          count towards Usage & cost under your cloud model.
         </p>
         <p>Desktops, and machines where PM can't read a battery, count as always plugged in.</p>
       </SectionInfo>
@@ -355,7 +361,7 @@ function GateBlock({
           {body(
             "Running a local model on a dedicated GPU uses significant power. This setting can send requests to a cloud provider while you're on battery instead to save power. There are currently no cloud providers set up, but don't worry, PM works without it!",
           )}
-          {body("Linking an OpenRouter key would make this available.")}
+          {body("Adding a cloud key would make this available.")}
         </>
       );
     case "key_unreadable":

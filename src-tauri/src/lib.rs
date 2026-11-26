@@ -36,6 +36,10 @@ mod connector_sync;
 mod context_budget;
 mod cost;
 mod db;
+// The providers a person can reach with their own key (opt-in, off by default), the table each
+// one is a row of, and the bundled list of the models PM offers on them with their prices.
+mod direct_models;
+mod direct_providers;
 mod doc_vectors;
 mod drive;
 mod duplicates;
@@ -90,6 +94,8 @@ mod notes;
 mod oauth_loopback;
 mod onedrive;
 mod openai_compat;
+// Your own OpenAI key: the one module that knows OpenAI's wire (a flavour of the shared dialect).
+mod openai_direct;
 mod openrouter;
 mod outlook_calendar;
 mod pathguard;
@@ -1802,6 +1808,16 @@ pub fn run() {
             commands::set_openrouter_key,
             commands::has_openrouter_background_key,
             commands::set_openrouter_background_key,
+            // Your own provider keys (opt-in, off by default): the read model, the opt-in, the key
+            // check, the per-role provider and its model and effort.
+            commands::direct_providers_state,
+            commands::set_direct_opt_in,
+            commands::save_direct_key,
+            commands::recheck_direct_key,
+            commands::clear_direct_key,
+            commands::set_role_cloud_provider,
+            commands::set_direct_role,
+            commands::set_direct_data_sharing,
             // Local AI endpoint (#297): detection, the posture-checked endpoint check, config
             // get/set, model listing, and the live status snapshot.
             local_ai::probe_local_llm_ports,

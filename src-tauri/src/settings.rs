@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
+use crate::llm_gateway::{CloudProvider, Role};
 use crate::{applock, db, AppState};
 
 /// Fallback model when the user hasn't chosen one, for BOTH roles. Swappable in
@@ -84,6 +85,17 @@ pub struct Settings {
     /// grounding — or `None` when a dev has disabled the gate. ON by default (card #402); the value and
     /// on/off are tuned by the Developer-mode control. See [`db::retrieval_confidence_threshold`].
     pub retrieval_confidence_threshold: Option<f32>,
+    /// The cloud provider that EFFECTIVELY answers each role, after the read-time demotion of a
+    /// direct provider that isn't opted in: "openrouter" or a direct provider's token. The composer
+    /// chip, the sidebar footer, the context meter's switch button and the Reset diff read these, so
+    /// none of them names an OpenRouter model for a role that your own key is answering.
+    pub chat_provider: String,
+    pub background_provider: String,
+    /// The EFFECTIVE cloud primary of each role: the direct role's one model, else the first model
+    /// of the OpenRouter list (`None` if that list is empty). `chat_models[0]` is only the cloud
+    /// primary while the role is on OpenRouter.
+    pub chat_cloud_model: Option<String>,
+    pub background_cloud_model: Option<String>,
 }
 
 impl Settings {
@@ -104,16 +116,49 @@ impl Settings {
             indexing_speed: "fast".to_string(),
             retrieval_k: crate::retrieval::DEFAULT_TOP_K,
             retrieval_confidence_threshold: Some(db::DEFAULT_CONFIDENCE_THRESHOLD),
+            // Both roles start on OpenRouter, so the cloud primary is the default OpenRouter model.
+            chat_provider: CloudProvider::OpenRouter.as_str().to_string(),
+            background_provider: CloudProvider::OpenRouter.as_str().to_string(),
+            chat_cloud_model: Some(DEFAULT_MODEL.to_string()),
+            background_cloud_model: Some(DEFAULT_MODEL.to_string()),
         }
     }
+}
+
+/// A role's effective provider and its cloud primary, read on the caller's guard (both take a
+/// `&Connection`, so this is safe under it). Direct: the role's one model. OpenRouter: the first of
+/// its list.
+fn role_cloud_primary(
+    conn: &Connection,
+    role: Role,
+    openrouter_models: &[String],
+) -> Result<(String, Option<String>)> {
+    let provider = crate::llm_gateway::role_cloud_provider(conn, role)?;
+    let model = if provider.is_direct() {
+        crate::direct_providers::models_for(conn, provider, role)?
+            .into_iter()
+            .next()
+    } else {
+        openrouter_models.first().cloned()
+    };
+    Ok((provider.as_str().to_string(), model))
 }
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
     let conn = state.conn()?;
+    let chat_models = models_for(&conn, CHAT_MODELS_KEY)?;
+    let background_models = models_for(&conn, BACKGROUND_MODELS_KEY)?;
+    let (chat_provider, chat_cloud_model) = role_cloud_primary(&conn, Role::Chat, &chat_models)?;
+    let (background_provider, background_cloud_model) =
+        role_cloud_primary(&conn, Role::Background, &background_models)?;
     Ok(Settings {
-        chat_models: models_for(&conn, CHAT_MODELS_KEY)?,
-        background_models: models_for(&conn, BACKGROUND_MODELS_KEY)?,
+        chat_models,
+        background_models,
+        chat_provider,
+        background_provider,
+        chat_cloud_model,
+        background_cloud_model,
         chat_auto_switch: db::get_bool(&conn, CHAT_AUTO_SWITCH_KEY, false)?,
         background_auto_switch: db::get_bool(&conn, BACKGROUND_AUTO_SWITCH_KEY, false)?,
         help_mode: db::get_bool(&conn, "help_mode", false)?,
@@ -210,7 +255,13 @@ pub fn set_retrieval_k(state: State<'_, AppState>, k: usize) -> Result<()> {
 /// new gate is a strict superset of the old key-only one — no migration, no backfill.
 #[derive(Serialize)]
 pub struct AiProviderStatus {
+    /// Whether CHAT has a cloud key (its provider's, which is OpenRouter's unless the person chose
+    /// their own). The first-run gate keeps asking this.
     pub has_cloud_key: bool,
+    /// Whether BACKGROUND has one. Separate since a restore can leave Chat on OpenRouter (keyed) and
+    /// Background on your own provider (no key here): background work must gate on its own role or
+    /// the gate passes and every job fails.
+    pub background_has_cloud_key: bool,
     pub local_configured: bool,
     pub onboarding_done: bool,
 }
@@ -222,13 +273,16 @@ pub fn ai_provider_status(
 ) -> Result<AiProviderStatus> {
     // Keychain read first (safe even when the store is locked), then the two store-backed reads.
     // The Chat role's key is the one this has always reported (the primary key).
-    let has_cloud_key =
-        crate::llm_gateway::try_role_has_cloud(&app, crate::llm_gateway::Role::Chat)?;
+    // Both reads take their own short lock to learn the role's provider, so they come BEFORE the guard
+    // below is taken (the mutex is not reentrant).
+    let has_cloud_key = crate::llm_gateway::try_role_has_cloud(&app, Role::Chat)?;
+    let background_has_cloud_key = crate::llm_gateway::try_role_has_cloud(&app, Role::Background)?;
     let conn = state.conn()?;
     let local_configured = crate::llm_gateway::local_chat_configured(&conn)?;
     let onboarding_done = db::get_bool(&conn, ONBOARDING_DONE_KEY, false)?;
     Ok(AiProviderStatus {
         has_cloud_key,
+        background_has_cloud_key,
         local_configured,
         onboarding_done,
     })
@@ -592,6 +646,47 @@ mod tests {
             d.retrieval_confidence_threshold,
             db::retrieval_confidence_threshold(&conn)
         );
+        // The two roles' effective provider and cloud primary, read as get_settings reads them.
+        let chat_models = models_for(&conn, CHAT_MODELS_KEY).unwrap();
+        let background_models = models_for(&conn, BACKGROUND_MODELS_KEY).unwrap();
+        let (cp, cm) = role_cloud_primary(&conn, Role::Chat, &chat_models).unwrap();
+        let (bp, bm) = role_cloud_primary(&conn, Role::Background, &background_models).unwrap();
+        assert_eq!(
+            (d.chat_provider.clone(), d.chat_cloud_model.clone()),
+            (cp, cm)
+        );
+        assert_eq!(
+            (
+                d.background_provider.clone(),
+                d.background_cloud_model.clone()
+            ),
+            (bp, bm)
+        );
+        assert_eq!(d.chat_provider, "openrouter");
+    }
+
+    /// With a role on your own key, `get_settings` names THAT model as the cloud primary, not
+    /// `chat_models[0]` (OpenRouter's list, which isn't the one answering). A stored-but-not-opted-in
+    /// provider is reported as OpenRouter, with OpenRouter's primary.
+    #[test]
+    fn a_direct_role_reports_its_own_cloud_primary_and_a_demoted_one_reports_openrouters() {
+        let (_dir, conn) = temp_db();
+        let or_models = models_for(&conn, CHAT_MODELS_KEY).unwrap();
+        db::set_setting(&conn, "chat_cloud_provider", "openai").unwrap();
+        // Stored, not opted in: demoted.
+        let (p, m) = role_cloud_primary(&conn, Role::Chat, &or_models).unwrap();
+        assert_eq!(p, "openrouter");
+        assert_eq!(m.as_deref(), or_models.first().map(String::as_str));
+        // Opted in: the direct role's one model.
+        db::set_setting(&conn, "direct_openai_enabled", "true").unwrap();
+        let (p, m) = role_cloud_primary(&conn, Role::Chat, &or_models).unwrap();
+        assert_eq!(
+            (p.as_str(), m.as_deref()),
+            ("openai", Some("openai/gpt-6.2-sol"))
+        );
+        // An empty OpenRouter list has no cloud primary.
+        let (_, none) = role_cloud_primary(&conn, Role::Background, &[]).unwrap();
+        assert_eq!(none, None);
     }
 
     #[test]
@@ -623,6 +718,15 @@ mod tests {
             "backup_gdrive_account",
             "dev_mode",
             "mods_dev_devices",
+            // A direct provider's opt-in carries the not-zero-data-retention warning, and a role's
+            // provider and its battery consent route data: a page that could write one could skip
+            // the warning or the question. Rust's commands alone write them.
+            "direct_openai_enabled",
+            "direct_openai_key_check",
+            "direct_openai_shares_data",
+            "chat_cloud_provider",
+            "background_cloud_provider",
+            "local_llm_power_cloud_consent_direct",
         ] {
             assert!(
                 !WEBVIEW_PREFS.contains(&sensitive),

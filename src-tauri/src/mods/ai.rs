@@ -810,11 +810,11 @@ mod tests {
     }
 
     fn cloud_arm(ids: &[&str]) -> CloudArm {
-        CloudArm {
-            provider: crate::llm_gateway::CloudProvider::OpenRouter,
-            key: Secret::from("k".to_string()),
-            models: models(ids),
-        }
+        CloudArm::new(
+            crate::llm_gateway::CloudProvider::OpenRouter,
+            Secret::from("k".to_string()),
+            models(ids),
+        )
     }
 
     fn local_arm() -> LocalArm {
@@ -1050,6 +1050,7 @@ mod tests {
             prompt_tokens: prompt,
             completion_tokens: completion,
             cost,
+            ..Default::default()
         }
     }
 

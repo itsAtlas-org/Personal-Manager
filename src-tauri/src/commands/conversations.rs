@@ -978,6 +978,27 @@ pub struct ContextStatus {
     pub window_proven: bool,
     pub compress: context_budget::CompressDecision,
     pub upgrade: Vec<context_budget::ModelOption>,
+    /// The cloud provider answering chat ("openrouter" or a direct provider's token). The meter names
+    /// it, and the "Switch to X" buttons (OpenRouter's catalogue, which a direct chat can't use) are
+    /// empty whenever it isn't OpenRouter.
+    pub provider: String,
+}
+
+/// The model the meter reports on. On OpenRouter it is the one that served the last reply, else the
+/// primary. With chat on a direct provider the last reply's `model` carries no provider, so after a
+/// switch it can be an OpenRouter-only id (an Anthropic model, say) whose `last_prompt_tokens` was
+/// measured on the OLD model: it is used only when PM lists it for the direct provider, or it is the
+/// local model that answered, and otherwise the direct primary is the model. Pure.
+fn meter_model(
+    direct: bool,
+    served: Option<String>,
+    primary: String,
+    served_is_known: bool,
+) -> String {
+    match served {
+        Some(s) if !direct || served_is_known => s,
+        _ => primary,
+    }
 }
 
 /// The usable context budget for a configured LOCAL model: 85% of its discovered window (leaving
@@ -1031,10 +1052,23 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
     // was measured for THAT model, so the window (denominator) must come from the same model, or the
     // percentage divides usage by the wrong window. Fall back to the primary (next-turn model) before any
     // reply has been measured.
-    let primary = effective_models(&conn, CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY)?
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    //
+    // With chat on your own key, the meter reads PM's list for that provider, not OpenRouter's: its
+    // primary comes from the direct role, and its window from the bundled catalogue first (the same id
+    // on OpenRouter may carry a smaller provider window).
+    let provider = llm_gateway::role_cloud_provider(&conn, llm_gateway::Role::Chat)?;
+    let direct = provider.is_direct();
+    let primary = if direct {
+        crate::direct_providers::models_for(&conn, provider, llm_gateway::Role::Chat)?
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+    } else {
+        effective_models(&conn, CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY)?
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+    };
     let served: Option<String> = conn
         .query_row(
             "SELECT model FROM messages \
@@ -1044,16 +1078,28 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
             |r| r.get(0),
         )
         .optional()?;
-    let model = served.unwrap_or(primary);
+    let served_is_known = served.as_deref().is_some_and(|s| {
+        crate::direct_models::find(s).is_some() || local_budget_window(&app, &conn, s).is_some()
+    });
+    let model = meter_model(direct, served, primary, served_is_known);
 
     // The reported model's window + the catalogue (latest refresh batch), from the daily price/context fetch.
     let catalogue = cached_catalogue(&conn)?;
-    let context_window = catalogue
-        .iter()
-        .find(|m| m.id == model)
-        .and_then(|m| m.context_length)
-        .map(|v| v as i64)
+    let direct_window = if direct {
+        crate::direct_models::find(&model).map(|m| i64::from(m.context))
+    } else {
+        None
+    };
+    let context_window = direct_window
         .map(|w| (w, None))
+        .or_else(|| {
+            catalogue
+                .iter()
+                .find(|m| m.id == model)
+                .and_then(|m| m.context_length)
+                .map(|v| v as i64)
+                .map(|w| (w, None))
+        })
         // A local model is uncatalogued — read its window from the in-memory cache the gateway fills
         // after the first local reply. `None` (never chatted locally yet) → the meter stays honestly
         // "unknown" rather than guessing.
@@ -1082,6 +1128,8 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
     let compress =
         context_budget::compress_plan(uncovered_pairs, summary_tokens_est, context_window);
     let upgrade = match context_window {
+        // OpenRouter's catalogue and OpenRouter's chat list don't apply to your own key.
+        _ if direct => Vec::new(),
         Some(w) => {
             let options: Vec<context_budget::ModelOption> = catalogue
                 .iter()
@@ -1108,6 +1156,7 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
         window_proven: window_source.is_some_and(|s| s.is_proven()),
         compress,
         upgrade,
+        provider: provider.as_str().to_string(),
     })
 }
 
@@ -1349,6 +1398,34 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
 mod tests {
     use super::*;
     use crate::commands::shared::temp_db;
+
+    /// After a switch from OpenRouter to your own key, the last reply's `model` can be an
+    /// OpenRouter-only id whose `last_prompt_tokens` was measured on the OLD model. With chat on a
+    /// direct provider the meter uses it only when PM lists it for that provider (or it is the local
+    /// model that answered), and otherwise reports the direct primary and its window.
+    #[test]
+    fn a_direct_chat_meter_ignores_a_served_model_from_before_the_switch() {
+        let primary = "openai/gpt-6.2-sol".to_string();
+        // An Anthropic model that served the last reply on OpenRouter: not the model any more.
+        let old_id = "anthropic/claude-sonnet-4.6".to_string();
+        let old = Some(old_id.clone());
+        assert_eq!(
+            meter_model(true, old.clone(), primary.clone(), false),
+            primary
+        );
+        // The direct primary's window is the one that is read.
+        let window = crate::direct_models::find(&primary).map(|m| i64::from(m.context));
+        assert_eq!(window, Some(1_050_000));
+        // A direct model that did serve it is kept (an earlier pick on the same provider).
+        let astra = Some("openai/gpt-6.2-astra".to_string());
+        assert_eq!(
+            meter_model(true, astra.clone(), primary.clone(), true),
+            "openai/gpt-6.2-astra"
+        );
+        // On OpenRouter nothing changes: the served model wins, else the primary.
+        assert_eq!(meter_model(false, old, primary.clone(), false), old_id);
+        assert_eq!(meter_model(false, None, primary.clone(), false), primary);
+    }
 
     /// Pin the chat honesty wire shape the PR6 frontend depends on: `Done` carries a `served_by`
     /// tag ("local"/"cloud"), and `Fallback` is the adjacently-tagged snake_case variant the TS

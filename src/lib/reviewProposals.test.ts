@@ -155,7 +155,11 @@ describe("proposeOnArrival", () => {
     resetArrivalProposals();
     proposalCache.clear();
     localStorage.setItem(REVIEW_AI_KEY, "true");
-    aiProviderStatus.mockResolvedValue({ has_cloud_key: true, local_configured: false });
+    aiProviderStatus.mockResolvedValue({
+      has_cloud_key: true,
+      background_has_cloud_key: true,
+      local_configured: false,
+    });
     proposeMetadata.mockResolvedValue(undefined);
   });
   afterEach(() => {
@@ -190,7 +194,25 @@ describe("proposeOnArrival", () => {
   });
 
   it("stays quiet when no model is linked", async () => {
-    aiProviderStatus.mockResolvedValue({ has_cloud_key: false, local_configured: false });
+    aiProviderStatus.mockResolvedValue({
+      has_cloud_key: false,
+      background_has_cloud_key: false,
+      local_configured: false,
+    });
+    proposeOnArrival(Array.from({ length: 6 }, (_, i) => landed(i + 1)));
+    await vi.waitFor(() => expect(aiProviderStatus).toHaveBeenCalled());
+    expect(proposeMetadata).not.toHaveBeenCalled();
+  });
+
+  /** A restore can leave Chat on OpenRouter (keyed) and Background on your own provider with no key
+   *  on this device. This is background work, so it gates on Background's key: the gate passing on
+   *  Chat's would let every job fail. */
+  it("stays quiet when only Chat has a key and Background has none", async () => {
+    aiProviderStatus.mockResolvedValue({
+      has_cloud_key: true,
+      background_has_cloud_key: false,
+      local_configured: false,
+    });
     proposeOnArrival(Array.from({ length: 6 }, (_, i) => landed(i + 1)));
     await vi.waitFor(() => expect(aiProviderStatus).toHaveBeenCalled());
     expect(proposeMetadata).not.toHaveBeenCalled();

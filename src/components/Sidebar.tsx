@@ -218,6 +218,11 @@ interface Props {
   /** How many auto-switch fallbacks are configured behind each primary (0 = none). */
   chatFallbacks: number;
   backgroundFallbacks: number;
+  /** A role answered straight by a provider the person reaches with their own key ("OpenAI
+   *  direct"), or null on OpenRouter. Said beside the model so the footer never names a model
+   *  without the route it takes. */
+  chatVia?: string | null;
+  backgroundVia?: string | null;
   /** Live local-endpoint status (#297). Adds a coloured "Local" line to the model footer — but ONLY
    *  when an endpoint is configured; `null`/unconfigured renders nothing (zero-pixel for cloud-only). */
   localAi: LocalLlmStatus | null;
@@ -250,6 +255,8 @@ export function Sidebar({
   backgroundModel,
   chatFallbacks,
   backgroundFallbacks,
+  chatVia = null,
+  backgroundVia = null,
   localAi,
   width,
   onStartResize,
@@ -672,6 +679,7 @@ export function Sidebar({
               power={powerTag(localAi, "chat")}
               parked={localAi ? powerOf(localAi).chat.local_model : null}
               fallbacks={chatFallbacks}
+              via={chatVia}
             />
             <ModelRow
               role="Tasks"
@@ -682,6 +690,7 @@ export function Sidebar({
               power={powerTag(localAi, "background")}
               parked={localAi ? powerOf(localAi).background.local_model : null}
               fallbacks={backgroundFallbacks}
+              via={backgroundVia}
             />
             <LocalRow status={localAi} />
           </button>
@@ -720,6 +729,7 @@ function ModelRow({
   power,
   parked,
   fallbacks,
+  via,
 }: {
   role: string;
   id: string | null;
@@ -734,6 +744,8 @@ function ModelRow({
   /** The role's bound local model, which the policy has parked while `power` is "on_battery". */
   parked: string | null;
   fallbacks: number;
+  /** The direct provider answering this role from the cloud, when there is one. */
+  via: string | null;
 }) {
   // On battery the backend already reports no local model for a moved role, so `shown` is the cloud
   // model answering and `activity` is null — only the title and the chip need to say why.
@@ -744,7 +756,11 @@ function ModelRow({
       ? onBatteryRowTitle(id, parked)
       : local
         ? `${local} — running on this machine${id ? `; ${id} is the cloud fallback` : ""}`
-        : (id ?? "Using the default model");
+        : id
+          ? via
+            ? `${id}, straight to ${via.replace(/ direct$/, "")} with your own key`
+            : id
+          : "Using the default model";
   return (
     <div className="flex items-center gap-1.5 text-xs leading-5">
       <span className="w-9 shrink-0 font-mono text-ink4">{role}</span>
@@ -783,6 +799,12 @@ function ModelRow({
       {power === "kept_local" && (
         <span className="shrink-0 text-[0.625rem] text-ink4" title={keptLocalTitle(local)}>
           kept local
+        </span>
+      )}
+      {/* Only said when the cloud model is what answers: a local model answering needs no route. */}
+      {via && !local && !awaitingModel && (
+        <span className="shrink-0 font-mono text-[0.625rem] text-ink4" title={title}>
+          {via}
         </span>
       )}
       {/* The fallbacks are cloud models, and none of them answers a role waiting for a pick. */}

@@ -9,11 +9,12 @@
 
 import { useRef } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useDialogLayer } from "../lib/useDialogLayer";
 
+const listModels = vi.hoisted(() => vi.fn());
 vi.mock("../lib/ipc", () => ({
-  listModels: () => Promise.resolve([]),
+  listModels: () => listModels(),
 }));
 
 // Same stub the other component tests use: the <Button>s reach for `useTheme`, and the real
@@ -38,10 +39,16 @@ vi.mock("../kit/theme", async (importOriginal) => ({
   }),
 }));
 
-import { ModelPicker } from "./ModelPicker";
+import { directPickerRows } from "../lib/directProviders";
+import { openaiView } from "../lib/directProvidersFixture";
+import { ModelPicker, type ModelSource } from "./ModelPicker";
 import { Modal } from "./ui/Modal";
 
-afterEach(cleanup);
+beforeEach(() => listModels.mockResolvedValue([]));
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe("ModelPicker inside a dialog", () => {
   it("closes only itself on Escape", async () => {
@@ -109,5 +116,98 @@ describe("ModelPicker inside a dialog", () => {
     expect(onQuestionClose).toHaveBeenCalledTimes(1);
     expect(screen.queryByPlaceholderText("Search models…")).not.toBeNull();
     expect(onDialogClose).not.toHaveBeenCalled();
+  });
+});
+
+// A person who only uses their own key hasn't opted into OpenRouter, so a direct list is handed in
+// and the picker never asks OpenRouter for anything.
+describe("ModelPicker with a provider's own list", () => {
+  const view = openaiView({
+    key_check: {
+      at: "2026-11-26T10:00:00Z",
+      outcome: "ok",
+      listed: ["openai/gpt-6.2-sol"],
+      listed_total: 40,
+    },
+  });
+  const source: ModelSource = {
+    kind: "direct",
+    models: directPickerRows(view),
+    caption: "Models your OpenAI key can use.",
+  };
+
+  it("never asks OpenRouter for its catalogue, however it is opened", async () => {
+    render(<ModelPicker value="" onChange={() => {}} source={source} allowCustom={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model…" }));
+    await screen.findByText("GPT-6.2 Sol");
+    expect(listModels).not.toHaveBeenCalled();
+  });
+
+  it("lists PM's own rows with the key's caption, and marks one the key's list leaves out", async () => {
+    render(<ModelPicker value="" onChange={() => {}} source={source} allowCustom={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model…" }));
+    expect(await screen.findByText("Models your OpenAI key can use.")).toBeTruthy();
+    expect(screen.getByText("GPT-6 Luna")).toBeTruthy();
+    // Sol is in the key's list; Luna and Terra are not, and stay selectable.
+    expect(screen.getAllByText("Not in your key's list")).toHaveLength(2);
+  });
+
+  it("takes no id typed by hand, and says why", async () => {
+    render(<ModelPicker value="" onChange={() => {}} source={source} allowCustom={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model…" }));
+    fireEvent.change(await screen.findByPlaceholderText("Search models…"), {
+      target: { value: "openai/made-up" },
+    });
+    expect(screen.queryByText(/Use custom model id/)).toBeNull();
+    expect(screen.getByText("PM can only use models it knows the price of.")).toBeTruthy();
+  });
+
+  it("still takes a typed id on OpenRouter, as it always did", async () => {
+    render(<ModelPicker value="" onChange={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model…" }));
+    fireEvent.change(await screen.findByPlaceholderText("Search models…"), {
+      target: { value: "vendor/some-model" },
+    });
+    expect(screen.getByText(/Use custom model id/)).toBeTruthy();
+    expect(listModels).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ModelPicker as a disclosure", () => {
+  it("says whether it is open, and gives focus back to the trigger on Escape and on a pick", async () => {
+    const onChange = vi.fn();
+    const source: ModelSource = {
+      kind: "direct",
+      models: directPickerRows(openaiView()),
+      caption: "x",
+    };
+    render(
+      <ModelPicker value="" onChange={onChange} source={source} triggerLabel="Add a model…" />,
+    );
+    const trigger = screen.getByRole("button", { name: "Add a model…" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const search = await screen.findByPlaceholderText("Search models…");
+    fireEvent.keyDown(search, { key: "Escape" });
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("false"));
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByText("GPT-6 Luna"));
+    expect(onChange).toHaveBeenCalledWith("openai/gpt-6-luna");
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("keeps the visible words in a longer accessible name", () => {
+    render(
+      <ModelPicker
+        value=""
+        onChange={() => {}}
+        triggerLabel="Add a model…"
+        ariaLabel="Add a model for chat"
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Add a model for chat" })).toBeTruthy();
   });
 });

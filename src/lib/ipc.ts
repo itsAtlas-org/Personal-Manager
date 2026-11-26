@@ -63,6 +63,11 @@ import type {
   DevSystemInfo,
   DevTableCount,
   DevTablePage,
+  CloudProviderId,
+  DirectProvidersState,
+  KeyCheckResult,
+  RoleMove,
+  RoleName,
   Document,
   DocumentLocation,
   DraftPreference,
@@ -257,6 +262,52 @@ export const hasOpenRouterBackgroundKey = () => invoke<boolean>("has_openrouter_
 
 export const setOpenRouterBackgroundKey = (key: string) =>
   invoke<void>("set_openrouter_background_key", { key });
+
+// ---- Your own provider keys (opt-in, off by default) --------------------------------------------
+// No call returns a key: the webview learns presence and a check verdict. `saveDirectKey`,
+// `recheckDirectKey` and `clearDirectKey` are deliberately NOT named `set_*`, so a refused key never
+// ticks the Settings "Saved" announcement (`settingsSaved.isSettingWrite`).
+
+/** The whole read model for the "Your own keys" section and the role blocks. Read-only, no network.
+ *  A keychain that can't be read never fails it: that provider's `key` reads "unreadable". */
+export const directProvidersState = () => invoke<DirectProvidersState>("direct_providers_state");
+
+/** Turn a provider on or off. Off moves every role that was on it back to OpenRouter in the same
+ *  transaction and returns the roles moved (the key is kept). */
+export const setDirectOptIn = (provider: CloudProviderId, enabled: boolean) =>
+  invoke<RoleMove[]>("set_direct_opt_in", { provider, enabled });
+
+/** Check a pasted key against its provider and keep it only if the provider accepts it. The result
+ *  says what was found and whether the key is now saved. */
+export const saveDirectKey = (provider: CloudProviderId, key: string) =>
+  invoke<KeyCheckResult>("save_direct_key", { provider, key });
+
+/** Check the stored key again. The key stays whatever the answer. */
+export const recheckDirectKey = (provider: CloudProviderId) =>
+  invoke<KeyCheckResult>("recheck_direct_key", { provider });
+
+/** Forget a provider's key (opt-in stays on) and return the roles that went back to OpenRouter. */
+export const clearDirectKey = (provider: CloudProviderId) =>
+  invoke<RoleMove[]>("clear_direct_key", { provider });
+
+/** Choose which cloud provider answers a role. "openrouter" is always allowed; a direct provider
+ *  only when it is opted in and its key is there (the error says which is missing). */
+export const setRoleCloudProvider = (role: RoleName, provider: CloudProviderId) =>
+  invoke<void>("set_role_cloud_provider", { role, provider });
+
+/** Choose a role's model and effort on a provider in ONE write, so the effort is checked against the
+ *  new model. One model per role in this version. `effort` null = the role's default; the word
+ *  "default" is refused (it is not a level). */
+export const setDirectRole = (
+  provider: CloudProviderId,
+  role: RoleName,
+  models: string[],
+  effort: string | null,
+) => invoke<void>("set_direct_role", { provider, role, models, effort });
+
+/** The person's own "my project shares data with this provider" tick-box. Display only. */
+export const setDirectDataSharing = (provider: CloudProviderId, shares: boolean) =>
+  invoke<void>("set_direct_data_sharing", { provider, shares });
 
 export const getSettings = () => invoke<Settings>("get_settings");
 

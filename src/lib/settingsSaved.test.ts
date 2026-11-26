@@ -26,8 +26,26 @@ describe("isSettingWrite", () => {
       "set_local_llm_endpoint",
       "set_help_mode",
       "set_pref",
+      // Your own provider keys: the opt-in, the role's provider and model, the tick-box.
+      "set_direct_opt_in",
+      "set_role_cloud_provider",
+      "set_direct_role",
+      "set_direct_data_sharing",
     ]) {
       expect(isSettingWrite(cmd)).toBe(true);
+    }
+  });
+
+  /** The key commands make a network call and can be refused. A refused key must never claim
+   *  "Saved", so none of them is named `set_*`. */
+  it("stays silent for the key commands, which can be refused", () => {
+    for (const cmd of [
+      "save_direct_key",
+      "recheck_direct_key",
+      "clear_direct_key",
+      "direct_providers_state",
+    ]) {
+      expect(isSettingWrite(cmd)).toBe(false);
     }
   });
 

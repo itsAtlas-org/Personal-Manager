@@ -157,7 +157,11 @@ beforeEach(() => {
   cachedProposals.mockResolvedValue([]);
   commitReview.mockResolvedValue(undefined);
   proposeMetadata.mockResolvedValue(undefined);
-  aiProviderStatus.mockResolvedValue({ has_cloud_key: true, local_configured: false });
+  aiProviderStatus.mockResolvedValue({
+    has_cloud_key: true,
+    background_has_cloud_key: true,
+    local_configured: false,
+  });
 });
 
 afterEach(() => {
