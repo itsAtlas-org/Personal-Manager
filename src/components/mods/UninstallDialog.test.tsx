@@ -76,6 +76,9 @@ function Notes() {
   );
 }
 
+// The dialog draws a waiting state before the preview arrives (`if (!preview)` in UninstallDialog), and
+// that state is a dialog too, so "a dialog is on screen" can be the waiting one: wait for the preview to
+// have landed (`settled`) before reading the dialog, and for the Uninstall button itself before clicking.
 const open = () =>
   render(
     <>
@@ -83,6 +86,11 @@ const open = () =>
       <Notes />
     </>,
   );
+
+async function settled(): Promise<HTMLElement> {
+  await waitFor(() => expect(screen.queryByText("Looking at what it has…")).toBeNull());
+  return screen.getByRole("dialog");
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -109,7 +117,7 @@ describe("the preview", () => {
       preview({ stays: { tasks: 3, milestones: 1, documents: 2, keptDocuments: 0 } }),
     );
     open();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await settled();
     expect(dialog.textContent).toContain("3 tasks, 1 milestone, 2 notes it made stay in PM");
     const choice = within(dialog).getByRole("checkbox") as HTMLInputElement;
     expect(choice.checked).toBe(false);
@@ -121,7 +129,7 @@ describe("the preview", () => {
   it("offers no deletion choice when the mod made nothing", async () => {
     uninstallPreview.mockResolvedValue(preview());
     open();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await settled();
     expect(within(dialog).queryByRole("checkbox")).toBeNull();
     expect(dialog.textContent).toContain("It hasn't made any tasks, milestones or notes.");
   });
@@ -140,15 +148,13 @@ describe("the preview", () => {
       }),
     );
     open();
-    expect((await screen.findByRole("dialog")).textContent).toContain("It hasn't saved anything.");
+    expect((await settled()).textContent).toContain("It hasn't saved anything.");
   });
 
   it("says why a mod the safety list removed is being uninstalled", async () => {
     uninstallPreview.mockResolvedValue(preview({ removedBySafetyList: true }));
     open();
-    expect((await screen.findByRole("dialog")).textContent).toContain(
-      "PM's safety list switched this mod off.",
-    );
+    expect((await settled()).textContent).toContain("PM's safety list switched this mod off.");
   });
 
   it("shows the reason the safety list removed it, from the row, when opened where no row or strip says it", async () => {
@@ -166,7 +172,7 @@ describe("the preview", () => {
         <UninstallDialog modId="acme.tool" refresh={refresh} onClose={onClose} />
       </ModRowsContext.Provider>,
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await settled();
     expect(dialog.textContent).toContain("PM's safety list switched this mod off.");
     // The backend's sentence, as plain text with the invisible character taken out.
     expect(dialog.textContent).toContain(
@@ -178,7 +184,7 @@ describe("the preview", () => {
   it("says no reason it doesn't have: a removed mod whose row isn't read yet shows the plain line only", async () => {
     uninstallPreview.mockResolvedValue(preview({ removedBySafetyList: true }));
     open();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await settled();
     expect(dialog.textContent).toContain("PM's safety list switched this mod off.");
     expect(dialog.textContent).not.toContain("PM removed");
   });
@@ -199,7 +205,7 @@ describe("the preview", () => {
     const evil = '<img src=x onerror="alert(1)">';
     uninstallPreview.mockResolvedValue(preview({ name: evil }));
     open();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await settled();
     expect(dialog.querySelector("img")).toBeNull();
     // The title quotes the name, and a double quote inside it can't close that quote.
     expect(dialog.textContent).toContain("<img src=x onerror='alert(1)'>");
@@ -223,8 +229,8 @@ describe("the preview", () => {
     uninstallPreview.mockResolvedValue(preview({ name: `Acme${RLO}Tool` }));
     uninstallMod.mockResolvedValue(done());
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
   });
 });
@@ -236,9 +242,9 @@ describe("uninstalling", () => {
     );
     uninstallMod.mockResolvedValue(done());
     open();
-    await screen.findByRole("dialog");
+    await settled();
     expect(uninstallMod).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await waitFor(() => expect(uninstallMod).toHaveBeenCalledWith("acme.tool", false));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(refresh).toHaveBeenCalled();
@@ -253,7 +259,7 @@ describe("uninstalling", () => {
     );
     open();
     fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await waitFor(() => expect(uninstallMod).toHaveBeenCalledWith("acme.tool", true));
     expect(await screen.findByText(/Deleted what it made: 2 tasks\./)).toBeTruthy();
   });
@@ -262,8 +268,8 @@ describe("uninstalling", () => {
     uninstallPreview.mockResolvedValue(preview());
     uninstallMod.mockResolvedValue(done());
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await waitFor(() => expect(uninstallMod).toHaveBeenCalledWith("acme.tool", false));
   });
 
@@ -275,8 +281,8 @@ describe("uninstalling", () => {
     writeFold("mods.mod.acme.tool:permissions", false);
     writeFold("mods.mod.acme.other", true);
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(parsePlacement(localStorage.getItem(NAV_PLACEMENT_KEY))).toEqual({
       hidden: ["mod:acme.other"],
@@ -291,8 +297,8 @@ describe("uninstalling", () => {
     uninstallPreview.mockResolvedValue(preview());
     uninstallMod.mockResolvedValue(done());
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     expect(await screen.findByText("“Acme Tool” was uninstalled.")).toBeTruthy();
   });
 
@@ -305,8 +311,8 @@ describe("uninstalling", () => {
       }),
     );
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     const working = await screen.findByRole("button", { name: "Uninstalling…" });
     expect((working as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
@@ -331,8 +337,8 @@ describe("uninstalling", () => {
     writeNavPlacement({ hidden: ["mod:acme.tool"], pinned: [] });
     writeFold("mods.mod.acme.tool", true);
     const view = open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     await screen.findByRole("button", { name: "Uninstalling…" });
     // The person switches tab: the Mods view, and this dialog with it, unmounts.
     view.unmount();
@@ -349,8 +355,8 @@ describe("uninstalling", () => {
     uninstallMod.mockRejectedValue({ code: "internal", message: "PM couldn't remove its files." });
     writeFold("mods.mod.acme.tool", true);
     open();
-    await screen.findByRole("dialog");
-    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await settled();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
     expect(await screen.findByText("PM couldn't remove its files.")).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
     expect(readFold("mods.mod.acme.tool")).toBe(true);
