@@ -224,10 +224,14 @@ async fn a_guess_never_waits_on_the_stores_one_guard() {
     // Somebody holds the guard (the app's own command, say): a connection that is still guessing
     // must not queue behind it, or a flood of guesses would stall the person's own commands in turn.
     let guard = w.host.store().conn().unwrap();
-    for token in [unpaired_token(&app), wrong_secret(&app)] {
+    // The case is named by its place, never by the token: a test message is a log line too.
+    for (case, token) in [unpaired_token(&app), wrong_secret(&app)]
+        .iter()
+        .enumerate()
+    {
         let mut c = w.open().unwrap();
-        c.auth(&token).await;
-        assert!(c.is_closed().await, "{token}");
+        c.auth(token).await;
+        assert!(c.is_closed().await, "case {case}");
     }
     drop(guard);
     // The paired token is looked at the usual way once the guard is free.

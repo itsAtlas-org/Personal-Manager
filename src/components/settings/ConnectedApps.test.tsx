@@ -196,8 +196,7 @@ describe("connecting an app", () => {
     const boxes = Object.fromEntries(
       SCOPE_CHOICES.map((s) => [
         s.id,
-        (screen.getByLabelText(new RegExp(s.label.replace(/[()]/g, "\\$&"))) as HTMLInputElement)
-          .checked,
+        (screen.getByLabelText(s.label, { exact: false }) as HTMLInputElement).checked,
       ]),
     );
     expect(boxes).toEqual({
@@ -243,9 +242,7 @@ describe("connecting an app", () => {
     expect(connect.hasAttribute("disabled")).toBe(false);
     for (const s of DEFAULT_SCOPES) {
       fireEvent.click(
-        screen.getByLabelText(
-          new RegExp(SCOPE_CHOICES.find((c) => c.id === s)!.label.replace(/[()]/g, "\\$&")),
-        ),
+        screen.getByLabelText(SCOPE_CHOICES.find((c) => c.id === s)!.label, { exact: false }),
       );
     }
     expect(connect.hasAttribute("disabled")).toBe(true);

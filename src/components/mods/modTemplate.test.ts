@@ -81,7 +81,7 @@ describe("the mod template's files", () => {
     // that passed here with one in a comment would still be refused by the packer.
     const page = indexHtml;
     expect(page.match(/<script/gi)).toHaveLength(2);
-    const scripts = [...page.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)];
+    const scripts = [...page.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     expect(scripts.map((m) => /src="([^"]+)"/.exec(m[1])?.[1])).toEqual([
       "./pm-host.js",
       "./main.js",
