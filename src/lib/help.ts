@@ -154,7 +154,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "conversations-list": {
     title: "Projects & Global chats",
-    body: "Two foldable lists. 'Projects' is every project PM knows about, with how many chats each one holds — click through to open that project, where its files sit beside a chat that searches only it. 'Global chats' is your chats that belong to no project, which search everything; click one to reopen it, or '+ New' to start another. Moving a chat into a project with the 📁 button takes it out of this list and into that project's own history.",
+    body: "Two foldable lists. 'Projects' is every project PM knows about, with how many chats each one holds — click through to open that project, where its files sit beside a chat that searches only it. 'Global chats' is your chats that belong to no project, which search everything; click one to reopen it, or '+ New' to start another. Moving a chat into a project with the 📁 button takes it out of this list and into that project's own history. Right-click a chat (Shift+F10) to open, rename, move or delete it, or a project to open or archive it.",
   },
   "sidebar-models": {
     title: "Models in use",
@@ -279,7 +279,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "documents-view": {
     title: "All files, Folders or Projects",
-    body: "How the list is laid out. All files is every document in one list. Folders sorts them by where each one came from: a folder for each Google account's Drive, Shared with you, shared drives, each OneDrive, each folder PM watches on this computer, and the files you added to PM yourself, your photos, pinboard notes and chats. Inside a connected account you find the same folders as in the account itself. Projects gives each project a folder; a document in several projects is in each of their folders. Click a folder to open it, and the path at the top to go back up. The files in a folder are listed with the same columns and sorting as All files. PM remembers the layout and the folder you had open on this computer.",
+    body: "How the list is laid out. All files is every document in one list. Folders sorts them by where each one came from: a folder for each Google account's Drive, Shared with you, shared drives, each OneDrive, each folder PM watches on this computer, and the files you added to PM yourself, your photos, pinboard notes and chats. Inside a connected account you find the same folders as in the account itself. Projects gives each project a folder; a document in several projects is in each of their folders. Click a folder to open it, and the path at the top to go back up. The files in a folder are listed with the same columns and sorting as All files. PM remembers the layout and the folder you had open on this computer. Right-click a file (Shift+F10 on its row) for Open, Open source, Open project, Copy title and Delete…, which asks first.",
   },
   "documents-review-banner": {
     title: "Documents to review",
@@ -306,7 +306,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "review-row": {
     title: "Reviewing a document",
-    body: "Set the project (start typing to reuse an existing one), pick an importance, and add short tags. The grey line is the AI's reasoning for its suggestion. Hover the Project, Importance, and Tags fields for what each one does.",
+    body: "Set the project (start typing to reuse an existing one), pick an importance, and add short tags. The grey line is the AI's reasoning for its suggestion. Hover the Project, Importance, and Tags fields for what each one does. Right-click a row (Shift+F10) to open it, approve it, or apply its filing to the rest of its folder.",
   },
   "review-project": {
     title: "Project",
@@ -326,9 +326,13 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Message box",
     body: "Type a question and press Enter. PM retrieves the most relevant chunks of your documents and answers from them.",
   },
+  "chat-answer-actions": {
+    title: "Copy and save an answer",
+    body: "Copy puts the answer on your clipboard; Save as note files it as a note. Right-click the answer (Shift+F10 on one of these buttons) for the same in a menu, with the rating when the answer shows sources.",
+  },
   "chat-sources": {
     title: "Sources",
-    body: "The documents this answer was grounded in. They make the answer verifiable — open the file to check.",
+    body: "The documents this answer was grounded in. They make the answer verifiable — open the file to check. Copy, Save as note and the thumbs sit under an answer; right-click it (Shift+F10 on one of them) for the same in a menu.",
   },
   "context-meter": {
     title: "Context usage",
@@ -752,7 +756,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "focus-card": {
     title: "Project",
-    body: "One project and its current status. The line beneath shows what drives that status — document count, priority, size, the nearest milestone, blocker, last activity. Click the name to open it; click Triage to set its attributes.",
+    body: "One project and its current status. The line beneath shows what drives that status — document count, priority, size, the nearest milestone, blocker, last activity. Click the name to open it; click Triage to set its attributes. Right-click a card (Shift+F10) for Open, Triage, Archive, Merge into… and Delete…, which still ask you to type the name.",
   },
   "focus-status-badge": {
     title: "Status",
@@ -764,7 +768,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "project-milestones": {
     title: "Milestones",
-    body: "A project's deadlines — a pitch, a presentation, an internal due date — each with a name and a date. Set how far along each one is with its progress menu; at Done it gets a line through it. The nearest one that isn't done drives the 'Due soon' status; finish it and the next takes over. Reorder with the arrows, remove with ×. A milestone linked to a calendar event (📅) takes its date from that event; Unlink makes the date yours to edit.",
+    body: "A project's deadlines — a pitch, a presentation, an internal due date — each with a name and a date. Set how far along each one is with its progress menu; at Done it gets a line through it. The nearest one that isn't done drives the 'Due soon' status; finish it and the next takes over. Reorder with the arrows, remove with ×, which asks first. A milestone linked to a calendar event (📅) takes its date from that event; Unlink, which asks too, makes the date yours to edit. Right-click a milestone (Shift+F10 on its buttons) for the same.",
   },
   "project-resize": {
     title: "Resize the panel",
@@ -784,7 +788,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "project-tasks": {
     title: "This project's tasks",
-    body: "The to-dos linked to this project, the same tasks you see on the pinboard and the Calendar's Runway. Type one and press Enter to add it, with a deadline if you like; More… opens everything. Tick the box to go from to do, to doing, to done. Click a title to read why it matters, and ✎ to change anything: when you plan to do it, a deadline that's firm or one to aim for (or one that follows a milestone or a calendar event), the lane, a stack that groups it with the other steps of one job, or park it for later. Done and parked tasks fold away at the bottom. Deleting the project keeps its tasks, without a project.",
+    body: "The to-dos linked to this project, the same tasks you see on the pinboard and the Calendar's Runway. Type one and press Enter to add it, with a deadline if you like; More… opens everything. Tick the box to go from to do, to doing, to done. Click a title to read why it matters, and ✎ to change anything: when you plan to do it, a deadline that's firm or one to aim for (or one that follows a milestone or a calendar event), the lane, a stack that groups it with the other steps of one job, or park it for later. Done and parked tasks fold away at the bottom. Deleting the project keeps its tasks, without a project. Right-click a task (Shift+F10 on its buttons) for the same choices, and Delete task…, which asks first.",
   },
   "project-chat": {
     title: "Project chat",
@@ -792,7 +796,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "project-files": {
     title: "Project files",
-    body: "Every document in this project — the ones filed here plus any linked in from elsewhere, marked Linked with their own primary project. This is the grounding the scoped chat answers from.",
+    body: "Every document in this project — the ones filed here plus any linked in from elsewhere, marked Linked with their own primary project. This is the grounding the scoped chat answers from. Right-click a file (Shift+F10 on its row) to open it, copy its title or delete it.",
   },
 };
 

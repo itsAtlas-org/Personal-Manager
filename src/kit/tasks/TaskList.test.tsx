@@ -8,11 +8,13 @@
 // asks the data to open the editor (which core draws, and a mod frame asks PM to draw), and turns to a
 // plain summary below Standard depth. Mounted with no `TaskData` it throws a named error.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Task, TaskStack } from "../../lib/types";
 import { TaskDataMissingError, TaskDataProvider, type TaskData } from "../taskData";
 import { TaskList, type TaskListProps } from "./TaskList";
+import { ContextMenuHost } from "../ui/ContextMenuHost";
+import { closeContextMenu } from "../lib/contextMenu";
 
 let tasksChanged: (() => void) | null = null;
 
@@ -51,11 +53,15 @@ const data = {
   edit: vi.fn<TaskData["edit"]>(),
 };
 
+const remove = vi.fn<NonNullable<TaskData["remove"]>>();
+
 /** The list over the mocked data. `data` is one stable object, as a provider's must be. */
-function List(props: TaskListProps) {
+function List(props: TaskListProps & { withRemove?: boolean }) {
+  const { withRemove, ...rest } = props;
   return (
-    <TaskDataProvider data={data}>
-      <TaskList {...props} />
+    <TaskDataProvider data={withRemove ? { ...data, remove } : data}>
+      <TaskList {...rest} />
+      <ContextMenuHost />
     </TaskDataProvider>
   );
 }
@@ -101,7 +107,10 @@ beforeEach(() => {
   depth = "standard";
   tasksChanged = null;
 });
-afterEach(cleanup);
+afterEach(() => {
+  act(() => closeContextMenu());
+  cleanup();
+});
 
 describe("TaskList", () => {
   it("lists open tasks in order and folds parked and done ones away", async () => {
@@ -354,5 +363,71 @@ describe("TaskList", () => {
     expect(screen.getByText("Closed one").className).toContain("line-through");
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});
+
+describe("TaskList right-click menu", () => {
+  const rightClick = (el: Element) => fireEvent.contextMenu(el, { clientX: 5, clientY: 5 });
+
+  it("offers Edit task…, the status as radios and Delete task… where the host can delete", async () => {
+    const t = task();
+    data.list.mockResolvedValue(listing([t]));
+    render(<List project="Atlas" withRemove />);
+    rightClick(await screen.findByRole("button", { name: "Edit Write the pitch" }));
+    const menu = screen.getByRole("menu", { name: "Task Write the pitch" });
+    expect(
+      screen
+        .getAllByRole("menuitemradio")
+        .map((r) => [r.textContent?.replace("✓", ""), r.getAttribute("aria-checked")]),
+    ).toEqual([
+      ["To do", "true"],
+      ["Doing", "false"],
+      ["Done", "false"],
+    ]);
+    // The row's own handlers: the editor is the host's, the status is the one status call.
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Edit task…" }));
+    expect(data.edit).toHaveBeenCalledWith({ task: t }, expect.any(Function));
+
+    rightClick(await screen.findByRole("button", { name: "Edit Write the pitch" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Doing" }));
+    await waitFor(() => expect(data.setStatus).toHaveBeenCalledWith(t.id, "doing"));
+
+    // Delete only asks the host; the list deletes nothing, and re-reads once the host says it has.
+    rightClick(await screen.findByRole("button", { name: "Edit Write the pitch" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete task…" }));
+    expect(remove).toHaveBeenCalledWith(t, expect.any(Function));
+    const reads = data.list.mock.calls.length;
+    act(() => remove.mock.calls[0][1]());
+    await waitFor(() => expect(data.list.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  it("leaves Delete task… out where the host has no delete (a mod frame)", async () => {
+    data.list.mockResolvedValue(listing([task()]));
+    render(<List project="Atlas" />);
+    rightClick(await screen.findByRole("button", { name: "Edit Write the pitch" }));
+    expect(screen.getByRole("menuitem", { name: "Edit task…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Delete task…" })).toBeNull();
+  });
+
+  it("offers Move up and down for a reorderable list, disabled at the ends", async () => {
+    data.list.mockResolvedValue(
+      listing([task({ id: 1, title: "First" }), task({ id: 2, title: "Second", ordinal: 1 })]),
+    );
+    render(<List project="Atlas" />);
+    rightClick(await screen.findByRole("button", { name: "Edit First" }));
+    expect((screen.getByRole("menuitem", { name: "Move up" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move down" }));
+    await waitFor(() => expect(data.reorder).toHaveBeenCalled());
+  });
+
+  it("opens from the keyboard on a row's own button", async () => {
+    data.list.mockResolvedValue(listing([task()]));
+    render(<List project="Atlas" withRemove />);
+    const edit = await screen.findByRole("button", { name: "Edit Write the pitch" });
+    edit.focus();
+    fireEvent.keyDown(edit, { key: "F10", shiftKey: true });
+    expect(screen.getByRole("menu", { name: "Task Write the pitch" })).toBeTruthy();
   });
 });

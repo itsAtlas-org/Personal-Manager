@@ -33,7 +33,7 @@ import { runMutation } from "../../lib/runMutation";
 import type { Calendar, CalendarEvent, Milestone, Task, TaskStatus } from "../../lib/types";
 import type { PopoverEditing } from "./parts/CalendarEventPopover";
 import { sourceLabel } from "./parts/sourceLabel";
-import { statusItems } from "./views/runwayMenu";
+import { statusItems } from "../../kit/tasks/taskMenu";
 
 /** What the menu reads from the Calendar, so it asks for nothing the view doesn't already hold. */
 export interface EventMenuDeps {

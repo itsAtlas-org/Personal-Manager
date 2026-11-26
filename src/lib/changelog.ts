@@ -24,7 +24,7 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "3.190.0-alpha",
+    version: "3.191.0-alpha",
     date: "2026-11-26",
     highlights: [
       "The Pinboard is now a mod. If you used it, PM downloads it for you once, from the same place as every other mod, and copies your board across exactly as it was. Nothing was deleted: the old copy is still in PM's store. You turn the Pinboard on the first time you open it.",
@@ -33,6 +33,16 @@ export const CHANGELOG: ChangelogEntry[] = [
       "Links in a Pinboard note open only if they are https links to a website name. Email links, plain http links and links to a bare IP address now show as text instead of opening.",
       "If you restore a backup that was made with “Also save mod data in my backups” turned off, and your board had moved into the Pinboard mod, PM puts the board back into the Pinboard, as it was when it moved, and tells you so. This needs the Pinboard to be installed. Edits you made after the move are not in such a backup.",
       "Under the hood: the Pinboard's editor libraries are used only to build the mod now, so PM itself no longer carries them.",
+    ],
+  },
+  {
+    version: "3.190.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Right-click now works on more of PM. A file in the Documents tab or a project's file list offers Open, Open source (or Reveal in file manager), Open project, Copy title, Copy link and Delete…. A chat in the sidebar offers Open, Rename, Move to project… and Delete…, and a project there offers Open and Archive. A project card on Focus offers Open, Triage, Archive, Merge into… and Delete…, and an archived one Open and Unarchive. A row in Review offers Open, Approve and Apply to the rest of its folder.",
+      "On a project's page, right-click a task for Edit, To do / Doing / Done, moving it and Delete task…, a milestone for its progress, order, Unlink and Remove, and a file as above. Right-click a chat answer to copy it, save it as a note or rate it, and there is now a Copy button under every answer, because an answer itself can't be reached from the keyboard.",
+      "Every choice that changes something repeats a button that was already there, and delete and merge still ask before anything goes. Copy title, Copy link, Open project and Delete task… are the plainly new ones. From the keyboard, Shift+F10 (or the Menu key) opens the same menu on a focused row or one of its buttons. A choice that doesn't apply is simply left out.",
+      "Two fixes on the way. Removing a milestone with × and unlinking it from the calendar used to happen at once; both now ask first. And archiving a project from its own page now refreshes the briefing, as archiving it from Focus always did.",
     ],
   },
   {

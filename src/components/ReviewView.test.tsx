@@ -49,8 +49,9 @@ vi.mock("../lib/ipc", () => ({
 
 // The reader is mounted once at app scope; the row's title button only needs somewhere to send a
 // click, and the real provider drags in the whole DocumentReader.
+const openReader = vi.hoisted(() => vi.fn());
 vi.mock("../lib/reader", () => ({
-  useReader: () => ({ openReader: () => {}, current: null }),
+  useReader: () => ({ openReader, current: null }),
 }));
 
 // The same stub the other component tests use: <Button>/<Input> reach for `useTheme`, and the real
@@ -67,6 +68,8 @@ vi.mock("../theme", async (importOriginal) => ({
 }));
 
 import { ReviewView } from "./ReviewView";
+import { ContextMenuHost } from "./ui/ContextMenuHost";
+import { closeContextMenu } from "../lib/contextMenu";
 import { pushLanding, resetDocumentFeed } from "../lib/documentFeed";
 import { proposalCache, resetArrivalProposals, withProposalRun } from "../lib/reviewProposals";
 import { REVIEW_AI_KEY } from "../lib/reviewPrefs";
@@ -130,7 +133,12 @@ async function deliverLandings() {
 }
 
 function mount() {
-  return render(<ReviewView onChanged={() => {}} onOpenSettings={() => {}} />);
+  return render(
+    <>
+      <ReviewView onChanged={() => {}} onOpenSettings={() => {}} />
+      <ContextMenuHost />
+    </>,
+  );
 }
 
 /** The decisions of the nth `commitReview` call. */
@@ -153,6 +161,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  act(() => closeContextMenu());
   cleanup();
   resetArrivalProposals();
   resetDocumentFeed();
@@ -338,5 +347,75 @@ describe("what a committed decision claims about its baseline", () => {
 
     expect(committed()[0].had_proposal).toBe(true);
     expect(committed()[0].proposed_project).toBe("BIMUN 2026");
+  });
+});
+
+describe("a Review row's right-click menu", () => {
+  const rightClick = (el: Element) => fireEvent.contextMenu(el, { clientX: 5, clientY: 5 });
+
+  it("opens the document through the row's own reader, and files it through Approve", async () => {
+    reviewQueue.mockResolvedValue([doc(81, { title: "Flight booking", project: "BIMUN 2026" })]);
+    mount();
+    await act(async () => {});
+    const title = screen.getByRole("button", { name: "Flight booking" });
+
+    rightClick(title);
+    expect(screen.getByRole("menu", { name: "Review Flight booking" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open" }));
+    expect(openReader).toHaveBeenCalledWith(expect.objectContaining({ id: 81 }));
+
+    rightClick(title);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Approve" }));
+    await act(async () => {});
+    expect(committed()).toHaveLength(1);
+    expect(committed()[0].document_id).toBe(81);
+  });
+
+  it("never offers Delete, and leaves Approve out while the row's suggestion is awaited", async () => {
+    reviewQueue.mockResolvedValue([doc(82, { title: "Still waiting" })]);
+    let release!: () => void;
+    const run = withProposalRun(() => new Promise<void>((r) => (release = r)));
+    try {
+      mount();
+      await act(async () => {});
+      rightClick(screen.getByRole("button", { name: "Still waiting" }));
+      expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy();
+      expect(screen.queryByRole("menuitem", { name: "Approve" })).toBeNull();
+      expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+    } finally {
+      release();
+      await run;
+    }
+  });
+
+  it("offers the folder action only where the row does", async () => {
+    reviewQueue.mockResolvedValue([
+      doc(83, {
+        title: "A",
+        project: "BIMUN 2026",
+        source_parent_folder_id: "f",
+        source_parent_folder_name: "Trip",
+      }),
+      doc(84, { title: "B", source_parent_folder_id: "f", source_parent_folder_name: "Trip" }),
+    ]);
+    mount();
+    await act(async () => {});
+    rightClick(screen.getByRole("button", { name: "A" }));
+    expect(
+      screen.getByRole("menuitem", { name: "Apply this filing to 1 other file…" }),
+    ).toBeTruthy();
+    act(() => closeContextMenu());
+    rightClick(screen.getByRole("button", { name: "B" }));
+    expect(screen.queryByRole("menuitem", { name: /Apply this filing/ })).toBeNull();
+  });
+
+  it("opens from the keyboard on the row's title button", async () => {
+    reviewQueue.mockResolvedValue([doc(85, { title: "Keyed" })]);
+    mount();
+    await act(async () => {});
+    const title = screen.getByRole("button", { name: "Keyed" });
+    title.focus();
+    fireEvent.keyDown(title, { key: "ContextMenu" });
+    expect(screen.getByRole("menu", { name: "Review Keyed" })).toBeTruthy();
   });
 });

@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import type { CalendarOverview, Conversation, LocalLlmStatus } from "../lib/types";
 import { calendarOverview, listArchivedProjects, listProjects, onCalendarSynced } from "../lib/ipc";
 import { archivedSet, isArchived } from "../lib/archivedProjects";
@@ -52,6 +58,10 @@ import { Briefing } from "./Briefing";
 import { readBriefingInSidebar, subscribeBriefingPrefs } from "../lib/briefingPrefs";
 import { readChatSectionOpen, writeChatSectionOpen, type ChatSectionId } from "../lib/chatPrefs";
 import { SidebarNav } from "./SidebarNav";
+import { openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { conversationMenuItems } from "../lib/conversationMenu";
+import { projectMenuItems } from "../lib/projectMenu";
+import { useArchiveProject } from "../lib/archiveProject";
 
 /** The command-palette shortcut hint shown in the sidebar (⌘ on macOS). */
 const SHORTCUT_HINT =
@@ -115,15 +125,33 @@ function ConversationRow({
   onSelect,
   onMove,
   onDelete,
+  onRename,
 }: {
   conversation: Conversation;
   active: boolean;
   onSelect: (id: number) => void;
   onMove: (c: Conversation) => void;
   onDelete: (c: Conversation) => void;
+  /** Only the global list passes it: a project chat has no title control to rename it with. */
+  onRename?: (c: Conversation) => void;
 }) {
+  // One menu for the row, from a right-click on it or the Menu key / Shift+F10 on its button (which
+  // is focusable, and so are the two hover buttons, whose key bubbles here too).
+  const onMenu = (e: ReactMouseEvent) => {
+    if (!wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      `Conversation ${c.title}`,
+      conversationMenuItems({
+        open: () => onSelect(c.id),
+        rename: onRename ? () => onRename(c) : undefined,
+        askMove: () => onMove(c),
+        askDelete: () => onDelete(c),
+      }),
+    );
+  };
   return (
-    <div className="group relative">
+    <div className="group relative" onContextMenu={onMenu}>
       <NavItem active={active} onClick={() => onSelect(c.id)} className="mb-1 pr-14">
         <span title={c.title}>{c.title}</span>
       </NavItem>
@@ -163,6 +191,9 @@ interface Props {
   /** Move a conversation into a project, or back to global with `null` (card B). The parent owns the
    *  mutation + list refresh (and, in a project pane, resetting if the open chat leaves the project). */
   onMove: (id: number, project: string | null) => void;
+  /** Open a GLOBAL conversation with its header title in edit mode (the row menu's Rename). The
+   *  parent owns it: the title control lives in the chat header, not here. */
+  onRename?: (id: number) => void;
   /** Start a new GLOBAL conversation — always, from any tab. Deliberately not context-sensitive:
    *  this hangs off the Chats row, and a button there can only honestly mean "a new chat in Chats".
    *  Making it quietly project-scoped whenever a project happened to be open is what made its
@@ -206,6 +237,7 @@ export function Sidebar({
   onSelect,
   onDelete,
   onMove,
+  onRename,
   onNew,
   onNewProjectChat,
   onOpenProject,
@@ -242,6 +274,15 @@ export function Sidebar({
   // Archived projects (#1018) leave this section, chats and all; their chats stay reachable from
   // the project itself, which Focus's Archive folder opens.
   const [archivedNames, setArchivedNames] = useState<string[]>([]);
+  // The one archive path (it regenerates the briefing too), shared with Focus and the project page.
+  const archiveProject = useArchiveProject();
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const rereadArchived = () =>
+    listArchivedProjects()
+      .then(setArchivedNames)
+      .catch(() => {
+        /* best-effort: nothing hidden */
+      });
   useEffect(() => {
     if (view !== "chat") return;
     let alive = true;
@@ -387,6 +428,13 @@ export function Sidebar({
               listing every other project would just be a way to leave. */}
           {view === "chat" && (
             <div data-help="conversations-list">
+              {/* A failed Archive from a project's menu is said here: the entry would otherwise just
+                  stay put, and the menu click would look like it did nothing. */}
+              {archiveError && (
+                <p role="alert" className="mb-1 px-2 text-xs text-st-blocked">
+                  {archiveError}
+                </p>
+              )}
               <ChatSection
                 id="projects"
                 title="Projects"
@@ -395,26 +443,70 @@ export function Sidebar({
                 defaultOpen={!minimal}
               >
                 {projectGroups.map((g) => (
-                  <NavItem
+                  // One menu per entry (Open, Archive); the Menu key / Shift+F10 on the entry's
+                  // button bubbles to this wrapper.
+                  <div
                     key={g.project}
-                    active={false}
-                    onClick={() => onOpenProject(g.project)}
-                    className="mb-1"
+                    onContextMenu={(e) => {
+                      if (!wantsAppMenu(e)) return;
+                      const entry = e.currentTarget;
+                      openContextMenu(
+                        e,
+                        `Project ${g.project}`,
+                        projectMenuItems({
+                          open: () => onOpenProject(g.project),
+                          archive: () => {
+                            setArchiveError(null);
+                            // The archived entry leaves the list and takes keyboard focus with it, so
+                            // it goes to the next project, else the one before, else the section's
+                            // own toggle. Picked now, while the entry is still in the list.
+                            const next =
+                              entry.nextElementSibling?.querySelector("button") ??
+                              entry.previousElementSibling?.querySelector("button") ??
+                              entry
+                                .closest("[data-help='conversations-list']")
+                                ?.querySelector("button");
+                            archiveProject(g.project, true, rereadArchived)
+                              .then(() =>
+                                // After React has removed the entry; only when focus was lost with
+                                // it, never taken from somewhere the person has since moved to.
+                                setTimeout(() => {
+                                  const at = document.activeElement;
+                                  if (!at || at === document.body || !at.isConnected) {
+                                    next?.focus();
+                                  }
+                                }, 0),
+                              )
+                              .catch((err) =>
+                                setArchiveError(
+                                  `Couldn't archive ${g.project}: ${err instanceof Error ? err.message : String(err)}`,
+                                ),
+                              );
+                          },
+                        }),
+                      );
+                    }}
                   >
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="truncate" title={g.project}>
-                        {g.project}
-                      </span>
-                      {g.chats.length > 0 && (
-                        <span
-                          className="shrink-0 font-mono text-xs text-ink4"
-                          title={`${g.chats.length} chat${g.chats.length === 1 ? "" : "s"} in this project`}
-                        >
-                          {g.chats.length}
+                    <NavItem
+                      active={false}
+                      onClick={() => onOpenProject(g.project)}
+                      className="mb-1"
+                    >
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="truncate" title={g.project}>
+                          {g.project}
                         </span>
-                      )}
-                    </span>
-                  </NavItem>
+                        {g.chats.length > 0 && (
+                          <span
+                            className="shrink-0 font-mono text-xs text-ink4"
+                            title={`${g.chats.length} chat${g.chats.length === 1 ? "" : "s"} in this project`}
+                          >
+                            {g.chats.length}
+                          </span>
+                        )}
+                      </span>
+                    </NavItem>
+                  </div>
                 ))}
               </ChatSection>
 
@@ -433,6 +525,7 @@ export function Sidebar({
                     onSelect={onSelect}
                     onMove={setPendingMove}
                     onDelete={setPendingDelete}
+                    onRename={onRename ? (conv) => onRename(conv.id) : undefined}
                   />
                 ))}
               </ChatSection>

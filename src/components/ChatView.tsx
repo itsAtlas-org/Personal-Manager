@@ -28,14 +28,15 @@ import { useDevMode } from "../lib/capabilities";
 import { useReader } from "../lib/reader";
 import { Markdown } from "../lib/markdown";
 import { citationTarget, linkCitations } from "../lib/chatMarkdown";
-import { chatNoteId } from "../lib/chatNote";
+import { saveAnswerAsNote } from "../lib/chatNote";
+import { copyViaHost, openContextMenu, wantsAppMenu } from "../lib/contextMenu";
+import { chatMessageMenuItems } from "../lib/chatMessageMenu";
 import { splitMentions } from "../lib/mentions";
 import { listTags } from "../lib/ipc";
-import { formatDate, formatDateLocal, shortModel } from "../lib/format";
+import { formatDate, shortModel } from "../lib/format";
 import {
   answerFeedback,
   getSettings,
-  ingestNote,
   rateAnswer,
   recordCitationClick,
   setRetrievalConfidenceThreshold,
@@ -300,11 +301,12 @@ function Sources({
  *  coaxed is worse than no rating, because it is a judgement about being asked rather than about the
  *  answer. Only shown on answers that actually retrieved something — there is nothing to judge the
  *  relevance of otherwise. */
-function AnswerRatingControls({ messageId }: { messageId: number }) {
+function useAnswerRating(messageId: number, enabled: boolean) {
   const [rating, setRating] = useState<AnswerRating | null>(null);
 
   // Reflect any rating already stored, so it survives reopening the conversation.
   useEffect(() => {
+    if (!enabled) return;
     let live = true;
     void answerFeedback(messageId)
       .then((f) => {
@@ -315,14 +317,26 @@ function AnswerRatingControls({ messageId }: { messageId: number }) {
     return () => {
       live = false;
     };
-  }, [messageId]);
+  }, [messageId, enabled]);
 
-  function choose(next: AnswerRating) {
-    const value = rating === next ? null : next;
-    setRating(value); // optimistic: the control must feel instant, and nothing depends on the write
-    void rateAnswer(messageId, value).catch(() => {});
-  }
+  const choose = useCallback(
+    (next: AnswerRating) => {
+      const value = rating === next ? null : next;
+      setRating(value); // optimistic: the control must feel instant, and nothing depends on the write
+      void rateAnswer(messageId, value).catch(() => {});
+    },
+    [rating, messageId],
+  );
+  return { rating, choose };
+}
 
+function AnswerRatingControls({
+  rating,
+  choose,
+}: {
+  rating: AnswerRating | null;
+  choose: (next: AnswerRating) => void;
+}) {
   return (
     <div className="flex justify-start" data-help="chat-answer-rating">
       <div className="flex items-center gap-0.5">
@@ -414,21 +428,45 @@ function PromptPanel({ messages }: { messages: PromptMessage[] }) {
  *  Reuses the pinboard note-ingest path, keyed on the message id so it is idempotent (saving twice
  *  re-embeds in place, never duplicates), with a soft "saved from a chat" date breadcrumb for
  *  provenance. The note is standalone — deleting the chat never removes it. */
-function SaveAsNoteButton({ message }: { message: Message }) {
-  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const save = async () => {
+type NoteState = "idle" | "saving" | "saved" | "error";
+
+/** The save's state and the one function that runs it, for the button below an answer and the
+ *  answer's right-click menu, so both show and respect the same "Saving…" and "Saved". */
+function useSaveAnswer(message: Message) {
+  const [state, setState] = useState<NoteState>("idle");
+  const save = useCallback(async () => {
     if (state === "saving" || state === "saved") return;
     setState("saving");
     try {
-      const stamp = `_Saved from a chat, ${formatDateLocal(new Date())}_`;
-      // `chat-` keeps saved answers apart from pinboard notes (whose ids are UUIDs or `w-…`), and
-      // stays inside the backend's note-id charset: a `chat:` prefix was refused as an invalid id,
-      // so every save failed.
-      await ingestNote(chatNoteId(message.id), "", `${message.content}\n\n${stamp}`);
+      await saveAnswerAsNote(message);
       setState("saved");
     } catch {
       setState("error");
     }
+  }, [state, message]);
+  return { state, save };
+}
+
+function SaveAsNoteButton({
+  state,
+  save,
+  message,
+}: {
+  state: NoteState;
+  save: () => void;
+  message: Message;
+}) {
+  // The host speaks "Answer copied" through its live region; sighted users get the label flip for a
+  // moment too, so a copy is never silent on screen.
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(t);
+  }, [copied]);
+  const copy = () => {
+    copyViaHost(message.content, "Answer copied");
+    setCopied(true);
   };
   const label =
     state === "saving"
@@ -438,13 +476,33 @@ function SaveAsNoteButton({ message }: { message: Message }) {
         : state === "error"
           ? "Couldn't save — retry"
           : "Save as note";
+  const quiet =
+    "min-h-6 min-w-6 rounded-[var(--radius-sm)] px-1.5 py-0.5 text-xs text-ink4 transition-colors hover:text-ink2 disabled:cursor-default disabled:hover:text-ink4 motion-reduce:transition-none";
+  // Said aloud whichever way the save ran: from the answer's menu, focus goes back to wherever the
+  // menu was opened from, so the button's own "Saved" label is never read out.
+  const said =
+    state === "saved" ? "Saved to notes" : state === "error" ? "Couldn't save the answer" : "";
   return (
-    <div className="flex justify-end">
+    <div className="flex justify-end gap-1" data-help="chat-answer-actions">
+      <span role="status" className="sr-only">
+        {said}
+      </span>
+      {/* Copy sits here because a message bubble can't take focus: the right-click menu has a Copy
+          too, but that one is a shortcut to this button, not the only way to it. The label says
+          "answer" so a list of buttons isn't a column of bare "Copy"s; min-h-6 is the 24px target. */}
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? undefined : "Copy answer"}
+        className={quiet}
+      >
+        {copied ? "Copied ✓" : "Copy"}
+      </button>
       <button
         type="button"
         onClick={save}
         disabled={state === "saving" || state === "saved"}
-        className="rounded-[var(--radius-sm)] px-1.5 py-0.5 text-xs text-ink4 transition-colors hover:text-ink2 disabled:cursor-default disabled:hover:text-ink4 motion-reduce:transition-none"
+        className={quiet}
       >
         {label}
       </button>
@@ -595,6 +653,26 @@ const MessageBlock = memo(function MessageBlock({
 
   const citations = message.role === "assistant" ? (message.citations ?? []) : [];
   const showSources = atLeast("standard") && citations.length > 0;
+  const keepable =
+    message.role === "assistant" && atLeast("standard") && message.content.trim() !== "";
+  const { rating, choose: chooseRating } = useAnswerRating(message.id, showSources);
+  const { state: noteState, save: saveNote } = useSaveAnswer(message);
+
+  // The answer's menu: a right-click anywhere on its block, or the Menu key / Shift+F10 on a control
+  // in it (a citation link, a source, the rating, Copy or Save: the bubble itself can't take focus).
+  // Selected text and links in the answer keep their Copy and Open link beside the items.
+  const onMenu = (e: MouseEvent) => {
+    if (!keepable || !wantsAppMenu(e)) return;
+    openContextMenu(
+      e,
+      "Answer",
+      chatMessageMenuItems(message.content, {
+        save: noteState === "idle" || noteState === "error" ? () => void saveNote() : undefined,
+        rate: showSources ? { current: rating, choose: chooseRating } : undefined,
+      }),
+      { withFallback: true },
+    );
+  };
 
   const jumpToSource = (n: number) => {
     const el = itemRefs.current[n - 1];
@@ -607,6 +685,7 @@ const MessageBlock = memo(function MessageBlock({
   return (
     <div
       ref={(el) => registerBlock(message.id, el)}
+      onContextMenu={onMenu}
       className={`flex flex-col gap-1.5 rounded-[var(--radius)] transition-shadow duration-500 motion-reduce:transition-none ${
         highlight ? "ring-1 ring-[color-mix(in_oklab,var(--accent)_50%,transparent)]" : ""
       }`}
@@ -639,15 +718,15 @@ const MessageBlock = memo(function MessageBlock({
           }}
         />
       )}
-      {showSources && <AnswerRatingControls messageId={message.id} />}
+      {showSources && <AnswerRatingControls rating={rating} choose={chooseRating} />}
       {showPrompt && message.role === "assistant" && prompt && prompt.length > 0 && (
         <PromptPanel messages={prompt} />
       )}
       {showPrompt && message.role === "assistant" && confidence && (
         <ConfidenceReadout confidence={confidence} />
       )}
-      {message.role === "assistant" && atLeast("standard") && message.content.trim() !== "" && (
-        <SaveAsNoteButton message={message} />
+      {keepable && (
+        <SaveAsNoteButton state={noteState} save={() => void saveNote()} message={message} />
       )}
       {showProvenance && message.role === "assistant" && atLeast("standard") && message.model && (
         <p

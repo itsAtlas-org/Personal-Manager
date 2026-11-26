@@ -34,6 +34,11 @@ export interface TaskData {
   /** Open the editor for `target`. `done` is called once the editor SAVED or DELETED a task (the list
    *  re-reads, and a quick-add row that became a task starts empty); a cancel does not call it. */
   edit(target: TaskEditTarget, done: () => void): void;
+  /** Ask whether to delete `task` and, once answered yes, delete it: the host draws the question (the
+   *  kit draws no dialog of its own) and calls `done` after the delete, so the list re-reads. Only the
+   *  right-click menu uses it, so a host that can't delete a task (a mod frame: the Host API has no
+   *  delete) leaves it out and the menu leaves out "Delete task…". */
+  remove?(task: Task, done: () => void): void;
 }
 
 /** Thrown in render by anything that needs a `TaskData` when no provider is above it. */

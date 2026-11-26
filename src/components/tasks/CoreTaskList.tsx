@@ -13,11 +13,16 @@ import { emptyTaskInput } from "../../lib/tasks";
 import {
   addTask,
   changeTaskStatus,
+  deleteTask,
   listTasks,
   listTaskStacks,
   onTasksChanged,
   reorderTasks,
 } from "../../lib/ipc";
+import { runMutation } from "../../lib/runMutation";
+import type { Task } from "../../lib/types";
+import { Callout } from "../ui";
+import { DeleteTaskDialog } from "./DeleteTaskDialog";
 import { TaskEditor } from "./TaskEditor";
 
 /** What the open editor is for, and what to tell the list once it saved or deleted. */
@@ -28,6 +33,11 @@ interface Editing {
 
 export function CoreTaskList(props: TaskListProps) {
   const [editing, setEditing] = useState<Editing | null>(null);
+  // The task a row's menu asked to delete, and what to tell the list once it has gone: the same
+  // "Delete this task?" the editor and the Runway ask, so the menu never deletes by itself.
+  const [deleting, setDeleting] = useState<{ task: Task; done: () => void } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // One stable object: a new one would make the list re-read (it keys its subscription on it).
   const data = useMemo<TaskData>(
     () => ({
@@ -42,13 +52,35 @@ export function CoreTaskList(props: TaskListProps) {
       reorder: reorderTasks,
       onChanged: onTasksChanged,
       edit: (target, done) => setEditing({ target, done }),
+      remove: (task, done) => {
+        setError(null);
+        setDeleting({ task, done });
+      },
     }),
     [],
   );
   const target = editing?.target;
+
+  async function confirmDelete() {
+    if (!deleting) return;
+    setBusy(true);
+    const ok = await runMutation(() => deleteTask(deleting.task.id), setError);
+    setBusy(false);
+    setDeleting(null);
+    if (ok) deleting.done();
+  }
+
   return (
     <TaskDataProvider data={data}>
       <TaskList {...props} />
+      {error && <Callout as="p">{error}</Callout>}
+      <DeleteTaskDialog
+        open={deleting !== null}
+        title={deleting?.task.title}
+        busy={busy}
+        onConfirm={() => void confirmDelete()}
+        onClose={() => (busy ? undefined : setDeleting(null))}
+      />
       <TaskEditor
         open={editing !== null}
         task={target && "task" in target ? target.task : null}
