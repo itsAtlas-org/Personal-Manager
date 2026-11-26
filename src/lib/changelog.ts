@@ -31,6 +31,15 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
+    version: "3.199.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Help mode now explains the rest of the left sidebar. Hover New beside Chats, What's New, Settings (and the dot on it), the edge you drag to resize the sidebar, the little arrow that brings back a hidden panel, or the move and delete buttons on a chat, and a card tells you what each one does.",
+      "Help mode also explains the Documents tab. Hover Add files, Add folder, Reset, Columns, the Indexed-only badge, a row's Delete and Edit, the archived files strip, the “files PM can't reach” banner and the import Activity list. Every column heading now says what it holds too, including that Author, Size and the dates read Unknown when the original didn't say, and that Last synced means the last time PM had something new to note about the file.",
+      "Hovering Columns used to explain the All files, Folders and Projects switch instead. It now explains the columns, and the folder path and folder tiles you open in Folders and Projects explain themselves. The thumbs on an answer, the “which model answered” note, the Review folder tools and a few setup fields had help that was never written, and now do.",
+    ],
+  },
+  {
     version: "3.195.0-alpha",
     date: "2026-11-26",
     highlights: [

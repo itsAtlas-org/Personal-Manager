@@ -18,6 +18,7 @@ export function CollapseTab({ side, onExpand }: Props) {
     <button
       type="button"
       onClick={onExpand}
+      data-help="panel-reopen"
       title="Show panel"
       aria-label="Show panel"
       className={`flex h-full w-5 min-w-[var(--tap-min,24px)] shrink-0 items-center justify-center bg-panel text-ink4 transition-colors hover:bg-surface hover:text-ink ${
