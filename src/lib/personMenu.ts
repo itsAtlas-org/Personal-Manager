@@ -10,7 +10,8 @@
 // The labels are radios (`checked`), one per label, ticked when every person the menu acts on carries
 // it: PM's menu has no submenu, and this is the same shape as a task's status items. When the row is
 // part of a checked selection the menu acts on all of it (`count`), and Open (one record) is left out.
-// A row in Trash offers only Restore and Delete now: nothing else makes sense there.
+// A row in Trash offers only Restore and Delete now: nothing else makes sense there. Edit… repeats
+// the record's Edit button, for a row that isn't the one open.
 //
 // Log a meeting and Merge with… join in the slices that build them, one entry each.
 
@@ -18,6 +19,8 @@ import type { MenuItem } from "../kit/lib/contextMenu";
 
 export interface PersonMenuHandlers {
   open: () => void;
+  /** Open the editor for this person (the record's own Edit button, from the row). */
+  edit: () => void;
   /** Star (`true`) or unstar (`false`) everyone the menu acts on. */
   star: (starred: boolean) => void;
   /** Put a label on everyone the menu acts on (`on`), or take it off. */
@@ -60,8 +63,12 @@ export function personMenuItems(s: PersonMenuState, h: PersonMenuHandlers): Menu
       { label: "Delete now…", danger: true, onSelect: h.askDeleteNow },
     ];
   }
+  // Edit… ends in an ellipsis because a dialog follows. It sits with Open: both are about the one
+  // record, so a selection of several has neither.
+  const edit: MenuItem[] = s.count === 1 ? [{ label: "Edit…", onSelect: h.edit }] : [];
   return [
     ...open,
+    ...edit,
     {
       label: s.allStarred ? "Unstar" : "Star",
       onSelect: () => h.star(!s.allStarred),

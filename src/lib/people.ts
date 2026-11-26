@@ -5,6 +5,7 @@
 // coming up, the sort the list is ordered by. No IPC, no clock of their own (callers hand in
 // `today`), so each is tested on its own.
 
+import { describeBirthday } from "./partialDate";
 import type { PeopleSort, PersonLabelRef, PersonRow } from "./types";
 
 /** Words for the person from a rejected write: the backend's refusals are fixed sentences (a
@@ -150,20 +151,12 @@ export function dayAndMonth(born: Pick<BornOn, "month" | "day">): string {
   return `${born.day} ${MONTHS[born.month - 1]}`;
 }
 
-/** A birthday as the record words it (slice 4b's record is its caller; the strip words its own
- *  line): "Birthday 15 April" while the year is unknown, "Birthday 15-04-1990 (36)" once it is
- *  (DD-MM-YYYY, with the age as of `today`). */
+/** A birthday as a line: "Birthday 15 April" while the year is unknown, "Birthday 15-04-1990 (36)"
+ *  once it is (DD-MM-YYYY, with the age as of `today`). The record words the value alone through
+ *  `describeBirthday`, the one place the age is counted. */
 export function birthdayText(value: string | null | undefined, today: Date): string | null {
-  const born = parseBornOn(value);
-  if (!born) return null;
-  if (born.year === null) return `Birthday ${dayAndMonth(born)}`;
-  const dd = String(born.day).padStart(2, "0");
-  const mm = String(born.month).padStart(2, "0");
-  const hadIt =
-    today.getMonth() + 1 > born.month ||
-    (today.getMonth() + 1 === born.month && today.getDate() >= born.day);
-  const age = today.getFullYear() - born.year - (hadIt ? 0 : 1);
-  return `Birthday ${dd}-${mm}-${born.year}${age >= 0 ? ` (${age})` : ""}`;
+  const text = describeBirthday(value, today);
+  return text === null ? null : `Birthday ${text}`;
 }
 
 /** One entry of the strip: who, the day it falls on and how far off that is. */
@@ -257,7 +250,10 @@ export function idsBetween(rows: readonly { id: number }[], anchor: number | nul
 
 /** The labels every one of `rows` carries (what the label picker shows ticked), and those only
  *  some do (shown as mixed). */
-export function labelCoverage(rows: readonly PersonRow[]): { all: Set<number>; some: Set<number> } {
+export function labelCoverage(rows: readonly { labels: readonly PersonLabelRef[] }[]): {
+  all: Set<number>;
+  some: Set<number>;
+} {
   const counts = new Map<number, number>();
   for (const r of rows) for (const l of r.labels) counts.set(l.id, (counts.get(l.id) ?? 0) + 1);
   const all = new Set<number>();

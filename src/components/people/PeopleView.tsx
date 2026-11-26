@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The People tab (Contacts, PR A): a header with the search box, filters and the list on the left,
-// the person on the right. This slice builds the shell, the list, selecting several, Trash and its
-// Undo; the record in the right pane, adding and editing, import and export, merging and the
-// timeline come in later slices, each joining the pieces below as one more entry.
+// The People tab (Contacts, PR A): a header with the search box and "+ Add person", filters and the
+// list on the left, the person's record on the right. It holds the list, selecting several, Trash and
+// its Undo, the record with its editor, label management (a deleted label can be undone) and the
+// links to projects; import and export, merging and the timeline come in later slices, each joining
+// the pieces below as one more entry.
 //
 // The tab router unmounts a view on every tab switch, so this holds no truth of its own: the list is
 // re-read on mount, on a filter, search or sort change, and on `people://changed` (`usePeopleData`).
@@ -17,8 +18,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { openContextMenu, wantsAppMenu } from "../../lib/contextMenu";
 import {
   createLabel,
+  deleteLabel,
   deletePeopleNow,
+  getPerson,
   labelPeople,
+  listLabels,
+  listPeople,
+  renameLabel,
   restorePeople,
   starPeople,
   trashPeople,
@@ -35,11 +41,14 @@ import {
   writePeopleSort,
 } from "../../lib/people";
 import { personMenuItems, personMenuLabel } from "../../lib/personMenu";
-import type { PeopleFilter, PeopleSort, PersonRow } from "../../lib/types";
+import type { SectionId } from "../../lib/personRecord";
+import type { PeopleFilter, PeopleSort, Person, PersonLabel, PersonRow } from "../../lib/types";
 import { Button, Callout, ConfirmDialog, Input, Select, Skeleton } from "../ui";
 import { LabelNameDialog, LabelPicker } from "./LabelPicker";
 import { PeopleList } from "./PeopleList";
-import { BirthdayStrip, FilterRail, PeoplePane } from "./PeopleSide";
+import { BirthdayStrip, FilterRail, NoPersonPane } from "./PeopleSide";
+import { PersonEditor } from "./PersonEditor";
+import { PersonRecord } from "./PersonRecord";
 import { SelectionBar } from "./SelectionBar";
 import { UndoStrip, useUndoNotices, useUndoShortcut } from "./UndoStrip";
 import { usePeopleData } from "./usePeopleData";
@@ -54,6 +63,8 @@ interface Props {
   reveal?: { uid: string; nonce: number } | null;
   /** Called once `reveal` is taken, so the owner drops it and a later visit doesn't jump. */
   onRevealTaken?: () => void;
+  /** Open a project (a record's project chips). Without it the chips are plain text. */
+  onOpenProject?: (project: string) => void;
 }
 
 const EMPTY_WORDS: Record<string, string> = {
@@ -63,7 +74,7 @@ const EMPTY_WORDS: Record<string, string> = {
   Label: "Nobody has this label yet.",
 };
 
-export function PeopleView({ reveal, onRevealTaken }: Props) {
+export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
   const [filter, setFilter] = useState<PeopleFilter>("All");
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
@@ -80,7 +91,17 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
   const [problem, setProblem] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ ids: number[]; name: string } | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // The people a new label goes on: none for one made from the filter list's "Add a label".
   const [labelling, setLabelling] = useState<number[] | null>(null);
+  const [renaming, setRenaming] = useState<PersonLabel | null>(null);
+  const [dropping, setDropping] = useState<PersonLabel | null>(null);
+  const [dropBusy, setDropBusy] = useState(false);
+  const [editor, setEditor] = useState<{ person: Person | null; section?: SectionId } | null>(null);
+  // Moves after every write of this tab's own, so the open record reads again even in a build
+  // where the change notice is slow; the notice itself moves `data.changes`.
+  const [bump, setBump] = useState(0);
+  // A person just added: kept open until the list has caught up and shows them.
+  const fresh = useRef<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const searching = query.trim() !== "";
@@ -156,7 +177,9 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
       const kept = [...prev].filter((id) => ids.has(id));
       return kept.length === prev.size ? prev : new Set(kept);
     });
-    setActiveId((id) => (id !== null && !ids.has(id) ? null : id));
+    if (fresh.current !== null && ids.has(fresh.current)) fresh.current = null;
+    // A person just added isn't in a list read before they were: keep them open until it is.
+    setActiveId((id) => (id !== null && !ids.has(id) && id !== fresh.current ? null : id));
   }, [rows, data.settled]);
 
   // --- focus after a row goes: a neighbour, only if focus fell to the page ---------------------------------
@@ -192,6 +215,7 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
         return false;
       } finally {
         reload();
+        setBump((n) => n + 1);
       }
     },
     [reload],
@@ -266,11 +290,101 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
   async function nameLabel(ids: number[], name: string) {
     const key = foldName(name);
     const existing = data.labels.find((l) => foldName(l.name) === key);
+    // A label made from the filter list has nobody to go on, so one that already exists is a
+    // mistake to say, not a label to quietly reuse.
+    if (ids.length === 0 && existing) throw "You already have a label with that name.";
     try {
       const id = existing?.id ?? (await createLabel(name));
-      await labelPeople(ids, id);
+      if (ids.length > 0) await labelPeople(ids, id);
     } finally {
       reload();
+      setBump((n) => n + 1);
+    }
+  }
+
+  async function renameTo(label: PersonLabel, name: string) {
+    try {
+      await renameLabel(label.id, name);
+    } finally {
+      reload();
+      setBump((n) => n + 1);
+    }
+  }
+
+  /** Delete a label after the person said yes. Who carried it is read first, Trash included (the
+   *  list hides those people), so Undo can put it back on the same people. Undo re-creates the label
+   *  with its name and labels them again: the label's id changes, which is fine because nothing else
+   *  keys a label by id in this PR (a Google link to it arrives in PR B and will need its own care). */
+  async function confirmDeleteLabel() {
+    if (!dropping) return;
+    const label = dropping;
+    setDropBusy(true);
+    setProblem(null);
+    try {
+      const [live, trashed] = await Promise.all([
+        listPeople({ Label: label.id }, null, "First"),
+        listPeople("Trash", null, "First"),
+      ]);
+      const ids = [...live, ...trashed.filter((r) => r.labels.some((l) => l.id === label.id))].map(
+        (r) => r.id,
+      );
+      await deleteLabel(label.id);
+      // The filter it was showing is gone with it.
+      if (typeof filter === "object" && filter.Label === label.id) chooseFilter("All");
+      undo.push(`Deleted the label ${label.name}.`, async () => {
+        try {
+          let id: number;
+          try {
+            id = await createLabel(label.name);
+          } catch (err) {
+            // The name was made again meanwhile: put them on that one rather than refuse.
+            const again = (await listLabels()).find(
+              (l) => foldName(l.name) === foldName(label.name),
+            );
+            if (!again) throw err;
+            id = again.id;
+          }
+          if (ids.length > 0) await labelPeople(ids, id);
+        } catch (err) {
+          setProblem(errorWords(err));
+        } finally {
+          reload();
+          setBump((n) => n + 1);
+        }
+      });
+    } catch (err) {
+      setProblem(errorWords(err));
+    } finally {
+      setDropBusy(false);
+      setDropping(null);
+      reload();
+      setBump((n) => n + 1);
+    }
+  }
+
+  // --- the editor ----------------------------------------------------------------------------------------------
+  function saved(id: number, created: boolean) {
+    setEditor(null);
+    if (created) {
+      // Show everyone and select the new person, who may not be in the list as last read.
+      fresh.current = id;
+      setFilter("All");
+      setTyped("");
+      setQuery("");
+      setChecked(new Set());
+      setProblem(null);
+      anchor.current = id;
+      setActiveId(id);
+    }
+    reload();
+    setBump((n) => n + 1);
+  }
+
+  async function editRow(row: PersonRow) {
+    try {
+      setEditor({ person: await getPerson(row.id) });
+    } catch (err) {
+      setProblem(errorWords(err));
     }
   }
 
@@ -333,6 +447,11 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
             anchor.current = row.id;
             setActiveId(row.id);
           },
+          edit: () => {
+            anchor.current = row.id;
+            setActiveId(row.id);
+            void editRow(row);
+          },
           star: (starred) => star(targets, starred),
           toggleLabel: (labelId, on) => toggleLabel(ids, labelId, on),
           newLabel: () => setLabelling(ids),
@@ -376,20 +495,38 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
               : `${rows.length} ${rows.length === 1 ? "person" : "people"}${searching ? " found" : ""}`}
           </p>
         </div>
-        <div className="w-full max-w-sm" data-help="people-list">
-          <Input
-            type="search"
-            aria-label="Search people"
-            placeholder="Search names, emails, companies, phone numbers"
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-          />
+        <div className="flex w-full max-w-lg items-center gap-2">
+          <div className="min-w-0 flex-1" data-help="people-list">
+            <Input
+              type="search"
+              aria-label="Search people"
+              placeholder="Search names, emails, companies, phone numbers"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+          </div>
+          <Button
+            variant="primary"
+            size="md"
+            className="shrink-0"
+            data-help="people-editor"
+            onClick={() => setEditor({ person: null })}
+          >
+            + Add person
+          </Button>
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
         <aside className="w-44 shrink-0 overflow-y-auto border-r border-border">
-          <FilterRail filter={filter} labels={data.labels} onChange={chooseFilter} />
+          <FilterRail
+            filter={filter}
+            labels={data.labels}
+            onChange={chooseFilter}
+            onNewLabel={() => setLabelling([])}
+            onRenameLabel={setRenaming}
+            onDeleteLabel={setDropping}
+          />
         </aside>
 
         <section
@@ -539,7 +676,22 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
         </section>
 
         <div className="min-h-0 min-w-0 flex-[1.2] basis-0 overflow-y-auto">
-          <PeoplePane row={active} />
+          {active ? (
+            <PersonRecord
+              key={active.id}
+              row={active}
+              version={data.changes + bump}
+              labels={data.labels}
+              run={run}
+              onEdit={(person, section) => setEditor({ person, section })}
+              onStar={(starred) => star([active], starred)}
+              onToggleLabel={(labelId, on) => toggleLabel([active.id], labelId, on)}
+              onNewLabel={() => setLabelling([active.id])}
+              onOpenProject={onOpenProject}
+            />
+          ) : (
+            <NoPersonPane />
+          )}
         </div>
       </div>
 
@@ -550,6 +702,39 @@ export function PeopleView({ reveal, onRevealTaken }: Props) {
           count={labelling.length}
           onSubmit={(name) => nameLabel(labelling, name)}
           onClose={() => setLabelling(null)}
+        />
+      )}
+      {renaming && (
+        <LabelNameDialog
+          count={0}
+          renaming={renaming.name}
+          onSubmit={(name) => renameTo(renaming, name)}
+          onClose={() => setRenaming(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={dropping !== null}
+        title={dropping ? `Delete the label ${dropping.name}?` : "Delete the label?"}
+        confirmLabel="Delete label"
+        danger
+        busy={dropBusy}
+        initialFocus="cancel"
+        helpId="people-labels"
+        onConfirm={() => void confirmDeleteLabel()}
+        onClose={() => setDropping(null)}
+      >
+        <p className="mt-2 text-sm text-ink2">
+          Nobody is deleted with it: the{" "}
+          {dropping?.people === 1 ? "1 person" : `${dropping?.people ?? 0} people`} who have it stay
+          in PM, and you can undo this right after.
+        </p>
+      </ConfirmDialog>
+      {editor && (
+        <PersonEditor
+          person={editor.person}
+          section={editor.section}
+          onClose={() => setEditor(null)}
+          onSaved={saved}
         />
       )}
       <ConfirmDialog

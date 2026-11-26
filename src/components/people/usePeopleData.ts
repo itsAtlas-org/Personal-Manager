@@ -32,6 +32,9 @@ export interface PeopleData {
   failed: boolean;
   /** The rows are the answer to the current filter, search and sort (not a read still in flight). */
   settled: boolean;
+  /** How many change notices have come in. The open record re-reads its person when this moves, so
+   *  it follows an edit from anywhere (a merge, a sync) without a second listener of its own. */
+  changes: number;
   /** Stable: always runs the newest read, so a closure kept for later (an Undo) never reads an
    *  old query or sort. */
   reload: () => void;
@@ -46,6 +49,7 @@ export function usePeopleData(filter: PeopleFilter, query: string, sort: PeopleS
   const [failed, setFailed] = useState(false);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loadedFilterKey, setLoadedFilterKey] = useState<string | null>(null);
+  const [changes, setChanges] = useState(0);
   const sent = useRef(0);
   // An object filter ({ Label: id }) is a new object on every render of a caller that builds it
   // inline, so the read depends on its key and takes the value through a ref.
@@ -92,7 +96,10 @@ export function usePeopleData(filter: PeopleFilter, query: string, sort: PeopleS
     const stop = subscribeUntilCleanup(() =>
       onPeopleChanged(() => {
         window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(() => loadRef.current(), REFRESH_DELAY_MS);
+        timer.current = window.setTimeout(() => {
+          loadRef.current();
+          setChanges((n) => n + 1);
+        }, REFRESH_DELAY_MS);
       }),
     );
     return () => {
@@ -111,6 +118,7 @@ export function usePeopleData(filter: PeopleFilter, query: string, sort: PeopleS
     loading: loading || (switching && !failed),
     failed,
     settled: loadedKey === key,
+    changes,
     reload,
   };
 }

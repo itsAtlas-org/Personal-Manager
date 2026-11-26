@@ -1,26 +1,35 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The selection bar's Label control and the dialog that names a new label. The picker is a small
-// popover of checkboxes, one per label: ticked when everyone selected carries it, mixed when only
-// some do, and a tick or untick puts the label on all of them or takes it off all of them. "New
-// label…" opens the same name dialog the right-click menu uses, which makes the label and puts it
-// on the same people in one go.
+// The Label control (the selection bar's, and the open record's) and the dialog that names a label.
+// The picker is a small popover of checkboxes, one per label: ticked when everyone it acts on
+// carries it, mixed when only some do, and a tick or untick puts the label on all of them or takes
+// it off all of them. "New label…" opens the same name dialog the right-click menu uses, which makes
+// the label and puts it on the same people in one go. The same dialog also names a label with
+// nobody on it yet (the filter list's "Add a label") and renames one.
 
 import { useId, useState, type FormEvent } from "react";
 import { errorWords, labelCoverage } from "../../lib/people";
-import type { PersonLabel, PersonRow } from "../../lib/types";
+import type { PersonLabel, PersonLabelRef } from "../../lib/types";
 import { Button, Callout, Dialog, Input, Popover } from "../ui";
 
 interface PickerProps {
   labels: readonly PersonLabel[];
-  /** The people the bar acts on. */
-  targets: readonly PersonRow[];
+  /** The people the control acts on: all of the selection, or the one record. */
+  targets: readonly { labels: readonly PersonLabelRef[] }[];
   onToggle: (labelId: number, on: boolean) => void;
   onNew: () => void;
+  /** The trigger's words; "Label" in the selection bar, "Add label" on a record. */
+  buttonLabel?: string;
 }
 
-export function LabelPicker({ labels, targets, onToggle, onNew }: PickerProps) {
+export function LabelPicker({
+  labels,
+  targets,
+  onToggle,
+  onNew,
+  buttonLabel = "Label",
+}: PickerProps) {
   const { all, some } = labelCoverage(targets);
   return (
     <Popover
@@ -33,7 +42,7 @@ export function LabelPicker({ labels, targets, onToggle, onNew }: PickerProps) {
           aria-expanded={open}
           onClick={toggle}
         >
-          Label
+          {buttonLabel}
         </Button>
       )}
       panelClassName="min-w-[14rem] p-2"
@@ -78,16 +87,18 @@ export function LabelPicker({ labels, targets, onToggle, onNew }: PickerProps) {
 }
 
 interface DialogProps {
-  /** How many people the new label goes on. */
+  /** How many people the new label goes on; 0 for a label that starts with nobody. */
   count: number;
-  /** Make the label (or find the one that already has the name) and put it on them. Rejects with
-   *  words for the person when it can't. */
+  /** A label's current name: the dialog renames it instead of making one. */
+  renaming?: string;
+  /** Make the label (or find the one that already has the name) and put it on them, or rename it.
+   *  Rejects with words for the person when it can't. */
   onSubmit: (name: string) => Promise<void>;
   onClose: () => void;
 }
 
-export function LabelNameDialog({ count, onSubmit, onClose }: DialogProps) {
-  const [name, setName] = useState("");
+export function LabelNameDialog({ count, renaming, onSubmit, onClose }: DialogProps) {
+  const [name, setName] = useState(renaming ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const formId = useId();
@@ -103,7 +114,14 @@ export function LabelNameDialog({ count, onSubmit, onClose }: DialogProps) {
       await onSubmit(clean);
       onClose();
     } catch (err) {
-      setError(errorWords(err, "PM couldn't make that label. Try again."));
+      setError(
+        errorWords(
+          err,
+          renaming !== undefined
+            ? "PM couldn't rename that label. Try again."
+            : "PM couldn't make that label. Try again.",
+        ),
+      );
       setBusy(false);
     }
   }
@@ -114,15 +132,24 @@ export function LabelNameDialog({ count, onSubmit, onClose }: DialogProps) {
       onClose={() => {
         if (!busy) onClose();
       }}
-      title="New label"
-      subtitle={count > 1 ? `It goes on the ${count} people selected.` : "It goes on this person."}
+      title={renaming !== undefined ? "Rename label" : "New label"}
+      helpId="people-labels"
+      subtitle={
+        renaming !== undefined
+          ? "Everyone who has it keeps it under the new name."
+          : count === 0
+            ? "It starts with nobody on it."
+            : count > 1
+              ? `It goes on the ${count} people selected.`
+              : "It goes on this person."
+      }
       footer={
         <>
           <Button variant="tertiary" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button type="submit" form={formId} disabled={busy || name.trim() === ""}>
-            Add label
+            {renaming !== undefined ? "Rename" : "Add label"}
           </Button>
         </>
       }

@@ -27,6 +27,10 @@ const ipc = vi.hoisted(() => ({
   labelPeople: vi.fn(),
   unlabelPeople: vi.fn(),
   createLabel: vi.fn(),
+  deleteLabel: vi.fn(),
+  renameLabel: vi.fn(),
+  createPerson: vi.fn(),
+  getPerson: vi.fn(),
   changed: null as null | (() => void),
 }));
 vi.mock("../../lib/ipc", () => {
@@ -157,6 +161,39 @@ beforeEach(() => {
   ipc.labelPeople.mockResolvedValue(1);
   ipc.unlabelPeople.mockResolvedValue(1);
   ipc.createLabel.mockResolvedValue(9);
+  ipc.deleteLabel.mockImplementation(async (labelId: number) => {
+    store.labels = (store.labels as PersonLabel[]).filter((l) => l.id !== labelId);
+    for (const r of store.rows as PersonRow[]) r.labels = r.labels.filter((l) => l.id !== labelId);
+    return 1;
+  });
+  ipc.renameLabel.mockResolvedValue(1);
+  // A stored person for whichever row is asked about: the record reads this, not the list's row.
+  ipc.getPerson.mockImplementation(async (id: number) => {
+    const r = (store.rows as PersonRow[]).find((x) => x.id === id)!;
+    return {
+      id: r.id,
+      uid: r.uid,
+      display_name: r.display_name,
+      given_name: "",
+      middle_name: "",
+      family_name: "",
+      name_prefix: "",
+      name_suffix: "",
+      birthday: null,
+      met_where: "",
+      met_on: null,
+      notes: "",
+      starred: r.starred,
+      trashed_at: r.trashed_at,
+      created_at: "2026-11-01T10:00:00Z",
+      updated_at: "2026-11-20T10:00:00Z",
+      details: [],
+      labels: r.labels,
+      last_met: null,
+      sources: [],
+      projects: [],
+    };
+  });
 });
 
 afterEach(() => {
@@ -275,13 +312,17 @@ describe("filters", () => {
   it("offers All, Starred, each label, Unlabelled and Trash, and each answers its own list", async () => {
     await view();
     const rail = within(screen.getByRole("navigation", { name: "People filters" }));
+    // The filters, with each label's menu button beside it and "Add a label" under them all.
     expect(rail.getAllByRole("button").map((b) => b.textContent)).toEqual([
       "All",
       "Starred",
       "Friends1",
+      "⋯",
       "Climbing0",
+      "⋯",
       "Unlabelled",
       "Trash",
+      "Add a label",
     ]);
 
     await pick("Starred");
@@ -692,5 +733,183 @@ describe("birthdays", () => {
     const strip = screen.getByRole("region", { name: "Upcoming birthdays" });
     expect(within(strip).getByText("Cal Placeholder")).toBeTruthy();
     expect(strip.textContent).toMatch(/Birthday \d{1,2} [A-Z][a-z]+/);
+  });
+});
+
+const pickFilter = async (name: string) => {
+  fireEvent.click(
+    within(screen.getByRole("navigation", { name: "People filters" })).getByRole("button", {
+      name: new RegExp(`^${name}`),
+    }),
+  );
+  await act(async () => {});
+};
+
+describe("adding a person", () => {
+  it("opens the editor from + Add person, and the new person is selected and shown", async () => {
+    await view();
+    // From a narrower filter: the new person must still show, so the view goes back to everyone.
+    await pickFilter("Starred");
+    fireEvent.click(screen.getByRole("button", { name: "+ Add person" }));
+    const dialog = screen.getByRole("dialog", { name: "Add a person" });
+    fireEvent.change(within(dialog).getByLabelText("Given name"), { target: { value: "Eve" } });
+    fireEvent.change(within(dialog).getByLabelText("Family name"), {
+      target: { value: "Newcomer" },
+    });
+    ipc.createPerson.mockImplementation(async () => {
+      (store.rows as PersonRow[]).push(person(5, "Eve Newcomer"));
+      return 5;
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await act(async () => {});
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a person" })).toBeNull());
+    expect(ipc.createPerson).toHaveBeenCalledTimes(1);
+    expect(names()).toContain("Eve Newcomer");
+    expect(screen.getByRole("region", { name: "Eve Newcomer" })).toBeTruthy();
+    expect(ipc.getPerson).toHaveBeenLastCalledWith(5);
+  });
+
+  it("selects the new person once the list shows them, even if a read before that lacked them", async () => {
+    await view();
+    fireEvent.click(screen.getByRole("button", { name: "+ Add person" }));
+    fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Eve" } });
+    // The re-read after the write comes back without them (the write isn't visible yet).
+    ipc.createPerson.mockResolvedValue(5);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await act(async () => {});
+    expect(names()).not.toContain("Eve");
+    (store.rows as PersonRow[]).push(person(5, "Eve"));
+    await act(async () => ipc.changed?.());
+    await waitFor(() => expect(names()).toContain("Eve"));
+    expect(screen.getByRole("region", { name: "Eve" })).toBeTruthy();
+  });
+});
+
+describe("the record", () => {
+  it("opens the person on the right when a row is clicked, and Edit opens the editor on them", async () => {
+    await view();
+    fireEvent.click(within(rowOf("Ben Sample")).getByText("Ben Sample"));
+    await act(async () => {});
+    expect(screen.getByRole("region", { name: "Ben Sample" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("dialog", { name: "Edit Ben Sample" })).toBeTruthy();
+  });
+
+  it("offers Edit… in the row menu, which opens the editor", async () => {
+    await view();
+    fireEvent.contextMenu(rowOf("Ben Sample"), { clientX: 5, clientY: 5 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit…" }));
+    await act(async () => {});
+    expect(ipc.getPerson).toHaveBeenCalledWith(2);
+    expect(screen.getByRole("dialog", { name: "Edit Ben Sample" })).toBeTruthy();
+  });
+
+  it("puts a label on the open person from the record, and takes it off", async () => {
+    await view();
+    fireEvent.click(within(rowOf("Ada Example")).getByText("Ada Example"));
+    await act(async () => {});
+    const record = within(screen.getByRole("region", { name: "Ada Example" }));
+    fireEvent.click(record.getByRole("button", { name: "Remove the label Friends" }));
+    expect(ipc.unlabelPeople).toHaveBeenCalledWith([1], 1);
+    fireEvent.click(record.getByRole("button", { name: "Add label" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Climbing" }));
+    expect(ipc.labelPeople).toHaveBeenCalledWith([1], 2);
+  });
+});
+
+describe("managing labels", () => {
+  const optionsOf = (name: string) =>
+    fireEvent.click(screen.getByRole("button", { name: `Label options for ${name}` }));
+
+  it("adds a label with nobody on it from the filter list", async () => {
+    await view();
+    fireEvent.click(screen.getByRole("button", { name: "Add a label" }));
+    const dialog = screen.getByRole("dialog", { name: "New label" });
+    fireEvent.change(within(dialog).getByLabelText("Label name"), {
+      target: { value: "Book club" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add label" }));
+    await waitFor(() => expect(ipc.createLabel).toHaveBeenCalledWith("Book club"));
+    expect(ipc.labelPeople).not.toHaveBeenCalled();
+  });
+
+  it("says so when the label already exists, rather than quietly reusing it", async () => {
+    await view();
+    fireEvent.click(screen.getByRole("button", { name: "Add a label" }));
+    const dialog = screen.getByRole("dialog", { name: "New label" });
+    fireEvent.change(within(dialog).getByLabelText("Label name"), { target: { value: "friends" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add label" }));
+    await waitFor(() =>
+      expect(within(dialog).getByText("You already have a label with that name.")).toBeTruthy(),
+    );
+    expect(ipc.createLabel).not.toHaveBeenCalled();
+  });
+
+  it("renames a label", async () => {
+    await view();
+    optionsOf("Friends");
+    fireEvent.click(screen.getByRole("button", { name: "Rename…" }));
+    const dialog = screen.getByRole("dialog", { name: "Rename label" });
+    const box = within(dialog).getByLabelText("Label name") as HTMLInputElement;
+    expect(box.value).toBe("Friends");
+    fireEvent.change(box, { target: { value: "Mates" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(ipc.renameLabel).toHaveBeenCalledWith(1, "Mates"));
+  });
+
+  it("asks before deleting a label, and deletes nothing on Cancel", async () => {
+    await view();
+    optionsOf("Friends");
+    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete the label Friends?" });
+    expect(within(dialog).getByText(/Nobody is deleted with it/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(ipc.deleteLabel).not.toHaveBeenCalled();
+    expect(screen.queryByText("Deleted the label Friends.")).toBeNull();
+  });
+
+  it("deletes a label with an Undo strip, and Undo puts it back on the same people, in Trash too", async () => {
+    // Cal is in Trash with the label: the list hides her, but Undo must still give it back to her.
+    const rows = store.rows as PersonRow[];
+    rows[2].labels = [{ id: 1, name: "Friends" }];
+    rows[2].trashed_at = "2026-11-20T09:00:00Z";
+    await view();
+    optionsOf("Friends");
+    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete label" }));
+    await act(async () => {});
+    expect(ipc.deleteLabel).toHaveBeenCalledWith(1);
+    const undo = () => screen.getByRole("button", { name: "Undo: Deleted the label Friends." });
+    expect(undo()).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Label options for Friends" })).toBeNull();
+
+    fireEvent.click(undo());
+    await act(async () => {});
+    expect(ipc.createLabel).toHaveBeenCalledWith("Friends");
+    // The id is new (the mock hands back 9); the same two people carry it.
+    expect(ipc.labelPeople).toHaveBeenCalledWith([1, 3], 9);
+  });
+
+  it("leaves the label filter when the label it was showing is deleted", async () => {
+    await view();
+    await pickFilter("Friends");
+    optionsOf("Friends");
+    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete label" }));
+    await act(async () => {});
+    expect(names()).toHaveLength(4);
+  });
+
+  it("puts the label on whoever carries the name now, when it was made again before Undo", async () => {
+    await view();
+    optionsOf("Friends");
+    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete label" }));
+    await act(async () => {});
+    ipc.createLabel.mockRejectedValueOnce("You already have a label with that name.");
+    store.labels = [{ id: 12, uid: "l12".padEnd(32, "0"), name: "friends", people: 0 }];
+    fireEvent.click(screen.getByRole("button", { name: "Undo: Deleted the label Friends." }));
+    await act(async () => {});
+    expect(ipc.labelPeople).toHaveBeenCalledWith([1], 12);
   });
 });

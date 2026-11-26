@@ -1,17 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The small pieces around the People list: the filter rail on its left, the upcoming-birthdays strip
-// at the top of the All list, and the right pane, which for now says who is open (the record itself
-// is the next slice's) or that nobody is.
+// The small pieces around the People list: the filter rail on its left (with the label controls: a
+// button to add a label and, on each label's row, a small menu to rename or delete it), the
+// upcoming-birthdays strip at the top of the All list, and the right pane's empty state. The record
+// that fills the pane is `PersonRecord`.
 
 import type { PeopleFilter, PersonLabel, PersonRow } from "../../lib/types";
-import {
-  personCircleBackground,
-  personInitials,
-  secondaryLine,
-  type UpcomingBirthday,
-} from "../../lib/people";
+import type { UpcomingBirthday } from "../../lib/people";
+import { Button, Popover } from "../ui";
 
 const sameFilter = (a: PeopleFilter, b: PeopleFilter) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -19,36 +16,103 @@ interface RailProps {
   filter: PeopleFilter;
   labels: readonly PersonLabel[];
   onChange: (filter: PeopleFilter) => void;
+  onNewLabel: () => void;
+  onRenameLabel: (label: PersonLabel) => void;
+  onDeleteLabel: (label: PersonLabel) => void;
 }
 
-export function FilterRail({ filter, labels, onChange }: RailProps) {
-  const item = (name: string, value: PeopleFilter, count?: number) => {
+export function FilterRail({
+  filter,
+  labels,
+  onChange,
+  onNewLabel,
+  onRenameLabel,
+  onDeleteLabel,
+}: RailProps) {
+  const item = (name: string, value: PeopleFilter, count?: number, label?: PersonLabel) => {
     const on = sameFilter(filter, value);
     return (
-      <li key={JSON.stringify(value)}>
+      <li key={JSON.stringify(value)} className="flex items-center gap-0.5">
         <button
           type="button"
           aria-current={on ? "true" : undefined}
           onClick={() => onChange(value)}
-          className={`flex w-full items-center justify-between gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-sm ${
+          className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-sm ${
             on ? "bg-accent-soft text-ink" : "text-ink2 hover:bg-surface"
           }`}
         >
           <span className="min-w-0 truncate">{name}</span>
           {count !== undefined && <span className="shrink-0 text-xs text-ink3">{count}</span>}
         </button>
+        {label && (
+          <span data-help="people-labels">
+            <Popover
+              ariaLabel={`Label ${label.name}`}
+              escapeClipping
+              trigger={({ open, toggle }) => (
+                <Button
+                  variant="tertiary"
+                  size="xs"
+                  aria-haspopup="true"
+                  aria-expanded={open}
+                  aria-label={`Label options for ${label.name}`}
+                  onClick={toggle}
+                >
+                  ⋯
+                </Button>
+              )}
+              panelClassName="min-w-[9rem] p-1"
+            >
+              {({ close }) => (
+                <div className="flex flex-col">
+                  <Button
+                    variant="tertiary"
+                    size="xs"
+                    className="justify-start"
+                    onClick={() => {
+                      close();
+                      onRenameLabel(label);
+                    }}
+                  >
+                    Rename…
+                  </Button>
+                  <Button
+                    variant="tertiary"
+                    size="xs"
+                    className="justify-start"
+                    onClick={() => {
+                      close();
+                      onDeleteLabel(label);
+                    }}
+                  >
+                    Delete…
+                  </Button>
+                </div>
+              )}
+            </Popover>
+          </span>
+        )}
       </li>
     );
   };
   return (
-    <nav aria-label="People filters" data-help="people-list" className="p-2">
+    <nav aria-label="People filters" data-help="people-list" className="flex flex-col gap-2 p-2">
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {item("All", "All")}
         {item("Starred", "Starred")}
-        {labels.map((l) => item(l.name, { Label: l.id }, l.people))}
+        {labels.map((l) => item(l.name, { Label: l.id }, l.people, l))}
         {item("Unlabelled", "Unlabelled")}
         {item("Trash", "Trash")}
       </ul>
+      <Button
+        variant="tertiary"
+        size="xs"
+        data-help="people-labels"
+        className="self-start"
+        onClick={onNewLabel}
+      >
+        Add a label
+      </Button>
     </nav>
   );
 }
@@ -90,44 +154,11 @@ export function BirthdayStrip({ birthdays, onOpen }: StripProps) {
   );
 }
 
-interface PaneProps {
-  row: PersonRow | null;
-}
-
-/** The right pane. With nobody open it says so; with someone open it shows who, until the record
- *  itself takes its place. */
-export function PeoplePane({ row }: PaneProps) {
-  if (!row) {
-    return (
-      <div className="grid h-full place-items-center p-6 text-center">
-        <p className="max-w-xs text-sm text-ink3">Nobody selected. Pick someone from the list.</p>
-      </div>
-    );
-  }
-  const second = secondaryLine(row);
+/** The right pane with nobody open. */
+export function NoPersonPane() {
   return (
-    <section aria-label={row.display_name} className="flex flex-col items-center gap-2 p-8">
-      <span
-        aria-hidden
-        style={{ background: personCircleBackground(row.uid) }}
-        className="grid h-16 w-16 place-items-center rounded-full text-xl font-semibold text-ink"
-      >
-        {personInitials(row.display_name)}
-      </span>
-      <h2 className="font-head text-lg font-semibold text-ink">{row.display_name}</h2>
-      {second && <p className="text-sm text-ink3">{second}</p>}
-      {row.labels.length > 0 && (
-        <ul className="m-0 flex list-none flex-wrap justify-center gap-1 p-0">
-          {row.labels.map((l) => (
-            <li
-              key={l.id}
-              className="rounded-full border border-ink4 px-2 py-0.5 text-xs text-ink3"
-            >
-              {l.name}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+    <div className="grid h-full place-items-center p-6 text-center">
+      <p className="max-w-xs text-sm text-ink3">Nobody selected. Pick someone from the list.</p>
+    </div>
   );
 }

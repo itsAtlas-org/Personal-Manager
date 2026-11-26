@@ -1295,7 +1295,11 @@ export default function App() {
                 ) : view === "people" ? (
                   // Before the final Chat branch: a view with no branch here draws Chats.
                   <main className="flex h-full min-w-0 flex-1 flex-col">
-                    <PeopleView reveal={peopleReveal} onRevealTaken={() => setPeopleReveal(null)} />
+                    <PeopleView
+                      reveal={peopleReveal}
+                      onRevealTaken={() => setPeopleReveal(null)}
+                      onOpenProject={openProject}
+                    />
                   </main>
                 ) : view === "documents" ? (
                   <main className="flex h-full flex-1 flex-col">

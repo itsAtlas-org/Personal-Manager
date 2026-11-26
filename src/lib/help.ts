@@ -36,6 +36,18 @@ export const HELP: Record<string, HelpEntry> = {
     title: "The People list",
     body: "Pick a filter on the left: everyone, starred people, a label, people with no label, or Trash. Sort by first name, last name or who you met most recently; the choice is remembered on this computer. Point at someone's circle to tick them, or press Tab to reach it, and Shift-click a second circle to tick everyone between. Once anyone is ticked, a bar offers Star, Label and Move to Trash for all of them. Birthdays in the next 30 days show at the top of the full list. Right-click a person (or press the Menu key) for the same actions.",
   },
+  "people-record": {
+    title: "A person's record",
+    body: "Everything PM holds about this person, in sections you can fold: contact details, work and school, dates, where you met, where they are now, relations, custom fields, notes, the projects they are linked to, and where their details came from. A section with nothing in it stays hidden; Add details offers them and opens the editor there. Under their name you see when you last met. Web links open in your browser, and anything that isn't a link, like an Instagram handle or a phone number, has a Copy button. Edit opens the editor. Star and labels change right away.",
+  },
+  "people-editor": {
+    title: "Adding and editing a person",
+    body: "Fill in what you know: names, emails, phone numbers, addresses, links and socials, work and school, a birthday, where you met, and your own custom fields. Each value has a label, and you can pick one of the suggestions or choose Other label and write your own. Use the arrows to put values in order: the first of each kind is their main one. Dates are three small boxes, day, month and year, and a birthday's year is optional. Nothing is saved until you press Save. If this person changed somewhere else while you were editing, PM keeps what you typed, says so, and lets you load their latest details instead.",
+  },
+  "people-labels": {
+    title: "Labels",
+    body: "Labels group people any way you like, and a person can carry several. Add a label under the filter list, then put it on people from their record, the selection bar or the right-click menu. The three dots beside a label rename it or delete it. Deleting a label never deletes anyone: the people stay in PM, and a note at the bottom of the window has an Undo that puts the label back on the same people.",
+  },
   "people-trash": {
     title: "People in Trash",
     body: "Moving someone to Trash keeps everything about them for 30 days, then PM deletes them for good. Right after you move someone, a note at the bottom of the window has an Undo, and Ctrl+Z (Cmd+Z on a Mac) presses it when you aren't typing in a box. In the Trash filter, Restore brings people back with their labels and details. Delete now removes them for good after asking, and that can't be undone.",

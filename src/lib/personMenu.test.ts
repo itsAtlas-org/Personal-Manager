@@ -18,6 +18,7 @@ const pick = (items: MenuItem[], label: string) =>
 function handlers() {
   return {
     open: vi.fn(),
+    edit: vi.fn(),
     star: vi.fn(),
     toggleLabel: vi.fn(),
     newLabel: vi.fn(),
@@ -44,10 +45,11 @@ function state(over: Partial<PersonMenuState> = {}): PersonMenuState {
 }
 
 describe("personMenuItems", () => {
-  it("offers Open, Star, one radio per label, New label… and Move to Trash last", () => {
+  it("offers Open, Edit…, Star, one radio per label, New label… and Move to Trash last", () => {
     const items = personMenuItems(state(), handlers());
     expect(names(items)).toEqual([
       "Open",
+      "Edit…",
       "Star",
       "—",
       "Label: Family",
@@ -69,12 +71,14 @@ describe("personMenuItems", () => {
     const h = handlers();
     const items = personMenuItems(state(), h);
     pick(items, "Open").onSelect();
+    pick(items, "Edit…").onSelect();
     pick(items, "Star").onSelect();
     pick(items, "Label: Family").onSelect();
     pick(items, "Label: Climbing").onSelect();
     pick(items, "New label…").onSelect();
     pick(items, "Move to Trash").onSelect();
     expect(h.open).toHaveBeenCalledOnce();
+    expect(h.edit).toHaveBeenCalledOnce();
     expect(h.star).toHaveBeenCalledWith(true);
     expect(h.toggleLabel).toHaveBeenNthCalledWith(1, 1, true);
     expect(h.toggleLabel).toHaveBeenNthCalledWith(2, 2, false);
@@ -96,6 +100,7 @@ describe("personMenuItems", () => {
   it("leaves Open out for a selection of several and acts on them all", () => {
     const items = personMenuItems(state({ count: 3 }), handlers());
     expect(names(items)).not.toContain("Open");
+    expect(names(items)).not.toContain("Edit…");
     expect(names(items)[0]).toBe("Star");
   });
 
@@ -112,7 +117,15 @@ describe("personMenuItems", () => {
 
   it("with no labels yet, still offers New label…", () => {
     const items = personMenuItems(state({ labels: [], carriedByAll: new Set() }), handlers());
-    expect(names(items)).toEqual(["Open", "Star", "—", "New label…", "—", "Move to Trash"]);
+    expect(names(items)).toEqual([
+      "Open",
+      "Edit…",
+      "Star",
+      "—",
+      "New label…",
+      "—",
+      "Move to Trash",
+    ]);
   });
 });
 
