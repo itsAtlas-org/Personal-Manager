@@ -11,7 +11,7 @@
 //! reaches `connectors` and `backup::schedule` too.
 
 use std::collections::{BTreeMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -1149,8 +1149,7 @@ async fn sync_history(
         server_time = server_time.or(one.server_time);
         if !one.complete {
             eprintln!(
-                "calendar: '{}' history came back incomplete; what arrived is kept, nothing removed",
-                cal.id
+                "calendar: a calendar's history came back incomplete; what arrived is kept, nothing removed"
             );
         }
     }
@@ -1434,7 +1433,7 @@ async fn sync_histories(
         match result {
             Ok(HistoryPass::Fetched) => written.push(cal.id.clone()),
             Ok(HistoryPass::Unchanged) => {}
-            Err(e) => eprintln!("calendar: '{}' history not brought up to date: {e}", cal.id),
+            Err(e) => eprintln!("{}", history_failure_line(&failure_category(&e))),
         }
     }
     let state = app.state::<AppState>();
@@ -1471,11 +1470,62 @@ fn note_fresh(app: &AppHandle, update: impl FnOnce(&mut Freshness)) {
 fn note_fresh_failure(app: &AppHandle, calendar_id: &str, e: &Error) {
     let now = Instant::now();
     if never_reached_google(e) {
-        note_fresh(app, |f| f.unreachable(calendar_id, now));
+        let mut wait = Duration::ZERO;
+        note_fresh(app, |f| wait = f.unreachable(calendar_id, now));
+        eprintln!("{}", failure_line(0, wait, &failure_category(e)));
     } else {
         let sign_in = matches!(e, Error::Reauth(_));
-        note_fresh(app, |f| f.failed(calendar_id, now, sign_in));
+        let mut counted = (0, Duration::ZERO);
+        note_fresh(app, |f| counted = f.failed(calendar_id, now, sign_in));
+        eprintln!(
+            "{}",
+            failure_line(counted.0, counted.1, &failure_category(e))
+        );
     }
+}
+
+/// A short, fixed-vocabulary name for why a change check failed: an HTTP status, or a kind. Never the
+/// error's own text: calendar and source ids embed the account's email, and a provider's reply
+/// can echo a URL or a token fragment, while this repo is public and people paste their logs.
+fn failure_category(e: &Error) -> String {
+    match e {
+        Error::Reauth(_) => "sign-in needed".into(),
+        Error::Http(h) if h.is_timeout() => "timed out".into(),
+        Error::Http(h) if h.is_connect() => "no connection".into(),
+        Error::Http(h) => h
+            .status()
+            .map_or_else(|| "network".into(), |s| format!("HTTP {}", s.as_u16())),
+        // Google's refusals read "Google API request failed (403 Forbidden): <body>": keep only the
+        // three digits.
+        Error::Other(m) => m
+            .strip_prefix("Google API request failed (")
+            .and_then(|rest| rest.get(..3))
+            .filter(|code| code.bytes().all(|b| b.is_ascii_digit()))
+            .map_or_else(|| "other".into(), |code| format!("HTTP {code}")),
+        _ => "other".into(),
+    }
+}
+
+/// The one log line for a failed Google check or fetch (the change check and the full sync both feed
+/// the same count). `in_a_row` is 0 for one that never reached Google (offline: not counted, see
+/// `Freshness::unreachable`). Carries no calendar id.
+fn failure_line(in_a_row: u32, retry: Duration, category: &str) -> String {
+    let secs = retry.as_secs();
+    if in_a_row == 0 {
+        format!(
+            "calendar: Google calendar update failed ({category}), not counted; next try in {secs} s"
+        )
+    } else {
+        format!(
+            "calendar: Google calendar update failed ({category}), {in_a_row} in a row; next try in {secs} s"
+        )
+    }
+}
+
+/// The log line for a calendar whose history couldn't be brought up to date: a category, never the
+/// calendar's id (it embeds the account's email) or the error's text.
+fn history_failure_line(category: &str) -> String {
+    format!("calendar: a calendar's history not brought up to date ({category}); tried again at the next sync")
 }
 
 /// Whether a request failed before Google could answer it: no connection, or no answer in time.
@@ -1675,10 +1725,9 @@ async fn check_one_calendar(
                             match sync_history(app, cal, live, tz, Some((&[], false))).await {
                                 Ok(HistoryPass::Fetched) => return CheckOutcome::Fetched,
                                 Ok(HistoryPass::Unchanged) => {}
-                                Err(e) => eprintln!(
-                                    "calendar: '{}' history not brought up to date: {e}",
-                                    cal.id
-                                ),
+                                Err(e) => {
+                                    eprintln!("{}", history_failure_line(&failure_category(&e)))
+                                }
                             }
                         }
                         return CheckOutcome::Unchanged;
@@ -1700,14 +1749,16 @@ async fn check_one_calendar(
             });
             if history.is_some() && (stale || more || !changes.is_empty()) {
                 if let Err(e) = sync_history(app, cal, live, tz, Some((&changes, more))).await {
-                    eprintln!("calendar: '{}' history not brought up to date: {e}", cal.id);
+                    eprintln!("{}", history_failure_line(&failure_category(&e)));
                 }
             }
             CheckOutcome::Fetched
         }
         // Written, but not all of it: the full sync will judge it; meanwhile back off.
         Ok(_) => {
-            note_fresh(app, |f| f.failed(&cal.id, Instant::now(), false));
+            let mut counted = (0, Duration::ZERO);
+            note_fresh(app, |f| counted = f.failed(&cal.id, Instant::now(), false));
+            eprintln!("{}", failure_line(counted.0, counted.1, "incomplete fetch"));
             CheckOutcome::Failed
         }
         Err(e) => {
@@ -1832,7 +1883,11 @@ pub async fn load_calendar_months(app: AppHandle, from: String, to: String) -> R
                 written.push(cal.id.clone());
             }
             Err(e) => {
-                eprintln!("calendar: '{}' couldn't load those months: {e}", cal.id);
+                // A category, never the id (it embeds the account's email) or the error's text.
+                eprintln!(
+                    "calendar: a calendar couldn't load those months ({})",
+                    failure_category(&e)
+                );
                 last_err = Some(e);
             }
         }
@@ -2283,6 +2338,69 @@ mod tests {
         );
         assert!(
             overview.contains("let ask_access = calendar_ask::ask_map(&calendars, &connected);")
+        );
+    }
+
+    /// The failure line names no calendar, account, URL or token, whatever the error says: ids embed
+    /// the account's email and a provider's reply can echo anything.
+    #[test]
+    fn a_failed_check_logs_a_category_and_nothing_from_the_error() {
+        // What must never reach a line. (Not printed on failure either: the line alone shows the leak.)
+        let never_logged = ["me@x.com", "gcal:", "token", "SECRET", "calendars/"];
+        let errors = [
+            Error::Other(
+                "Google API request failed (403 Forbidden): me@x.com gcal:me@x.com token=SECRET \
+                 https://www.googleapis.com/calendar/v3/calendars/me@x.com/events"
+                    .into(),
+            ),
+            Error::Reauth("stored Google token unreadable: me@x.com SECRET".into()),
+            Error::Other("bad calendar source id: gcal:me@x.com".into()),
+            Error::Other("Google API request failed (me@x.com".into()),
+        ];
+        let categories: Vec<String> = errors.iter().map(failure_category).collect();
+        assert_eq!(categories, ["HTTP 403", "sign-in needed", "other", "other"]);
+        for category in &categories {
+            let line = failure_line(3, Duration::from_secs(120), category);
+            for fragment in never_logged {
+                assert!(!line.contains(fragment), "the failure line leaks: {line}");
+            }
+        }
+        assert_eq!(
+            failure_line(3, Duration::from_secs(120), "HTTP 403"),
+            "calendar: Google calendar update failed (HTTP 403), 3 in a row; next try in 120 s"
+        );
+        assert_eq!(
+            failure_line(0, Duration::from_secs(10), "no connection"),
+            "calendar: Google calendar update failed (no connection), not counted; next try in 10 s"
+        );
+        // The history line has no id slot at all, so the error's text can't reach it either.
+        let history = history_failure_line(&failure_category(&errors[0]));
+        assert_eq!(
+            history,
+            "calendar: a calendar's history not brought up to date (HTTP 403); tried again at the next sync"
+        );
+        for fragment in never_logged {
+            assert!(
+                !history.contains(fragment),
+                "the history line leaks: {history}"
+            );
+        }
+    }
+
+    /// A transport failure's category never carries its (already redacted) URL.
+    #[test]
+    fn a_network_failure_is_a_kind_not_a_url() {
+        let raw = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("blocking client builds")
+            .get("https://127.0.0.1:1/calendars/me@x.com/SECRET?token=SECRET")
+            .send()
+            .expect_err("nothing listens on loopback port 1");
+        let category = failure_category(&Error::from(raw));
+        assert!(
+            ["no connection", "timed out", "network"].contains(&category.as_str()),
+            "{category}"
         );
     }
 }

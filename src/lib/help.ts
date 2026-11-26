@@ -164,6 +164,48 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Search",
     body: "Opens the command palette — a quick-jump to any project, file, past conversation, or calendar event. You can also open it anytime with Ctrl+K (⌘K on a Mac).",
   },
+  "sidebar-new-chat": {
+    title: "New chat",
+    body: "Starts a fresh chat that searches everything you've added, from any tab, even while a project is open. To chat about just one project, open it and use the + New over its conversations.",
+  },
+  "sidebar-new-project-chat": {
+    title: "New chat in this project",
+    body: "Starts a new conversation that only searches this project's files. The + New beside Chats starts a global one instead.",
+  },
+  "sidebar-chat-move": {
+    title: "Move to a project",
+    body: "Files this chat under a project, so from then on it searches only that project's files. Choose 'No project (global)' to make it a global chat again. Past messages stay as they are.",
+  },
+  "sidebar-chat-delete": {
+    title: "Delete chat",
+    body: "Permanently deletes this conversation and its messages, along with anything it added to search. PM asks first, and it can't be undone.",
+  },
+  "sidebar-whats-new": {
+    title: "What's New",
+    body: "A plain-English list of what changed in each version of PM, newest first. PM also opens it once after an update.",
+  },
+  "sidebar-settings": {
+    title: "Settings",
+    body: "Everything you can change: your connected accounts and folders, the AI models PM uses, how it looks, backups and security. A small dot on it means something in there is worth a look, such as a better-fitting local model or a Google account that needs reconnecting.",
+  },
+  "sidebar-resize": {
+    title: "Resize the sidebar",
+    body: "Drag this edge to make the sidebar wider or narrower. Drag it all the way to the edge of the window to hide it; a slim arrow tab stays behind to bring it back.",
+  },
+  "panel-reopen": {
+    title: "Show the panel",
+    body: "This panel is tucked away. Click to open it again at its narrowest width, then drag its edge to make it wider.",
+  },
+
+  // Onboarding
+  "onboarding-later": {
+    title: "Set up AI later",
+    body: "Finishes setup without an AI provider. PM still works, but chat and the behind-the-scenes AI stay off until you add a key or a local model in Settings.",
+  },
+  "onboarding-local-url": {
+    title: "Your local AI address",
+    body: "Where the AI server on your own computer can be reached, such as Ollama at http://localhost:11434. Connect checks that PM can reach it.",
+  },
 
   // Teach (entity resolution)
   "teach-intro": {
@@ -285,6 +327,90 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Documents to review",
     body: "How many ingested documents are still waiting for you to confirm their project, tags, and importance. Click to jump to the Review queue.",
   },
+  "documents-add": {
+    title: "Add files or a folder",
+    body: "Pick files, or a whole folder, to bring into PM — the same as dropping them on the drop box. PM converts each one to Markdown, splits it into searchable pieces and saves it in your vault, so once it's in you can safely delete the original.",
+  },
+  "documents-reset": {
+    title: "Reset connected files",
+    body: "Only here when you have files from connected accounts or watched folders. It removes PM's record of all of them, along with how you filed them, then fetches them again from scratch as new, unsorted files. The files themselves, and anything you added to your vault yourself, aren't touched. It asks first.",
+  },
+  "documents-columns": {
+    title: "Choose columns",
+    body: "Tick the columns you want in the table; Title always shows. Until you pick, PM follows your Depth setting, and 'Reset to depth' hands the choice back to it.",
+  },
+  "documents-col-title": {
+    title: "Title",
+    body: "The document's name. The grey line under it says where it sits at its source: the folders it's in for a connected file, or the path it was imported from for one you added yourself. Click a row to read the document.",
+  },
+  "documents-col-project": {
+    title: "Project",
+    body: "The project this document is filed under. '+2 more projects' means it's linked into others too. A small orange dot means you haven't confirmed its filing yet, which is what the Review tab is for.",
+  },
+  "documents-col-importance": {
+    title: "Importance",
+    body: "How much this document matters to you: high, medium, low or archive, or a dash if you haven't set one. It isn't about how new the file is. Change it with Edit on a row, or in Review.",
+  },
+  "documents-col-source": {
+    title: "Source",
+    body: "Where the file lives: your vault, a folder PM watches on this computer ('This device'), or a connected Google Drive or OneDrive account. A warning mark means the original has gone or can't be reached right now. Sort by this column to gather those at one end. This column is off until you tick it in Columns.",
+  },
+  "documents-col-chunks": {
+    title: "Chunks",
+    body: "How many searchable pieces PM split this document into; longer documents usually have more.",
+  },
+  "documents-col-author": {
+    title: "Author",
+    body: "Who wrote the document, as its source reported it. It says Unknown when the source didn't say; a file on your own computer, for one, has no author PM can read.",
+  },
+  "documents-col-modified-by": {
+    title: "Modified by",
+    body: "Who last changed the file, as its source reported it. It says Unknown when the source didn't say.",
+  },
+  "documents-col-created": {
+    title: "Created",
+    body: "When the original file was created, as its source reported it, or Unknown. The year is left off for dates in the current year.",
+  },
+  "documents-col-updated": {
+    title: "Updated",
+    body: "When the original file last changed, as its source reported it, or Unknown. That's about the file, not about PM; Last synced is the PM side.",
+  },
+  "documents-col-size": {
+    title: "Size",
+    body: "How big the original file is, as its source reported it. It says Unknown when the source didn't say; a Google Doc has no file size, for one.",
+  },
+  "documents-col-ingested": {
+    title: "Ingested",
+    body: "The date and time PM first added this document.",
+  },
+  "documents-col-synced": {
+    title: "Last synced",
+    body: "The last time PM had something new to write down about this document. It isn't the last time PM looked, so a file nobody has touched keeps an old date. A dash means PM has no date for it.",
+  },
+  "documents-source-badge": {
+    title: "Indexed-only, or a source problem",
+    body: "Marks a file from a connected account or watched folder: PM keeps its summary and search index, and reads the full text from where it lives when you open it. 'Source missing' means it was deleted there; 'Source unreachable' means PM can't get to it right now (offline, or access expired). It stays findable either way.",
+  },
+  "documents-row-delete": {
+    title: "Delete",
+    body: "Shows when you hover a row. Removes the document from PM after asking. For a connected file only PM's copy goes and the original is never touched; for one you added, PM's copy in your vault goes and the file you imported from is left alone. A saved chat is deleted with its messages.",
+  },
+  "documents-row-edit": {
+    title: "Edit",
+    body: "Shows when you hover a row. Opens a small panel to change the document's project and importance right here, without going to Review. While the panel is open the button reads Close.",
+  },
+  "documents-archived": {
+    title: "Archived projects' files",
+    body: "Files that belong to archived projects are hidden from the list so they don't crowd it. Show brings them back for a look; Hide tucks them away again.",
+  },
+  "documents-dead-banner": {
+    title: "Files PM can't reach",
+    body: "These came from a folder, drive or account that's gone or disconnected, or were deleted where they came from. 'Delete them…' clears them all out of PM after asking; each row also carries its own warning if you'd rather go one at a time.",
+  },
+  "documents-activity": {
+    title: "Import activity",
+    body: "A running list of the files PM is adding or re-reading, each with its result: how many pieces it made, or why it was skipped or failed. It stays open or shut the way you left it.",
+  },
 
   // Review view
   "review-repropose": {
@@ -316,6 +442,14 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Importance",
     body: "How much this document matters to you — NOT how new it is or how often you open it. High: a core reference you'd be set back without; it can surface in Focus and nudge a project toward 'due soon'. Medium: useful, you'll want it sometimes. Low: keep-but-peripheral — it's auto-filed out of the review queue so it never becomes a chore, and stays fully searchable. Archive: deliberately shelve it — hidden from the Document Map and sorted to the bottom of lists, but still findable by search (especially exact keywords); pick it for things you want out of the way without deleting. Rules of thumb for the tricky cases: an active project but an outdated/unused file → Low (the project being live doesn't make the file significant); something you open often but that isn't significant → Medium is fine; something you rarely touch but would be stuck without → High. When unsure, Medium is the safe middle — you can change it anytime.",
   },
+  "review-apply-folder": {
+    title: "Apply to the rest of the folder",
+    body: "Offers to file the other documents that came from the same folder under this document's project in one go. You tick which ones first, so nothing is filed until you confirm.",
+  },
+  "review-folder-panel": {
+    title: "File a folder's documents together",
+    body: "Tick the documents from this folder that should go into the same project, then file them. Each one keeps its own tags and importance, and no AI is called. Cancel leaves everything as it was.",
+  },
   "review-tags": {
     title: "Tags",
     body: "Short, free-form labels for finding and grouping documents later — topics, people, or types like 'invoice', 'tax', 'spec', 'meeting'. They don't change a document's project or importance, but they are more than filing: type @tag in a chat and that message leans on everything carrying the label, and search finds a file by its tags as well as its name. Reuse a label you already have wherever it fits — a tag that only ever lands on one document isn't grouping anything. Keep them lowercase and short; press Enter or comma to add, × to remove. A document can have many; none is fine too.",
@@ -333,6 +467,19 @@ export const HELP: Record<string, HelpEntry> = {
   "chat-sources": {
     title: "Sources",
     body: "The documents this answer was grounded in. They make the answer verifiable — open the file to check. Copy, Save as note and the thumbs sit under an answer; right-click it (Shift+F10 on one of them) for the same in a menu.",
+  },
+  // The thumbs named this id since #566; the entry never existed, so hovering them showed nothing.
+  "chat-answer-rating": {
+    title: "Rate this answer",
+    body: "Tell PM whether the answer was any good: the thumbs-up if it helped, the thumbs-down if it missed. It only shows on answers that found something in your documents. The rating is kept on this computer, and clicking it again clears it.",
+  },
+  "chat-provenance": {
+    title: "Which model answered",
+    body: "A small note under an answer naming the model that wrote it and, when PM knows, where it ran: on this computer or in the cloud. 'cloud, on battery' means PM moved the answer to your cloud model because you were on battery.",
+  },
+  "chat-prompt-inspect": {
+    title: "Prompt sent to the API",
+    body: "Developer mode only. Open it to see exactly what PM sent the model for this answer, word for word: its instructions and the context it gathered from your documents.",
   },
   "context-meter": {
     title: "Context usage",
