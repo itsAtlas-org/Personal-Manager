@@ -265,6 +265,24 @@ export function RoleBlock({
       {(issue === "key_missing" || issue === "key_unreadable") && (
         <p className="text-xs text-st-due">{roleIssueLine(issue, role, providerName(stored))}</p>
       )}
+      {/* A status and not an alert: it is a state of the account, not something that just failed.
+          The region stays mounted (for a role that can change, like the one below) so a line that
+          appears later, after Check again, is announced. */}
+      {live ? (
+        <div role="status">
+          {issue === "no_credit" && (
+            <p className="text-xs text-st-due">
+              {roleIssueLine(issue, role, providerName(stored))}
+            </p>
+          )}
+        </div>
+      ) : (
+        issue === "no_credit" && (
+          <p role="status" className="text-xs text-st-due">
+            {roleIssueLine(issue, role, providerName(stored))}
+          </p>
+        )
+      )}
       {role === "background" && direct && (
         <p className="text-xs text-ink4">
           Mods can't use your own keys. While Background is on {providerName(effective)}, a mod that

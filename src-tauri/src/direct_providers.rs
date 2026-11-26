@@ -112,8 +112,11 @@ fn row(p: CloudProvider) -> Result<&'static DirectProvider> {
 pub(crate) enum KeyOutcome {
     /// The provider accepted the key.
     Ok,
-    /// Valid, but it can't list models. Saved anyway; a chat may still work.
+    /// Valid, but it can't list models or can't chat. Saved anyway; see [`KeyNote`].
     Restricted,
+    /// Valid and listing, but the account has no credit or is at its spend limit, so every chat
+    /// fails until credit is added. Saved: the key is fine, and Check again clears it.
+    NoCredit,
     /// The provider says the key isn't right.
     Rejected,
     /// The provider doesn't serve this country or region.
@@ -129,8 +132,25 @@ pub(crate) enum KeyOutcome {
 impl KeyOutcome {
     /// Whether the key is kept: a mistyped key is never stored.
     pub(crate) fn keeps_key(self) -> bool {
-        matches!(self, KeyOutcome::Ok | KeyOutcome::Restricted)
+        matches!(
+            self,
+            KeyOutcome::Ok | KeyOutcome::Restricted | KeyOutcome::NoCredit
+        )
     }
+}
+
+/// An extra word about a verdict, for the cases the outcome alone can't say. A newer PM's word
+/// makes the stored verdict unreadable (shown as none), the same as an unknown outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum KeyNote {
+    /// The test chat couldn't be tried (a rate limit, a 5xx, a timeout, a model that's gone), so
+    /// the model listing's verdict stands.
+    ChatUntried,
+    /// The key lists models but OpenAI refuses its chat: a read-only key.
+    ReadOnly,
+    /// The key can neither list models nor chat.
+    NoAccess,
 }
 
 /// A key check's verdict plus what the key can see.
@@ -141,6 +161,7 @@ pub(crate) struct KeyCheck {
     pub listed: Vec<String>,
     /// How many models the provider listed, PM-known or not.
     pub listed_total: usize,
+    pub note: Option<KeyNote>,
 }
 
 impl KeyCheck {
@@ -149,6 +170,7 @@ impl KeyCheck {
             outcome,
             listed: Vec::new(),
             listed_total: 0,
+            note: None,
         }
     }
 
@@ -177,6 +199,9 @@ pub(crate) struct StoredKeyCheck {
     pub outcome: KeyOutcome,
     pub listed: Vec<String>,
     pub listed_total: usize,
+    /// Absent in a verdict stored before the test chat existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<KeyNote>,
 }
 
 /// Remember a verdict. `at` comes from the open connection, never a helper that would take the DB
@@ -187,6 +212,7 @@ pub(crate) fn store_key_check(conn: &Connection, p: CloudProvider, check: &KeyCh
         outcome: check.outcome,
         listed: check.listed.clone(),
         listed_total: check.listed_total,
+        note: check.note,
     };
     let json = serde_json::to_string(&stored).map_err(|e| Error::Other(e.to_string()))?;
     db::set_setting(conn, row(p)?.key_check, &json)
@@ -880,6 +906,7 @@ mod tests {
             outcome: KeyOutcome::Ok,
             listed: vec!["openai/gpt-6.2-sol".into()],
             listed_total: 9,
+            note: None,
         };
         store_key_check(&conn, OA, &check).unwrap();
 
@@ -915,6 +942,7 @@ mod tests {
             outcome: KeyOutcome::Unexpected(418),
             listed: vec![],
             listed_total: 0,
+            note: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["outcome"]["unexpected"], 418);
@@ -927,10 +955,31 @@ mod tests {
     }
 
     #[test]
+    fn a_verdict_stored_before_the_test_chat_still_reads_and_a_note_round_trips() {
+        // The row an earlier build wrote: no `note`.
+        let old = r#"{"at":"t","outcome":"ok","listed":[],"listed_total":3}"#;
+        let c: StoredKeyCheck = serde_json::from_str(old).unwrap();
+        assert_eq!(c.note, None);
+        assert!(!serde_json::to_string(&c).unwrap().contains("note"));
+        let c = StoredKeyCheck {
+            at: "t".into(),
+            outcome: KeyOutcome::NoCredit,
+            listed: vec![],
+            listed_total: 4,
+            note: Some(KeyNote::ChatUntried),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["outcome"], "no_credit");
+        assert_eq!(v["note"], "chat_untried");
+        assert_eq!(serde_json::from_value::<StoredKeyCheck>(v).unwrap(), c);
+    }
+
+    #[test]
     fn only_a_working_or_restricted_key_is_kept() {
         for (o, kept) in [
             (KeyOutcome::Ok, true),
             (KeyOutcome::Restricted, true),
+            (KeyOutcome::NoCredit, true),
             (KeyOutcome::Rejected, false),
             (KeyOutcome::RegionBlocked, false),
             (KeyOutcome::Malformed, false),

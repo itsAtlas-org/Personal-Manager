@@ -14,7 +14,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::direct_providers::{
-    self, DirectProvider, DirectProvidersState, KeyOutcome, RoleMove, PROVIDERS,
+    self, DirectProvider, DirectProvidersState, KeyNote, KeyOutcome, RoleMove, PROVIDERS,
 };
 use crate::error::{Error, Result};
 use crate::llm_gateway::{self, CloudProvider, KeyPresence, Role};
@@ -51,6 +51,10 @@ pub struct KeyCheckResult {
     pub saved: bool,
     pub listed: Vec<String>,
     pub listed_total: usize,
+    /// Set when the verdict needs a word the outcome can't carry (the test chat couldn't be tried,
+    /// the key is read-only). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<KeyNote>,
 }
 
 /// The whole read model for the "Your own keys" section and the role blocks. Read-only, no
@@ -115,6 +119,7 @@ pub async fn save_direct_key(
             saved: false,
             listed: Vec::new(),
             listed_total: 0,
+            note: None,
         });
     }
     // The keychain, then the store.
@@ -129,6 +134,7 @@ pub async fn save_direct_key(
         saved: true,
         listed: check.listed,
         listed_total: check.listed_total,
+        note: check.note,
     })
 }
 
@@ -138,12 +144,44 @@ fn refused(outcome: KeyOutcome) -> KeyCheckResult {
         saved: false,
         listed: Vec::new(),
         listed_total: 0,
+        note: None,
     }
+}
+
+/// Whether a re-check's answer replaces the stored verdict. PURE. Only an answer that says
+/// something about the key is stored (works, restricted, no credit, rejected, region), not a
+/// moment's trouble reaching the provider. And a test chat that couldn't be tried must not erase a
+/// known-bad verdict (no credit, a read-only key): a rate limit during Check again says nothing
+/// about whether credit was added, so the stored line and the chip stay until a real answer comes.
+fn should_store_recheck(
+    prev: Option<&direct_providers::StoredKeyCheck>,
+    check: &direct_providers::KeyCheck,
+) -> bool {
+    let says_something = matches!(
+        check.outcome,
+        KeyOutcome::Ok
+            | KeyOutcome::Restricted
+            | KeyOutcome::NoCredit
+            | KeyOutcome::Rejected
+            | KeyOutcome::RegionBlocked
+    );
+    if !says_something {
+        return false;
+    }
+    if check.note == Some(KeyNote::ChatUntried) {
+        let known_bad = prev.is_some_and(|p| {
+            p.outcome == KeyOutcome::NoCredit
+                || (p.outcome == KeyOutcome::Restricted
+                    && matches!(p.note, Some(KeyNote::ReadOnly | KeyNote::NoAccess)))
+        });
+        return !known_bad;
+    }
+    true
 }
 
 /// Check the stored key again (a revoked key, a project that gained access to a model). The key
 /// stays whatever the answer, so `saved` is true; the verdict is stored for the answers that say
-/// something about the key (works, restricted, rejected, region), and not for a moment's
+/// something about the key (works, restricted, no credit, rejected, region), and not for a moment's
 /// trouble reaching the provider.
 #[tauri::command]
 pub async fn recheck_direct_key(app: AppHandle, provider: String) -> Result<KeyCheckResult> {
@@ -151,20 +189,20 @@ pub async fn recheck_direct_key(app: AppHandle, provider: String) -> Result<KeyC
     let key = (d.get_key)()?
         .ok_or_else(|| Error::Other(format!("There is no {} key to check.", d.name)))?;
     let check = direct_providers::check_key(d.provider, key.expose()).await;
-    let says_something = matches!(
-        check.outcome,
-        KeyOutcome::Ok | KeyOutcome::Restricted | KeyOutcome::Rejected | KeyOutcome::RegionBlocked
-    );
-    if says_something {
+    {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        direct_providers::store_key_check(&conn, d.provider, &check)?;
+        let prev = direct_providers::read_key_check(&conn, d.provider)?;
+        if should_store_recheck(prev.as_ref(), &check) {
+            direct_providers::store_key_check(&conn, d.provider, &check)?;
+        }
     }
     Ok(KeyCheckResult {
         outcome: check.outcome,
         saved: true,
         listed: check.listed,
         listed_total: check.listed_total,
+        note: check.note,
     })
 }
 
@@ -300,6 +338,59 @@ mod tests {
         );
     }
 
+    fn stored(outcome: KeyOutcome, note: Option<KeyNote>) -> direct_providers::StoredKeyCheck {
+        direct_providers::StoredKeyCheck {
+            at: "2026-11-26T00:00:00Z".into(),
+            outcome,
+            listed: Vec::new(),
+            listed_total: 0,
+            note,
+        }
+    }
+
+    fn checked(outcome: KeyOutcome, note: Option<KeyNote>) -> direct_providers::KeyCheck {
+        let mut c = direct_providers::KeyCheck::of(outcome);
+        c.note = note;
+        c
+    }
+
+    #[test]
+    fn a_chat_that_could_not_be_tried_never_erases_a_known_bad_verdict() {
+        let untried = checked(KeyOutcome::Ok, Some(KeyNote::ChatUntried));
+        for prev in [
+            stored(KeyOutcome::NoCredit, None),
+            stored(KeyOutcome::Restricted, Some(KeyNote::ReadOnly)),
+            stored(KeyOutcome::Restricted, Some(KeyNote::NoAccess)),
+        ] {
+            assert!(!should_store_recheck(Some(&prev), &untried), "{prev:?}");
+        }
+        // Nothing known bad to protect: the answer is stored as usual.
+        assert!(should_store_recheck(None, &untried));
+        assert!(should_store_recheck(
+            Some(&stored(KeyOutcome::Ok, None)),
+            &untried
+        ));
+        // A real answer replaces a bad one: credit was added.
+        let ok = checked(KeyOutcome::Ok, None);
+        assert!(should_store_recheck(
+            Some(&stored(KeyOutcome::NoCredit, None)),
+            &ok
+        ));
+        assert!(should_store_recheck(
+            Some(&stored(KeyOutcome::Ok, None)),
+            &checked(KeyOutcome::NoCredit, None)
+        ));
+        // Trouble reaching the provider is never stored.
+        assert!(!should_store_recheck(
+            None,
+            &checked(KeyOutcome::Unreachable, None)
+        ));
+        assert!(!should_store_recheck(
+            None,
+            &checked(KeyOutcome::Unexpected(502), None)
+        ));
+    }
+
     #[test]
     fn the_result_serialises_with_the_frozen_names() {
         let v = serde_json::to_value(KeyCheckResult {
@@ -307,12 +398,23 @@ mod tests {
             saved: false,
             listed: vec!["openai/gpt-6.2-sol".into()],
             listed_total: 3,
+            note: None,
         })
         .unwrap();
         assert_eq!(v["outcome"]["unexpected"], 418);
         assert_eq!(v["saved"], false);
         assert_eq!(v["listed_total"], 3);
         assert_eq!(v["listed"][0], "openai/gpt-6.2-sol");
+        assert!(v.get("note").is_none(), "no note, no field");
+        let noted = serde_json::to_value(KeyCheckResult {
+            outcome: KeyOutcome::Restricted,
+            saved: true,
+            listed: vec![],
+            listed_total: 0,
+            note: Some(KeyNote::ReadOnly),
+        })
+        .unwrap();
+        assert_eq!(noted["note"], "read_only");
         assert_eq!(
             serde_json::to_value(refused(KeyOutcome::Malformed)).unwrap()["outcome"],
             "malformed"

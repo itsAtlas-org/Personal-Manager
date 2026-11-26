@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.195.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "When you save an OpenAI key, PM now sends OpenAI one tiny test message (“Reply with OK.”) as well as checking the key. A key on an account with no credit yet now says so straight away, instead of saying the key works and then failing when you chat. The test costs a tiny fraction of a cent and isn't listed in Usage.",
+      "A saved key that has no credit yet, can't chat, or couldn't be tried has a Check again button, so you can add credit or change the key's access in OpenAI and check it again without pasting the key back in.",
+    ],
+  },
+  {
     version: "3.194.0-alpha",
     date: "2026-11-26",
     highlights: [

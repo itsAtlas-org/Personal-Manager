@@ -52,6 +52,23 @@ describe("the composer chip", () => {
     );
   });
 
+  it("wears the due tint and says no credit when the account has none", async () => {
+    m.directProvidersState.mockResolvedValue(
+      directState({
+        view: openaiView({
+          key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0 },
+        }),
+        chat: "openai",
+      }),
+    );
+    render(<DirectRouteChip settings={direct} localAi={null} />);
+    const chip = await screen.findByText("OpenAI: no credit");
+    expect(chip.getAttribute("title")).toBe(
+      "Your OpenAI account has no credit yet, so chat won't answer until you add some. Then press Check again in Settings > AI & Models.",
+    );
+    expect(chip.getAttribute("style")).toContain("--st-due");
+  });
+
   it("says shared when the person ticked that their project shares data", async () => {
     m.directProvidersState.mockResolvedValue(
       directState({ view: openaiView({ shares_data: true }), chat: "openai" }),

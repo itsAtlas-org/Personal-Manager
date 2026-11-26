@@ -187,6 +187,24 @@ describe("a role that can't be answered", () => {
     ).toBe(true);
   });
 
+  it("says a role on a key with no credit won't answer yet, as a status", () => {
+    const state = directState({
+      view: openaiView({
+        key_check: { at: "x", outcome: "no_credit", listed: [], listed_total: 0 },
+      }),
+      chat: "openai",
+    });
+    render(<Harness initial={state} />);
+    const line = screen.getByText(
+      "Your OpenAI account has no credit yet, so this won't answer until you add some.",
+    );
+    expect(line.closest('[role="status"]')).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    // The provider stays chosen and selectable: the key is fine.
+    expect(providerSelect().value).toBe("openai");
+    expect([...providerSelect().options].find((o) => o.value === "openai")!.disabled).toBe(false);
+  });
+
   it("says OpenAI is turned off, and a button puts the role back on OpenRouter", async () => {
     // Stored on OpenAI but demoted at read: the switch is off.
     const state = directState({

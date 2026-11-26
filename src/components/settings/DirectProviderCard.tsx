@@ -6,11 +6,20 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
   keyVerdict,
   movedLine,
+  offersRecheck,
+  recheckStores,
+  recheckVerdict,
   roleName,
   storedVerdict,
   type DirectProviderInfo,
 } from "../../lib/directProviders";
-import { clearDirectKey, saveDirectKey, setDirectDataSharing, setDirectOptIn } from "../../lib/ipc";
+import {
+  clearDirectKey,
+  recheckDirectKey,
+  saveDirectKey,
+  setDirectDataSharing,
+  setDirectOptIn,
+} from "../../lib/ipc";
 import type {
   DirectProvidersState,
   DirectProviderView,
@@ -62,6 +71,10 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
   // The last check made from this card. It stays until the next edit: a result that vanished on a
   // timer would not be announced reliably and could not be read again.
   const [result, setResult] = useState<KeyCheckResult | null>(null);
+  // Whether that result came from Check again: the key was already saved, so a refusal is not
+  // "Not saved", and it is told in the status line rather than as a field error. (An error the
+  // command throws, such as "no key to check", still shows under the field.)
+  const [again, setAgain] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [moved, setMoved] = useState<string | null>(null);
   const [announce, setAnnounce] = useState("");
@@ -118,6 +131,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
     }
     setChecking(true);
     setResult(null);
+    setAgain(false);
     setRefusal(null);
     setAnnounce("Checking your key");
     onError?.(null);
@@ -133,6 +147,34 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
       setAnnounce("");
     } catch (err) {
       // A refusal before any check (not turned on, a keychain that can't be written): its own words.
+      setRefusal(String(err));
+      setAnnounce("");
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  // Check again: the saved key goes to the provider once more (credit added, access given, a chat
+  // that couldn't be tried). Same guard and the same announcement as a first check.
+  async function checkAgain() {
+    if (checking) return;
+    setChecking(true);
+    setResult(null);
+    setAgain(true);
+    setRefusal(null);
+    setAnnounce("Checking your key");
+    onError?.(null);
+    try {
+      const r = await recheckDirectKey(view.provider);
+      setResult(r);
+      await reload();
+      setAnnounce("");
+      // The button goes away once there is nothing left to recheck, which would drop focus to
+      // <body>: put it on the key field instead.
+      // Only an answer that was stored can end the button's turn: for trouble reaching the provider
+      // the stored verdict stands and the button stays.
+      if (recheckStores(r.outcome) && !offersRecheck(r.outcome, r.note)) setFocusTick((t) => t + 1);
+    } catch (err) {
       setRefusal(String(err));
       setAnnounce("");
     } finally {
@@ -176,9 +218,26 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
 
   // What to say about the key. This session's check first; otherwise the stored one, which is shown
   // only beside a key that is really there.
-  const session = result ? keyVerdict(result.outcome, result.listed.length, name) : null;
-  const verdict = session && result?.saved ? session : session ? null : storedVerdict(view, name);
+  const session = result
+    ? (again ? recheckVerdict : keyVerdict)(result.outcome, result.listed.length, name, result.note)
+    : null;
+  // While Check again is out, the old verdict is not shown: an answer identical to it would change
+  // nothing in the live region and be never announced.
+  const verdict =
+    checking && again
+      ? null
+      : session && result?.saved
+        ? session
+        : session
+          ? null
+          : storedVerdict(view, name);
   const fieldError = refusal ?? (session && !result?.saved ? session.text : null);
+  // What the card shows now, from this session's check or the stored one.
+  // A re-check that only failed to reach the provider stored nothing, so the stored verdict (and
+  // its Check again button) still stand.
+  const current =
+    session && result?.saved && (!again || recheckStores(result.outcome)) ? result : view.key_check;
+  const canRecheck = hasKey && offersRecheck(current?.outcome, current?.note);
   const using = (["chat", "background"] as RoleName[]).filter(
     (r) => view.roles[r].uses_this_provider,
   );
@@ -274,10 +333,23 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
                   Remove key
                 </Button>
               )}
+              {canRecheck && (
+                // The same element for the whole check, like Save and check.
+                <Button
+                  type="button"
+                  variant="secondary"
+                  aria-label={`Check again for ${name}`}
+                  aria-disabled={checking ? true : undefined}
+                  className={checking ? "cursor-wait" : undefined}
+                  onClick={() => void checkAgain()}
+                >
+                  {checking && again ? "Checking..." : "Check again"}
+                </Button>
+              )}
             </div>
             <div role="status" aria-live="polite" className="mt-2">
               {verdict &&
-                (verdict.tone === "warn" ? (
+                (verdict.tone !== "ok" ? (
                   <Callout tone="warning" body="ink" live={false}>
                     {verdict.text}
                   </Callout>

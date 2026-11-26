@@ -434,7 +434,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-openai-key": {
     title: "OpenAI API key",
-    body: "A normal project key from platform.openai.com/api-keys. PM checks it when you press Save and check: it asks OpenAI which models the key can use. A restricted key may not be able to answer that, and PM saves it anyway. A key that OpenAI refuses isn't saved.",
+    body: "A normal project key from platform.openai.com/api-keys. PM checks it when you press Save and check: it asks OpenAI which models the key can use, then sends one tiny test message (\"Reply with OK.\") to prove it can chat. That costs a tiny fraction of a cent and isn't listed in Usage. A key with no credit, or one that can't chat, is saved with a note, and Check again tries it once you've fixed that. A key that OpenAI refuses isn't saved.",
   },
   "settings-role-provider": {
     title: "Provider",
