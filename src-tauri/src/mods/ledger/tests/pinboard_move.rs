@@ -7,7 +7,8 @@
 //! board is `pinboard_move/tests.rs`; this file is about the transaction round it: the marker, the
 //! rollback, and the frame that must never get to write first.
 //!
-//! The markers are seeded by hand: C1 writes none (C2's migration does).
+//! The markers are seeded by hand: these tests start from a store the ladder has not marked and
+//! pick the state they need (v62 writes the same two keys for a store that used the Pinboard).
 
 use super::*;
 use crate::mods::autoinstall::{self, Step, PILOTS};

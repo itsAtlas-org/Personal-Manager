@@ -541,6 +541,17 @@ mod tests {
         version: usize,
         document: bool,
     ) -> (PackInputs, String) {
+        vault_at_version_seeded(root, version, document, None)
+    }
+
+    /// The same, optionally with a Pinboard board row (`settings['pinboard']`) in the store too
+    /// (what v62 reads to mark a Pinboard user).
+    fn vault_at_version_seeded(
+        root: &Path,
+        version: usize,
+        document: bool,
+        board: Option<&str>,
+    ) -> (PackInputs, String) {
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let meta = vault::ensure_device_meta(&src).unwrap();
@@ -555,6 +566,13 @@ mod tests {
                     "INSERT INTO documents(vault_path, title, content_hash) \
                      VALUES ('a.md', 'A', 'ha')",
                     [],
+                )
+                .unwrap();
+            }
+            if let Some(board) = board {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES ('pinboard', ?1)",
+                    [board],
                 )
                 .unwrap();
             }
@@ -625,11 +643,11 @@ mod tests {
     }
 
     /// A backup taken by the build before v61 (a format-2 archive around a v60 store) restores on
-    /// this one: the open migrates it to v61, drops the Map's cache table, and writes the Document
-    /// Map's marker only when the store holds a document. `FORMAT_VERSION` did not change for v61:
-    /// a format-2 archive may hold a store at v60 or later.
+    /// this one: the open migrates it to this build's schema (v61 drops the Map's cache table and
+    /// writes the Document Map's marker only when the store holds a document, then v62 runs).
+    /// `FORMAT_VERSION` did not change for v61: a format-2 archive may hold a store at v60 or later.
     #[test]
-    fn a_v60_backup_restores_and_migrates_to_v61() {
+    fn a_v60_backup_restores_and_migrates_to_this_builds_schema() {
         for (document, marker) in [(false, None), (true, Some("1".to_string()))] {
             let root = tempfile::tempdir().unwrap();
             let (inputs, key_hex) = vault_at_version_holding(root.path(), 60, document);
@@ -643,7 +661,7 @@ mod tests {
             let restored = target.join("pm.sqlite");
             assert_eq!(
                 schema_version(&restored, &key_hex),
-                61,
+                latest_version(),
                 "document: {document}"
             );
             let conn = db::open_unmigrated(&restored, &key_hex).unwrap();
@@ -668,6 +686,72 @@ mod tests {
                 .unwrap();
             assert_eq!(title, "call Sam");
         }
+    }
+
+    /// Pack a store at `version` (optionally holding a board), restore it, and report the schema
+    /// version, the Pinboard's two markers (auto-install, pending) and the board row after.
+    fn restore_with_board(
+        version: usize,
+        board: Option<&str>,
+    ) -> (i64, (Option<String>, Option<String>), Option<String>) {
+        let root = tempfile::tempdir().unwrap();
+        let (inputs, key_hex) = vault_at_version_seeded(root.path(), version, false, board);
+        assert_eq!(
+            schema_version(&inputs.db_snapshot, &key_hex),
+            version as i64
+        );
+        let archive = root.path().join("old.pmbackup");
+        let cancel = AtomicBool::new(false);
+        pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
+
+        let target = root.path().join("restored");
+        restore(&archive, "pw", &target, |_, _| {}, &cancel).unwrap();
+        let restored = target.join("pm.sqlite");
+        let conn = db::open_unmigrated(&restored, &key_hex).unwrap();
+        let get = |key: &str| -> Option<String> {
+            conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .ok()
+        };
+        (
+            schema_version(&restored, &key_hex),
+            (
+                get("mods_autoinstall_pinboard"),
+                get("pinboard_move_pending"),
+            ),
+            get("pinboard"),
+        )
+    }
+
+    /// A backup taken at v61 (the build before the Pinboard's markers) restores here: the open
+    /// runs v62 over the restored content, so a board with a widget is marked for the install
+    /// and the copy, exactly as an upgrade marks it, and the board's bytes come through. v62
+    /// changed no table, so `FORMAT_VERSION` stays 2.
+    #[test]
+    fn a_v61_backup_with_a_board_restores_with_both_pinboard_markers() {
+        let board = r#"{"version":9,"widgets":[{"id":"w1"}]}"#;
+        let (version, markers, kept) = restore_with_board(61, Some(board));
+        assert_eq!(version, latest_version());
+        assert!(version >= 62);
+        assert_eq!(markers, (Some("1".to_string()), Some("1".to_string())));
+        assert_eq!(kept.as_deref(), Some(board), "the board came through");
+    }
+
+    /// A v60 backup climbs through v61 and v62: marked when it holds a board, and left
+    /// unmarked when it does not.
+    #[test]
+    fn a_v60_backup_restores_with_pinboard_markers_only_when_it_has_a_board() {
+        let board = r#"{"widgets":[{"id":"w1"}]}"#;
+        let (version, markers, kept) = restore_with_board(60, Some(board));
+        assert_eq!(version, latest_version());
+        assert_eq!(markers, (Some("1".to_string()), Some("1".to_string())));
+        assert_eq!(kept.as_deref(), Some(board));
+
+        let (version, markers, kept) = restore_with_board(60, None);
+        assert_eq!(version, latest_version());
+        assert_eq!(markers, (None, None), "no board and no note, no marker");
+        assert_eq!(kept, None);
     }
 
     /// A store a newer PM wrote is refused at restore with its typed fault (I-28): nothing is

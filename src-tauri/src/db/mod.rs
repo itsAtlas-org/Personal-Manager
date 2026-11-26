@@ -1135,7 +1135,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 61);
+            assert_eq!(version, latest_version());
             assert_eq!(marker(&conn).as_deref(), Some("1"));
             assert!(!has_layout(&conn));
             conn.query_row(
@@ -1171,6 +1171,77 @@ mod tests {
         );
 
         // A wrong key is refused exactly as before.
+        let wrong = "ff".repeat(32);
+        let err = open(&path, &wrong).unwrap_err().to_string();
+        assert!(err.contains(WRONG_KEY_OR_CORRUPT_MSG), "{err}");
+    }
+
+    /// The encrypted store across v62: a keyed v61 file holding a board that is not JSON and a
+    /// note document opens (the bare widget count would have stopped it), carries both Pinboard
+    /// markers, keeps the board's bytes, does not write a cleared marker again, and a wrong key
+    /// is refused as before.
+    #[test]
+    fn a_keyed_v61_store_opens_at_v62_with_the_pinboard_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v61.sqlite");
+        let get = |conn: &Connection, key: &str| -> Option<String> {
+            conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .ok()
+        };
+        {
+            let conn = open_at_version(&path, KEY, 61).unwrap();
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES ('pinboard', '- a note')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO documents(vault_path, title, content_hash, source_id) \
+                 VALUES ('n.md', 'N', 'h', 'note:x')",
+                [],
+            )
+            .unwrap();
+        }
+
+        {
+            let conn = open(&path, KEY).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, latest_version());
+            assert!(version >= 62);
+            assert_eq!(
+                get(&conn, "mods_autoinstall_pinboard").as_deref(),
+                Some("1")
+            );
+            assert_eq!(get(&conn, "pinboard_move_pending").as_deref(), Some("1"));
+            assert_eq!(
+                get(&conn, "pinboard").as_deref(),
+                Some("- a note"),
+                "the board is untouched"
+            );
+            conn.execute(
+                "DELETE FROM settings WHERE key IN ('mods_autoinstall_pinboard', 'pinboard_move_pending')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = open(&path, KEY).unwrap();
+        assert_eq!(
+            get(&conn, "mods_autoinstall_pinboard"),
+            None,
+            "not written twice"
+        );
+        assert_eq!(
+            get(&conn, "pinboard_move_pending"),
+            None,
+            "not written twice"
+        );
+        drop(conn);
+
         let wrong = "ff".repeat(32);
         let err = open(&path, &wrong).unwrap_err().to_string();
         assert!(err.contains(WRONG_KEY_OR_CORRUPT_MSG), "{err}");

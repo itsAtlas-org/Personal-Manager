@@ -103,10 +103,11 @@ pub const PILOTS: [Pilot; 2] = [
         pending: None,
         handover: hand_over_map,
     },
-    // The Pinboard (PR C). DORMANT in C1: no migration writes `mods_autoinstall_pinboard` or
-    // `pinboard_move_pending` yet (C2's v62 does). Only `mark_restored` can write the marker, for a
-    // restored store with a signed catalogue `atlas.pinboard` row, and that store has no pending
-    // move. The move itself (`pinboard_move`) runs only when one of them is there.
+    // The Pinboard (PR C). Awake since v62, which writes `mods_autoinstall_pinboard` for a store whose
+    // board has a widget or that holds a `note:` document, and `pinboard_move_pending` for a store
+    // whose board is not blank. `mark_restored` can also write the marker, for a restored store with
+    // a signed catalogue `atlas.pinboard` row, and that store has no pending move. The move itself
+    // (`pinboard_move`) runs only when the pending key is there.
     Pilot {
         id: "atlas.pinboard",
         marker: "mods_autoinstall_pinboard",
@@ -1289,10 +1290,10 @@ mod tests {
         );
     }
 
-    /// The pass is awake since v61, which writes the Map's marker for a store that has documents
-    /// (`db/migrations.rs`, the one writer). No other code in this crate names a marker key outside
-    /// this file, that migration and the tests: a second writer would start downloads nobody asked
-    /// for, so it can't happen by accident.
+    /// The pass is awake since v61 and v62, which write the Map's marker for a store that has
+    /// documents and the Pinboard's for a store that used it (`db/migrations.rs`, the one writer). No
+    /// other code in this crate names a marker key outside this file, those migrations and the tests:
+    /// a second writer would start downloads nobody asked for, so it can't happen by accident.
     #[test]
     fn only_this_file_and_the_migration_name_a_marker_key() {
         fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
@@ -1320,18 +1321,20 @@ mod tests {
             &mut found,
         );
         assert!(found.is_empty(), "{found:?}");
-        // And the migration really writes the one marker this file reads (the pass is not dormant).
+        // And the migrations really write the marker of each pilot (the pass is not dormant).
         let migrations = include_str!("../db/migrations.rs");
         let production = migrations.split("#[cfg(test)]\nmod tests").next().unwrap();
-        assert!(
-            production.contains(&format!("SELECT '{}', '1'", PILOTS[0].marker)),
-            "v61 must write {}",
-            PILOTS[0].marker
-        );
+        for (pilot, version) in [(&PILOTS[0], "v61"), (&PILOTS[1], "v62")] {
+            assert!(
+                production.contains(&format!("SELECT '{}', '1'", pilot.marker)),
+                "{version} must write {}",
+                pilot.marker
+            );
+        }
     }
 
     #[test]
-    fn the_pilots_table_names_each_pilot_once_and_the_pinboard_is_dormant() {
+    fn the_pilots_table_names_each_pilot_once_and_the_pinboard_is_awake() {
         let ids: Vec<&str> = PILOTS.iter().map(|p| p.id).collect();
         assert_eq!(ids, ["atlas.map", "atlas.pinboard"]);
         let p = &PILOTS[1];

@@ -53,7 +53,7 @@ fn world() -> (tempfile::TempDir, Connection) {
     (dir, conn)
 }
 
-/// The legacy row as the old Pinboard left it, and the move owed (what v62 writes in C2).
+/// The legacy row as the old Pinboard left it, and the move owed (what v62 writes).
 fn owed(conn: &Connection, board: &[u8]) {
     // Text where it is text (the Pinboard stored a string), a BLOB where it is not.
     match std::str::from_utf8(board) {
@@ -753,9 +753,9 @@ fn the_old_row_survives_every_path() {
 }
 
 #[test]
-fn nothing_in_the_product_writes_the_legacy_row_or_the_pending_key() {
-    // Source guard for the two C1 promises: `settings['pinboard']` is only ever read here, and the
-    // move is dormant (the pending key is only ever deleted; C2's migration writes it).
+fn the_pending_key_is_written_only_by_v62_and_nothing_writes_the_legacy_row() {
+    // Source guard for two promises: `settings['pinboard']` is only ever read here, and the pending
+    // key is only ever deleted here (migration v62 is what writes it).
     let source = include_str!("../pinboard_move.rs");
     let production = source.split("#[cfg(test)]\nmod tests;").next().unwrap();
     for (n, line) in production.lines().enumerate() {
@@ -784,8 +784,8 @@ fn nothing_in_the_product_writes_the_legacy_row_or_the_pending_key() {
             assert!(sql.contains("KEY = ?1"), "a delete by key only: {sql}");
         }
     }
-    // Nothing else in the crate names the pending key outside this file and the tests (the PILOTS
-    // entry uses the constant), so nothing in C1 writes it.
+    // Nothing else in the crate names the pending key outside this file, the migrations and the
+    // tests (the PILOTS entry uses the constant), so nothing else can write it.
     fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
@@ -796,6 +796,7 @@ fn nothing_in_the_product_writes_the_legacy_row_or_the_pending_key() {
                 let production = text.split("#[cfg(test)]\nmod tests").next().unwrap();
                 let own = path.ends_with("mods/pinboard_move.rs")
                     || path.ends_with("mods/autoinstall.rs")
+                    || path.ends_with("db/migrations.rs")
                     || path.components().any(|c| c.as_os_str() == "tests");
                 if !own && production.contains(concat!("pinboard_move_", "pending")) {
                     out.push(path.display().to_string());
@@ -944,7 +945,7 @@ fn prefs(conn: &Connection) -> Option<(Value, i64)> {
 #[test]
 fn the_device_prefs_fill_only_what_the_mod_lacks_and_clear_the_flag() {
     let (_dir, mut conn) = world();
-    // Dormant: nothing is written without the flag the move sets.
+    // Nothing is written without the flag the move sets.
     assert!(!adopt_pinboard_prefs(&mut conn, Some(false), Some(false), Some(false)).unwrap());
     assert_eq!(prefs(&conn), None);
 
