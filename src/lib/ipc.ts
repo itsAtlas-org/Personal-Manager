@@ -137,7 +137,12 @@ import type {
   DupesReport,
   MergeChoices,
   MergeDone,
+  PeopleExportDone,
+  PeopleExportScope,
   PeopleFilter,
+  PeopleImportOptions,
+  PeopleImportPreview,
+  PeopleImportResult,
   PeopleMergePreview,
   PeopleSort,
   Person,
@@ -1303,6 +1308,22 @@ export const markPeopleDistinct = (a: number, b: number) =>
 
 /** Offer the pairs marked "not the same person" again. Resolves to how many were hidden. */
 export const restorePeopleDistinct = () => invoke<number>("restore_people_distinct");
+
+/** Pick a `.vcf` file and read what is in it, writing nothing. The backend opens the picker (the
+ *  path never passes through the webview). Resolves to `null` when the picker is cancelled; refuses
+ *  in plain words for a file over 128 MB. The parse is held ten minutes under `preview_id`. */
+export const pickVcardAndPreview = () =>
+  invoke<PeopleImportPreview | null>("pick_vcard_and_preview");
+
+/** Import the file the last preview read, as one transaction. A stale preview (replaced, old, or
+ *  from another store) refuses in plain words and writes nothing. */
+export const commitVcardImport = (previewId: string, options: PeopleImportOptions) =>
+  invoke<PeopleImportResult>("commit_vcard_import", { previewId, options });
+
+/** Write people as a vCard file, and with `timeline` their timeline as a spreadsheet beside it. The
+ *  backend opens the save dialog. Resolves to `null` when it is cancelled. */
+export const exportPeople = (scope: PeopleExportScope, timeline: boolean) =>
+  invoke<PeopleExportDone | null>("export_people", { scope, timeline });
 
 /** Fire after any people write, from any surface. The People tab debounces its refetch. */
 export const onPeopleChanged = (handler: () => void): Promise<UnlistenFn> =>

@@ -580,6 +580,10 @@ pub struct AppState {
     /// each bound to the store epoch it was made in. Always locked while holding (or after) the DB
     /// guard, never the other way round.
     pub people_undo: Mutex<people::merge::UndoShelf>,
+    /// The vCard file read for an import and not yet imported (spec 5.2): one parse in memory for
+    /// ten minutes, bound to the store epoch it was read under. Locked while holding (or after) the
+    /// DB guard, never the other way round.
+    pub people_import: Mutex<people::import::ImportHold>,
     /// Snapshot of the currently-running index rebuild, so the Documents tab (and the Settings
     /// rebuild modal) can resume showing progress after the user navigates away and back — the
     /// ingest sibling of `drive_sync`.
@@ -748,6 +752,7 @@ impl AppState {
             local_sync_cancel: AtomicBool::new(false),
             duplicate_watch: Mutex::new(duplicates::DuplicateWatch::default()),
             people_undo: Mutex::new(people::merge::UndoShelf::default()),
+            people_import: Mutex::new(people::import::ImportHold::default()),
             ingest_job: Mutex::new(IngestJobState::default()),
             retag_job: Mutex::new(RetagJobState::default()),
             retag_busy: AtomicBool::new(false),
@@ -1025,6 +1030,10 @@ impl AppState {
     fn clear_people_undo(&self) {
         if let Ok(mut shelf) = self.people_undo.lock() {
             shelf.clear();
+        }
+        // A held vCard preview is the same kind of thing: contact values of a store now closed.
+        if let Ok(mut held) = self.people_import.lock() {
+            held.clear();
         }
     }
 
@@ -2077,6 +2086,9 @@ pub fn run() {
             commands::undo_merge_people,
             commands::mark_people_distinct,
             commands::restore_people_distinct,
+            commands::pick_vcard_and_preview,
+            commands::commit_vcard_import,
+            commands::export_people,
             commands::search_people,
             commands::calendar_overview,
             commands::request_calendar_access,

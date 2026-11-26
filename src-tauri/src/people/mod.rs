@@ -32,16 +32,24 @@
 //! Not model-path code: nothing here may be named from `chat`, `briefing`, `mods` or the MCP tools
 //! (E13, gated in a later slice).
 
+pub mod card;
 pub mod dupes;
+pub mod export;
 pub mod fold;
+pub mod import;
 pub mod merge;
 pub mod partial_date;
 pub mod sources;
+pub mod vcard;
 
+#[cfg(test)]
+mod import_tests;
 #[cfg(test)]
 mod merge_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vcard_tests;
 
 use std::collections::{HashMap, HashSet};
 

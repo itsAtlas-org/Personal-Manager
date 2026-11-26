@@ -160,7 +160,7 @@ fn phone_core(key: &str) -> &str {
 
 /// The group a phone key belongs to: the last nine digits of a number long enough to be matched by
 /// suffix, else the key itself (a short number matches only an equal one).
-fn phone_group(key: &str) -> String {
+pub(super) fn phone_group(key: &str) -> String {
     let core = phone_core(key);
     if core.len() >= 9 {
         format!("t{}", &core[core.len() - 9..])
@@ -169,7 +169,7 @@ fn phone_group(key: &str) -> String {
     }
 }
 
-fn phones_match(a: &str, b: &str) -> bool {
+pub(super) fn phones_match(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

@@ -3813,3 +3813,78 @@ export interface MergeDone {
   merged: number;
   undo: string | null;
 }
+
+/** What the vCard parser says about a file, by kind (`people::vcard::Warning`). Counts of cards or
+ *  values, never a value. */
+export type PeopleImportWarningKind =
+  | "no_name"
+  | "bad_encoding"
+  | "value_cut"
+  | "bad_date"
+  | "unfinished_card"
+  | "too_many_properties"
+  | "too_many_details"
+  | "unreadable_line";
+
+/** The import dialog's facts about the chosen file (`people::import::ImportPreview`). Nothing is
+ *  written yet; the parse is held in memory under `preview_id` for ten minutes. */
+export interface PeopleImportPreview {
+  preview_id: string;
+  /** The file's name, for "{n} people in {file}". Untrusted text: render it as text only. */
+  file_name: string;
+  /** People in the file. */
+  people: number;
+  /** Already in PM (by id). */
+  already: number;
+  /** Of those, in Trash: they come back. */
+  from_trash: number;
+  /** New ones that look like people PM has (the same email or phone). */
+  look_alike: number;
+  /** Cards skipped for having no name, email or phone. */
+  no_name: number;
+  /** Cards that repeated an earlier card's id. */
+  repeated: number;
+  photos_skipped: boolean;
+  /** False when the file was cut short or hit a limit. */
+  complete: boolean;
+  warnings: { kind: PeopleImportWarningKind; count: number }[];
+  /** Properties set aside, by name. */
+  ignored: { name: string; count: number }[];
+}
+
+/** What the import dialog sends back (`people::import::ImportOptions`). */
+export interface PeopleImportOptions {
+  /** A label to put on everyone in the file. */
+  label?: string | null;
+}
+
+/** A person PM kept its own values for, and which (`people::import::KeptNote`). */
+export interface PeopleImportKept {
+  name: string;
+  /** "name", "birthday", "where you met" or "notes". */
+  fields: string[];
+}
+
+/** What an import did (`people::import::ImportResult`). */
+export interface PeopleImportResult {
+  added: number;
+  /** People already in PM that gained something. */
+  updated: number;
+  /** People already in PM that gained nothing. */
+  unchanged: number;
+  /** Names of people who came back from Trash. */
+  restored: string[];
+  kept: PeopleImportKept[];
+  /** People in this import who now have a possible duplicate. */
+  review: number;
+}
+
+/** Who an export covers (`people::export::ExportScope`). */
+export type PeopleExportScope = "All" | { Label: number } | { Ids: number[] };
+
+/** What an export wrote (`people::export::ExportDone`). */
+export interface PeopleExportDone {
+  people: number;
+  /** The files written, the vCard first. */
+  files: string[];
+}

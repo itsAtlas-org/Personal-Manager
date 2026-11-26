@@ -16,10 +16,13 @@
 
 use std::time::Instant;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
-use crate::error::Result;
+use crate::blocking::spawn_blocking_result;
+use crate::error::{Error, Result};
 use crate::people::dupes::DupesReport;
+use crate::people::export::{ExportDone, ExportScope};
+use crate::people::import::{ImportOptions, ImportPreview, ImportResult};
 use crate::people::merge::{MergeChoices, MergeDone, MergePreview};
 use crate::people::{
     self, Label, ListFilter, ListSort, Person, PersonDraft, PersonRow, PersonSaved,
@@ -431,6 +434,148 @@ pub fn restore_people_distinct(
     Ok(shown)
 }
 
+// --- vCard import and export (main window) ---------------------------------------------------------------------
+
+/// The longest a file's name is shown (it is the user's own text, but a hostile name is still text).
+const FILE_NAME_CHARS: usize = 120;
+
+/// Pick a `.vcf` file and read what is in it, writing nothing (spec 5.2). The backend opens the
+/// picker, so the path never round-trips through the webview. The file is read with a cap and
+/// parsed off the DB guard; the parse is then held in memory for ten minutes under the returned
+/// `preview_id`, and a new preview replaces it. A cancelled picker answers `None`.
+#[tauri::command]
+pub async fn pick_vcard_and_preview(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ImportPreview>> {
+    use tauri_plugin_dialog::DialogExt;
+    require_people_main_window(&window)?;
+    let app2 = app.clone();
+    // Deliberately NOT `blocking::spawn_blocking_result`: the picker returns an `Option`, not a
+    // `Result` (the `set_proton_cli_path` shape).
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app2.dialog()
+            .file()
+            .set_title("Choose a contacts file")
+            .add_filter("vCard", &["vcf", "vcard"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| Error::Other("The file dialog didn't open.".into()))?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|_| Error::Other("PM couldn't read the chosen file's place.".into()))?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| people::card::truncate_chars(&people::fold::clean_text(&n), FILE_NAME_CHARS).0)
+        .unwrap_or_default();
+    // Parse, then count against the store, both off the async worker: counting is a few lookups
+    // per card. The epoch is read under the guard, so a store that changes afterwards makes the
+    // hold stale (a refusal), never wrong.
+    let app2 = app.clone();
+    let (parsed, counts, epoch) = spawn_blocking_result("contacts file", move || {
+        let bytes = people::import::read_capped(&path)?;
+        let parsed = people::import::prepare(people::vcard::parse_vcf(&bytes));
+        let state = app2.state::<AppState>();
+        let conn = state.conn()?;
+        let epoch = state.store_epoch();
+        let counts = people::import::preview_counts(&conn, &parsed.cards)?;
+        Ok((parsed, counts, epoch))
+    })
+    .await?;
+    let mut preview = ImportPreview::of(String::new(), file_name, &parsed, counts);
+    let held = state
+        .people_import
+        .lock()
+        .map_err(|_| Error::Other("PM couldn't hold that file.".into()))?
+        .put(epoch, parsed.cards, Instant::now())?;
+    preview.preview_id = held;
+    Ok(Some(preview))
+}
+
+/// Import the file read by the last preview, as one transaction, then tell every view once. A
+/// preview that was replaced, is over ten minutes old or was read under another store refuses in
+/// plain words and writes nothing.
+#[tauri::command]
+pub async fn commit_vcard_import(
+    window: tauri::Window,
+    app: AppHandle,
+    preview_id: String,
+    options: ImportOptions,
+) -> Result<ImportResult> {
+    require_people_main_window(&window)?;
+    // A big file is thousands of writes and a duplicate scan: off the main thread, which would
+    // otherwise freeze the window for it.
+    let app2 = app.clone();
+    let done = spawn_blocking_result("contacts import", move || {
+        let state = app2.state::<AppState>();
+        let conn = state.conn()?;
+        let mut done = people::import::commit_held(
+            &conn,
+            &state.people_import,
+            state.store_epoch(),
+            &preview_id,
+            &options,
+            Instant::now(),
+        )?;
+        // The review count is a courtesy: the import is already written, so a failure to read for
+        // it must not turn a finished import into an error (or skip telling the views).
+        let dupes = people::dupes::load(&conn).ok();
+        drop(conn);
+        done.review = dupes.map_or(0, |d| people::import::review_count(&d, &done.touched));
+        Ok(done)
+    })
+    .await?;
+    people::announce_changed(&app);
+    Ok(done)
+}
+
+/// Write people as a vCard 3.0 file, and with `timeline` their timeline as a spreadsheet beside it
+/// (spec 5.3). The backend opens the save dialog (rule L-5: decrypted data is never written to a
+/// path the webview names). People in Trash are never written. A cancelled dialog answers `None`.
+#[tauri::command]
+pub async fn export_people(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    scope: ExportScope,
+    timeline: bool,
+) -> Result<Option<ExportDone>> {
+    use tauri_plugin_dialog::DialogExt;
+    require_people_main_window(&window)?;
+    let exported = {
+        let conn = state.conn()?;
+        people::export::build(&conn, &scope, timeline)?
+    };
+    let app2 = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app2.dialog()
+            .file()
+            .set_title("Export people")
+            .set_file_name("people.vcf")
+            .add_filter("vCard", &["vcf"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| Error::Other("The file dialog didn't open.".into()))?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let dest = picked
+        .into_path()
+        .map_err(|_| Error::Other("PM couldn't read the chosen file's place.".into()))?;
+    let done = spawn_blocking_result("contacts export", move || {
+        people::export::write(&dest, &exported)
+    })
+    .await?;
+    Ok(Some(done))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +617,9 @@ mod tests {
         ("undo_merge_people", Tier::Main),
         ("mark_people_distinct", Tier::Main),
         ("restore_people_distinct", Tier::Main),
+        ("pick_vcard_and_preview", Tier::Main),
+        ("commit_vcard_import", Tier::Main),
+        ("export_people", Tier::Main),
     ];
 
     /// Main-window commands that only read (they announce nothing).
@@ -479,6 +627,9 @@ mod tests {
         "list_labels",
         "people_duplicates_snapshot",
         "merge_people_preview",
+        // The import's preview and the export write nothing in the store: the file is the write.
+        "pick_vcard_and_preview",
+        "export_people",
     ];
 
     /// The shipped part of this file, and each command's body in it (name, body).
@@ -493,9 +644,10 @@ mod tests {
             .skip(1)
             .map(|chunk| {
                 let name = chunk
-                    .strip_prefix("pub fn ")
+                    .strip_prefix("pub async fn ")
+                    .or_else(|| chunk.strip_prefix("pub fn "))
                     .and_then(|rest| rest.split('(').next())
-                    .expect("a command is `pub fn name(`")
+                    .expect("a command is `pub fn name(` or `pub async fn name(`")
                     .to_owned();
                 // Comment lines dropped, so a guard named only in a comment proves nothing.
                 let body = chunk

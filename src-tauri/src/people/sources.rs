@@ -253,17 +253,43 @@ pub fn person_for_source(
 /// into them by a merge (so a file exported before the merge still finds the survivor). A person in
 /// Trash is still found: restoring them is the import's job (E4).
 pub fn person_for_ident(conn: &Connection, ident: &str) -> Result<Option<(i64, bool)>> {
+    if let Some(found) = person_for_own_ident(conn, ident)? {
+        return Ok(Some(found));
+    }
     Ok(conn
         .query_row(
             "SELECT id, trashed_at IS NOT NULL FROM people \
-              WHERE uid = ?1 \
-                 OR (merged_uids IS NOT NULL \
-                     AND EXISTS (SELECT 1 FROM json_each(merged_uids) WHERE value = ?1)) \
-              ORDER BY (uid = ?1) DESC LIMIT 1",
+              WHERE merged_uids IS NOT NULL \
+                AND EXISTS (SELECT 1 FROM json_each(merged_uids) WHERE value = ?1) LIMIT 1",
             params![ident],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
+}
+
+/// The person whose own `uid` this is (an index lookup), and whether they are in Trash. A bulk
+/// caller asks this per card and takes the folded ids from [`merged_ident_owners`] once, because
+/// the folded ids sit in a JSON column no index reaches.
+pub fn person_for_own_ident(conn: &Connection, ident: &str) -> Result<Option<(i64, bool)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, trashed_at IS NOT NULL FROM people WHERE uid = ?1",
+            params![ident],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Every uid a merge folded into someone, and the person it folded into.
+pub fn merged_ident_owners(conn: &Connection) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.value, p.id FROM people p, json_each(p.merged_uids) j \
+          WHERE p.merged_uids IS NOT NULL ORDER BY p.id DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().collect())
 }
 
 #[cfg(test)]
