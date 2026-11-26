@@ -19,7 +19,7 @@ use tokio::net::UnixStream;
 use tokio::runtime::Handle;
 
 use super::device;
-use super::supervisor::Lifecycle;
+use super::supervisor::{wanted_if, Lifecycle};
 use super::test_support::{open_vault, pair_app, App};
 use super::transport::{PlatformTransport, StartError, Transport};
 use crate::mods::api::test_support::TestHost;
@@ -139,6 +139,21 @@ async fn nothing_listens_and_nothing_is_made_until_the_device_says_on() {
     host.mcp().life().reconcile(&host, &Handle::current(), true);
     assert!(!host.mcp().life().status().listening);
     assert!(!host.dir().join("mcp").exists(), "not even the folder");
+}
+
+#[test]
+fn a_build_that_does_not_offer_connected_apps_never_wants_a_listener_whatever_the_file_says() {
+    // The device file is shared with builds that do offer them (a debug build on the same data
+    // folder): on:true for this vault must not bring a socket up where the section is hidden and
+    // could neither show it nor switch it off.
+    let w = World::on();
+    assert!(device::device_state(&w.here).on);
+    assert!(wanted_if(&w.host, true, true).is_some());
+    assert!(wanted_if(&w.host, true, false).is_none());
+    assert!(wanted_if(&w.host, false, true).is_none());
+    // And the real `wanted` (what `reconcile` asks) hands the build's own answer to it.
+    let code = code_of(&source("src/mods/mcp/supervisor.rs"));
+    assert!(code.contains("wanted_if(host, writes, super::commands::offered())"));
 }
 
 #[tokio::test]

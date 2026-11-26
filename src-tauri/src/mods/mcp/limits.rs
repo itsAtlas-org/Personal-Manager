@@ -88,6 +88,8 @@ impl McpLimits {
     }
 
     /// A request of `client` in `family` admitted in both steps at `now`.
+    // Only the tests drive the clock.
+    #[cfg(test)]
     pub fn admit_at(&self, client: i64, family: Family, now: Instant) -> Result<Held, ModError> {
         let held = self.admit_call_at(client, now)?;
         self.in_family_at(held, client, family, now)

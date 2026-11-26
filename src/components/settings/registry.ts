@@ -30,6 +30,9 @@ import {
   StorageIcon,
 } from "./tabIcons";
 
+/** The Connected apps section's anchor id, in Data & Security. */
+export const MCP_SECTION_ID = "sec-data-apps";
+
 export type SettingsTab =
   | "general"
   | "accessibility"
@@ -130,6 +133,9 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDef[] = [
         Icon: DataIcon,
         sections: [
           { id: "sec-data-applock", label: "App lock" },
+          // Left off the rail, and out of the page, where PM doesn't offer connected apps
+          // (`shownSections`): a rail link must never point at a section that isn't there.
+          { id: MCP_SECTION_ID, label: "Connected apps" },
           // Data and Vault merged into one section (#712) — the split was the incident. The id
           // is the surviving one of the two, deliberately: changing it breaks the in-rail
           // sub-nav and `scrollToSection` then silently no-ops.
@@ -200,6 +206,15 @@ export function fallbackTab(
   if (tabShown(open, features)) return open;
   const group = groups.find((g) => g.tabs.some((t) => t.id === open));
   return group?.tabs.find((t) => tabShown(t.id, features))?.id ?? "general";
+}
+
+/** `sections` with Connected apps left out unless PM offers them on this computer (pure). Offered is
+ *  decided by Rust (`mcpOffered`), so the rail, the scroll-spy and the page agree on one answer. */
+export function shownSections(
+  sections: readonly SettingsSectionDef[],
+  mcpOffered: boolean,
+): readonly SettingsSectionDef[] {
+  return mcpOffered ? sections : sections.filter((s) => s.id !== MCP_SECTION_ID);
 }
 
 /** The sub-nav sections for a tab (empty if it doesn't expand). */

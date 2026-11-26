@@ -176,6 +176,7 @@ impl Conns {
     }
 
     /// Connections open now.
+    #[cfg(test)]
     pub fn count(&self) -> usize {
         self.lock().entries.len()
     }

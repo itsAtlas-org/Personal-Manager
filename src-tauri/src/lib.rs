@@ -2222,6 +2222,13 @@ pub fn run() {
             mods::tab::dev_commands::dev_mode_state,
             mods::tab::dev_commands::dev_mode_switch,
             mods::tab::dev_commands::install_unsigned_file,
+            // Connected apps (Mods spec 1.16): whether Settings offers them, what it shows, the
+            // per-device switch, connecting an app (its token, once) and revoking one.
+            mods::mcp::commands::mcp_offered,
+            mods::mcp::commands::mcp_state,
+            mods::mcp::commands::mcp_set_on,
+            mods::mcp::commands::mcp_connect_app,
+            mods::mcp::commands::mcp_revoke,
             // The Developer kit's readouts (API version, endpoints, limits, engine seal): read-only.
             mods::tab::kit::dev_kit_info,
             // Developer test folders (Mods slice 6, part 4): load (the stark screen's first step;

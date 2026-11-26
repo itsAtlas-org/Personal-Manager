@@ -223,30 +223,60 @@ fn forget_orphan_pairs(conn: &Connection, here: &Here) -> Result<(), Fault> {
     Ok(())
 }
 
+/// The longest scopes text the list reads (characters): the four ids as a JSON array are under a
+/// hundred, so anything longer is not one this module wrote.
+const LIST_SCOPES_MAX_CHARS: i64 = 500;
+
+/// The longest date text the list reads (characters): an ISO instant is 24.
+const LIST_DATE_MAX_CHARS: i64 = 40;
+
+/// A name as the list shows it: at most [`NAME_MAX_CHARS`] characters, an ellipsis after a cut one.
+/// `raw` holds one character more than that at most, which is how a cut one is told.
+fn shown_name(raw: &str) -> String {
+    if raw.chars().count() <= NAME_MAX_CHARS {
+        return raw.to_owned();
+    }
+    let mut name: String = raw.chars().take(NAME_MAX_CHARS).collect();
+    name.push('…');
+    name
+}
+
 /// The apps of the store, newest last, as the list shows them.
 pub fn list(conn: &Connection, here: &Here) -> Vec<ClientView> {
     let state = device::device_state(here);
+    // Every text column is cut in SQL, so a hostile row (a shared store's writer does not go through
+    // `mint`) never reads more than a few dozen characters into memory, nor on over IPC to the page.
+    // A scopes text longer than any real one parses to nothing; a name that was cut gets an ellipsis.
     let Ok(mut stmt) = conn.prepare(
-        "SELECT id, name, scopes, created_at, last_used_at FROM mcp_clients ORDER BY id LIMIT ?1",
+        "SELECT id, substr(name, 1, ?2), substr(scopes, 1, ?3), substr(created_at, 1, ?4), \
+         substr(last_used_at, 1, ?4) FROM mcp_clients ORDER BY id LIMIT ?1",
     ) else {
         return Vec::new();
     };
-    let rows = stmt.query_map([LIST_MAX as i64], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?,
-        ))
-    });
+    let rows = stmt.query_map(
+        [
+            LIST_MAX as i64,
+            NAME_MAX_CHARS as i64 + 1,
+            LIST_SCOPES_MAX_CHARS,
+            LIST_DATE_MAX_CHARS,
+        ],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        },
+    );
     let Ok(rows) = rows else {
         return Vec::new();
     };
     rows.flatten()
         .map(|(id, name, scopes, created_at, last_used_at)| ClientView {
             id,
-            name,
+            name: shown_name(&name),
             paired: pairing_matches(conn, &state.clients, id, None).is_some(),
             scopes: parse_scopes(&scopes).unwrap_or_default(),
             created_at,

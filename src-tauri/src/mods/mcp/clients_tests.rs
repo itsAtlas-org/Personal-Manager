@@ -516,6 +516,49 @@ fn the_list_says_which_apps_this_device_holds() {
         .any(|v| v.id == mine && v.paired));
 }
 
+#[test]
+fn the_list_cuts_a_hostile_rows_text_to_a_screens_worth() {
+    let (host, here) = rig();
+    // A shared store's writer does not go through `mint`: huge name, scopes and dates.
+    let big = "é".repeat(1_000_000);
+    let id = host.sql(|c| {
+        c.execute(
+            "INSERT INTO mcp_clients(name, token_hash, scopes, created_at, last_used_at) \
+             VALUES (?1, 'x', ?1, ?1, ?1)",
+            [&big],
+        )
+        .unwrap();
+        c.last_insert_rowid()
+    });
+    // A name of exactly the longest allowed is shown whole; one over is cut with an ellipsis.
+    let exact = "n".repeat(NAME_MAX_CHARS);
+    let over = "m".repeat(NAME_MAX_CHARS + 1);
+    host.sql(|c| {
+        for name in [&exact, &over] {
+            c.execute(
+                "INSERT INTO mcp_clients(name, token_hash, scopes) VALUES (?1, ?1, '[]')",
+                [name],
+            )
+            .unwrap();
+        }
+    });
+    let listed = host.sql(|c| list(c, &here));
+    let of = |id: i64| listed.iter().find(|v| v.id == id).unwrap();
+    let hostile = of(id);
+    assert_eq!(hostile.name.chars().count(), NAME_MAX_CHARS + 1);
+    assert!(hostile.name.ends_with('…'));
+    assert!(hostile.scopes.is_empty());
+    assert_eq!(hostile.created_at.chars().count(), 40);
+    assert_eq!(
+        hostile.last_used_at.as_deref().map(|s| s.chars().count()),
+        Some(40)
+    );
+    assert_eq!(listed[1].name, exact);
+    assert_eq!(listed[2].name, format!("{}…", &over[..NAME_MAX_CHARS]));
+    // The whole list is small enough to be sent over and over.
+    assert!(serde_json::to_string(&listed).unwrap().len() < 4_000);
+}
+
 // --- last_used_at -------------------------------------------------------------------------------
 
 fn last_used(host: &TestHost, id: i64) -> Option<String> {

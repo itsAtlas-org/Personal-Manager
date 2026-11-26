@@ -40,7 +40,7 @@ use crate::mods::devmode::Here;
 
 /// Which vault, in which folder, a listener was started for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Key {
+pub(super) struct Key {
     vault: String,
     place: String,
 }
@@ -217,7 +217,14 @@ impl Lifecycle {
 
 /// The vault the listener should be up for, if any.
 fn wanted<H: Host>(host: &H, writes: bool) -> Option<Key> {
-    if !writes || crate::paths::data_dir_is_purged() {
+    wanted_if(host, writes, super::commands::offered())
+}
+
+/// [`wanted`] with `offered` given. A build that does not offer connected apps never listens, whatever
+/// the device file says: the file is shared with builds that do (a debug build on the same data
+/// folder), and the hidden section could neither show the server running nor switch it off.
+pub(super) fn wanted_if<H: Host>(host: &H, writes: bool, offered: bool) -> Option<Key> {
+    if !offered || !writes || crate::paths::data_dir_is_purged() {
         return None;
     }
     let (vault, root) = host.store().active_vault_place()?;
@@ -248,8 +255,6 @@ pub fn after_settle(app: &AppHandle, writes: bool) {
 
 /// The switch, a pairing or the vault changed (Settings): bring the listener in line, asking the
 /// session whether this instance writes the store.
-// Called by the Settings commands (slice M1c); nothing in this slice has a switch to turn.
-#[allow(dead_code)]
 pub fn after_open(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
     let writes = crate::lock_session::this_instance_writes(state.inner()) && state.is_unlocked();
@@ -271,8 +276,6 @@ pub fn on_lock(app: &AppHandle) {
 }
 
 /// An app was revoked: its connections end.
-// Called by the revoke command (slice M1c).
-#[allow(dead_code)]
 pub fn on_revoked(app: &AppHandle, client: i64) {
     if let Some(life) = lifecycle(app) {
         life.close_client(client);

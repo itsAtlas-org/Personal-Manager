@@ -62,6 +62,16 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
   ["devModeState", () => ipc.devModeState(), "dev_mode_state", undefined],
   ["devModeSwitch", () => ipc.devModeSwitch(true), "dev_mode_switch", { on: true }],
   ["devKitInfo", () => ipc.devKitInfo(), "dev_kit_info", undefined],
+  ["mcpOffered", () => ipc.mcpOffered(), "mcp_offered", undefined],
+  ["mcpState", () => ipc.mcpState(), "mcp_state", undefined],
+  ["mcpSetOn", () => ipc.mcpSetOn(true), "mcp_set_on", { on: true }],
+  [
+    "mcpConnectApp",
+    () => ipc.mcpConnectApp("Desk", ["tasks.read", "calendar.read"]),
+    "mcp_connect_app",
+    { name: "Desk", scopes: ["tasks.read", "calendar.read"] },
+  ],
+  ["mcpRevoke", () => ipc.mcpRevoke(7), "mcp_revoke", { clientId: 7 }],
   [
     "installFromCatalogue",
     () => ipc.installFromCatalogue("atlas.map"),

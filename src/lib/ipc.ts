@@ -15,6 +15,8 @@ import type {
   AiPromptInfo,
   ExportOutcome,
   InstallResult,
+  McpConnected,
+  McpState,
   ModIcon,
   ModInfo,
   ModSecretSlot,
@@ -2409,6 +2411,29 @@ export const devModeState = () => invoke<DevModeState>("dev_mode_state");
 /** Switch developer mode for this device and wait for the write. Off pauses every unsigned mod, on
  *  resumes exactly those it paused. The answer is what it is now; a rejection means nothing changed. */
 export const devModeSwitch = (on: boolean) => invoke<DevSwitch>("dev_mode_switch", { on });
+
+// ---- Connected apps (Mods spec 1.16) ----------------------------------------------------------------
+// Settings > Data & Security. A refusal rejects with `{code, message}` like the Mods commands; show the
+// message. None of these ever returns a token except `mcpConnectApp`, once.
+
+/** Whether this build shows connected apps at all (a release build only on an OS Bobby has tested).
+ *  Built into the app, so it needs no vault. */
+export const mcpOffered = () => invoke<boolean>("mcp_offered");
+
+/** What the section shows: this device's switch, the apps, whether the connection point is open and
+ *  why not. Never a token. Rejects `no-store` until the vault is open. */
+export const mcpState = () => invoke<McpState>("mcp_state");
+
+/** Switch connected apps on or off for THIS device in this vault; answers with the state as it is now. */
+export const mcpSetOn = (on: boolean) => invoke<McpState>("mcp_set_on", { on });
+
+/** Make an app that may read `scopes` (permission ids) and answer with its token and the config text
+ *  that carries it. The ONLY time the token is ever in the page: show it, let it be copied, drop it. */
+export const mcpConnectApp = (name: string, scopes: string[]) =>
+  invoke<McpConnected>("mcp_connect_app", { name, scopes });
+
+/** Take an app away and end its connections; answers with the state as it is now. */
+export const mcpRevoke = (clientId: number) => invoke<McpState>("mcp_revoke", { clientId });
 
 /** The Developer kit's readouts, all from Rust so the page keeps no copy that could drift: the API
  *  version and its deprecation window, every row of the dispatch table, the build-time limits, the

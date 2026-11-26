@@ -12,6 +12,7 @@
 //! - [`device`]: this computer's own record of whether the server is on for a vault and which apps it
 //!   paired (a file, never the store: a restore or a shared vault can never switch it on).
 //! - [`clients`]: minting, listing, revoking and verifying an app.
+//! - [`commands`]: what Settings > Data & Security calls (the switch, connecting, revoking).
 //! - [`tools`]: the five read tools and the scope each needs.
 //! - [`limits`]: the per-app limiter and its words.
 //! - [`jsonrpc`]: the protocol's messages.
@@ -48,11 +49,6 @@
 //! projection and one core per call, and `Authorised`, `calls::read` and `ModFacts` are never reused
 //! for an app.
 
-// Built before its callers: the commands behind Settings (slice M1c) are what call the clients' and
-// the device file's functions, and until they land only the restore reset (`device::all_off`) and the
-// socket's connections (`serve`) do. Tests cover every function.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -65,6 +61,7 @@ use crate::mods::api::{blocking, search_calls, Caller, Code, Host, ModError, Rep
 use crate::mods::devmode::Here;
 
 pub mod clients;
+pub mod commands;
 pub mod device;
 pub mod jsonrpc;
 pub mod limits;
@@ -75,6 +72,8 @@ pub mod transport;
 
 #[cfg(test)]
 mod clients_tests;
+#[cfg(test)]
+mod commands_tests;
 #[cfg(test)]
 mod device_tests;
 #[cfg(test)]
