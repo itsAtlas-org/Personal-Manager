@@ -73,6 +73,10 @@ export interface BoardDrag {
   startDrag: (e: ReactPointerEvent, w: Widget, mode: DragMode) => void;
 }
 
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
 export function rectToPx(r: Rect): PxRect {
   return { x: r.x * CELL, y: r.y * CELL, w: r.w * CELL, h: r.h * CELL };
 }
@@ -126,8 +130,14 @@ export function useBoardDrag(opts: BoardDragOptions): BoardDrag {
     };
 
     const onMove = (e: PointerEvent) => {
-      setLivePx(compute(e));
-      optsRef.current.onPointerCell?.(drag.id, pointerCell(e));
+      const live = compute(e);
+      setLivePx(live);
+      // A card that would land at the rect it already has is not being moved (resolveDrop treats the
+      // drop as a click and files nothing), so it aims at no folder: the ring and the drop agree.
+      const { cols, rows } = optsRef.current.boundsRef.current;
+      const snapped = pxRectToCells(live, cols, rows, minSize(drag.kind));
+      const unmoved = sameRect(snapped, drag.startRect);
+      optsRef.current.onPointerCell?.(drag.id, unmoved ? null : pointerCell(e));
     };
     const onUp = (e: PointerEvent) => {
       const { cols, rows } = optsRef.current.boundsRef.current;

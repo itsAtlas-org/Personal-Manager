@@ -197,6 +197,31 @@ describe("resolveDrop — file / fold / move", () => {
     expect(resolveDrop(widgets, "a", size, 44, 28, stubId, null)).toBe(widgets);
   });
 
+  it("a click on a card drawn exactly on a same-size card folds nothing (it did not move)", () => {
+    // The narrow frame's reflow can draw a card exactly on another: a press and release on its
+    // header is a click, not the "stack them to fold" gesture.
+    const widgets = [note("a", size), note("b", { ...size })];
+    expect(resolveDrop(widgets, "b", { ...size }, 44, 28, stubId, { x: 5, y: 4 })).toBe(widgets);
+    expect(resolveDrop(widgets, "a", { ...size }, 44, 28, stubId, null)).toBe(widgets);
+  });
+
+  it("a click on a card lying over a folder files nothing, with the pointer over the folder", () => {
+    const f = folder("f", { x: 4, y: 4, w: 3, h: 3 }, [note("a", size)]);
+    const c = note("c", { x: 3, y: 4, w: 7, h: 5 });
+    const widgets = [f, c];
+    expect(resolveDrop(widgets, "c", { ...c.rect }, 44, 28, stubId, { x: 5, y: 4 })).toBe(widgets);
+  });
+
+  it("a drop at the same corner but another size is not a click: it still folds with its twin", () => {
+    // "Did not move" means the whole rect is unchanged. A card whose corner stays but whose size
+    // differs from what the drop says is a real drop, and meeting a twin there folds the two.
+    const widgets = [note("a", size), note("b", { x: 4, y: 4, w: 4, h: 3 })];
+    const out = resolveDrop(widgets, "b", size, 44, 28, stubId, null);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("folder");
+    expect(out[0].children?.map((c) => c.id).sort()).toEqual(["a", "b"]);
+  });
+
   it("folds two identically-placed widgets into a new 3×3 folder", () => {
     const widgets = [note("a", size), note("b", { x: 0, y: 0, w: 7, h: 5 })];
     const out = resolveDrop(widgets, "b", size, 44, 28, stubId, null); // drop b exactly onto a

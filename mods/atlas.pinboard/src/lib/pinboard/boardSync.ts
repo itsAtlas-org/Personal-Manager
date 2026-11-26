@@ -14,9 +14,12 @@
 //
 // A save is the stored board with the DIFFERENCE between the display board as it was loaded and the
 // display board now applied to it: a card that was added is added, one that was removed is removed, a
-// field that changed is set, and every other card, field and rect stays byte for byte as it was. The
-// same two functions merge: after a revision conflict the board is read again and the same difference
-// is applied to what is there now, so the other writer's changes are kept and ours are added to them.
+// field that changed is set, and every other card, field and rect is sent with the very same values
+// it was stored with (the same objects, in the same key order). What PM's store then keeps is those
+// values; it may write an object's keys in another order, so after a save the board is the same, not
+// necessarily the same bytes, and nothing here treats a different key order as a change. The same two
+// functions merge: after a revision conflict the board is read again and the same difference is
+// applied to what is there now, so the other writer's changes are kept and ours are added to them.
 //
 // Nothing here throws on a hostile value (any JSON, any depth) and nothing here touches the clock, PM
 // or React.

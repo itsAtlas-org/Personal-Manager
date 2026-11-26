@@ -3,6 +3,16 @@
 The Pinboard's own history. Its version is the one in `manifest.json`, separate from PM's (spec D12): a
 change that touches only this folder bumps this version and adds an entry here.
 
+## 1.0.2
+
+- A click on a card that is drawn on top of another card or on top of a folder no longer puts
+  them into a folder. When your window is narrower than your board, the Pinboard draws the cards
+  that do not fit moved over, and one could land exactly on another card of the same size or on a
+  folder; pressing and letting go on it, without moving it, then folded the two into a new folder or
+  filed the card away. A card is now filed or folded only when you move it to a new place. While you
+  drag a card that has not left its place, no folder is ringed as a drop target. Where you put each
+  card is still what is stored.
+
 ## 1.0.1
 
 - The manifest now says `"answersSuspend": true`: the Pinboard saves what you were typing when PM
