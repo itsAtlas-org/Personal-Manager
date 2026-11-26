@@ -252,7 +252,9 @@ export function isFileable(kind: WidgetKind): boolean {
  *
  * This is the single source of truth for "would this drop file into a folder?" — {@link resolveDrop}
  * and the view's during-drag highlight both call it, so what the user is shown and what actually
- * happens cannot drift apart.
+ * happens cannot drift apart. (The one gate on top: a drop at the rect the card already has is a
+ * click and files nothing, so the drag hook aims at no folder while the live rect snaps to the
+ * card's own rect.)
  *
  * The pointer decides, not the dragged rect: a big note only *overlapping* a folder is placed
  * normally (widgets are free to overlap), so filing stays a deliberate aim rather than a graze.
@@ -292,7 +294,9 @@ function placeInFolder(siblings: Widget[], size: Rect, cols: number, rows: numbe
 }
 
 /**
- * Resolve where a just-moved widget `id` lands at cell-`rect`, returning the next widget list:
+ * Resolve where a just-moved widget `id` lands at cell-`rect`, returning the next widget list. A
+ * drop at the rect the widget already has is a click and changes nothing (the same array comes
+ * back); otherwise:
  *   1. Pointer over a folder → file the widget into it (see {@link folderAtPointer}), laid out clear
  *      of its new siblings.
  *   2. Else another loose widget at the exact same rect → combine the two into a NEW folder at that
@@ -314,6 +318,20 @@ export function resolveDrop(
 ): Widget[] {
   const moving = widgets.find((w) => w.id === id);
   if (!moving) return widgets;
+  // A drop that leaves the card where it is drawn is a click (a press on its header, which raises
+  // it), not a gesture: it files nothing and folds nothing, and to file or fold a card the person
+  // moves it. The board can DRAW a card exactly on a same-size card, or over a folder, that the person
+  // never put it on (the reflow into a narrow frame places a card in the first slot free of the cards
+  // before it; `findFreeRect` falls back to the top-left when the board is full), and a click there
+  // used to fold the two into a new folder, or file the card away.
+  if (
+    rect.x === moving.rect.x &&
+    rect.y === moving.rect.y &&
+    rect.w === moving.rect.w &&
+    rect.h === moving.rect.h
+  ) {
+    return widgets;
+  }
   const rest = widgets.filter((w) => w.id !== id);
 
   // 1) Pointer over a folder → file it in. (Never fires for a moving folder — no nesting.)
