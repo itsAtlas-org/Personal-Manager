@@ -685,6 +685,9 @@ export interface PinboardMoveState {
   conflict: boolean;
   /** The mod's copy had characters replaced; the old row is unchanged. */
   repaired: boolean;
+  /** A restore put the board back as it was when it moved into the mod (later edits are not in
+   *  it), and the copy has landed. Drawn only when no conflict is open. */
+  restored: boolean;
   /** The board cannot move as it is, and the install waits: it stays safe in PM's store. */
   refused: "unreadable" | "tooBig" | null;
 }

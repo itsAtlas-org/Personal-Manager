@@ -1,19 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect } from "vitest";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeExternalLinks from "rehype-external-links";
 import remarkGfm from "remark-gfm";
 import {
+  Markdown,
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
   REMARK_PLUGINS_PLAIN_LINES,
-  REMARK_PLUGINS_WITH_DASH_LISTS,
   safeUrl,
   SCHEMA,
 } from "./markdown";
-import { remarkDashLists } from "./markdownDashLists";
 import { remarkPlainLines } from "./markdownPlainLines";
 
 // The markdown pipeline is PM's single sanitizing boundary for untrusted, ingested content. These lock
@@ -96,10 +97,10 @@ describe("SCHEMA", () => {
 
   // The assertion above reads hast-util-sanitize's own allow-list, because SCHEMA never sets
   // `tagNames` of its own — it would only catch PM literally appending "script". This is the
-  // PM-side pin: the ONLY things we widen are `attributes.a` and `attributes.ul`. Everything else,
+  // PM-side pin: the ONLY things we widen are `attributes.a`. Everything else,
   // `protocols` above all (the list that makes a `javascript:` href die at the sanitizer even if
   // urlTransform were bypassed), has to stay exactly the library default.
-  it("widens the default schema in exactly two places and no other", () => {
+  it("widens the default schema in exactly one place and no other", () => {
     const differing = Object.keys(defaultSchema).filter(
       (k) =>
         SCHEMA[k as keyof typeof SCHEMA] !== defaultSchema[k as keyof typeof defaultSchema] &&
@@ -111,24 +112,22 @@ describe("SCHEMA", () => {
     const attrs = SCHEMA.attributes as Record<string, unknown>;
     const defaults = (defaultSchema.attributes ?? {}) as Record<string, unknown>;
     const changedAttrs = Object.keys(defaults).filter((k) => attrs[k] !== defaults[k]);
-    expect(changedAttrs).toEqual(["a", "ul"]);
+    expect(changedAttrs).toEqual(["a"]);
     expect(Object.keys(attrs).sort()).toEqual(Object.keys(defaults).sort());
   });
 
-  // Both widenings are VALUE-PINNED, which is what makes them narrow rather than an open door: the
-  // `["className", "…"]` form admits those literals and nothing else, exactly as the library's own
-  // schema admits `contains-task-list` on a `ul` and `task-list-item` on an `li`. A regression to a
-  // bare `"className"` would let any class through and would not be caught by the diff above.
-  //
-  // ONE entry listing both values, not two entries: `findDefinition` returns the FIRST entry whose
-  // name matches, so a second `["className", …]` would be dead code and the added class would be
-  // stripped — silently, and with every other test in this file still green.
-  it("admits exactly one extra class on a ul, by literal value, in a single entry", () => {
+  // The one class a `ul` may carry is the library's own `contains-task-list`, VALUE-PINNED: the
+  // `["className", "…"]` form admits that literal and nothing else, exactly as the library's own
+  // schema admits `task-list-item` on an `li`. A regression to a bare `"className"` would let any
+  // class through and would not be caught by the diff above. (PM once added `pm-dash-list` here for
+  // the Pinboard's dash points; the Pinboard mod draws those in its own editor now, so a widening
+  // of the one sanitizing renderer for it would be attack surface for nothing.)
+  it("admits only the library's own task-list class on a ul, by literal value, in a single entry", () => {
     const ul = (SCHEMA.attributes as Record<string, unknown[]>).ul;
     const classEntries = ul.filter(
       (e) => e === "className" || (Array.isArray(e) && e[0] === "className"),
     );
-    expect(classEntries).toEqual([["className", "contains-task-list", "pm-dash-list"]]);
+    expect(classEntries).toEqual([["className", "contains-task-list"]]);
     expect(ul).not.toContain("className");
   });
 
@@ -151,19 +150,12 @@ describe("SCHEMA", () => {
   });
 });
 
-// The dash-list plugin is a REMARK plugin, which is the property that keeps it out of the security
-// story: remark runs on mdast, upstream of the whole rehype chain, so it cannot put anything past
-// the sanitizer no matter what it emits. These pin that placement.
+// Remark plugins run on mdast, upstream of the whole rehype chain, so none of them can put anything
+// past the sanitizer no matter what it emits. These pin which surfaces get which.
 describe("the remark pipeline", () => {
   it("leaves the default surface untouched", () => {
     expect(REMARK_PLUGINS).toHaveLength(1);
     expect(REMARK_PLUGINS[0]).toBe(remarkGfm);
-  });
-
-  it("adds the dash-list plugin only on the opted-in surface", () => {
-    expect(REMARK_PLUGINS_WITH_DASH_LISTS).toHaveLength(2);
-    expect(REMARK_PLUGINS_WITH_DASH_LISTS[0]).toBe(remarkGfm);
-    expect(REMARK_PLUGINS_WITH_DASH_LISTS[1]).toBe(remarkDashLists);
   });
 
   it("adds the plain-lines parser setting only on the opted-in surface", () => {
@@ -199,5 +191,43 @@ describe("the rehype pipeline", () => {
   it("holds exactly the two plugins it is meant to", () => {
     expect(REHYPE_PLUGINS).toHaveLength(2);
     expect(entry(0)[0]).toBe(rehypeExternalLinks);
+  });
+});
+
+// What the renderer does with a note's list markers. The Pinboard's "-" points keep their en dash
+// because the Pinboard MOD's own editor draws it; PM's Markdown has no dash-list mode, so a "- item"
+// in a document, a chat answer or a promoted note is an ordinary bullet. These are literal strings
+// on purpose: a class or a marker that appeared would show in them.
+describe("list markers in ordinary Markdown", () => {
+  const render = (source: string): string =>
+    renderToStaticMarkup(createElement(Markdown, null, source));
+
+  it("renders a `- a` line as an ordinary bullet list, with no dash-list class", () => {
+    const out = render("- a");
+    expect(out).toBe('<div class="pm-markdown"><ul>\n<li>a</li>\n</ul></div>');
+    expect(out).not.toContain("pm-dash-list");
+  });
+
+  it("renders a `+ a` line the same, so a note read back from the vault is a plain list", () => {
+    expect(render("+ a")).toBe('<div class="pm-markdown"><ul>\n<li>a</li>\n</ul></div>');
+  });
+
+  it("keeps a `*` list and a `+` list as two ordinary lists, neither carrying a class", () => {
+    expect(render("* a\n\n+ b")).toBe(
+      '<div class="pm-markdown"><ul>\n<li>a</li>\n</ul>\n<ul>\n<li>b</li>\n</ul></div>',
+    );
+  });
+
+  it("turns a two-space hard break into a <br/>", () => {
+    expect(render("one  \ntwo")).toBe('<div class="pm-markdown"><p>one<br/>\ntwo</p></div>');
+  });
+
+  it("keeps the task-list classes the checklist CSS relies on", () => {
+    // The `:has()` selectors in index.css are a fallback for renderers that drop these; on an
+    // engine without `:has()` support these classes are the ONLY thing carrying the rule.
+    const out = render("- [ ] todo");
+    expect(out).toContain('<ul class="contains-task-list">');
+    expect(out).toContain('<li class="task-list-item">');
+    expect(out).not.toContain("pm-dash-list");
   });
 });

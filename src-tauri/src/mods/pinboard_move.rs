@@ -5,9 +5,11 @@
 //! the pilot handover of `atlas.pinboard`, run in the install's transaction through
 //! `autoinstall::finish` (an auto-install) or `autoinstall::finish_manual` (a click in the Mods tab).
 //!
-//! **DORMANT in C1.** The move acts only when `pinboard_move_pending` is in the store, and nothing
-//! in C1 writes it (C2's migration v62 does, from the board's content). The core Pinboard stays the
-//! live one.
+//! The move acts only when `pinboard_move_pending` is in the store. It has two writers and no
+//! other: migration v62 writes it, from the board's content (a non-blank board is owed its copy),
+//! and a restore's re-arm ([`autoinstall::rearm_pinboard`], called from `backup::adopt_mods`) writes
+//! it again for a store whose backup was taken after the move without the mod's data, so the
+//! restored store gets the pre-move board back in the mod. Both only ever INSERT it.
 //!
 //! **What must hold** (Bobby: "be very careful with the pinboard, live data, additive, don't remove
 //! anything"; the board is a person's own words and no copy of it may be lost):
@@ -43,7 +45,7 @@
 //!   so a planted type is never an error that blocks an install, and no untrusted text reaches an
 //!   error message or a log line.
 //!
-//! The marker and pending key names are C2's migration's; the strips that tell the person are drawn
+//! The marker and pending key names are migration v62's; the strips that tell the person are drawn
 //! by PM (`PinboardMoveStrips`).
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -58,8 +60,13 @@ use super::store;
 use crate::db;
 use crate::pinboard_legacy::{self, BOARD_KEY as LEGACY_KEY, PINBOARD_MOD_ID};
 
-/// "A non-blank board exists and its copy is owed." Written by C2's v62; deleted by the move.
+/// "A non-blank board exists and its copy is owed." Written by v62 and by a restore's re-arm
+/// ([`autoinstall::rearm_pinboard`]); deleted by the move.
 pub const PENDING: &str = "pinboard_move_pending";
+/// "This store's board was put back from the legacy snapshot by a restore": the strip says the
+/// restored board is the one from when the Pinboard moved, without later edits. Written only by the
+/// re-arm; cleared by the person's OK ([`dismiss`]) and when the move meets a board of the mod's own.
+pub const RESTORED: &str = "pinboard_move_restored";
 /// The sha256 (hex) of the legacy row's bytes at the move: the board has moved, and the legacy row is
 /// a frozen snapshot from here (`projects::pinboard_move_recorded`, the Calendar and the notes read it).
 pub const MOVED: &str = "pinboard_moved_sha";
@@ -263,7 +270,7 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 /// Blank as the move reads it: no row, or text that Rust's `trim` empties. A value that is not UTF-8
 /// is not blank (it is refused as unreadable).
-fn blank(bytes: &[u8]) -> bool {
+pub(super) fn blank(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).is_ok_and(|t| t.trim().is_empty())
 }
 
@@ -282,7 +289,7 @@ fn text_of(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
 }
 
 /// The legacy row's exact bytes, or `None` for no row.
-fn legacy_bytes(conn: &Connection) -> rusqlite::Result<Option<Vec<u8>>> {
+pub(super) fn legacy_bytes(conn: &Connection) -> rusqlite::Result<Option<Vec<u8>>> {
     Ok(conn
         .query_row(
             "SELECT CAST(value AS BLOB) FROM settings WHERE key = ?1",
@@ -460,6 +467,10 @@ pub(super) fn hand_over_pinboard(conn: &Connection, mod_id: &str) -> Result<(), 
             db::set_setting(conn, CONFLICT, &legacy_sha).map_err(|_| store_failed())?;
             db::set_setting(conn, MOVED, &legacy_sha).map_err(|_| store_failed())?;
             db::delete_setting(conn, PENDING).map_err(|_| store_failed())?;
+            // A restore's re-arm met a board the mod already has (the person edited before the copy
+            // settled): the restored board did not land, so the "PM restored your Pinboard" note
+            // would say something untrue. The conflict strip tells the real story.
+            db::delete_setting(conn, RESTORED).map_err(|_| store_failed())?;
             return Ok(());
         }
     };
@@ -482,6 +493,10 @@ pub struct MoveState {
     pub conflict: bool,
     /// The mod's copy had characters replaced.
     pub repaired: bool,
+    /// A restore put the pre-move board back (the re-arm's note is there) and the copy has landed:
+    /// the move is recorded again and no conflict is open. It draws only after the copy, so the
+    /// strip never says "restored" while the board is still on its way.
+    pub restored: bool,
     /// The move cannot happen as the board is: `unreadable` or `tooBig`. Worked out from the rows
     /// (a refused move rolls its transaction back, so it can write nothing).
     pub refused: Option<&'static str>,
@@ -513,9 +528,11 @@ pub fn state(conn: &Connection) -> rusqlite::Result<MoveState> {
             }
         }
     }
+    let conflict = has(conn, CONFLICT)?;
     Ok(MoveState {
-        conflict: has(conn, CONFLICT)?,
+        conflict,
         repaired: has(conn, REPAIRED)?,
+        restored: has(conn, RESTORED)? && has(conn, MOVED)? && !conflict,
         refused,
     })
 }
@@ -609,11 +626,12 @@ pub fn use_old_board(conn: &mut Connection) -> Result<(), UseOldRefusal> {
 }
 
 /// Clear a strip's note: `conflict` ("Keep this one": the mod's board stays and the old row stays as
-/// a snapshot) or `repaired` ("OK"). `false` for a name that is neither.
+/// a snapshot), `repaired` or `restored` ("OK"). `false` for a name that is none of them.
 pub fn dismiss(conn: &Connection, which: &str) -> rusqlite::Result<bool> {
     let key = match which {
         "conflict" => CONFLICT,
         "repaired" => REPAIRED,
+        "restored" => RESTORED,
         _ => return Ok(false),
     };
     conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
@@ -626,7 +644,7 @@ pub fn dismiss(conn: &Connection, which: &str) -> rusqlite::Result<bool> {
 /// mod's `prefs` key, only into the fields the mod does not hold yet, then clear the flag. A frame has
 /// no `localStorage`, so only the page can carry them. The same shape as the Map's
 /// ([`autoinstall::adopt_map_prefs`]): `Ok(false)` when there was nothing to do; the page keeps its
-/// keys; nothing is written without the flag the move sets (dormant until then).
+/// keys; nothing is written without the flag the move sets (a no-op until then).
 ///
 /// A `prefs` value that is not a JSON object is not ours to replace: it is left as it is and the flag
 /// cleared.

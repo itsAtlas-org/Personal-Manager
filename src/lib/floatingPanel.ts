@@ -3,7 +3,7 @@
 
 // Geometry for a free-floating, draggable, resizable in-app panel.
 //
-// Kept pure and separate from the component (like `pinboard/grid.ts`) so the rules that are easy to
+// Kept pure and separate from the component (like the Pinboard's `grid.ts`) so the rules that are easy to
 // get wrong — and impossible to notice until a user has the wrong monitor — are unit-tested:
 //
 //  * the panel must never cover the title bar, because that strip carries the frameless window's

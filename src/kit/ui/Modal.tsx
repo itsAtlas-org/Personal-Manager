@@ -76,8 +76,8 @@ export interface ModalBaseProps {
  *
  *  Prefer `labelledBy`, pointing at the heading already on screen, so the name cannot drift from
  *  the visible title (WCAG 2.5.3). `label` is the escape hatch for a dialog whose "title" is not a
- *  heading — PinboardView's folder board, whose title is an editable `<input>`, is the only one in
- *  the tree.
+ *  heading — the Pinboard's folder board, whose title is an editable `<input>`, was the only one in
+ *  the tree, and it is a mod's page now (so nothing in PM itself uses it today).
  *
  *  This is a union, not two optionals, and that is the whole point of the batch: the NEXT unnamed
  *  dialog is a `tsc` failure rather than an audit finding. Nearly nothing should reach for it

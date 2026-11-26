@@ -24,7 +24,7 @@ const noop = () => {};
 
 describe("Modal", () => {
   it("takes its accessible name from `label` when there is no heading to point at", () => {
-    // PinboardView's folder board: its "title" is an editable <input>, not a heading, so
+    // The Pinboard's folder board: its "title" is an editable <input>, not a heading, so
     // `labelledBy` has nothing correct to reference.
     const { getByRole } = render(
       <Modal open onClose={noop} label="Weekend plans">

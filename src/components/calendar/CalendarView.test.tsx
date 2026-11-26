@@ -2897,6 +2897,11 @@ describe("CalendarView: Event | Task in quick create", () => {
     const read = holdNextTasksRead();
     fireEvent.keyDown(title(), { key: "Enter" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The box leaving the DOM is only the commit. The effects that rebind the window's key handler to
+    // the calendar without a box open run in the passive flush after it, and a key pressed before
+    // that reaches the handler of the box that was open and opens nothing (an occasional failure on
+    // a loaded CI runner). Let that flush finish, as `mount` does for the same reason.
+    await act(async () => {});
     return read;
   }
 

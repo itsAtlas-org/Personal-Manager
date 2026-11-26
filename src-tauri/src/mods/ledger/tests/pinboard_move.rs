@@ -7,7 +7,8 @@
 //! board is `pinboard_move/tests.rs`; this file is about the transaction round it: the marker, the
 //! rollback, and the frame that must never get to write first.
 //!
-//! The markers are seeded by hand: C1 writes none (C2's migration does).
+//! The markers are seeded by hand: these tests start from a store the ladder has not marked and
+//! pick the state they need (v62 writes the same two keys for a store that used the Pinboard).
 
 use super::*;
 use crate::mods::autoinstall::{self, Step, PILOTS};
@@ -492,6 +493,89 @@ fn a_pending_copy_moves_whether_or_not_the_landed_note_is_already_there() {
     w.exec("INSERT INTO settings(key, value) VALUES ('mods_pilot_landed_pinboard', '1')");
     install_by_hand(&w, &b, Source::Catalogue).unwrap();
     settled(&w, BOARD);
+}
+
+// ---- A restore without the mod's data brings the pre-move board back ------------------------------
+
+#[test]
+fn a_restore_that_re_arms_the_move_and_the_real_settle_put_the_old_board_back_in_the_mod() {
+    // The Pinboard moved once. A backup taken with the mod's data off holds the signed row, the
+    // legacy snapshot and the move's record, but not the mod's board (the strip drops `mod_kv`).
+    let w = world();
+    let b = built("1.0.0");
+    owe(&w, true);
+    assert!(matches!(
+        land(&w, &b, &b.index()),
+        PilotLanded::Installed(_)
+    ));
+    settled(&w, BOARD);
+    // What the backup lacks: the mod's board. (The overlay stays in a backup; it is removed here so
+    // the settle's own seeding is what the test sees.) The person's edits after the move are not
+    // in the snapshot, which is the point of the strip's words.
+    w.exec(
+        "DELETE FROM mod_kv WHERE key = 'board'; DELETE FROM mod_overlay;
+         INSERT INTO settings(key, value) VALUES ('pinboard_move_repaired', '1');",
+    );
+    let before = legacy(&w);
+
+    // The restore's reset, as `switch_to_vault` runs it before the store is attached.
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let conn = w.store.conn.lock().unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(&conn, dir.path(), "vault-1").unwrap();
+    }
+    assert_eq!(setting(&w, PENDING).as_deref(), Some("1"));
+    assert_eq!(setting(&w, "pinboard_moved_sha"), None);
+    assert_eq!(setting(&w, "pinboard_move_repaired"), None);
+    assert_eq!(setting(&w, MARKER).as_deref(), Some("1"));
+    assert_eq!(board(&w), None, "nothing is copied until the pass settles");
+
+    // The pass settles the row that is already there.
+    w.ledger().settle_pilot(pilot()).unwrap();
+    settled(&w, BOARD);
+    assert_eq!(setting(&w, MARKER), None);
+    assert_eq!(
+        legacy(&w),
+        before,
+        "the old row, byte for byte and in place"
+    );
+    let state = {
+        let conn = w.store.conn.lock().unwrap();
+        pinboard_move::state(&conn).unwrap()
+    };
+    assert!(state.restored, "the strip says what came back");
+    assert!(!state.conflict && !state.repaired && state.refused.is_none());
+}
+
+#[test]
+fn the_rearm_is_not_run_for_a_backup_that_kept_the_mods_board() {
+    // A toggle-on backup has the board the person edited since the move: the reset must not owe the
+    // copy again, and the settle that follows must change nothing.
+    let w = world();
+    let b = built("1.0.0");
+    owe(&w, true);
+    assert!(matches!(
+        land(&w, &b, &b.index()),
+        PilotLanded::Installed(_)
+    ));
+    w.exec(
+        "UPDATE mod_kv SET value = '{\"version\":1,\"widgets\":[]}', revision = 9 WHERE key = 'board'",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let conn = w.store.conn.lock().unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(&conn, dir.path(), "vault-1").unwrap();
+    }
+    assert_eq!(setting(&w, PENDING), None);
+    assert!(setting(&w, "pinboard_moved_sha").is_some());
+    w.ledger().settle_pilot(pilot()).unwrap();
+    assert_eq!(
+        board(&w),
+        Some(("{\"version\":1,\"widgets\":[]}".to_owned(), 9)),
+        "their later board stands"
+    );
+    let conn = w.store.conn.lock().unwrap();
+    assert!(!pinboard_move::state(&conn).unwrap().restored);
 }
 
 // ---- The Map, which a person's own install now settles too -----------------------------------------

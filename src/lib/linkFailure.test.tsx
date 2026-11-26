@@ -1152,8 +1152,6 @@ describe("callers of openUrl", () => {
     for (const path of [
       "src/lib/useExternalLinks.ts",
       "src/components/ui/ContextMenuHost.tsx",
-      "src/components/NoteEditor.tsx",
-      "src/components/RichNoteEditor.tsx",
       "src/components/calendar/edit/DescriptionEditor.tsx",
       "src/components/backup/ProtonDriveSection.tsx",
     ]) {

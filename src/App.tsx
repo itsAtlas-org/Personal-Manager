@@ -28,7 +28,6 @@ import { DocumentsView } from "./components/DocumentsView";
 import { FocusView } from "./components/FocusView";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { LockScreen } from "./components/LockScreen";
-import { PinboardView } from "./components/PinboardView";
 import { ProjectView } from "./components/ProjectView";
 import { ReviewView } from "./components/ReviewView";
 import { ModsRoute } from "./components/mods/ModsRoute";
@@ -74,6 +73,8 @@ import {
   isModView,
   isReachable,
   learningToolsShown,
+  navigateTarget,
+  PINBOARD_VIEW,
   useNav,
   type View,
 } from "./lib/nav";
@@ -816,12 +817,14 @@ export default function App() {
   // re-read a blob it wrote, before this window writes its own copy back over it.
   useEffect(() => followStoredPrefs(), []);
 
-  // The pop-out Calendar's links to a project or the pinboard land here (popout.rs `show_in_main`).
-  // Through a ref, so the subscription is made once and always calls the current `openProject`.
+  // The pop-out Calendar's links to a project or the Pinboard's tab land here (popout.rs
+  // `show_in_main`). Through a ref, so the subscription is made once and always calls the current
+  // `openProject`. What it accepts is `navigateTarget`'s say: the pop-out is another webview.
   const navigateRef = useRef<(view: string, project?: string) => void>(() => {});
   navigateRef.current = (to, project) => {
-    if (to === "project" && project) openProject(project);
-    else if (to === "pinboard" || to === "calendar") setView(to);
+    const target = navigateTarget(to, project);
+    if (target?.kind === "project") openProject(target.project);
+    else if (target?.kind === "view") setView(target.view);
   };
   useEffect(
     () =>
@@ -1168,8 +1171,9 @@ export default function App() {
                 focus. */}
             {!showSettings && <ModNoticeStrips />}
             {/* What PM says about the Pinboard's move into its mod: both boards kept, a copy with
-                characters replaced, a board that can't move yet. Dormant until the move is owed;
-                Settings draws its own copy while open. */}
+                characters replaced, a board a restore put back, a board that can't move yet.
+                Draws nothing unless a move or restore left a note; Settings draws its own copy
+                while open. */}
             {!showSettings && <PinboardMoveStrips />}
             {!showSettings && <ModKeyAsks />}
             <div
@@ -1268,7 +1272,7 @@ export default function App() {
                   <main className="flex h-full flex-1 flex-col">
                     <CalendarView
                       onOpenProject={openProject}
-                      onOpenPinboard={() => setView("pinboard")}
+                      onOpenPinboard={() => setView(PINBOARD_VIEW)}
                       onPopOut={() => void openCalendarWindow().catch(() => {})}
                       reveal={calendarReveal}
                       onRevealTaken={() => setCalendarReveal(null)}
@@ -1292,13 +1296,6 @@ export default function App() {
                 ) : view === "teach" ? (
                   <main className="flex h-full flex-1 flex-col">
                     <TeachView />
-                  </main>
-                ) : view === "pinboard" ? (
-                  // min-w-0 lets the oversized pinboard board stay contained in its own
-                  // overflow-auto scroller instead of inflating <main> and shoving the board
-                  // header's right-aligned buttons off-screen.
-                  <main className="flex h-full min-w-0 flex-1 flex-col">
-                    <PinboardView />
                   </main>
                 ) : view === "dev" ? (
                   <main className="flex h-full flex-1 flex-col">

@@ -132,6 +132,16 @@ function listen(port: MessagePort): unknown[] {
 
 const tick = (ms = 20) => act(() => new Promise((r) => setTimeout(r, ms)));
 
+/** The question is on screen AND live: its Escape listener, its place among the open dialogs and its
+ *  focus on Decline are all set by effects that run a beat after the commit that draws it, and a key
+ *  pressed in that gap goes to the dialog under it (or nowhere). Focus on Decline is the last of them. */
+async function questionReady(): Promise<HTMLElement> {
+  const dialog = await screen.findByRole("alertdialog");
+  const decline = within(dialog).getByRole("button", { name: "Decline" });
+  await waitFor(() => expect(document.activeElement).toBe(decline));
+  return dialog;
+}
+
 /** Let the guard that holds Accept for half a second after the question appears pass. */
 async function pastGuard() {
   await act(() => new Promise((r) => setTimeout(r, PROMPT_GUARD_MS + 60)));
@@ -214,7 +224,7 @@ describe("PM's own yes/no for a MOD-2003", () => {
       const port = connect(await theFrame());
       const got = listen(port);
       port.postMessage({ id: 9, method: "milestones.delete", args: { id: 1 } });
-      const dialog = await screen.findByRole("alertdialog");
+      const dialog = await questionReady();
       if (how === "button")
         fireEvent.click(within(dialog).getByRole("button", { name: "Decline" }));
       else if (how === "escape") fireEvent.keyDown(window, { key: "Escape" });
@@ -277,7 +287,7 @@ describe("PM's own yes/no for a MOD-2003", () => {
     const port = connect(await theFrame());
     listen(port);
     port.postMessage({ id: 1, method: "shell.openLink", args: {} });
-    await screen.findByRole("alertdialog");
+    await questionReady();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(modConfirm).toHaveBeenCalledWith(TOKEN, false));
     expect(onLowerClose).not.toHaveBeenCalled();

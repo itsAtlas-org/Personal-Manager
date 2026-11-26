@@ -20,6 +20,7 @@ import {
   pilotFeature,
   pilotHiddenRuleApplies,
   pilotModIds,
+  PINBOARD_VIEW,
   placementAfterPilotLanded,
   renamedNavId,
   resolveNav,
@@ -41,9 +42,9 @@ describe("a stored `graph` placement", () => {
   it("is the core Map tab for as long as one exists: nothing is renamed", () => {
     expect(WITH_GRAPH.has("graph")).toBe(true);
     expect(renamedNavId("graph", WITH_GRAPH)).toBe("graph");
-    expect(parsePlacement('{"hidden":["graph"],"pinned":["pinboard"]}', WITH_GRAPH)).toEqual({
+    expect(parsePlacement('{"hidden":["graph"],"pinned":["documents"]}', WITH_GRAPH)).toEqual({
       hidden: ["graph"],
-      pinned: ["pinboard"],
+      pinned: ["documents"],
     });
     // A pin the user made on the mod's tab ahead of time is kept as a mod tab, as before.
     expect(parsePlacement('{"hidden":[],"pinned":["mod:atlas.map"]}', WITH_GRAPH).pinned).toEqual([
@@ -54,9 +55,9 @@ describe("a stored `graph` placement", () => {
   it("is the Map mod's tab in PM as it ships: the core list has no `graph`", () => {
     expect(CORE.has("graph")).toBe(false);
     expect(renamedNavId("graph")).toBe(MAP);
-    expect(parsePlacement('{"hidden":["graph"],"pinned":["pinboard"]}')).toEqual({
+    expect(parsePlacement('{"hidden":["graph"],"pinned":["documents"]}')).toEqual({
       hidden: [MAP],
-      pinned: ["pinboard"],
+      pinned: ["documents"],
     });
   });
 
@@ -84,7 +85,7 @@ describe("a stored `graph` placement", () => {
 
   it("leaves every other id alone, whichever state PM is in", () => {
     for (const core of [WITH_GRAPH, WITHOUT_GRAPH]) {
-      for (const id of ["focus", "pinboard", "mods", "mod:acme.tool", "mod:atlas.pinboard"]) {
+      for (const id of ["focus", "documents", "mods", "mod:acme.tool", "mod:atlas.pinboard"]) {
         expect(renamedNavId(id, core), id).toBe(id);
       }
     }
@@ -112,10 +113,10 @@ describe("the installed-hidden rule", () => {
 
   it("hides the new tab on a Minimal device that wasn't showing the core tab, once the core entry is gone", () => {
     expect(pilotHiddenRuleApplies("atlas.map", WITHOUT_GRAPH)).toBe(true);
-    const start: NavPlacement = { hidden: ["teach"], pinned: ["pinboard"] };
+    const start: NavPlacement = { hidden: ["teach"], pinned: ["documents"] };
     expect(placementAfterPilotLanded(start, "atlas.map", "min", WITHOUT_GRAPH)).toEqual({
       hidden: ["teach", MAP],
-      pinned: ["pinboard"],
+      pinned: ["documents"],
     });
   });
 
@@ -200,6 +201,11 @@ describe("the sidebar's pilot tables and the backend's PILOTS", () => {
     expect(pilots.map((p) => p.id)).toEqual(["atlas.map", "atlas.pinboard"]);
   });
 
+  it("names the Pinboard's tab the way the Rust pilot table names the mod", () => {
+    const pinboard = pilots.find((p) => p.id === "atlas.pinboard");
+    expect(PINBOARD_VIEW).toBe(`mod:${pinboard?.id}`);
+  });
+
   it("has the same pilots in the sidebar's table", () => {
     expect(pilotModIds().sort()).toEqual(pilots.map((p) => p.id).sort());
   });
@@ -209,7 +215,7 @@ describe("the sidebar's pilot tables and the backend's PILOTS", () => {
     for (const p of pilots) {
       const tab = pilotCoreTab(p.id);
       expect(tab, p.id).not.toBeNull();
-      // Once PM's own list has no such tab (the Map now, the Pinboard after PR C2) a pin or a hide
+      // Once PM's own list has no such tab (the Map and the Pinboard now) a pin or a hide
       // stored for it means the mod's tab; while PM's list has it, nothing is translated.
       expect(renamedNavId(tab as string, none), p.id).toBe(`mod:${p.id}`);
       expect(pilotFeature(p.id), p.id).not.toBeNull();
@@ -226,25 +232,19 @@ describe("the sidebar's pilot tables and the backend's PILOTS", () => {
     }
   });
 
-  it("changes nothing for the Pinboard while PM still has its own Pinboard tab", () => {
-    // PR C1: the core Pinboard is live, so the translation, and the rule, wait.
-    expect(CORE.has("pinboard")).toBe(true);
-    expect(renamedNavId("pinboard")).toBe("pinboard");
+  it("makes the Pinboard's old tab the mod's now that PM's own list has none", () => {
+    // The core Pinboard tab is gone, so a pin or a hide stored for `pinboard` is the mod's.
+    expect(CORE.has("pinboard")).toBe(false);
+    expect(renamedNavId("pinboard")).toBe("mod:atlas.pinboard");
     expect(parsePlacement('{"hidden":["pinboard"],"pinned":["pinboard"]}')).toEqual({
-      hidden: ["pinboard"],
-      pinned: ["pinboard"],
+      hidden: ["mod:atlas.pinboard"],
+      pinned: ["mod:atlas.pinboard"],
     });
-    expect(pilotHiddenRuleApplies("atlas.pinboard")).toBe(false);
-    expect(placementAfterPilotLanded({ hidden: [], pinned: [] }, "atlas.pinboard", "min")).toEqual({
-      hidden: [],
-      pinned: [],
-    });
-    // And a tab that was always shown stays so after the core tab goes: nothing is hidden for it.
-    const gone = new Set([...CORE].filter((id) => id !== "pinboard"));
-    expect(pilotHiddenRuleApplies("atlas.pinboard", gone)).toBe(true);
-    expect(
-      placementAfterPilotLanded({ hidden: [], pinned: [] }, "atlas.pinboard", "min", gone),
-    ).toEqual({ hidden: [], pinned: [] });
+    expect(pilotHiddenRuleApplies("atlas.pinboard")).toBe(true);
+    // The tab was always shown, so landing the mod hides nothing, at any Depth.
+    for (const depth of ["min", "standard", "power"] as const) {
+      expect(placementAfterPilotLanded(NONE, "atlas.pinboard", depth)).toBe(NONE);
+    }
     const [pending] = modNavEntries([
       { id: "atlas.pinboard", name: "Pinboard", navTab: "Pinboard", pending: true },
     ]);

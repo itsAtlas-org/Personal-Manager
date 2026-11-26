@@ -10,8 +10,7 @@
 // - With no line of its own, it opens through `openLink` and a failure shows in the link notice:
 //   the app-wide handler (useExternalLinks: chat, the reader, the briefing), a middle-click on a
 //   description's web link and a Ctrl+click on one in the description editor, the right-click
-//   menu's Open link, a note's Ctrl+click (NoteEditor, RichNoteEditor) and Proton Drive's install
-//   link.
+//   menu's Open link, and Proton Drive's install link.
 // - With a line of its own beside what was clicked, it says the failure there: an event
 //   description's mail links (useMailLink, under the description), the call's Join and "Open in
 //   Google Calendar" (MeetField, the event pop-up), and the sign-in strip's Open again (the strip

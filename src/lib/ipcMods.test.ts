@@ -188,6 +188,12 @@ const CALLS: [string, () => Promise<unknown>, string, Record<string, unknown> | 
     "pinboard_move_dismiss",
     { note: "conflict" },
   ],
+  [
+    "pinboardMoveDismiss (restored)",
+    () => ipc.pinboardMoveDismiss("restored"),
+    "pinboard_move_dismiss",
+    { note: "restored" },
+  ],
 ];
 
 describe("the Mods tab's wrappers", () => {

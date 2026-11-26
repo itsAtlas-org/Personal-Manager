@@ -86,7 +86,7 @@ prerequisites.
 
 ```bash
 npm install
-npm run tauri dev      # run the app (needs a desktop; it won't render headless)
+PM_DATA_DIR=/path/to/a/folder npm run tauri dev   # run the app (needs a desktop; it won't render headless)
 ```
 
 Platform gotchas worth knowing before you lose an afternoon:
@@ -191,7 +191,8 @@ quality but do almost nothing at *runtime* — there are **no end-to-end or UI t
 A green PR proves the code compiles, is well-formed, and passes unit tests; it does
 **not** prove the feature works. That last mile is on you:
 
-- **Run the app and exercise the real path** (`npm run tauri dev`). This is the single
+- **Run the app and exercise the real path** (`npm run tauri dev` with `PM_DATA_DIR` set; a dev
+  build refuses the real data folder unless you set `PM_DEV_REAL_DATA=1`). This is the single
   most important check and only a human can do it. "The types compile" is not "it works."
 - **No placeholder or mock data** wired into any surface — real empty/loading states
   instead.

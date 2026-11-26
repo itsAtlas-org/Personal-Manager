@@ -374,14 +374,15 @@ export const setVaultEmbedder = (embedderId: string) =>
  *  it (the backend then reasons in UTC). Validated against the tz database in Rust. */
 export const setTimeZone = (zone: string) => invoke<void>("set_time_zone", { zone });
 
-/** Read a UI preference blob (theme axes, pinboard layout) from the encrypted store
+/** Read a UI preference blob (theme axes, sidebar and calendar layout) from the encrypted store
  *  so it travels with the data folder. `null` when nothing is stored yet. */
 export const getPref = (key: string) => invoke<string | null>("get_pref", { key });
 
 /** Persist a UI preference blob. The backend only accepts a fixed allowlist of keys
- *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `pinboard`, `map`, `project_ui`, `milestone_ui`,
- *  `calendar_ui`, `backup_ui`), so this can't touch schema-critical settings. Developer mode is
- *  not one of them: it is Rust's alone, per device (`devModeState` / `devModeSwitch`). */
+ *  (`WEBVIEW_PREFS` in settings.rs: `appearance`, `project_ui`, `milestone_ui`, `calendar_ui`,
+ *  `backup_ui`), so this can't touch schema-critical settings. Developer mode is not one of them:
+ *  it is Rust's alone, per device (`devModeState` / `devModeSwitch`). Neither is `pinboard`: the
+ *  Pinboard is a mod now and its old board row is a frozen snapshot only Rust reads. */
 export const setPref = (key: string, value: string) => invoke<void>("set_pref", { key, value });
 
 /** Ordered preferred chat models (first = primary). */
@@ -1846,7 +1847,7 @@ export interface MainNavigate {
 }
 
 /** Show `to` in the main window and bring it forward: the pop-out's links to a project or the
- *  pinboard. */
+ *  Pinboard's tab (`view: "mod:atlas.pinboard"`). The main window checks `view` (`navigateTarget`). */
 export const showInMainWindow = (to: MainNavigate) =>
   invoke<void>("show_in_main_window", { view: to.view, project: to.project ?? null });
 
@@ -2575,15 +2576,16 @@ export const adoptPinboardPrefs = (
 ) => invoke<boolean>("adopt_pinboard_prefs", { confirmDelete, showPast, showCompleted });
 
 /** What PM's strips about the Pinboard's move say: both boards kept, a copy with characters
- *  replaced, a board that cannot move yet. Booleans and a word, never the board's text. */
+ *  replaced, a board a restore put back, a board that cannot move yet. Booleans and a word, never
+ *  the board's text. */
 export const pinboardMoveState = () => invoke<PinboardMoveState>("pinboard_move_state");
 
 /** "Use my old board": the mod's board is saved as "board before move" first, then the old one
  *  becomes the mod's. Nothing is deleted. Rejects (nothing changed) with the reason in words. */
 export const pinboardUseOldBoard = () => invoke<void>("pinboard_use_old_board");
 
-/** Clear one of the move's notes: `conflict` ("Keep this one") or `repaired`. */
-export const pinboardMoveDismiss = (note: "conflict" | "repaired") =>
+/** Clear one of the move's notes: `conflict` ("Keep this one"), `repaired` or `restored` ("OK"). */
+export const pinboardMoveDismiss = (note: "conflict" | "repaired" | "restored") =>
   invoke<void>("pinboard_move_dismiss", { note });
 
 /** Subscribe to `mods://changed`: the installed mods, or what the registry serves, changed (an

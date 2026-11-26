@@ -126,7 +126,7 @@ describe("contrast axis — WCAG targets across every system × mode", () => {
       });
 
       // The segmented controls (SegmentedControl, the Calendar's RangeControl, the pressed IconButton,
-      // the Pinboard's list/timeline switch, the Map's By project / Semantic switch). Two things
+      // the Map's By project / Semantic switch). Two things
       // there failed 1.4.11, measured with the real themeVars over every System x Mode x accent x
       // Contrast level (76 combinations):
       //   - the group's edge in `--border2` (or `--border`): 1.33-1.84:1 against bg/panel/surface at
@@ -210,7 +210,6 @@ describe("segmented controls use the measured edge and rim", () => {
       "../kit/ui/SegmentedControl.tsx",
       "../components/ui/IconButton.tsx",
       "../components/calendar/RangeControl.tsx",
-      "../components/PinboardView.tsx",
       "../components/calendar/edit/CustomRecurrenceDialog.tsx",
       "../components/calendar/edit/GuestField.tsx",
     ],
@@ -239,10 +238,6 @@ describe("segmented controls use the measured edge and rim", () => {
 
   it("IconButton: the pressed variant is rimmed", () => {
     expect(src("ui/IconButton.tsx")).toContain(`"bg-accent text-accent-ink ${RIM} enabled:hover`);
-  });
-
-  it("Pinboard's list/timeline switch: the chosen icon is rimmed", () => {
-    expect(src("PinboardView.tsx")).toContain(`"bg-accent text-accent-ink ${RIM}"`);
   });
 
   it("Custom repeat's weekday buttons: the rim is there on and off", () => {

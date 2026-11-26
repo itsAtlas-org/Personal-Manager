@@ -113,10 +113,10 @@ describe("every dialog has an accessible name", () => {
   it("finds the dialogs it is meant to be scanning", () => {
     // A scan of an empty set passes, and after the conversion nearly every dialog reaches Modal
     // through `Dialog`. Pin that the matcher still sees the ones that remain — `Dialog` itself,
-    // and the folder board that names itself with `label`.
+    // and the Mods tab's first-open dialog that names itself with `labelledBy`.
     const withModals = SOURCES.filter(([, t]) => /<Modal[\s>]/.test(t)).map(([p]) => p);
     expect(withModals).toContain("src/kit/ui/Dialog.tsx");
-    expect(withModals).toContain("src/components/PinboardView.tsx");
+    expect(withModals).toContain("src/components/mods/ModsView.tsx");
   });
 
   it("has no unnamed <Modal> anywhere in the tree", () => {
@@ -317,7 +317,6 @@ describe("form-control edges use --ink4, not --border2", () => {
         ],
       ],
       ["src/components/DocumentReader.tsx", ["text-xs text-ink2 hover:bg-surface"]],
-      ["src/components/PinboardView.tsx", ["text-[0.6875rem] text-ink3 focus:border-accent-text"]],
       ["src/components/ProjectPicker.tsx", ["bg-surface text-ink3"]],
       ["src/components/TeachTags.tsx", ["group inline-flex items-center gap-1"]],
       ["src/components/calendar/ZoneGutter.tsx", ["zones.length === 0 &&"]],

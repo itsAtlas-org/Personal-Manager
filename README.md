@@ -67,10 +67,12 @@ not an exhaustive list; the in-app **What's New** is the complete, current recor
   briefing all read from one honest picture of what matters.
 - **Per-project view.** Click in and everything narrows to that project: its files beside a
   chat that answers only from them.
-- **A pinboard to think on.** A board for notes, checklists and timelines you can drag,
+- **A pinboard to think on (a mod).** A board for notes, checklists and timelines you can drag,
   resize and tidy into folders, with undo when you change your mind. Nothing on it is
   trapped there: a note can become a real document in your vault when it's ready, and a
-  timeline can become a project's milestones.
+  timeline can become a project's milestones. If you already used the Pinboard, PM downloads
+  it once for you, from the same catalogue as every mod, and copies your board across as it was;
+  you switch it on the first time you open it. Anyone else finds it in the Mods tab.
 - **A map of your knowledge (an optional mod).** The Document Map lays your documents out by
   meaning — related material clusters together — as a navigable map you can explore. If you
   already had documents, PM downloads it once for you, from the same catalogue as every mod,
@@ -168,8 +170,12 @@ For a full tour of the architecture and the rules for working in this repo, see
 
 ```bash
 npm install
-npm run tauri dev
+PM_DATA_DIR=/path/to/a/data/folder npm run tauri dev
 ```
+
+A dev build refuses to start on the real data folder the installed app uses. Point `PM_DATA_DIR`
+at another folder (a copy, or an empty one for a fresh start), or set `PM_DEV_REAL_DATA=1` to use
+the real folder on purpose.
 
 On first launch, paste your **OpenRouter API key** (from <https://openrouter.ai/keys>)
 into the welcome screen. It's stored in your OS keychain — never on disk or in this
@@ -278,7 +284,8 @@ source of truth). The folder is named **`Personal Manager`** for easy backup:
 
 The folder name is deliberately decoupled from the app's bundle identifier
 (`org.itsatlas.pm`, which stays fixed because the OS keychain is keyed to it). Override
-the location for development with the `PM_DATA_DIR` environment variable. Encryption and
+the location for development with the `PM_DATA_DIR` environment variable (a dev build refuses
+the real folder unless `PM_DATA_DIR` is set or `PM_DEV_REAL_DATA=1`). Encryption and
 API keys live in the OS keychain, never in the data directory.
 
 ## Privacy & security

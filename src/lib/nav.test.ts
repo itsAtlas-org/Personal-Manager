@@ -28,8 +28,10 @@ import {
   MOD_TAB_HELP_ID,
   MOD_TAB_LABEL_MAX,
   NAV_PLACEMENT_KEY,
+  navigateTarget,
   navMenuItems,
   navPlacementIsDefault,
+  PINBOARD_VIEW,
   parsePlacement,
   pinEntry,
   readNavPlacement,
@@ -53,12 +55,12 @@ const SPARE_TAB: NavEntryDef = {
   id: SPARE,
   label: "Spare",
   source: "core",
-  helpId: "nav-pinboard",
+  helpId: "nav-teach",
   hideable: true,
   defaultShown: (depth) => depth !== "min",
 };
 const WITH_SPARE: readonly NavEntryDef[] = CORE_NAV.flatMap((e) =>
-  e.id === "pinboard" ? [SPARE_TAB, e] : [e],
+  e.id === "mods" ? [SPARE_TAB, e] : [e],
 );
 
 const NONE: NavPlacement = { hidden: [], pinned: [] };
@@ -69,18 +71,8 @@ const shown = (p: NavPlacement, ctx: NavContext = STANDARD) =>
   ids(resolveNav(WITH_SPARE, p, ctx).shown);
 
 // The hand-written sidebar this replaced, in its order, with its gates, then the Mods tab (spec
-// §1.13), which sits after Pinboard and before Dev.
-const BEFORE = [
-  "focus",
-  "chat",
-  "calendar",
-  "documents",
-  "review",
-  "teach",
-  SPARE,
-  "pinboard",
-  "mods",
-];
+// §1.13), which sits after Teach and before Dev.
+const BEFORE = ["focus", "chat", "calendar", "documents", "review", "teach", SPARE, "mods"];
 
 describe("resolveNav: the default", () => {
   it("is the sidebar as it was, for Standard and Power", () => {
@@ -90,7 +82,7 @@ describe("resolveNav: the default", () => {
 
   it("leaves the learning tools and the Map out on Minimal, as teachVisible/mapVisible did", () => {
     const r = resolveNav(WITH_SPARE, NONE, MINIMAL);
-    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
+    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "mods"]);
     expect(ids(r.dormant)).toEqual(["review", "teach", SPARE]);
     expect(r.hidden).toEqual([]);
   });
@@ -103,12 +95,11 @@ describe("resolveNav: the default", () => {
 
 describe("resolveNav: placement", () => {
   it("puts pinned entries first, in pinned order", () => {
-    expect(shown({ hidden: [], pinned: ["pinboard", "calendar"] })).toEqual([
-      "pinboard",
+    expect(shown({ hidden: [], pinned: ["documents", "calendar"] })).toEqual([
+      "documents",
       "calendar",
       "focus",
       "chat",
-      "documents",
       "review",
       "teach",
       SPARE,
@@ -118,15 +109,7 @@ describe("resolveNav: placement", () => {
 
   it("drops hidden entries from the sidebar but keeps them to offer", () => {
     const r = resolveNav(WITH_SPARE, { hidden: [SPARE, "chat"], pinned: [] }, STANDARD);
-    expect(ids(r.shown)).toEqual([
-      "focus",
-      "calendar",
-      "documents",
-      "review",
-      "teach",
-      "pinboard",
-      "mods",
-    ]);
+    expect(ids(r.shown)).toEqual(["focus", "calendar", "documents", "review", "teach", "mods"]);
     expect(ids(r.hidden)).toEqual(["chat", SPARE]);
   });
 
@@ -264,6 +247,59 @@ describe("isReachable and isActiveEntry", () => {
     const focus = WITH_SPARE.find((e) => e.id === "focus")!;
     expect(isActiveEntry(focus, "project")).toBe(true);
     expect(isActiveEntry(focus, "chat")).toBe(false);
+  });
+});
+
+describe("the Pinboard's tab since it became a mod", () => {
+  const PINBOARD_ROW = { id: "atlas.pinboard", name: "Pinboard", navTab: "Pinboard" };
+
+  it("is a mod tab, and PM has no tab of its own by that old name", () => {
+    expect(PINBOARD_VIEW).toBe("mod:atlas.pinboard");
+    expect(CORE_NAV.map((e) => e.id as string)).not.toContain("pinboard");
+  });
+
+  it("can be opened from a Calendar dot whether its row is a pending placeholder or a landed one", () => {
+    // `pending` is the placeholder for a mod PM is still installing. A paused or a waiting-for-you
+    // mod is a landed row with the same `navTab` (its panel says why); an entry takes no standing,
+    // so the placeholder, `pending: false` and a row with no `pending` field cover the shapes.
+    for (const pending of [true, false, undefined]) {
+      const entries = [...CORE_NAV, ...modNavEntries([{ ...PINBOARD_ROW, pending }])];
+      const resolved = resolveNav(entries, NONE, STANDARD);
+      expect(isReachable(PINBOARD_VIEW, entries, resolved, true), String(pending)).toBe(true);
+    }
+  });
+
+  it("sends a Calendar dot to Focus when there is no row at all (a new user who never installed it)", () => {
+    const resolved = resolveNav(CORE_NAV, NONE, STANDARD);
+    expect(isReachable(PINBOARD_VIEW, CORE_NAV, resolved, true)).toBe(false);
+  });
+});
+
+describe("navigateTarget: what the main window does with the pop-out's link", () => {
+  it("opens the Calendar, a named project and a mod's tab", () => {
+    expect(navigateTarget("calendar")).toEqual({ kind: "view", view: "calendar" });
+    expect(navigateTarget("project", "Atlas")).toEqual({ kind: "project", project: "Atlas" });
+    expect(navigateTarget("mod:atlas.pinboard")).toEqual({
+      kind: "view",
+      view: "mod:atlas.pinboard",
+    });
+  });
+
+  it("reads the old `pinboard` view as the Pinboard's tab", () => {
+    expect(navigateTarget("pinboard")).toEqual({ kind: "view", view: PINBOARD_VIEW });
+  });
+
+  it("refuses a project with no name, a bad mod id, a path and any other view", () => {
+    expect(navigateTarget("project")).toBeNull();
+    expect(navigateTarget("project", "")).toBeNull();
+    expect(navigateTarget("mod:Atlas.pinboard")).toBeNull();
+    expect(navigateTarget("mod:atlas")).toBeNull();
+    expect(navigateTarget("mod:atlas.pinboard/../x")).toBeNull();
+    expect(navigateTarget("/etc/passwd")).toBeNull();
+    // Views that exist but are not the pop-out's to open (Dev is gated, Mods is a core route).
+    for (const view of ["dev", "mods", "documents", "focus", "", "Calendar", "graph"]) {
+      expect(navigateTarget(view), view).toBeNull();
+    }
   });
 });
 
@@ -461,12 +497,12 @@ describe("stored placement", () => {
   it("forgets an uninstalled mod's tab, and nothing else", () => {
     writeNavPlacement({
       hidden: ["review", "mod:acme.tool"],
-      pinned: ["mod:acme.tool", "mod:acme.other", "pinboard"],
+      pinned: ["mod:acme.tool", "mod:acme.other", "documents"],
     });
     forgetNavTab("mod:acme.tool");
     expect(readNavPlacement("standard")).toEqual({
       hidden: ["review"],
-      pinned: ["mod:acme.other", "pinboard"],
+      pinned: ["mod:acme.other", "documents"],
     });
     // Nothing stored, or nothing about it: nothing is written.
     localStorage.clear();
@@ -494,9 +530,9 @@ describe("stored placement", () => {
 
   it("writes, reads back and resets", () => {
     expect(navPlacementIsDefault(readNavPlacement("standard"))).toBe(true);
-    writeNavPlacement({ hidden: ["review"], pinned: ["pinboard"] });
+    writeNavPlacement({ hidden: ["review"], pinned: ["documents"] });
     const read = readNavPlacement("standard");
-    expect(read).toEqual({ hidden: ["review"], pinned: ["pinboard"] });
+    expect(read).toEqual({ hidden: ["review"], pinned: ["documents"] });
     // The same object while nothing changes: useSyncExternalStore loops on a fresh one.
     expect(readNavPlacement("standard")).toBe(read);
     resetNavPlacement();

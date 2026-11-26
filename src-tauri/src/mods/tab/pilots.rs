@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The commands the pilots' auto-install gives the page (`mods::autoinstall`, PR B plan B8; the last
-//! four are the Pinboard's, PR C K8, dormant until a migration writes its markers):
+//! four are the Pinboard's, PR C K8, awake since v62 writes its markers for a store that used it):
 //!
 //! - `retry_auto_install`, the "Try now" under an "Installing" tab: fetch the safety list now and let
 //!   its pass run the install (offline, the index already held may still do it);
@@ -13,7 +13,8 @@
 //!   only, and only while the handover's flag stands;
 //! - `adopt_pinboard_prefs`, the same for the Pinboard's three nags;
 //! - `pinboard_move_state`, which strips the page draws about the Pinboard's move (a conflict, a
-//!   repaired copy, a board that cannot move), `pinboard_use_old_board` and `pinboard_move_dismiss`,
+//!   repaired copy, a board a restore put back, a board that cannot move), `pinboard_use_old_board`
+//!   and `pinboard_move_dismiss`,
 //!   the two answers to them (`mods::pinboard_move`).
 //!
 //! Each is main-window only through [`blocking`], and none is named `set_*`.
@@ -201,7 +202,8 @@ fn use_old_error(e: UseOldRefusal) -> ModsError {
     }
 }
 
-/// Clear a Pinboard strip's note: `conflict` ("Keep this one") or `repaired`. Nothing else is touched.
+/// Clear a Pinboard strip's note: `conflict` ("Keep this one"), `repaired` or `restored` ("OK").
+/// Nothing else is touched.
 #[tauri::command]
 pub async fn pinboard_move_dismiss(webview: Webview, note: String) -> Result<()> {
     blocking(&webview, move |app| {

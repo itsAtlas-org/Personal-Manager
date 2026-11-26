@@ -61,9 +61,9 @@ chunked, embedded, indexed and retrievable, with bounded context cost); **index-
 connectors** for Google Drive, OneDrive and local folders (pointer + embedding, bytes
 fetched live — never imported); a **multi-provider calendar** (Google events editable, #884) with a unified
 **Calendar** view tab; **project milestones** and a **structured flag layer**; **encrypted
-portable backups** (Proton Drive / Google Drive); the **Document Map**, a mod
-PM downloads once for people who had documents; **spreadsheet**
-and **photo/OCR** ingestion; a **document reader**; a **pinboard**; runtime **developer
+portable backups** (Proton Drive / Google Drive); the **Document Map** and the **Pinboard**, two mods
+PM downloads once for people who used them; **spreadsheet**
+and **photo/OCR** ingestion; a **document reader**; runtime **developer
 mode**; and the **V2 design system** (below). The deliberate cuts still stand (Google Tasks;
 everything in spec §10); design/polish, a pre-release security pass, and the public-repo
 release remain the open post-v1 work.
@@ -79,14 +79,14 @@ release remain the open post-v1 work.
     everywhere but this file, and the `frontend` CI job (pr.yml) runs it.
   - `src/lib/types.ts` — shared types mirroring the Rust structs.
   - `src/components/` — the nav surfaces (`Sidebar` → Focus / Chats / Documents / Review /
-    Calendar / Pinboard, any installed mod's tab (the Document Map is one), plus the capability-gated Teach + Dev; the list itself, its gating
+    Calendar, any installed mod's tab (the Document Map and the Pinboard are two), plus the capability-gated Teach + Dev; the list itself, its gating
     and the user's pin and hide live in `src/lib/nav.ts`, which the sidebar, the command palette
     and App's fallback all read): `FocusView` (status
     cards + triage + milestones + the calendar agenda + the daily briefing), `ProjectView`
     (per-project files + scoped chat), `ChatView` / `Composer` (+ `ContextMeter`,
     `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`,
     `calendar/` (the unified calendar view, incl. a Terminal fork),
-    `PinboardView`, `TeachView` / `TeachPreferences` (entities + preferences), `DevView`
+    `TeachView` / `TeachPreferences` (entities + preferences), `DevView`
     (read-only inspectors), `ConnectorsSettings` + per-provider connection components,
     `SettingsView` (tabbed: keys/model, appearance, storage, backup, security, developer…),
     `CommandPalette` (Ctrl/Cmd+K), `HelpOverlay`. Shared primitives live in
@@ -227,10 +227,12 @@ release remain the open post-v1 work.
     A call that needs the person's yes is a question PM draws itself (`confirm.rs`, `ModConfirmDialog`,
     INVARIANTS.md I-37); before PM takes a frame down in an orderly way it asks it to save
     (`suspend.rs`, I-38); `refs.rs` rewrites a mod's stored project names when a project is renamed,
-    merged or deleted (`data.projectRefs`); `pinboard_move.rs` is the Pinboard's copy into its mod,
-    built and dormant until a later migration (I-36), and `pinboard_legacy.rs` is what core still
-    reads of the old board (the Calendar's dots). `mods/atlas.pinboard/` is the Pinboard as a mod, a
-    copy of the core one built on `src/kit`; core's Pinboard stays the live one. A mod's build
+    merged or deleted (`data.projectRefs`); `pinboard_move.rs` is the Pinboard's copy into its mod
+    (migration v62 asks for it, the restore's `autoinstall::rearm_pinboard` asks again; I-36), and
+    `pinboard_legacy.rs` is what core still reads of the old board (the Calendar's dots before the
+    move, the frozen snapshot after it). `mods/atlas.pinboard/` is the Pinboard, built on `src/kit`;
+    core has no Pinboard of its own (the swap, #1044), and the old `settings['pinboard']` row is never
+    deleted. A mod's build
     (`mods/vite.config.ts`) takes React and Tailwind, and Tailwind scans only `src/kit` and the mod's
     own source.
     `tests/sealed-frame/` is a regression app that never ships: it includes
@@ -436,11 +438,15 @@ adding a holder needs no change to the script.
 
 ```bash
 npm install
-npm run tauri dev      # run the app (needs a desktop; GUI won't render headless)
+PM_DATA_DIR=/path/to/a/copy npm run tauri dev   # run the app (needs a desktop; GUI won't render headless)
 npm run build          # type-check + bundle the frontend
 cargo test  --manifest-path src-tauri/Cargo.toml   # backend tests (incl. the store)
 cargo build --manifest-path src-tauri/Cargo.toml   # compile the backend
 ```
+
+A dev build (`npm run tauri dev`, `cargo run`) refuses to start on the real data folder the
+installed app uses: set `PM_DATA_DIR` to a copy of it, or set `PM_DEV_REAL_DATA=1` to use the real
+folder on purpose. Release builds ignore both and are unaffected.
 
 The DB layer has a self-contained test (`src-tauri/src/db/mod.rs`) that proves
 encryption + vectors + keyword search without a keychain or GUI — keep it green.

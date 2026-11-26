@@ -358,8 +358,11 @@ fn db_holds_user_data(conn: &rusqlite::Connection) -> bool {
     // The seeded inbox is not user intent; a renamed or merged entity is.
     let entities = "SELECT EXISTS(SELECT 1 FROM entities \
                       WHERE NOT (type = 'project' AND canonical_name = 'Unsorted'))";
-    // The pinboard is the one intent that lives ONLY in `settings`. Matched by key rather than by an
-    // exclusion list, because boot writes at least five keys of its own and that list would rot.
+    // The legacy pinboard row is an intent that lives ONLY in `settings`: before the Pinboard moved
+    // into its mod it was the whole board, and after the move it stays as the frozen pre-mod copy
+    // (the mod's own board is `mod_kv`, counted below), so a store that holds it holds a person's
+    // words either way. Matched by key rather than by an exclusion list, because boot writes at
+    // least five keys of its own and that list would rot.
     let pinboard = "SELECT EXISTS(SELECT 1 FROM settings \
                       WHERE key = 'pinboard' AND trim(COALESCE(value, '')) <> '')";
     // A mod's content-class storage is the user's (Mods spec §1.11), wherever its board or notes

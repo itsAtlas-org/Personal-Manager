@@ -1902,6 +1902,31 @@ const MIGRATIONS: &[&str] = &[
         WHERE EXISTS (SELECT 1 FROM documents);
     DROP TABLE IF EXISTS doc_layout;
     "#,
+    // v62: the Pinboard's existing-user markers (Mods spec section 5, D11, plan decision 13).
+    //
+    // INSERT OR IGNORE only: no UPDATE, DELETE or DROP, no table, and settings['pinboard'] is never
+    // written. mods_autoinstall_pinboard says "this store used the Pinboard": its board has at least one
+    // widget, or it has a note: document that is not Chat's (note:chat-* are saved Chat answers). The
+    // CASE wrapper is required: json_array_length raises "malformed JSON" on a value that is not JSON,
+    // SQLite does not promise AND short-circuits, and a migration error stops the store opening.
+    // typeof() keeps a BLOB from being read as JSONB. substr, not LIKE, because LIKE ignores case.
+    // pinboard_move_pending says "a non-blank board exists": the copy into the mod's storage is owed.
+    // mods/autoinstall.rs acts on the first, the Pinboard's handover on the second, and both clear
+    // them in the install's own transaction.
+    r#"
+    INSERT OR IGNORE INTO settings(key, value)
+        SELECT 'mods_autoinstall_pinboard', '1'
+        WHERE COALESCE((SELECT CASE WHEN typeof(value) = 'text' AND json_valid(value)
+                                    THEN json_array_length(value, '$.widgets') END
+                        FROM settings WHERE key = 'pinboard'), 0) > 0
+           OR EXISTS (SELECT 1 FROM documents
+                      WHERE substr(source_id, 1, 5) = 'note:'
+                        AND substr(source_id, 1, 10) <> 'note:chat-');
+    INSERT OR IGNORE INTO settings(key, value)
+        SELECT 'pinboard_move_pending', '1'
+        WHERE EXISTS (SELECT 1 FROM settings
+                      WHERE key = 'pinboard' AND trim(COALESCE(value, '')) <> '');
+    "#,
 ];
 
 /// Whether a store at `stored` is one this build can open: at or below the migrations it knows.
@@ -2085,6 +2110,8 @@ mod tests {
 
         // The replay ran v61 too, over a store holding documents: the marker is there.
         assert_eq!(marker(&conn).as_deref(), Some("1"));
+        // And v62: these documents carry no `note:` source id and the store holds no board.
+        assert_eq!(pinboard_markers(&conn), (None, None));
     }
 
     /// A freshly-opened store reaches the latest `user_version` and carries the v14 connector
@@ -2104,7 +2131,7 @@ mod tests {
             "every migration applied"
         );
         assert_eq!(
-            version, 61,
+            version, 62,
             "migration count pin (connector registry is v14; usage cost_usd is v15; \
              semantic-map doc_layout is v16; importance 'archive' level is v17; \
              multi-provider calendar foundation is v18; shared-drive access relation is v19; \
@@ -2137,7 +2164,8 @@ mod tests {
              archiving a project is v58; \
              tasks and task_stacks are v59; \
              the mods tables and usage_log.mod_id are v60; \
-             the Map's doc_layout drop and its auto-install marker are v61)"
+             the Map's doc_layout drop and its auto-install marker are v61; \
+             the Pinboard's existing-user markers are v62)"
         );
 
         // A minimal insert takes the additive defaults (index_only mode, ok state, NULL cursor).
@@ -3492,6 +3520,23 @@ mod tests {
         .ok()
     }
 
+    /// The Pinboard's two existing-user markers (v62): (auto-install, pending). Read through
+    /// CAST so a marker a test seeds as a BLOB still reads back.
+    fn pinboard_markers(conn: &rusqlite::Connection) -> (Option<String>, Option<String>) {
+        let get = |key: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT CAST(value AS TEXT) FROM settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        (
+            get("mods_autoinstall_pinboard"),
+            get("pinboard_move_pending"),
+        )
+    }
+
     fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
         conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -3607,6 +3652,8 @@ mod tests {
             "a store with a document is marked"
         );
         assert!(!has_table(&conn, "doc_layout"));
+        // v62 reads the same document and finds no `note:` id and no board: no Pinboard marker.
+        assert_eq!(pinboard_markers(&conn), (None, None));
     }
 
     /// The sibling over a v2 store with NO documents: the same ladder ends without the marker.
@@ -3626,6 +3673,7 @@ mod tests {
         assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
         assert_eq!(marker(&conn), None, "no document, no marker");
         assert!(!has_table(&conn, "doc_layout"));
+        assert_eq!(pinboard_markers(&conn), (None, None));
     }
 
     /// v47 moves the free-form labels into the registry so `@tag` can scope by one. Same contract
@@ -4173,7 +4221,7 @@ mod tests {
         let (_d, conn) = v60_store_with_a_document();
         assert_eq!(marker(&conn), None, "v60 writes no marker");
         super::run(&conn).unwrap();
-        assert_eq!(user_version(&conn), 61);
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
         assert_eq!(marker(&conn).as_deref(), Some("1"));
         assert!(
             !has_table(&conn, "doc_layout"),
@@ -4188,7 +4236,7 @@ mod tests {
         let (_d, conn) = v60_store_with_a_document();
         conn.execute_batch("DELETE FROM documents;").unwrap();
         super::run(&conn).unwrap();
-        assert_eq!(user_version(&conn), 61);
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
         assert_eq!(marker(&conn), None, "no document, so owed nothing");
         assert!(
             !has_table(&conn, "doc_layout"),
@@ -4226,14 +4274,330 @@ mod tests {
         );
     }
 
-    /// A fresh store (v16 to v61 in one pass) has neither the table nor the marker.
+    /// A fresh store (v16 to the top in one pass) has neither the table nor the marker.
     #[test]
     fn a_fresh_store_has_no_map_cache_and_no_marker() {
         const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
-        assert_eq!(user_version(&conn), 61);
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
         assert!(!has_table(&conn, "doc_layout"));
         assert_eq!(marker(&conn), None);
+        // v62 writes neither Pinboard marker for a store that never used it.
+        assert_eq!(pinboard_markers(&conn), (None, None));
+    }
+
+    // --- v62: the Pinboard's existing-user markers ------------------------------------------------
+
+    /// What a case seeds as the Pinboard's board row (`settings['pinboard']`).
+    enum Board {
+        Absent,
+        Text(&'static str),
+        Blob(&'static [u8]),
+    }
+
+    /// A real v61 store, ready for v62.
+    fn v61_store() -> (tempfile::TempDir, rusqlite::Connection) {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open_keyed(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+        apply_through(&conn, 61);
+        assert_eq!(user_version(&conn), 61);
+        (dir, conn)
+    }
+
+    fn seed_board(conn: &rusqlite::Connection, board: &Board) {
+        match board {
+            Board::Absent => {}
+            Board::Text(t) => {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES ('pinboard', ?1)",
+                    [t],
+                )
+                .unwrap();
+            }
+            Board::Blob(b) => {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES ('pinboard', ?1)",
+                    [b],
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    /// Insert one document per entry; the id is the `source_id` (None is a NULL one). Each gets a
+    /// distinct vault_path and content_hash, which the table makes UNIQUE.
+    fn seed_documents(conn: &rusqlite::Connection, source_ids: &[Option<&str>]) {
+        for (i, sid) in source_ids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO documents(vault_path, title, content_hash, source_id) \
+                 VALUES (?1, 'd', ?2, ?3)",
+                rusqlite::params![format!("d{i}.md"), format!("h{i}"), sid],
+            )
+            .unwrap();
+        }
+    }
+
+    /// The board row as the store holds it: its rowid and its bytes, whatever the type.
+    fn board_row(conn: &rusqlite::Connection) -> Option<(i64, Vec<u8>)> {
+        conn.query_row(
+            "SELECT rowid, CAST(value AS BLOB) FROM settings WHERE key = 'pinboard'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+    }
+
+    /// Run v62's SQL over a seeded store inside a transaction, read the two markers, and roll
+    /// back, so one store serves every case. The board row must come out with the same rowid and
+    /// bytes it went in with: v62 never writes it. The run result is unwrapped on purpose: a
+    /// "malformed JSON" error is what the bare spec form raises, and it must fail the case.
+    fn v62_markers(
+        conn: &rusqlite::Connection,
+        board: &Board,
+        docs: &[Option<&str>],
+        preseed: bool,
+    ) -> (Option<String>, Option<String>) {
+        conn.execute_batch("BEGIN").unwrap();
+        seed_board(conn, board);
+        seed_documents(conn, docs);
+        if preseed {
+            conn.execute_batch(
+                "INSERT INTO settings(key, value) VALUES ('mods_autoinstall_pinboard', 'kept');
+                 INSERT INTO settings(key, value) VALUES ('pinboard_move_pending', 'kept');",
+            )
+            .unwrap();
+        }
+        let before = board_row(conn);
+        conn.execute_batch(super::MIGRATIONS[61]).unwrap();
+        let after = board_row(conn);
+        let markers = pinboard_markers(conn);
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(before, after, "v62 never touches the board row");
+        markers
+    }
+
+    fn yes(b: bool) -> Option<String> {
+        b.then(|| "1".to_string())
+    }
+
+    /// One row of the case table: name, board, documents' source ids, owed the mod, owed a copy.
+    type Case = (
+        &'static str,
+        Board,
+        &'static [Option<&'static str>],
+        bool,
+        bool,
+    );
+
+    /// The case table the PR description quotes (plan section 5, 17 cases and the extras): which
+    /// stores are owed the mod (autoinstall) and which are owed a board copy (pending). It runs
+    /// on the bundled SQLCipher build, the only engine PM ships.
+    #[test]
+    fn v62_marks_exactly_the_stores_that_used_the_pinboard() {
+        let (_d, conn) = v61_store();
+        const NOTE_ID: &[Option<&str>] = &[Some("note:abc")];
+        let widget = r#"{"version":1,"widgets":[{"id":"w1","type":"note"}]}"#;
+        let v9_board = r#"{"version":9,"widgets":[{"id":"a"},{"id":"b"}],"folders":[]}"#;
+        // (case, board, documents, owed the mod, owed a copy)
+        let cases: Vec<Case> = vec![
+            ("1 no row", Board::Absent, &[], false, false),
+            ("2 empty string", Board::Text(""), &[], false, false),
+            ("3 whitespace", Board::Text("  \n"), &[], false, true),
+            ("4 garbage", Board::Text("- a note"), &[], false, true),
+            ("5 json null", Board::Text("null"), &[], false, true),
+            ("6 json array", Board::Text("[1,2]"), &[], false, true),
+            (
+                "7 no widgets key",
+                Board::Text(r#"{"a":1}"#),
+                &[],
+                false,
+                true,
+            ),
+            (
+                "8 widgets not a list",
+                Board::Text(r#"{"widgets":5}"#),
+                &[],
+                false,
+                true,
+            ),
+            (
+                "9 empty widget list",
+                Board::Text(r#"{"widgets":[]}"#),
+                &[],
+                false,
+                true,
+            ),
+            ("10 one widget", Board::Text(widget), &[], true, true),
+            ("11 v9 board", Board::Text(v9_board), &[], true, true),
+            (
+                "12 empty board, note",
+                Board::Text(r#"{"widgets":[]}"#),
+                NOTE_ID,
+                true,
+                true,
+            ),
+            (
+                "13 only a chat note",
+                Board::Absent,
+                &[Some("note:chat-12")],
+                false,
+                false,
+            ),
+            (
+                "14 upper-case NOTE:",
+                Board::Absent,
+                &[Some("NOTE:abc")],
+                false,
+                false,
+            ),
+            (
+                "15 no board, a note",
+                Board::Absent,
+                &[Some("note:x")],
+                true,
+                false,
+            ),
+            (
+                "16 blob value",
+                Board::Blob(b"{\"widgets\":[1]}"),
+                &[],
+                false,
+                true,
+            ),
+            // Extras beyond the plan's 17.
+            (
+                "e1 widgets an object",
+                Board::Text(r#"{"widgets":{}}"#),
+                &[],
+                false,
+                true,
+            ),
+            (
+                "e2 not valid json",
+                Board::Text("{widgets:[1]}"),
+                &[],
+                false,
+                true,
+            ),
+            (
+                "e3 widgets and a chat note",
+                Board::Text(widget),
+                &[Some("note:chat-1")],
+                true,
+                true,
+            ),
+            (
+                "e4 bare note:",
+                Board::Absent,
+                &[Some("note:")],
+                true,
+                false,
+            ),
+            (
+                "e5 bare note:chat-",
+                Board::Absent,
+                &[Some("note:chat-")],
+                false,
+                false,
+            ),
+            ("e6 NULL source_id", Board::Absent, &[None], false, false),
+            ("e7 zero-length blob", Board::Blob(b""), &[], false, false),
+            (
+                "e8 a chat note and an ordinary one",
+                Board::Absent,
+                &[Some("note:chat-1"), Some("note:b")],
+                true,
+                false,
+            ),
+        ];
+        for (name, board, docs, auto, pending) in cases {
+            let got = v62_markers(&conn, &board, docs, false);
+            assert_eq!(got, (yes(auto), yes(pending)), "case {name}");
+        }
+        // Nothing leaked out of the rolled-back cases.
+        assert_eq!(pinboard_markers(&conn), (None, None));
+        assert_eq!(count(&conn, "SELECT count(*) FROM documents"), 0);
+    }
+
+    /// Case 17: markers already there (the install cleared them, or a restore set them) keep
+    /// their value, and running the statements again changes nothing.
+    #[test]
+    fn v62_keeps_markers_that_are_already_there() {
+        let (_d, conn) = v61_store();
+        let board = Board::Text(r#"{"widgets":[{"id":"w"}]}"#);
+        let got = v62_markers(&conn, &board, &[Some("note:x")], true);
+        assert_eq!(got, (Some("kept".into()), Some("kept".into())));
+
+        // A second run over a store that already has them is the same.
+        conn.execute_batch("BEGIN").unwrap();
+        seed_board(&conn, &board);
+        conn.execute_batch(super::MIGRATIONS[61]).unwrap();
+        let first = pinboard_markers(&conn);
+        assert_eq!(first, (yes(true), yes(true)));
+        conn.execute_batch(super::MIGRATIONS[61]).unwrap();
+        assert_eq!(pinboard_markers(&conn), first);
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+
+    /// The tripwire: the spec's bare form (no CASE wrapper) raises on a board that is not JSON,
+    /// which would stop the store opening on every launch. This is why the SQL carries the
+    /// wrapper; if a future SQLite stops raising here, the wrapper is merely belt and braces.
+    #[test]
+    fn the_bare_widget_count_raises_on_a_board_that_is_not_json() {
+        let (_d, conn) = v61_store();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('pinboard', '- a note')",
+            [],
+        )
+        .unwrap();
+        let err = conn
+            .query_row(
+                "SELECT json_array_length(value, '$.widgets') FROM settings WHERE key = 'pinboard'",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed JSON"), "got: {err}");
+    }
+
+    /// The whole ladder from v61 over a store with a real board: it opens at the top, both
+    /// markers are written, and the board's bytes are exactly what they were.
+    #[test]
+    fn v62_through_run_marks_a_real_board_and_leaves_its_bytes() {
+        let (_d, conn) = v61_store();
+        let board = r#"{"version":9,"widgets":[{"id":"w1","type":"note","text":"café \n"}]}"#;
+        seed_board(&conn, &Board::Text(board));
+        let before = board_row(&conn);
+        super::run(&conn).unwrap();
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+        assert!(super::MIGRATIONS.len() >= 62);
+        assert_eq!(pinboard_markers(&conn), (yes(true), yes(true)));
+        assert_eq!(board_row(&conn), before, "the board row is untouched");
+    }
+
+    /// A board that is not JSON must not stop the store opening: `run` is `Ok`, the board is
+    /// owed a copy (the handover decides what to do with it) and is not a reason to install.
+    #[test]
+    fn v62_through_run_opens_a_store_whose_board_is_garbage() {
+        let (_d, conn) = v61_store();
+        seed_board(&conn, &Board::Text("- a note"));
+        let before = board_row(&conn);
+        super::run(&conn).expect("a garbage board must not fail the migration");
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+        assert_eq!(pinboard_markers(&conn), (None, yes(true)));
+        assert_eq!(board_row(&conn), before);
+    }
+
+    /// A store that never used the Pinboard comes out of v62 with neither marker (it installs the
+    /// mod from the Mods tab if it wants it).
+    #[test]
+    fn v62_leaves_a_store_that_never_used_the_pinboard_alone() {
+        let (_d, conn) = v61_store();
+        super::run(&conn).unwrap();
+        assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+        assert_eq!(pinboard_markers(&conn), (None, None));
+        assert_eq!(board_row(&conn), None, "v62 does not invent a board row");
     }
 }

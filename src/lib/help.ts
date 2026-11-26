@@ -40,10 +40,6 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Teach",
     body: "Where you teach PM how your projects are named. Merge a name variant into the real project so it stops reappearing, rename a project everywhere at once, or add a name you know means the same thing — the same thing correcting a project in Review does, just directly. On for the Standard and Power presets; right-click it in the sidebar to hide it (Review goes with it) or pin it to the top.",
   },
-  "nav-pinboard": {
-    title: "Pinboard",
-    body: "A free-form planning board: pin sticky notes and simple timelines, drag them around, and resize them. It's a scratch space for thinking — saved on this device, separate from your documents.",
-  },
   "nav-dev": {
     title: "Dev",
     body: "Developer mode's inspection tab: read-only views of PM's internal state — raw tables, row counts, the corrections log, and system & build info. For debugging and watching how PM works; nothing here changes your data. Turn it on or off under Settings → Developer.",
@@ -197,10 +193,6 @@ export const HELP: Record<string, HelpEntry> = {
   "teach-pref-nl": {
     title: "In your own words",
     body: "Type a preference as a plain sentence and PM fills in the fields for you. Check them before saving — nothing is stored until you do.",
-  },
-  "settings-pinboard-confirm-delete": {
-    title: "Confirm before deleting a pinboard card",
-    body: "Ask before a note or timeline is deleted from the Pinboard, so an important one can't go with a stray click. The pop-up tells you what actually goes with it — entries that would leave your calendar, or a document already saved to your vault that would stay behind. If you ticked 'Don't ask again' in that pop-up, this is where you turn it back on. It's per-device, and it doesn't apply to a folder's ✕, which only ungroups it and spills the cards back onto the board. Either way, Ctrl+Z (⌘Z on a Mac) undoes a deletion.",
   },
   "settings-sidebar-placement": {
     title: "Sidebar tabs",
@@ -681,7 +673,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-backup-mod-data": {
     title: "Mods in your backups",
-    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
+    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. The one exception is the Pinboard: if your board moved into it from PM, a backup taken with this off still holds the board as it was when it moved, and a restore puts that board back into the Pinboard if it is installed (later edits are not in it). A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
   },
   "settings-license": {
     title: "License",
@@ -822,84 +814,6 @@ export const HELP: Record<string, HelpEntry> = {
   "project-files": {
     title: "Project files",
     body: "Every document in this project — the ones filed here plus any linked in from elsewhere, marked Linked with their own primary project. This is the grounding the scoped chat answers from. Right-click a file (Shift+F10 on its row) to open it, copy its title or delete it.",
-  },
-
-  // Pinboard (spec §4) — a free-form planning board
-  "pinboard-board": {
-    title: "Your planning board",
-    body: "A free space to think. Add notes, timelines, task lists and folders, then drag them anywhere and resize from the bottom-right corner — they snap to a grid and stay where you put them between visits. Cards are free to overlap; to file one into a folder, drop it with your mouse pointer over the folder. Ctrl+Z (⌘Z on a Mac) undoes what you last did here — a deletion, a colour, a move, or the last few seconds of typing — and Ctrl+Y (or Ctrl/⌘+Shift+Z) puts it back; the trail is kept for this visit, not saved between them. Right-click the empty board to add a card where you clicked, or a card to rename, duplicate, colour or delete it. With the keyboard, move to a card and press Shift+F10 (or the Menu key, if your keyboard has one) for the same menu. Shift+right-click gives your system's own menu. The board is saved on this device, encrypted with the rest of your data, and is separate from your indexed documents.",
-  },
-  "pinboard-add-note": {
-    title: "Add a note",
-    body: "Drops a sticky note on the board to jot anything down. Notes are free text; tint one with a colour to group or flag it. Available at every density.",
-  },
-  "pinboard-add-timeline": {
-    title: "Add a timeline",
-    body: "Drops a timeline card for laying out dated milestones in order — handy for sketching a plan at a glance.",
-  },
-  "pinboard-add-folder": {
-    title: "Add a folder",
-    body: "Drops an empty folder on the board to tidy things into. Drag a note or timeline so your mouse pointer is over the folder and let go to file it inside — the folder lights up when it's going to catch what you're holding. (Dropping a card so it merely overlaps a folder just leaves it lying on top, the same as notes overlap each other.) You can also make a folder without this button, by dropping one card exactly on top of another the same size. A folder stays until you ungroup it with its ✕, however few cards are left in it — so an empty one will happily sit and wait.",
-  },
-  "pinboard-add-tasklist": {
-    title: "Add a task list",
-    body: "Drops a live list of your tasks on the board: all of them, or one project's, chosen in the card's header. The tasks themselves live in PM, not on the card, so ticking one here ticks it on the project page and the Calendar's Runway too, and deleting the card leaves the tasks where they are.",
-  },
-  "pinboard-tasklist": {
-    title: "A task list",
-    body: "Your tasks, live: change the project in the header, or pick All tasks. Type one and press Enter to add it; tick the box to go from to do, to doing, to done; click a title to see why it matters, and ✎ to plan it, give it a deadline or link it to a milestone or an event. Sort the list by your own order, nearest date, deadline, A–Z or date added, and the arrow beside it turns the order round; each card keeps its own. Every change shows everywhere the task does. If the project this list followed is deleted, the list asks whether to show all tasks or go.",
-  },
-  "pinboard-note-tasks": {
-    title: "Turn checkboxes into tasks",
-    body: "Copies this note's checkbox lines into real tasks, ticked ones as done, and puts a task list beside the note (or shows the one already on the board): that project's tasks, or all your tasks if you leave them without a project. The note stays exactly as it is, and a line that's already a task in the same project isn't added twice.",
-  },
-  "pinboard-folder": {
-    title: "A folder",
-    body: "A group of notes and timelines, kept in one tile so the board stays tidy. It shows how many cards are inside; click it to open them, and give it a title like any other card. Drag a card onto it — pointer over the folder — to file that card away. Folders don't go inside folders: drag one onto another and they simply stack, each keeping its own cards. Task lists stay on the board too and never file into a folder. The ✕ ungroups the folder, spilling its cards back onto the board rather than deleting them. Once open, 'In place' shows the cards as a compact grid beside the folder, and 'Overlay' opens the folder's own pinboard over the middle of the screen, where the cards keep their real shape and size. Give a folder a game with the dice in its top bar and the tile changes: it shows that game's face and how many cards are still in, and clicking it plays instead of opening. 'Cards' in the top bar is always the way back to the notes.",
-  },
-  "pinboard-folder-game": {
-    title: "Gamble your next task",
-    body: "Can't decide what to do next? Put the candidates in a folder, press the dice, and pick a game. 'Just a folder', at the top of that same list, is how you hand it back: no game, and the tile opens the cards again. Three of them choose one card out of all of them: a roulette wheel, a fist of straws, or a box of folded slips — whatever they land on is your next task. The other two put ONE card to you and let you play for it: flip a coin and heads you do it, or throw rock, paper, scissors against PM and do it only if PM wins. Nothing checks up on you either way; it's just something to push against. A card the folder has already used stays put but greys out, and isn't offered again until every other card has had a turn, at which point the round loops all the way back and starts fresh. That round is remembered, so you can close PM, come back later, and carry on rather than being handed the same job twice. Under the game, 'Grey out what it picks' is what makes that round a round at all: turn it off and there is no memory between plays, every card is in every draw, and the same one can come up twice running — a true coin toss rather than a fair share-out. Beside it, 'Move the winner out' decides whether a card you have been given leaves for the main board — a card you dodged never does, because it isn't work. On the wheel only, each card can be given a bigger or smaller share of the spin from the list underneath; the wedges are cut from exactly those shares, so what you see is what it uses. Timelines can sit in a game folder but are never drawn — a dated track isn't a task. If motion is turned down in Settings, the games skip straight to the answer.",
-  },
-  "pinboard-folder-board": {
-    title: "The folder's pinboard",
-    body: "Inside a folder you get a board of its own, at 80% of your main one. The cards keep the shape and size you gave them, and you drag, resize and overlap them in here exactly as you do outside — a folder is a place to put things, not a different kind of thing. Nothing files into anything in here: folders don't nest, so a card dropped on another simply overlaps it. Use ⤴ on a card to move it back out to the main board.",
-  },
-  "pinboard-timeline-view": {
-    title: "List or line",
-    body: "Two ways to show this timeline's entries: as a stacked list of rows, or laid out left to right along a line in date order. Purely how it looks — the entries and their dates are the same either way — so pick whichever reads better at the size you've made the card.",
-  },
-  "pinboard-note": {
-    title: "A note",
-    body: "A sticky note — type anything into it and it saves as you go. Notes are Markdown: start a line with . for a bullet or - for a dash point, 1. for a numbered list, i. for roman numerals, > for an arrow/quote, or [] for a checkbox, and pressing Enter continues the list for you. A note reads like a document while you write it: the markers turn into bullets, checkboxes, headings and tables as you type them, and Tab, Shift+Tab and Enter work on lists and tables the way they do in Docs. Click a checkbox to tick it. A note with formatting the document view can't keep exactly opens as Markdown instead, where you edit the text itself and only the line you're on shows its markers, so nothing in it is changed. Drag the header to move it, resize from the bottom-right corner, and use the ✕ to remove it. The dots along the bottom tint it a colour so related notes read together.",
-  },
-  "pinboard-note-format": {
-    title: "Format the note",
-    body: "Quick formatting for the note: bold, italic, heading, and bullet, numbered and checklist lists. Each applies to the selected lines; press it again to turn it off, and hover for its shortcut. Table opens a grid: sweep across it (or drag, or use the arrow keys) to choose columns and rows, then click to add it at the cursor. With the cursor in a table, Table opens the table's menu, as does right-clicking a cell: add a row or column, or delete the row, the column or the table. In a table, Tab and Shift+Tab move between cells and Up and Down between rows; Tab in the last cell or Enter adds a row, and Enter on an empty last row takes you out. Down from the last row, Up from the first, or a click under the table always gives you a line to write on. Backspace just under a table selects it, and again deletes it. It's saved as a Markdown table, so it stays a table when you ingest the note.",
-  },
-  "pinboard-note-ingest": {
-    title: "Ingest as a document",
-    body: "Save this note into your vault as a real Markdown document, the way any document goes in: it's written to your vault, chunked, indexed, and lands in the Review queue for you to file to a project and set its importance — after which it turns up in Documents, Focus and search like anything else. It shows 'In review' until you file it, then 'Filed · project'. Edit the note and a 'Re-ingest' button updates the same document, keeping its filing. The document is its own copy in your vault: deleting the note never removes it.",
-  },
-  "pinboard-note-tint": {
-    title: "Tint this note",
-    body: "Colour the note to group or flag it — the colours are the same status hues PM uses elsewhere (due, quick win, and so on), so a tint can carry a light meaning. It's purely visual and changes nothing else.",
-  },
-  "pinboard-timeline": {
-    title: "A timeline",
-    body: "A card for dated milestones. Give it a title and add rows with a date and a short label; they sort themselves earliest to latest. Or link it to a real project (below) to show and edit that project's actual milestones. Drag the header to move it and resize from the corner.",
-  },
-  "pinboard-timeline-project": {
-    title: "Link a project",
-    body: "Bind this timeline to one of your projects — pick an existing one or type a new name. Once linked, the card shows that project's real milestones on a line, and adding or editing one here writes straight to the project, so it also shows in your daily briefing and the project's Focus panel. A brand-new name becomes a real project when you add its first milestone (it appears on your Focus page once it also has a document).",
-  },
-  "pinboard-timeline-line": {
-    title: "Milestones on a line",
-    body: "This project's milestones, laid out earliest to latest. Each is a dot on the line with its date above and label below — edit either in place, click the dot to mark it done, or ✕ to remove it, and every change syncs with the project everywhere else. A 📅 date is synced from a linked calendar event and is read-only here.",
-  },
-  "pinboard-timeline-unlink": {
-    title: "Unlink the project",
-    body: "Detach this card from its project and return it to a freeform timeline. The project and its milestones are untouched — only this card stops tracking them.",
   },
 };
 

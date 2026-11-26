@@ -4,7 +4,7 @@
 // Every npm package that SHIPS carries a licence we have accepted.
 //
 // WHY. pr.yml's `dependencies` job is named for all three ecosystems and gated only Rust: `cargo
-// deny` proved the crate tree, and nothing at all looked at the 122 production npm packages that end
+// deny` proved the crate tree, and nothing at all looked at the production npm packages that end
 // up inside the shipped webview bundle. A copyleft package could have arrived transitively — through
 // a patch bump of something four levels down — and the first anyone would have heard of it is a
 // licence complaint about a released binary.

@@ -93,7 +93,7 @@ describe("CalendarWindow", () => {
     fireEvent.click(screen.getByRole("button", { name: "project" }));
     expect(ipc.showInMainWindow).toHaveBeenCalledWith({ view: "project", project: "Atlas" });
     fireEvent.click(screen.getByRole("button", { name: "pinboard" }));
-    expect(ipc.showInMainWindow).toHaveBeenCalledWith({ view: "pinboard" });
+    expect(ipc.showInMainWindow).toHaveBeenCalledWith({ view: "mod:atlas.pinboard" });
   });
 
   it("shows nothing of the calendar while PM is locked, or its vault waits for a passphrase", async () => {

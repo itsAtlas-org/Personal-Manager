@@ -56,16 +56,7 @@ function rightClick(el: Element, init: MouseEventInit = {}) {
 describe("SidebarNav", () => {
   it("draws the tabs it always had, in order", () => {
     renderNav();
-    expect(tabs()).toEqual([
-      "focus",
-      "chat",
-      "calendar",
-      "documents",
-      "review",
-      "teach",
-      "pinboard",
-      "mods",
-    ]);
+    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "review", "teach", "mods"]);
   });
 
   it("lights Focus while a project is open, and keeps Chats' New and Review's count", () => {
@@ -80,32 +71,32 @@ describe("SidebarNav", () => {
   it("navigates to a tab's own view", () => {
     const onNavigate = vi.fn();
     renderNav({ onNavigate });
-    fireEvent.click(screen.getByRole("button", { name: "Pinboard" }));
-    expect(onNavigate).toHaveBeenCalledWith("pinboard");
+    fireEvent.click(screen.getByRole("button", { name: "Documents" }));
+    expect(onNavigate).toHaveBeenCalledWith("documents");
   });
 
   it("hides a tab from its right-click menu, and shows it again from another tab's", () => {
     renderNav();
-    rightClick(screen.getByRole("button", { name: "Pinboard" }));
-    const menu = screen.getByRole("menu", { name: "Pinboard tab" });
+    rightClick(screen.getByRole("button", { name: "Documents" }));
+    const menu = screen.getByRole("menu", { name: "Documents tab" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Hide" }));
-    expect(tabs()).not.toContain("pinboard");
+    expect(tabs()).not.toContain("documents");
 
     rightClick(screen.getByRole("button", { name: "Focus" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Show Pinboard" }));
-    expect(tabs()).toContain("pinboard");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show Documents" }));
+    expect(tabs()).toContain("documents");
   });
 
   it("pins a tab to the top, and unpins it", () => {
     renderNav();
-    rightClick(screen.getByRole("button", { name: "Pinboard" }));
+    rightClick(screen.getByRole("button", { name: "Documents" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Pin to the top" }));
-    expect(tabs()[0]).toBe("pinboard");
+    expect(tabs()[0]).toBe("documents");
 
-    rightClick(screen.getByRole("button", { name: "Pinboard" }));
+    rightClick(screen.getByRole("button", { name: "Documents" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Unpin" }));
-    // Back in its own place, just before the Mods tab that follows it.
-    expect(tabs().slice(-2)).toEqual(["pinboard", "mods"]);
+    // Back in its own place, after Calendar and before the learning tools.
+    expect(tabs().slice(0, 5)).toEqual(["focus", "chat", "calendar", "documents", "review"]);
   });
 
   it("hides the learning tools together", () => {
@@ -130,7 +121,7 @@ describe("SidebarNav", () => {
   it("on Minimal, leaves the learning tools out until shown, which pins", () => {
     gates.depth = "min";
     renderNav();
-    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "pinboard", "mods"]);
+    expect(tabs()).toEqual(["focus", "chat", "calendar", "documents", "mods"]);
     rightClick(screen.getByRole("button", { name: "Focus" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Show Review and Teach" }));
     expect(tabs().slice(0, 2)).toEqual(["review", "teach"]);
@@ -149,7 +140,7 @@ describe("SidebarNav", () => {
 
   it("leaves Shift+right-click to the system menu", () => {
     renderNav();
-    rightClick(screen.getByRole("button", { name: "Pinboard" }), { shiftKey: true });
+    rightClick(screen.getByRole("button", { name: "Documents" }), { shiftKey: true });
     expect(screen.queryByRole("menu")).toBeNull();
   });
 });
@@ -157,7 +148,7 @@ describe("SidebarNav", () => {
 // The mod tabs: installed mods' own entries, appended after PM's (spec §1.17) from the rows
 // `lib/modRows` shares, reachable from the same right-click menu as every other tab.
 describe("SidebarNav: mod tabs", () => {
-  const CORE = ["focus", "chat", "calendar", "documents", "review", "teach", "pinboard", "mods"];
+  const CORE = ["focus", "chat", "calendar", "documents", "review", "teach", "mods"];
   const row = (id: string, navTab: string | null, name = "Acme Tool"): ModInfo =>
     ({ id, name, navTab }) as ModInfo;
 

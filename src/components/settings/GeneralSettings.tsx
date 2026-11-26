@@ -36,7 +36,6 @@ import {
 import { setBriefingWindowVisible } from "../../lib/ipc";
 import { useModsNoticeFolded } from "../../lib/useModsNoticeFolded";
 import { TrayIconRow } from "./TrayIconRow";
-import { readConfirmDelete, writeConfirmDelete } from "../../lib/pinboard/prefs";
 import { navPlacementIsDefault, resetNavPlacement, useNavPlacement } from "../../lib/nav";
 import {
   ACCENTS,
@@ -90,9 +89,6 @@ export function GeneralSettings() {
     resetAppearance,
   } = useTheme();
   const help = useHelp();
-  // Seeded from localStorage rather than watched: the toggle is the only writer here, and the
-  // Pinboard reads the pref fresh at the moment you click delete (see pinboard/prefs.ts).
-  const [confirmDelete, setConfirmDelete] = useState(readConfirmDelete);
   // Where the Calendar tab opens. Stored as a mode string; surfaced as a plain on/off because
   // "today" is the default and "where I left it" is the opt-in.
   const [openOnLast, setOpenOnLast] = useState(() => readOpenOn() === "last");
@@ -156,7 +152,6 @@ export function GeneralSettings() {
   }
 
   // --- Reset-to-default (#445) ---
-  const confirmDeleteIsDefault = confirmDelete;
   const briefingIsDefault =
     !briefingSidebar && briefingFloat === "off" && briefingPrefsAreDefault();
   // The Focus tab's view prefs (layout, Upcoming, panels) are set on the tab, not here — but "Reset
@@ -204,7 +199,6 @@ export function GeneralSettings() {
   // The whole tab, minus the deliberately-excluded time zone (device-derived, not a preference).
   const generalIsDefault =
     appearanceIsDefault &&
-    confirmDeleteIsDefault &&
     focusIsDefault &&
     calendarIsDefault &&
     chatSectionsDefault &&
@@ -212,10 +206,6 @@ export function GeneralSettings() {
     !modsNotice.folded &&
     helpIsDefault;
 
-  function resetConfirmDelete() {
-    setConfirmDelete(true);
-    writeConfirmDelete(true);
-  }
   function resetFocus() {
     // Everything the Focus tab owns (layout, Upcoming mode / hours / days, panel visibility) —
     // the defaults live in focusPrefs beside the readers, so this never re-lists them.
@@ -237,7 +227,6 @@ export function GeneralSettings() {
   }
   function resetGeneral() {
     resetAppearance();
-    resetConfirmDelete();
     resetFocus();
     resetCalendar();
     resetChatSections(); // the Chats-tab sidebar folds, back to density-derived
@@ -431,22 +420,6 @@ export function GeneralSettings() {
             />
           )}
         </SettingRow>
-        <SettingRow
-          label="Confirm before deleting a pinboard card"
-          helpId="settings-pinboard-confirm-delete"
-          aside={!confirmDeleteIsDefault && <ResetLink onReset={resetConfirmDelete} />}
-        >
-          {(a11y) => (
-            <Toggle
-              {...a11y}
-              checked={confirmDelete}
-              onChange={(on) => {
-                setConfirmDelete(on);
-                writeConfirmDelete(on);
-              }}
-            />
-          )}
-        </SettingRow>
         {/* The tabs are pinned and hidden where they are, from a right-click in the sidebar (one
             control, one home), so this row holds only the way back. The description says where
             the controls went: without it, the Review & Teach and Map switches that used to sit here
@@ -516,10 +489,9 @@ export function GeneralSettings() {
             and a gating hint, not explanation.
 
             It covers the five controls with no explanation anywhere else — System, Mode, Depth,
-            Accent, Text size — and deliberately stops there. The pinboard confirm toggle and the
-            sidebar tabs row already carry their own help-mode entries in lib/help.ts
-            (`settings-pinboard-confirm-delete`, `settings-sidebar-placement`), and repeating those
-            here would be a second copy to keep in step. Depth is the reason this was worth writing
+            Accent, Text size — and deliberately stops there. The sidebar tabs row already carries
+            its own help-mode entry in lib/help.ts (`settings-sidebar-placement`), and repeating
+            that here would be a second copy to keep in step. Depth is the reason this was worth writing
             at all: it's the only control in the section with neither an option tooltip nor a word
             of prose. */}
         <SectionInfo title="What these settings do">
@@ -707,12 +679,12 @@ export function GeneralSettings() {
         onReset={resetGeneral}
         confirmBody={
           <>
-            Restores appearance (System, Mode, Accent, Depth, Location), the pinboard delete
-            confirmation, the Focus tab (which panels it shows and where the briefing appears),
-            where the Calendar opens, how far a swipe moves it and its Hide done and All-day filters
-            (off), the Chats sidebar's folds, the chat Thinking button (back to off), the sidebar's
-            tabs (nothing pinned or hidden), the Mods notice (shown in full again on a new mod's
-            first screen), and help mode to their defaults. Your time zone is left as-is.
+            Restores appearance (System, Mode, Accent, Depth, Location), the Focus tab (which panels
+            it shows and where the briefing appears), where the Calendar opens, how far a swipe
+            moves it and its Hide done and All-day filters (off), the Chats sidebar's folds, the
+            chat Thinking button (back to off), the sidebar's tabs (nothing pinned or hidden), the
+            Mods notice (shown in full again on a new mod's first screen), and help mode to their
+            defaults. Your time zone is left as-is.
           </>
         }
       />

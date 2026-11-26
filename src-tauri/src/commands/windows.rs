@@ -19,7 +19,8 @@ pub async fn open_calendar_window(app: AppHandle) -> Result<()> {
 }
 
 /// Show one of the main window's views and bring it forward: the pop-out Calendar's links to a
-/// project or to the pinboard. `view` is an app view's name; `project` goes with `"project"`.
+/// project or to the Pinboard's tab. `view` is an app view's name or a mod's tab (`"mod:<id>"`), and
+/// the main window checks it (`navigateTarget`); `project` goes with `"project"`.
 #[tauri::command]
 pub fn show_in_main_window(app: AppHandle, view: String, project: Option<String>) -> Result<()> {
     popout::show_in_main(&app, Navigate { view, project })
