@@ -45,6 +45,24 @@ export const DOC_COLUMN_LABELS: Record<DocColumnKey, string> = {
   synced: "Last synced",
 };
 
+/** The help-mode entry (src/lib/help.ts) for each column's header. Spelled out rather than derived
+ *  from the key: the ids are kebab-case (`modifiedBy` → `-modified-by`), and a Record over every key
+ *  means a new column fails to compile until it has one. `title` is not a key, so its header names
+ *  `documents-col-title` itself. */
+export const DOC_COLUMN_HELP_IDS: Record<DocColumnKey, string> = {
+  project: "documents-col-project",
+  importance: "documents-col-importance",
+  source: "documents-col-source",
+  chunks: "documents-col-chunks",
+  author: "documents-col-author",
+  modifiedBy: "documents-col-modified-by",
+  created: "documents-col-created",
+  updated: "documents-col-updated",
+  size: "documents-col-size",
+  ingested: "documents-col-ingested",
+  synced: "documents-col-synced",
+};
+
 /** How wide a column is allowed to get, for the columns that hold free text.
  *
  *  **The table sizes columns to their contents; these are ceilings, not widths.** It used to be

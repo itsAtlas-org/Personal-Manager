@@ -24,7 +24,7 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "3.198.0-alpha",
+    version: "3.201.0-alpha",
     date: "2026-11-26",
     highlights: [
       "You can now use your own Anthropic key, with Claude Sonnet, Opus, Haiku and Fable. It's off until you turn it on, under Settings > AI & Models > Your own keys.",
@@ -37,13 +37,37 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    version: "3.197.0-alpha",
+    version: "3.200.0-alpha",
     date: "2026-11-26",
     highlights: [
       "You can now use your own Google Gemini key. It's off until you turn it on, under Settings > AI & Models > Your own keys.",
       "PM checks whether your Gemini key is free or paid and tells you which on its card, on the chat chip and in the sidebar. A free key means Google may train on what you send, and people at Google may read it. A paid key doesn't, but isn't zero data retention either.",
-      "In the UK, the EU, Iceland, Liechtenstein, Norway and Switzerland, Google only allows paid keys, so PM won't use a free one there. It works out where you are from your computer's time zone and says what it read. It also won't use a free key where it can't tell where you are, for example when the computer's time zone is UTC. If Google tells PM your project has gone back to the free tier, PM pauses Gemini there until it's paid again.",
+      "In the UK, the EU, Iceland, Liechtenstein, Norway and Switzerland, Google's terms allow only paid keys, so PM won't use a free one there. It works out where you are from your computer's time zone and says what it read. It also won't use a free key where it can't tell where you are, for example when the computer's time zone is UTC. If Google tells PM your project has gone back to the free tier, PM pauses Gemini there until it's paid again.",
       "Gemini's price changes on 01-12-2026 and 01-01-2027 are already in PM's list, so Usage & cost stays right.",
+    ],
+  },
+  {
+    version: "3.199.2-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "If PM's check for changes you made in Google fails, it now leaves a short note in its log saying how many times in a row it has failed and when it will try again, so a calendar that stops updating is easier to track down. Until now a failed check left no trace at all.",
+      "PM's notes about your calendars in its log no longer name your calendars or your account, so a log you share in a bug report doesn't carry your email address.",
+    ],
+  },
+  {
+    version: "3.199.1-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "The daily briefing's Refresh button now tells you what happened. If it can't refresh, for example because no AI is set up for background work, it says why under the briefing, and your old briefing stays put. The “Updated” line now shows the time as well as the day, so you can see a refresh worked.",
+    ],
+  },
+  {
+    version: "3.199.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "Help mode now explains the rest of the left sidebar. Hover New beside Chats, What's New, Settings (and the dot on it), the edge you drag to resize the sidebar, the little arrow that brings back a hidden panel, or the move and delete buttons on a chat, and a card tells you what each one does.",
+      "Help mode also explains the Documents tab. Hover Add files, Add folder, Reset, Columns, the Indexed-only badge, a row's Delete and Edit, the archived files strip, the “files PM can't reach” banner and the import Activity list. Every column heading now says what it holds too, including that Author, Size and the dates read Unknown when the original didn't say, and that Last synced means the last time PM had something new to note about the file.",
+      "Hovering Columns used to explain the All files, Folders and Projects switch instead. It now explains the columns, and the folder path and folder tiles you open in Folders and Projects explain themselves. The thumbs on an answer, the “which model answered” note, the Review folder tools and a few setup fields had help that was never written, and now do.",
     ],
   },
   {

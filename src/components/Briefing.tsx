@@ -10,9 +10,9 @@
 // the text may take). The body, the empty/generating states and the Refresh control are shared —
 // which is the point: a change to how a briefing reads lands everywhere at once.
 
-import { Button, Card, RefreshIcon } from "./ui";
+import { Button, Callout, Card, RefreshIcon } from "./ui";
 import { Markdown } from "../lib/markdown";
-import { formatDate } from "../lib/format";
+import { formatDateTime } from "../lib/format";
 import { useBriefing } from "../lib/briefing";
 
 /** How much chrome the briefing wears. `card` is the Focus tab's full-width card; `panel` is the
@@ -58,11 +58,11 @@ export function Briefing({
    *  briefing from pushing the nav out of reach. */
   fill?: boolean;
 }) {
-  const { briefing, busy, refresh } = useBriefing();
+  const { briefing, busy, error, requestRefresh } = useBriefing();
   const text = briefing?.briefing.trim() ?? "";
   if (!text && !busy) return null;
 
-  const onRefresh = () => void refresh();
+  const onRefresh = () => void requestRefresh();
   const body = text ? (
     <div className="pm-inline-md text-sm leading-relaxed text-ink2">
       <Markdown>{text}</Markdown>
@@ -70,8 +70,23 @@ export function Briefing({
   ) : (
     <p className="text-sm text-ink4">Putting together your briefing…</p>
   );
+  // The time as well as the day: a Refresh that works on unchanged facts reads much like the old
+  // briefing, and a date-only stamp could not tell the user it had run at all.
   const updated = text && briefing?.updated_at && (
-    <p className="mt-2 text-xs text-ink4">Updated {formatDate(briefing.updated_at)}</p>
+    <p className="mt-2 text-xs text-ink4">Updated {formatDateTime(briefing.updated_at)}</p>
+  );
+  // Only a failure the user asked for (their Refresh click): the briefing itself stays as it was.
+  // Kept OUT of the sidebar's `max-h-48` text box, so a long message neither scrolls away with the
+  // text nor pushes the box taller; it gets its own small cap instead.
+  const failure = error && (
+    <Callout
+      as="p"
+      live={false}
+      role="status"
+      className={`mt-2 shrink-0 [overflow-wrap:anywhere] ${variant === "panel" && !fill ? "max-h-24 overflow-y-auto" : ""}`}
+    >
+      Couldn't refresh: {error}
+    </Callout>
   );
 
   if (variant === "card") {
@@ -85,6 +100,7 @@ export function Briefing({
         </div>
         {body}
         {updated}
+        {failure}
       </Card>
     );
   }
@@ -108,6 +124,7 @@ export function Briefing({
         {body}
       </div>
       {updated}
+      {failure}
     </div>
   );
 }
