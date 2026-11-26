@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.199.1-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "The daily briefing's Refresh button now tells you what happened. If it can't refresh, for example because no AI is set up for background work, it says why under the briefing, and your old briefing stays put. The “Updated” line now shows the time as well as the day, so you can see a refresh worked.",
+    ],
+  },
+  {
     version: "3.199.0-alpha",
     date: "2026-11-26",
     highlights: [
