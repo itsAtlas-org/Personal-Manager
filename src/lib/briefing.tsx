@@ -46,6 +46,20 @@ interface BriefingState {
    *  hiccup leaves the previous briefing in place. Concurrent calls share the one in-flight request
    *  rather than starting a second model call. */
   refresh: () => Promise<void>;
+  /** Why the last Refresh the USER clicked failed, in the backend's own words; null otherwise. Set
+   *  only by {@link requestRefresh}: the automatic runs and the post-flag refresh stay silent, as
+   *  the briefing is optional and an hourly check must not manufacture an error nobody asked for. */
+  error: string | null;
+  /** The Refresh button's call: clears the old message, regenerates, and shows (and returns) the
+   *  failure if there is one. Resolves to null on success. */
+  requestRefresh: () => Promise<string | null>;
+}
+
+/** The backend rejects with a bare string (`Error` serialises to its message); anything else is an
+ *  `Error` from the bridge, or something we have no words for. */
+function failureText(e: unknown): string {
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : "";
+  return text.trim() || "something went wrong.";
 }
 
 const BriefingContext = createContext<BriefingState | null>(null);
@@ -63,6 +77,7 @@ export function BriefingProvider({
 }) {
   const [briefing, setBriefing] = useState<DailyBriefing | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // These calls resolve after the user may have navigated away or the app may have unmounted; don't
   // write state then. Re-armed on mount because StrictMode double-invokes effects in dev
@@ -77,20 +92,27 @@ export function BriefingProvider({
   // awaits the same regeneration instead of returning early while the first is still running — which
   // matters for `onFlagResolved`, whose `Promise.all` must not resolve before the briefing lands.
   // Assigned BEFORE the first await, so StrictMode's double mount cannot slip a second call past it.
-  const inFlight = useRef<Promise<void> | null>(null);
+  const inFlight = useRef<Promise<string | null> | null>(null);
 
   // `force` separates the user asking (the Refresh button, always regenerates) from the app
   // checking (the launch check, which regenerates only if the facts moved). Both go through the
   // one latch, and the backend applies the same distinction again across windows.
+  //
+  // Resolves to why a FORCED run failed (null on success, and always null unforced): a failure
+  // keeps the previous briefing either way, but only a forced one is worth telling anyone about.
+  // Whether to SHOW it is the caller's call — `refresh` (after a flag is resolved) drops it,
+  // `requestRefresh` (the button) shows it.
   const run = useCallback((force: boolean) => {
     if (inFlight.current) return inFlight.current;
     setBusy(true);
-    const started = (async () => {
+    const started = (async (): Promise<string | null> => {
       try {
         const next = force ? await refreshDailyBriefing() : await syncDailyBriefing();
         if (aliveRef.current) setBriefing(next);
-      } catch {
-        /* keep whatever we have — the briefing is optional */
+        return null;
+      } catch (e) {
+        // Keep whatever we have — the briefing is optional.
+        return force ? failureText(e) : null;
       } finally {
         inFlight.current = null;
         if (aliveRef.current) setBusy(false);
@@ -100,7 +122,14 @@ export function BriefingProvider({
     return started;
   }, []);
 
-  const refresh = useCallback(() => run(true), [run]);
+  const refresh = useCallback(async () => void (await run(true)), [run]);
+
+  const requestRefresh = useCallback(async () => {
+    setError(null);
+    const failed = await run(true);
+    if (aliveRef.current) setError(failed);
+    return failed;
+  }, [run]);
 
   // Load the stored briefing once at app scope, then run the LAUNCH CHECK: the backend rebuilds the
   // facts and regenerates only if they differ from the ones the stored briefing was written from.
@@ -129,7 +158,10 @@ export function BriefingProvider({
     const pending = onBriefingUpdated(() => {
       void getDailyBriefing()
         .then((next) => {
-          if (aliveRef.current) setBriefing(next);
+          if (!aliveRef.current) return;
+          setBriefing(next);
+          // A fresh briefing has landed, so "couldn't refresh" is no longer the news.
+          setError(null);
         })
         .catch(() => {
           /* optional, as everywhere else */
@@ -139,7 +171,7 @@ export function BriefingProvider({
   }, []);
 
   return (
-    <BriefingContext.Provider value={{ briefing, busy, refresh }}>
+    <BriefingContext.Provider value={{ briefing, busy, refresh, error, requestRefresh }}>
       {children}
     </BriefingContext.Provider>
   );

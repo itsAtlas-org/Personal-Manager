@@ -257,9 +257,15 @@ pub(crate) async fn refresh_briefing_auto(app: &AppHandle) -> Result<briefing::D
     run_briefing_refresh(app, false).await
 }
 
+/// What a forced Refresh says when [`briefing::build_flag_snapshot`] has nothing to build on, which
+/// is when there are no active (unarchived) projects and no flags. Calendar events alone don't
+/// count (an ordinary event raises no flag), so the message names only projects and the flags
+/// that need attention, and gives no calendar advice.
+const NOTHING_TO_BRIEF_MESSAGE: &str = "There's nothing to brief on yet. The briefing is built from your active projects and from the deadlines and events that need your attention, and there are none right now. Add a project, then try again.";
+
 /// Regenerate the daily briefing from the current focus-view state. Background work: runs on the
-/// background API key, never holds the DB lock across the model call (rule #4), and is a no-op
-/// (returns the stored value) when there's nothing to summarise.
+/// background API key, never holds the DB lock across the model call (rule #4). With nothing to
+/// summarise it returns the stored value, except that a forced Refresh is told so (an `Err`).
 ///
 /// `force` separates the user asking from the app checking. Forced, it always calls the model and
 /// surfaces a missing-provider error. Unforced, it calls the model only when
@@ -337,8 +343,12 @@ async fn run_briefing_refresh(app: &AppHandle, force: bool) -> Result<briefing::
         (snapshot, profile)
     };
 
-    // Nothing to brief on yet — leave any prior briefing in place.
+    // Nothing to brief on yet — leave any prior briefing in place. A user's Refresh is told why
+    // nothing happened (it used to look like a click that did nothing); an automatic check stays quiet.
     let Some(snapshot) = snapshot else {
+        if force {
+            return Err(Error::Other(NOTHING_TO_BRIEF_MESSAGE.to_string()));
+        }
         let conn = state.conn()?;
         return briefing::get_briefing(&conn);
     };
@@ -597,6 +607,47 @@ mod tests {
                 && after.2 == before.2 + 1,
             "linked, dated, and its project touched"
         );
+    }
+
+    /// A Refresh the user clicked on an empty store says why nothing happened; the automatic checks
+    /// stay quiet and return the stored row. No test can build the AppHandle `run_briefing_refresh`
+    /// needs, so this reads the file's own text (as `a_relink_nudges_the_briefing` does), and pins
+    /// the message to what `build_flag_snapshot` really returns `None` for.
+    #[test]
+    fn a_forced_refresh_with_nothing_to_brief_on_says_so() {
+        let source = include_str!("assistant.rs");
+        let at = source
+            .find("async fn run_briefing_refresh(")
+            .expect("the function is defined");
+        let body = &source[at..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        let none_branch = body
+            .find("let Some(snapshot) = snapshot else {")
+            .expect("it leaves when there is no snapshot");
+        let branch = &body[none_branch..];
+        let branch = &branch[..branch.find("};").expect("the branch ends")];
+        let forced = branch.find("if force {").expect("a forced run is told");
+        let stored = branch
+            .find("get_briefing")
+            .expect("an automatic one gets the stored row");
+        assert!(
+            branch[forced..].contains("NOTHING_TO_BRIEF_MESSAGE") && forced < stored,
+            "the forced Err comes before the stored-row fallback"
+        );
+
+        // The message names what the snapshot is built from, and the snapshot really is `None`
+        // with neither projects nor flags.
+        assert!(NOTHING_TO_BRIEF_MESSAGE.contains("projects"));
+        assert!(!NOTHING_TO_BRIEF_MESSAGE.contains("calendar"));
+        assert!(briefing::build_flag_snapshot(
+            &[],
+            &[],
+            &[],
+            &[],
+            "2026-11-26T09:00",
+            chrono_tz::Tz::UTC
+        )
+        .is_none());
     }
 
     /// The command nudges the briefing after [`relink`], and only once it's done: a refusal returns
