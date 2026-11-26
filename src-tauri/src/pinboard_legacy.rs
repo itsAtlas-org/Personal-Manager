@@ -5,8 +5,8 @@
 //! (PR C). It stays small and legacy-named, and everything here reads the board as plain JSON, never
 //! as the Pinboard's own types.
 //!
-//! Today (K4): the Calendar's dots. [`pinboard_entries`] is a port of `src/lib/pinboard/calendarEntries.ts`
-//! (the freeform timeline entries of the stored board), and [`clamp_overlay`] is the one rule that
+//! Today (K4): the Calendar's dots. [`pinboard_entries`] is a port of the mod's
+//! `mods/atlas.pinboard/src/lib/pinboard/calendarEntries.ts` (the freeform timeline entries of the stored board), and [`clamp_overlay`] is the one rule that
 //! turns them into what `mod_overlay` may hold. The pre-move reader ([`calendar_entries`]) and the
 //! move's own seeding of the table (K8) both go through that rule, so the dots a user sees do not
 //! change at the move. The rule **never raises**: it drops what the table could not hold rather than
@@ -31,7 +31,10 @@ use crate::mods::package::tidy_user_line;
 /// The Pinboard mod's id: the row set of `mod_overlay` the Calendar reads once the board has moved.
 pub const PINBOARD_MOD_ID: &str = "atlas.pinboard";
 
-/// The `settings` key of the pre-mod board (`PINBOARD_PREF_KEY` in `src/lib/pinboard/types.ts`).
+/// The `settings` key of the pre-mod board (`PINBOARD_PREF_KEY` in the mod's
+/// `mods/atlas.pinboard/src/lib/pinboard/types.ts`). The core Pinboard that wrote it is gone, and
+/// nothing in the product writes the row any more except a rename or delete of a project, and only
+/// until the move is recorded.
 pub const BOARD_KEY: &str = "pinboard";
 
 /// The board format version this reader understands (`BOARD_VERSION`); another version is read as
@@ -205,6 +208,23 @@ pub fn derive_overlay(raw: &str) -> Vec<Entry> {
     clamp_overlay(pinboard_entries(raw))
 }
 
+/// The legacy row's text, or `None` for no row and for a value that is not UTF-8 text. The row is
+/// read as bytes, so a BLOB or an integer planted by a shared vault's member is never the typed-read
+/// error `db::get_setting` raises (which would fail every rename, delete, merge and Calendar read
+/// for good, now the row is permanent): a value that can't be read as text carries no board, and
+/// the callers leave the row exactly as it is.
+pub fn legacy_text(conn: &Connection) -> Result<Option<String>> {
+    let bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = ?1",
+            [BOARD_KEY],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(bytes.and_then(|b| String::from_utf8(b).ok()))
+}
+
 /// What the Calendar draws for the Pinboard (`calendar_pinboard_entries`).
 ///
 /// Once the move is recorded (`pinboard_moved_sha`), the mod's own `mod_overlay` rows, and an empty
@@ -251,7 +271,7 @@ pub fn calendar_entries(conn: &Connection) -> Result<Vec<Entry>> {
         }
         return Ok(clamp_overlay(kept));
     }
-    Ok(crate::db::get_setting(conn, BOARD_KEY)?
+    Ok(legacy_text(conn)?
         .map(|raw| derive_overlay(&raw))
         .unwrap_or_default())
 }
@@ -273,7 +293,7 @@ pub struct LegacyNote {
     pub recorded_current: bool,
 }
 
-/// The Pinboard's `cheapHash` (`PinboardView.tsx`): djb2 over UTF-16 code units, in base 36. It only
+/// The Pinboard's `cheapHash` (the mod's `mods/atlas.pinboard/src/components/PinboardView.tsx`): djb2 over UTF-16 code units, in base 36. It only
 /// tells whether a note's text has changed since it was last ingested.
 fn cheap_hash(s: &str) -> String {
     let mut h: i32 = 5381;

@@ -13,7 +13,8 @@
 //!   only, and only while the handover's flag stands;
 //! - `adopt_pinboard_prefs`, the same for the Pinboard's three nags;
 //! - `pinboard_move_state`, which strips the page draws about the Pinboard's move (a conflict, a
-//!   repaired copy, a board that cannot move), `pinboard_use_old_board` and `pinboard_move_dismiss`,
+//!   repaired copy, a board a restore put back, a board that cannot move), `pinboard_use_old_board`
+//!   and `pinboard_move_dismiss`,
 //!   the two answers to them (`mods::pinboard_move`).
 //!
 //! Each is main-window only through [`blocking`], and none is named `set_*`.
@@ -201,7 +202,8 @@ fn use_old_error(e: UseOldRefusal) -> ModsError {
     }
 }
 
-/// Clear a Pinboard strip's note: `conflict` ("Keep this one") or `repaired`. Nothing else is touched.
+/// Clear a Pinboard strip's note: `conflict` ("Keep this one"), `repaired` or `restored` ("OK").
+/// Nothing else is touched.
 #[tauri::command]
 pub async fn pinboard_move_dismiss(webview: Webview, note: String) -> Result<()> {
     blocking(&webview, move |app| {

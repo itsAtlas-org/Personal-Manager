@@ -568,6 +568,7 @@ fn keep_this_one_and_ok_clear_only_their_own_note() {
         MoveState {
             conflict: false,
             repaired: true,
+            restored: false,
             refused: None
         }
     );
@@ -753,9 +754,11 @@ fn the_old_row_survives_every_path() {
 }
 
 #[test]
-fn the_pending_key_is_written_only_by_v62_and_nothing_writes_the_legacy_row() {
+fn the_pending_key_has_two_writers_and_this_file_never_writes_the_legacy_row() {
     // Source guard for two promises: `settings['pinboard']` is only ever read here, and the pending
-    // key is only ever deleted here (migration v62 is what writes it).
+    // key is only ever deleted here. The writers of the pending key are migration v62 and a
+    // restore's re-arm (`autoinstall::rearm_pinboard`, an `INSERT OR IGNORE`); the walk below
+    // proves there are no others.
     let source = include_str!("../pinboard_move.rs");
     let production = source.split("#[cfg(test)]\nmod tests;").next().unwrap();
     for (n, line) in production.lines().enumerate() {
@@ -784,8 +787,9 @@ fn the_pending_key_is_written_only_by_v62_and_nothing_writes_the_legacy_row() {
             assert!(sql.contains("KEY = ?1"), "a delete by key only: {sql}");
         }
     }
-    // Nothing else in the crate names the pending key outside this file, the migrations and the
-    // tests (the PILOTS entry uses the constant), so nothing else can write it.
+    // Nothing else in the crate names the pending key outside this file, the migrations, the pilots'
+    // file (`autoinstall.rs`: the PILOTS entry and the re-arm, both by the constant) and the tests,
+    // so nothing else can write it. By its literal name here; by the constant just below.
     fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
@@ -810,6 +814,188 @@ fn the_pending_key_is_written_only_by_v62_and_nothing_writes_the_legacy_row() {
         &mut found,
     );
     assert!(found.is_empty(), "{found:?}");
+
+    // The literal is only one way to name the key: the constant is the other, and `autoinstall.rs`
+    // (which names the literal nowhere) is where the re-arm lives. Outside this file and that one no
+    // production code may use `pinboard_move::PENDING`, and inside `autoinstall.rs` it appears
+    // exactly twice: the PILOTS entry (a read) and the re-arm's one `INSERT OR IGNORE` (the only
+    // write), which never updates and never deletes the key.
+    fn uses_of_the_constant(dir: &std::path::Path, out: &mut Vec<(String, usize)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                uses_of_the_constant(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let production = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+                let code: String = production
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let uses = code.matches("pinboard_move::PENDING").count();
+                let own = path.ends_with("mods/pinboard_move.rs")
+                    || path.file_name().is_some_and(|f| f == "tests.rs")
+                    || path.components().any(|c| c.as_os_str() == "tests");
+                if uses > 0 && !own {
+                    out.push((path.display().to_string(), uses));
+                }
+            }
+        }
+    }
+    let mut users = Vec::new();
+    uses_of_the_constant(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut users,
+    );
+    assert_eq!(users.len(), 1, "{users:?}");
+    assert!(users[0].0.ends_with("mods/autoinstall.rs"), "{users:?}");
+    assert_eq!(users[0].1, 2, "the PILOTS entry and the re-arm's insert");
+    let autoinstall = include_str!("../autoinstall.rs");
+    let autoinstall = autoinstall.split("#[cfg(test)]\nmod tests").next().unwrap();
+    assert!(
+        !autoinstall.contains("set_setting(conn, pinboard_move::PENDING")
+            && !autoinstall.contains(concat!(
+                "DELETE FROM settings WHERE key = 'pinboard_move_",
+                "pending'"
+            ))
+            && !autoinstall.contains("UPDATE settings"),
+        "the re-arm only inserts the pending key"
+    );
+}
+
+/// The statement that starts at `at`: up to the next `;` (or the end).
+fn statement_at(code: &str, at: usize) -> &str {
+    let rest = &code[at..];
+    &rest[..rest.find(';').unwrap_or(rest.len())]
+}
+
+fn line_of(code: &str, at: usize) -> usize {
+    code[..at].matches('\n').count() + 1
+}
+
+/// The statements and calls in `files` (path, production source) that write `settings['pinboard']`,
+/// as `path: line`. A write is a `set_setting`/`delete_setting`/`execute` whose statement (up to the
+/// next `;`, over as many lines as rustfmt gave it) names the key or either constant; a local
+/// binding of the key's name (`let key = "pinboard";`, which a later call could write through) is
+/// reported too; and so is an SQL literal that updates or deletes the row or inserts it.
+fn legacy_row_writers(files: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let names = |code: &str| {
+        code.contains("\"pinboard\"") || code.contains("BOARD_KEY") || code.contains("LEGACY_KEY")
+    };
+    for (path, source) in files {
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        // Comments blanked, every line kept, so an index still counts lines.
+        let code: String = production
+            .lines()
+            .map(|l| l.split("//").next().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for call in ["set_setting(", "delete_setting(", ".execute("] {
+            for (at, _) in code.match_indices(call) {
+                if names(statement_at(&code, at)) {
+                    out.push(format!("{path}: line {}", line_of(&code, at)));
+                }
+            }
+        }
+        for (at, _) in code.match_indices("let ") {
+            let before = code[..at].chars().next_back();
+            let rhs = statement_at(&code, at)
+                .split_once('=')
+                .map(|(_, r)| r.trim());
+            let alias = rhs.is_some_and(|r| {
+                ["\"pinboard\"", "BOARD_KEY", "LEGACY_KEY"]
+                    .iter()
+                    .any(|t| r.trim_start_matches('&') == *t)
+            });
+            if alias && !before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                out.push(format!(
+                    "{path}: line {}: a binding of the key",
+                    line_of(&code, at)
+                ));
+            }
+        }
+        let code_only: String = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sql in code_only.split('"').filter(|s| s.contains("'pinboard'")) {
+            let up = sql.trim_start().to_ascii_uppercase();
+            if up.starts_with("UPDATE")
+                || up.starts_with("DELETE")
+                || up.contains("VALUES ('PINBOARD'")
+                || up.contains("SELECT 'PINBOARD',")
+            {
+                out.push(format!("{path}: {}", sql.trim()));
+            }
+        }
+    }
+    out
+}
+
+fn source_files() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && !path.components().any(|c| c.as_os_str() == "tests")
+                && !path.file_name().is_some_and(|f| f == "tests.rs")
+            {
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                out.push((rel, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+#[test]
+fn no_production_file_but_projects_writes_the_legacy_board_row() {
+    // Once the Pinboard is a mod, the page that rewrote the row (`set_pref`, the core Pinboard's
+    // debounced save) is gone, so the rename and delete of a project are the one writer left, and
+    // only while the move is not recorded. A second writer would change a person's only pre-mod copy.
+    let files = source_files();
+    assert!(files.len() > 50, "the walk found the source tree");
+    let writers: Vec<String> = legacy_row_writers(&files)
+        .into_iter()
+        .filter(|w| !w.starts_with("projects.rs"))
+        .collect();
+    assert!(writers.is_empty(), "{writers:?}");
+    // The guard sees what it is for: projects.rs does write it (two sites), and a planted writer in
+    // another file is reported.
+    let own: Vec<String> = legacy_row_writers(&files)
+        .into_iter()
+        .filter(|w| w.starts_with("projects.rs"))
+        .collect();
+    assert_eq!(own.len(), 2, "{own:?}");
+    for offender in [
+        "fn f(c: &Connection) { crate::db::set_setting(c, \"pinboard\", \"{}\"); }",
+        "fn f(c: &Connection) { c.execute(\"UPDATE settings SET value = 'x' WHERE key = 'pinboard'\", []); }",
+        "fn f(c: &Connection) { c.execute(\"DELETE FROM settings WHERE key = 'pinboard'\", []); }",
+        "fn f(c: &Connection) { c.execute(\"INSERT INTO settings(key, value) VALUES ('pinboard', '{}')\", []); }",
+        "fn f(c: &Connection) { c.execute(\"UPDATE settings SET value = ?2 WHERE key = ?1\", params![BOARD_KEY, v]); }",
+        // What rustfmt makes of a call over 100 columns: one argument per line.
+        "fn f(c: &Connection) {\n    crate::db::set_setting(\n        c,\n        \"pinboard\",\n        &text,\n    )?;\n}",
+        "fn f(c: &Connection) {\n    c.execute(\n        \"UPDATE settings SET value = ?2 WHERE key = ?1\",\n        params![\n            LEGACY_KEY,\n            v\n        ],\n    )?;\n}",
+        // The key bound to a local first, then written through it.
+        "fn f(c: &Connection) {\n    let key = \"pinboard\";\n    crate::db::set_setting(c, key, &text)?;\n}",
+    ] {
+        let found = legacy_row_writers(&[("mods/other.rs".to_owned(), offender.to_owned())]);
+        assert_eq!(found.len(), 1, "{offender}: {found:?}");
+    }
+    // Reads are not writes.
+    assert!(legacy_row_writers(&[(
+        "mods/other.rs".to_owned(),
+        "fn f(c: &Connection) { c.query_row(\"SELECT value FROM settings WHERE key = 'pinboard'\", [], |r| r.get(0)); }".to_owned()
+    )])
+    .is_empty());
 }
 
 // ---- Hostile stores ---------------------------------------------------------------------------
@@ -1062,4 +1248,271 @@ fn a_rename_before_the_move_is_copied_and_one_after_it_goes_through_the_mods_ref
     let moved: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(moved, bound("Atlas 2"));
     assert_eq!(revision, 2, "a frame holding the first copy is stale");
+}
+
+/// [`bound`] after a delete: the bindings are nulled, no widget is removed.
+fn unbound() -> Value {
+    json!({"version": 1, "widgets": [
+        {"id": "a", "kind": "timeline", "project": null},
+        {"id": "f", "kind": "folder", "children": [{"id": "c", "kind": "timeline", "project": null}]}
+    ]})
+}
+
+/// A stored board as a value: the mod's storage sorts object keys, so a board a rename rewrote is
+/// compared structurally, never by bytes.
+fn board_value(conn: &Connection) -> Value {
+    serde_json::from_slice(&board_of(conn, BOARD).unwrap().0).unwrap()
+}
+
+fn legacy_value(conn: &Connection) -> Value {
+    serde_json::from_slice(&legacy_row(conn).unwrap().0).unwrap()
+}
+
+#[test]
+fn a_delete_before_the_move_unbinds_the_legacy_row_and_one_after_it_goes_through_the_mods_refs() {
+    // Delete first: the legacy row is unbound (nothing removed), and the move copies that.
+    let (_dir, mut conn) = store_with_refs();
+    owed(&conn, bound("Atlas").to_string().as_bytes());
+    crate::projects::delete_project_satellites(&conn, "Atlas").unwrap();
+    assert_eq!(legacy_value(&conn), unbound(), "unbound before the move");
+    run(&mut conn).unwrap();
+    assert_eq!(
+        board_value(&conn),
+        unbound(),
+        "the move copies what was left"
+    );
+
+    // Move first: the legacy row is a snapshot, byte for byte; the mod's board is unbound through
+    // its declared refs, one revision on.
+    let (_dir, mut conn) = store_with_refs();
+    owed(&conn, bound("Atlas").to_string().as_bytes());
+    run(&mut conn).unwrap();
+    let snapshot = legacy_row(&conn).unwrap();
+    crate::projects::delete_project_satellites(&conn, "Atlas").unwrap();
+    assert_eq!(
+        legacy_row(&conn).unwrap(),
+        snapshot,
+        "the snapshot is frozen"
+    );
+    assert_eq!(board_value(&conn), unbound());
+    assert_eq!(board_of(&conn, BOARD).unwrap().1, 2);
+}
+
+#[test]
+fn a_rename_with_the_mod_present_and_no_board_yet_rewrites_the_old_row_and_the_copy_takes_it() {
+    // "Pending, the mod's row there, its board not yet": the rename has two places to rewrite and
+    // only one holds a board. It must not invent a board row in the mod, and the copy that follows
+    // carries the renamed board.
+    let (_dir, mut conn) = store_with_refs();
+    owed(&conn, bound("Atlas").to_string().as_bytes());
+    assert!(board_of(&conn, BOARD).is_none());
+    crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2").unwrap();
+    assert_eq!(legacy_value(&conn), bound("Atlas 2"));
+    assert!(
+        board_of(&conn, BOARD).is_none(),
+        "a rename never creates the mod's board"
+    );
+    run(&mut conn).unwrap();
+    assert_eq!(board_value(&conn), bound("Atlas 2"));
+    assert_eq!(board_of(&conn, BOARD).unwrap().1, 1);
+}
+
+#[test]
+fn a_conflict_keeps_the_old_row_frozen_while_the_mods_board_follows_a_rename() {
+    // The mod already holds a board with content: both are kept, and the move is recorded, so the
+    // legacy row is a snapshot. A rename then reaches the mod's board only, and the conflict still
+    // describes the unchanged legacy bytes ("Use my old board" would not answer Changed).
+    let (_dir, mut conn) = store_with_refs();
+    put_mod_board(&conn, BOARD, &bound("Atlas").to_string(), 3);
+    owed(&conn, bound("Atlas").to_string().as_bytes());
+    run(&mut conn).unwrap();
+    assert!(state(&conn).unwrap().conflict);
+    let snapshot = legacy_row(&conn).unwrap();
+    crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2").unwrap();
+    assert_eq!(legacy_row(&conn).unwrap(), snapshot, "frozen");
+    assert_eq!(board_value(&conn), bound("Atlas 2"));
+    assert_eq!(board_of(&conn, BOARD).unwrap().1, 4);
+    assert_eq!(
+        setting(&conn, CONFLICT),
+        Some(sha_hex(&snapshot.0)),
+        "the strip still describes the legacy row it was raised for"
+    );
+}
+
+#[test]
+fn a_merge_before_the_move_folds_the_old_row_and_the_mod_unconsented_gets_the_copy() {
+    // `merge_entities` then the satellites' rename onto the survivor (what the merge command does),
+    // with the mod installed and not consented: the legacy row is rewritten, and the copy carries it.
+    let (_dir, mut conn) = store_with_refs();
+    let from = crate::entities::resolve_project(&conn, "Atlas", true)
+        .unwrap()
+        .unwrap();
+    let into = crate::entities::resolve_project(&conn, "Beta", true)
+        .unwrap()
+        .unwrap();
+    owed(&conn, bound("Atlas").to_string().as_bytes());
+    crate::entities::merge_entities(&conn, from, into).unwrap();
+    crate::projects::rename_project_satellites(&conn, "Atlas", "Beta").unwrap();
+    assert_eq!(legacy_value(&conn), bound("Beta"));
+    run(&mut conn).unwrap();
+    assert_eq!(board_value(&conn), bound("Beta"));
+}
+
+#[test]
+fn v62s_markers_through_the_real_migration_then_an_install_and_a_rename_carry_the_board_across() {
+    // A store at v61 holding a board with a bound timeline, migrated by the real ladder.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm.sqlite");
+    let board = bound("Atlas").to_string();
+    {
+        let conn =
+            crate::db::open_at_version(&path, crate::mods::api::test_support::DB_KEY, 61).unwrap();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('pinboard', ?1)",
+            [&board],
+        )
+        .unwrap();
+    }
+    let mut conn = crate::db::open(&path, crate::mods::api::test_support::DB_KEY).unwrap();
+    assert_eq!(
+        setting(&conn, autoinstall::PILOTS[1].marker).as_deref(),
+        Some("1")
+    );
+    assert_eq!(setting(&conn, PENDING).as_deref(), Some("1"));
+    // The mod arrives (as the install leaves it) and the person renames the project before the
+    // copy settles: the old row is rewritten, then the copy takes it.
+    install(&conn);
+    conn.execute(
+        "UPDATE mods SET project_refs = ?2, consented_at = NULL WHERE id = ?1",
+        params![
+            PINBOARD_MOD_ID,
+            json!([{"key": "board", "path": "$.widgets..project"}]).to_string()
+        ],
+    )
+    .unwrap();
+    crate::entities::resolve_project(&conn, "Atlas", true)
+        .unwrap()
+        .unwrap();
+    crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2").unwrap();
+    run(&mut conn).unwrap();
+    assert_eq!(board_value(&conn), bound("Atlas 2"));
+    assert_eq!(setting(&conn, PENDING), None);
+    // After the copy, a second rename goes to the mod only.
+    let snapshot = legacy_row(&conn).unwrap();
+    crate::projects::rename_project_satellites(&conn, "Atlas 2", "Atlas 3").unwrap();
+    assert_eq!(legacy_row(&conn).unwrap(), snapshot);
+    assert_eq!(board_value(&conn), bound("Atlas 3"));
+}
+
+/// A BLOB that is not UTF-8 and an integer: the two types a shared vault's member can plant where
+/// the product wrote text.
+const PLANTS: [&str; 2] = ["x'ff00fe'", "7"];
+
+fn plant_setting(conn: &Connection, key: &str, sql_value: &str) {
+    conn.execute(
+        &format!("INSERT OR REPLACE INTO settings(key, value) VALUES (?1, {sql_value})"),
+        [key],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_planted_type_at_the_moved_record_or_the_legacy_row_never_fails_a_rename_delete_merge_or_read()
+{
+    for plant in PLANTS {
+        // 1. At the move's record.
+        let (_dir, conn) = store_with_refs();
+        let from = crate::entities::resolve_project(&conn, "Atlas", true)
+            .unwrap()
+            .unwrap();
+        let into = crate::entities::resolve_project(&conn, "Beta", true)
+            .unwrap()
+            .unwrap();
+        owed(&conn, bound("Atlas").to_string().as_bytes());
+        plant_setting(&conn, MOVED, plant);
+        crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2")
+            .unwrap_or_else(|e| panic!("rename, moved = {plant}: {e}"));
+        crate::entities::merge_entities(&conn, from, into).unwrap();
+        crate::projects::rename_project_satellites(&conn, "Atlas 2", "Beta")
+            .unwrap_or_else(|e| panic!("merge, moved = {plant}: {e}"));
+        crate::projects::delete_project_satellites(&conn, "Beta")
+            .unwrap_or_else(|e| panic!("delete, moved = {plant}: {e}"));
+        calendar_entries(&conn).unwrap_or_else(|e| panic!("calendar, moved = {plant}: {e}"));
+        pinboard_legacy::stored_board(&conn)
+            .unwrap_or_else(|e| panic!("stored board, moved = {plant}: {e}"));
+
+        // 2. At the legacy row itself: left exactly as it is, never an error.
+        let (_dir, conn) = store_with_refs();
+        crate::entities::resolve_project(&conn, "Beta", true)
+            .unwrap()
+            .unwrap();
+        plant_setting(&conn, "pinboard", plant);
+        let planted = legacy_row(&conn).unwrap();
+        crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2")
+            .unwrap_or_else(|e| panic!("rename, board = {plant}: {e}"));
+        crate::projects::delete_project_satellites(&conn, "Atlas 2")
+            .unwrap_or_else(|e| panic!("delete, board = {plant}: {e}"));
+        calendar_entries(&conn).unwrap_or_else(|e| panic!("calendar, board = {plant}: {e}"));
+        pinboard_legacy::stored_board(&conn)
+            .unwrap_or_else(|e| panic!("stored board, board = {plant}: {e}"));
+        assert_eq!(
+            legacy_row(&conn).unwrap(),
+            planted,
+            "the planted row is untouched"
+        );
+    }
+}
+
+#[test]
+fn a_planted_record_that_is_not_text_reads_as_not_moved_and_a_text_one_as_moved() {
+    // The rule the typed read became: blank or not-UTF-8 is "not recorded", any other text is.
+    let (_dir, conn) = store();
+    assert!(!crate::projects::pinboard_move_recorded(&conn).unwrap());
+    plant_setting(&conn, MOVED, "x'ff00fe'");
+    assert!(!crate::projects::pinboard_move_recorded(&conn).unwrap());
+    plant_setting(&conn, MOVED, "'  '");
+    assert!(!crate::projects::pinboard_move_recorded(&conn).unwrap());
+    plant_setting(&conn, MOVED, "'abc'");
+    assert!(crate::projects::pinboard_move_recorded(&conn).unwrap());
+    plant_setting(&conn, MOVED, "7");
+    assert!(crate::projects::pinboard_move_recorded(&conn).unwrap());
+}
+
+#[test]
+fn the_restored_note_draws_only_after_the_copy_and_never_beside_a_conflict() {
+    let (_dir, mut conn) = world();
+    // The re-arm's state: owed again, the note set, the record of the move gone.
+    owed(&conn, three_widget_board().as_bytes());
+    db::set_setting(&conn, RESTORED, "1").unwrap();
+    assert!(
+        !state(&conn).unwrap().restored,
+        "not before the copy landed"
+    );
+    run(&mut conn).unwrap();
+    assert!(state(&conn).unwrap().restored, "after the copy");
+    // A conflict beside it (the mod held a board) is the strip that matters.
+    db::set_setting(&conn, CONFLICT, "x").unwrap();
+    assert!(!state(&conn).unwrap().restored);
+    db::delete_setting(&conn, CONFLICT).unwrap();
+    assert!(state(&conn).unwrap().restored);
+    assert!(dismiss(&conn, "restored").unwrap());
+    assert!(!state(&conn).unwrap().restored);
+    assert_eq!(setting(&conn, RESTORED), None);
+    assert!(
+        setting(&conn, MOVED).is_some(),
+        "OK clears the note, not the move"
+    );
+}
+
+#[test]
+fn a_move_that_meets_a_board_of_the_mods_own_drops_the_restored_note() {
+    // After a re-arm the person edited in the mod before the copy settled: both boards are kept and
+    // the conflict strip tells it, so "PM restored your Pinboard" must not be left standing.
+    let (_dir, mut conn) = world();
+    owed(&conn, three_widget_board().as_bytes());
+    db::set_setting(&conn, RESTORED, "1").unwrap();
+    put_mod_board(&conn, BOARD, r#"{"version":1,"widgets":[{"id":"n"}]}"#, 2);
+    run(&mut conn).unwrap();
+    assert!(state(&conn).unwrap().conflict);
+    assert_eq!(setting(&conn, RESTORED), None);
 }

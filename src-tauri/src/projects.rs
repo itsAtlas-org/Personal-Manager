@@ -625,7 +625,7 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
     //    PM is single-window and the rename UI is a different tab than the Pinboard, so the board
     //    isn't mounted during a rename; it re-reads the re-keyed blob on its next mount.
     if !pinboard_move_recorded(conn)? {
-        if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
+        if let Some(blob) = crate::pinboard_legacy::legacy_text(conn)? {
             if let Some(rekeyed) = rekey_pinboard_project(&blob, old, new) {
                 crate::db::set_setting(conn, "pinboard", &rekeyed)?;
             }
@@ -646,9 +646,21 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
 
 /// Whether the Pinboard's board has moved to the mod (`pinboard_moved_sha` is recorded): the legacy
 /// row `settings['pinboard']` is then a frozen snapshot that a rename or delete leaves alone.
+///
+/// Read as bytes, never as a typed value: a shared vault's member can plant a BLOB or an integer
+/// there, and a typed read of one is an error that would fail every rename, merge, delete and
+/// Calendar read for good. A value that is not UTF-8 text, or is blank, reads as "not recorded".
 pub(crate) fn pinboard_move_recorded(conn: &Connection) -> Result<bool> {
-    Ok(crate::db::get_setting(conn, "pinboard_moved_sha")?
-        .is_some_and(|sha| !sha.trim().is_empty()))
+    use rusqlite::OptionalExtension;
+    let sha: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = 'pinboard_moved_sha'",
+            [],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(sha.is_some_and(|b| std::str::from_utf8(&b).is_ok_and(|t| !t.trim().is_empty())))
 }
 
 /// Re-key a pinboard blob's project-bound widget bindings from `old` to `new`, across the board's
@@ -751,7 +763,7 @@ pub fn delete_project_satellites(conn: &Connection, name: &str) -> Result<()> {
     // 4. Unbind pinboard widgets rather than removing them: the legacy board until its move is
     //    recorded (see `rename_project_satellites` step 7), and every mod's declared `projectRefs`.
     if !pinboard_move_recorded(conn)? {
-        if let Some(blob) = crate::db::get_setting(conn, "pinboard")? {
+        if let Some(blob) = crate::pinboard_legacy::legacy_text(conn)? {
             if let Some(unbound) = unbind_pinboard_project(&blob, name) {
                 crate::db::set_setting(conn, "pinboard", &unbound)?;
             }

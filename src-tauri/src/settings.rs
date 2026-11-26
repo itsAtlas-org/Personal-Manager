@@ -347,16 +347,21 @@ pub fn set_time_zone(state: State<'_, AppState>, zone: String) -> Result<()> {
 /// `dev_mode` is no longer one of them: developer mode is per device and decides whether unsigned
 /// mods may install and run, so the page can't write it (`mods::devmode`, the `dev_mode_state` and
 /// `dev_mode_switch` commands). The old row stays in the store, never read by anything.
+///
+/// `pinboard` is no longer one of them either: the Pinboard lives in its mod (its board is the mod's
+/// own storage), the one page that wrote the row is gone, and the row `settings['pinboard']` is a
+/// frozen legacy snapshot that only Rust reads (the Calendar and a project rename or delete, until
+/// the move is recorded; backups). A webview that could write it could rewrite the only pre-mod
+/// copy of a person's board. Nothing deletes the row.
 const WEBVIEW_PREFS: &[&str] = &[
     "appearance",
-    "pinboard",
     "project_ui",
     "milestone_ui",
     "calendar_ui",
     "backup_ui",
 ];
 
-/// Read a UI preference blob the webview previously stored (theme axes, pinboard
+/// Read a UI preference blob the webview previously stored (theme axes, sidebar and calendar
 /// layout). These live in the encrypted `settings` table — not the webview's
 /// `localStorage` — so they travel with the data folder when it's backed up or
 /// moved to another machine. Returns `None` when nothing is stored yet. Gated on
@@ -587,13 +592,12 @@ mod tests {
     #[test]
     fn webview_prefs_allowlist_excludes_sensitive_settings() {
         // I-04: get_pref/set_pref gate on this list, so a compromised webview can read or write ONLY
-        // its own UI blobs. Lock it: the six UI keys are in, and schema-critical / sensitive rows
+        // its own UI blobs. Lock it: the five UI keys are in, and schema-critical / sensitive rows
         // are out — a future edit that accidentally adds one trips this test. The last three carry
         // user content (project names, calendar ids, backup account ids) that used to sit in the
         // webview's plaintext localStorage, so dropping one of them silently sends it back there.
         for ui in [
             "appearance",
-            "pinboard",
             "project_ui",
             "milestone_ui",
             "calendar_ui",
@@ -602,8 +606,11 @@ mod tests {
             assert!(WEBVIEW_PREFS.contains(&ui), "{ui} should be webview-owned");
         }
         // Developer mode gates unsigned mods: a page that could write it could switch it on (the
-        // old `dev_mode` row and the per-device record, `mods_dev_devices`, are Rust's alone).
+        // old `dev_mode` row and the per-device record, `mods_dev_devices`, are Rust's alone). The
+        // Pinboard's legacy board is the only pre-mod copy of a person's board: since the Pinboard
+        // became a mod no webview may read or write it (a set of `pinboard` is refused).
         for sensitive in [
+            "pinboard",
             "embedding_dim",
             "embedding_model",
             "learning_profile",

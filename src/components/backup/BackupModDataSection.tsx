@@ -85,7 +85,8 @@ export function BackupModDataSection({ busy }: BackupModDataSectionProps) {
           {!keep && (
             <Callout tone="warning" live={false} className="mt-2">
               A restore then brings those mods back empty: whatever they saved is not in your
-              backups.
+              backups. The one exception is the Pinboard: if this is off, a backup holds only the
+              board as it was when the Pinboard moved into a mod.
             </Callout>
           )}
         </div>

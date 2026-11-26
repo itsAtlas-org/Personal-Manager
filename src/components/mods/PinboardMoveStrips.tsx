@@ -15,11 +15,15 @@
 //             warning is never folded away).
 //   repaired  A few characters could not be stored as they were and were replaced in the mod's copy.
 //             The old board is unchanged. One button clears it.
+//   restored  A restore brought back a store whose Pinboard had moved into its mod, from a backup
+//             that left the mod's data out, so PM copied the board as it was when it moved. Later
+//             edits are not in it. One button clears it; it draws only once the copy landed and no
+//             conflict is open (the conflict strip is the one that matters then).
 //   refused   The board cannot move as it is (not readable, or bigger than a mod can save). It is
 //             safe in PM's store, nothing was changed, and PM says so. Nothing to press: it clears
 //             itself when the board can move.
 //
-// Dormant: a store with no move owed, or one that moved cleanly, draws nothing.
+// A store with no move owed, or one that moved cleanly, draws nothing.
 
 import { useState } from "react";
 import { pinboardMoveDismiss, pinboardUseOldBoard } from "../../lib/ipc";
@@ -33,7 +37,9 @@ export function PinboardMoveStrips() {
   const { state, refresh } = usePinboardMove();
   const [busy, setBusy] = useState<Busy>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  if (!state || (!state.conflict && !state.repaired && !state.refused)) return null;
+  if (!state || (!state.conflict && !state.repaired && !state.refused && !state.restored)) {
+    return null;
+  }
 
   async function answer(which: Exclude<Busy, null>, act: () => Promise<unknown>) {
     setBusy(which);
@@ -111,6 +117,25 @@ export function PinboardMoveStrips() {
               className="shrink-0"
               disabled={busy !== null}
               onClick={() => void answer("ok", () => pinboardMoveDismiss("repaired"))}
+            >
+              OK
+            </Button>
+          </div>
+        </Callout>
+      )}
+      {state.restored && !state.conflict && (
+        <Callout tone="info" size="md" live variant="strip">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="min-w-0 break-words">
+              PM restored your Pinboard as it was when it moved into a mod. Backups without mod data
+              don&apos;t hold later edits.
+            </p>
+            <Button
+              variant="tertiary"
+              size="sm"
+              className="shrink-0"
+              disabled={busy !== null}
+              onClick={() => void answer("ok", () => pinboardMoveDismiss("restored"))}
             >
               OK
             </Button>

@@ -1157,8 +1157,9 @@ export default function App() {
                 focus. */}
             {!showSettings && <ModNoticeStrips />}
             {/* What PM says about the Pinboard's move into its mod: both boards kept, a copy with
-                characters replaced, a board that can't move yet. Dormant until the move is owed;
-                Settings draws its own copy while open. */}
+                characters replaced, a board a restore put back, a board that can't move yet.
+                Draws nothing unless a move or restore left a note; Settings draws its own copy
+                while open. */}
             {!showSettings && <PinboardMoveStrips />}
             {!showSettings && <ModKeyAsks />}
             <div

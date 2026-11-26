@@ -33,7 +33,12 @@ vi.mock("../../kit/theme", async (importOriginal) => ({
 
 import { PinboardMoveStrips } from "./PinboardMoveStrips";
 
-const NOTHING: PinboardMoveState = { conflict: false, repaired: false, refused: null };
+const NOTHING: PinboardMoveState = {
+  conflict: false,
+  repaired: false,
+  restored: false,
+  refused: null,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -156,11 +161,39 @@ describe("PinboardMoveStrips", () => {
   });
 
   it("draws every strip that is owed, refusal first", async () => {
-    pinboardMoveState.mockResolvedValue({ conflict: true, repaired: true, refused: "tooBig" });
+    pinboardMoveState.mockResolvedValue({
+      conflict: true,
+      repaired: true,
+      restored: true,
+      refused: "tooBig",
+    });
     render(<PinboardMoveStrips />);
     await screen.findByText(/older one in PM/);
     const text = document.body.textContent ?? "";
     expect(text.indexOf("bigger than a mod")).toBeLessThan(text.indexOf("older one in PM"));
     expect(text.indexOf("older one in PM")).toBeLessThan(text.indexOf("replacement mark"));
+    // The restored strip never draws beside a conflict, whatever the flag says.
+    expect(text).not.toContain("PM restored your Pinboard");
+  });
+
+  it("tells a restored board once, and OK clears it and reads the state again", async () => {
+    pinboardMoveState.mockResolvedValue({ ...NOTHING, restored: true });
+    render(<PinboardMoveStrips />);
+    expect(
+      await screen.findByText(
+        /PM restored your Pinboard as it was when it moved into a mod\. Backups without mod data don't hold later edits\./,
+      ),
+    ).toBeTruthy();
+    pinboardMoveState.mockResolvedValue(NOTHING);
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+    await waitFor(() => expect(pinboardMoveDismiss).toHaveBeenCalledWith("restored"));
+    await waitFor(() => expect(screen.queryByText(/PM restored your Pinboard/)).toBeNull());
+  });
+
+  it("does not draw the restored strip while a conflict is open", async () => {
+    pinboardMoveState.mockResolvedValue({ ...NOTHING, restored: true, conflict: true });
+    render(<PinboardMoveStrips />);
+    await screen.findByText(/older one in PM/);
+    expect(screen.queryByText(/PM restored your Pinboard/)).toBeNull();
   });
 });

@@ -69,6 +69,11 @@ pub fn reset_for_adopt(conn: &Connection, data_dir: &Path, vault_id: &str) -> Re
     // migration: the marker says so, and the open's pass puts them back (`autoinstall`), so a
     // restore onto a new computer gets the Map back without a click, as it did when it was built in.
     autoinstall::mark_restored(&tx)?;
+    // A backup taken after the Pinboard moved into its mod, with the mod's data left out, holds the
+    // board only as the legacy snapshot of when it moved. Owing the move again, in this same
+    // transaction, is what brings that board back into the mod (`autoinstall::rearm_pinboard` says
+    // when it fires and what it writes). Only a restore does this; a join writes nothing.
+    autoinstall::rearm_pinboard(&tx)?;
     // Dev mode off for EVERY device: an empty per-device record and the old row off (this PM never
     // reads the old row; the write is for an older PM sharing the vault). The unsigned rows need no
     // write here: the load that follows the store's open reads the record first and pauses each
@@ -320,6 +325,7 @@ pub fn settled(app: &AppHandle) -> Result<Vec<RestoredMod>> {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::mods::pinboard_move;
 
     fn store_conn() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();
@@ -497,6 +503,288 @@ mod tests {
         add(&conn, "atlas.map", false, "active", None);
         reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
         assert!(!marker(&conn), "an unsigned file is not the pilot");
+    }
+
+    // ---- The Pinboard's re-arm (Q4): a restore brings back the pre-move board ---------------------
+
+    const PIN: &str = "atlas.pinboard";
+    /// The board as the legacy row holds it: a timeline bound to a project, and a freeform one with
+    /// one dated entry (the Calendar's dots come from freeform timelines).
+    const OLD_BOARD: &str = r#"{"version":1,"widgets":[{"id":"t","kind":"timeline","project":"Atlas"},{"id":"f","kind":"timeline","items":[{"id":"i","label":"Ship","date":"2026-12-01"}]}]}"#;
+    const MOVED_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn put(conn: &Connection, key: &str, value: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+
+    fn setting_text(conn: &Connection, key: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        // Read as bytes: a planted BLOB that is not UTF-8 must not panic the helper.
+        conn.query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = ?1",
+            [key],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .unwrap()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    fn legacy_board_bytes(conn: &Connection) -> Option<Vec<u8>> {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = 'pinboard'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// A restored store as a mod-data-off backup leaves it: the board moved once (the record is
+    /// there, with stale strip notes), the legacy row holds the snapshot, the signed catalogue
+    /// Pinboard row came along, and the mod's own `board` did not.
+    fn moved_without_mod_data() -> (tempfile::TempDir, Connection) {
+        let (d, conn) = store_conn();
+        add(&conn, PIN, true, "active", None);
+        put(&conn, "pinboard", OLD_BOARD);
+        put(&conn, pinboard_move::MOVED, MOVED_SHA);
+        put(&conn, pinboard_move::CONFLICT, MOVED_SHA);
+        put(&conn, pinboard_move::REPAIRED, "1");
+        (d, conn)
+    }
+
+    fn fired(conn: &Connection) -> bool {
+        setting_text(conn, pinboard_move::PENDING).is_some()
+    }
+
+    /// Every key the re-arm may write or delete, as the store holds them.
+    fn rearm_keys(conn: &Connection) -> Vec<Option<String>> {
+        [
+            pinboard_move::PENDING,
+            pinboard_move::MOVED,
+            pinboard_move::CONFLICT,
+            pinboard_move::REPAIRED,
+            pinboard_move::RESTORED,
+        ]
+        .iter()
+        .map(|k| setting_text(conn, k))
+        .collect()
+    }
+
+    #[test]
+    fn a_restore_without_the_mods_data_owes_the_move_again_and_changes_nothing_else() {
+        let (d, conn) = moved_without_mod_data();
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert_eq!(
+            setting_text(&conn, pinboard_move::PENDING).as_deref(),
+            Some("1"),
+            "the copy is owed again"
+        );
+        assert_eq!(setting_text(&conn, pinboard_move::MOVED), None);
+        assert_eq!(
+            setting_text(&conn, pinboard_move::CONFLICT),
+            None,
+            "a stale conflict describes a board that is not in this copy"
+        );
+        assert_eq!(setting_text(&conn, pinboard_move::REPAIRED), None);
+        assert_eq!(
+            setting_text(&conn, pinboard_move::RESTORED).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            setting_text(&conn, "mods_autoinstall_pinboard").as_deref(),
+            Some("1"),
+            "the marker the pass acts on is there too"
+        );
+        assert_eq!(
+            legacy_board_bytes(&conn).as_deref(),
+            Some(OLD_BOARD.as_bytes()),
+            "the legacy row is byte for byte what it was"
+        );
+        let kv: i64 = conn
+            .query_row("SELECT count(*) FROM mod_kv", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kv, 0, "nothing was written to the mod's storage");
+    }
+
+    #[test]
+    fn the_rearm_returns_the_store_to_the_pre_move_state_for_renames_and_the_calendar() {
+        // With the record of the move gone, the legacy row is live again: a rename rewrites it (so
+        // the copy takes the renamed board) and the Calendar reads its dots, as before the move.
+        let (d, conn) = moved_without_mod_data();
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(!crate::projects::pinboard_move_recorded(&conn).unwrap());
+        let dots = crate::pinboard_legacy::calendar_entries(&conn).unwrap();
+        assert_eq!(dots.len(), 1, "the Calendar reads the legacy board again");
+        crate::projects::rename_project_satellites(&conn, "Atlas", "Atlas 2").unwrap();
+        let text = String::from_utf8(legacy_board_bytes(&conn).unwrap()).unwrap();
+        let board: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(board["widgets"][0]["project"], "Atlas 2");
+    }
+
+    /// Each store a restore meets that must NOT be re-armed: the record of the move, the strip
+    /// notes and the legacy row all stay as they were, and nothing is pending.
+    #[test]
+    fn the_rearm_stays_off_unless_every_condition_holds() {
+        type Break = fn(&Connection);
+        let cases: [(&str, Break); 12] = [
+            ("a backup with the mod's data: the board is there", |c| {
+                c.execute(
+                    "INSERT INTO mod_kv(mod_id, key, class, value) \
+                     VALUES ('atlas.pinboard', 'board', 'content', '{}')",
+                    [],
+                )
+                .unwrap();
+            }),
+            ("a backup from before the move: no record", |c| {
+                c.execute("DELETE FROM settings WHERE key = 'pinboard_moved_sha'", [])
+                    .unwrap();
+            }),
+            ("the person removed the mod: no row", |c| {
+                c.execute("DELETE FROM mods WHERE id = 'atlas.pinboard'", [])
+                    .unwrap();
+            }),
+            ("an unsigned file install is not the Pinboard", |c| {
+                c.execute(
+                    "UPDATE mods SET signed = 0, installed_from = 'file' WHERE id = 'atlas.pinboard'",
+                    [],
+                )
+                .unwrap();
+            }),
+            (
+                "a catalogue row that is not signed is not the Pinboard",
+                |c| {
+                    c.execute(
+                        "UPDATE mods SET signed = 0 WHERE id = 'atlas.pinboard' \
+                     AND installed_from = 'catalogue'",
+                        [],
+                    )
+                    .unwrap();
+                },
+            ),
+            ("a developer's test folder is not the Pinboard", |c| {
+                c.execute(
+                    "UPDATE mods SET installed_from = 'folder', package_sha256 = NULL \
+                     WHERE id = 'atlas.pinboard'",
+                    [],
+                )
+                .unwrap();
+            }),
+            ("no legacy row: no board to give back", |c| {
+                c.execute("DELETE FROM settings WHERE key = 'pinboard'", [])
+                    .unwrap();
+            }),
+            ("a blank legacy row", |c| put(c, "pinboard", " \n\t ")),
+            // The move would refuse these as unreadable, so the copy could never land: the record of
+            // the move must stay, and no note is owed.
+            ("a legacy row that is not text", |c| {
+                c.execute(
+                    "UPDATE settings SET value = x'ff00fe' WHERE key = 'pinboard'",
+                    [],
+                )
+                .unwrap();
+            }),
+            ("a legacy row that is not JSON", |c| {
+                put(c, "pinboard", "this is not a board");
+            }),
+            ("a blank record of the move", |c| {
+                put(c, pinboard_move::MOVED, "  ");
+            }),
+            ("a record of the move that is not text", |c| {
+                c.execute(
+                    "UPDATE settings SET value = x'ff00fe' WHERE key = 'pinboard_moved_sha'",
+                    [],
+                )
+                .unwrap();
+            }),
+        ];
+        for (what, break_it) in cases {
+            let (d, conn) = moved_without_mod_data();
+            break_it(&conn);
+            let before = rearm_keys(&conn);
+            let legacy_before = legacy_board_bytes(&conn);
+            reset_for_adopt(&conn, &dir_of(&d, A), VAULT)
+                .unwrap_or_else(|e| panic!("{what}: the restore must not be blocked: {e}"));
+            assert!(!fired(&conn), "{what}: nothing is owed");
+            assert_eq!(rearm_keys(&conn), before, "{what}: nothing was touched");
+            assert_eq!(
+                setting_text(&conn, pinboard_move::RESTORED),
+                None,
+                "{what}: no note"
+            );
+            assert_eq!(legacy_board_bytes(&conn), legacy_before, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_planted_integer_as_the_record_of_the_move_reads_as_recorded() {
+        // The same rule as `pinboard_move_recorded`: a value that is text once cast (an integer)
+        // is a record, so the restore owes the copy; only a blank or non-UTF-8 value is not one.
+        let (d, conn) = moved_without_mod_data();
+        conn.execute(
+            "UPDATE settings SET value = 7 WHERE key = 'pinboard_moved_sha'",
+            [],
+        )
+        .unwrap();
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert!(fired(&conn));
+        assert_eq!(setting_text(&conn, pinboard_move::MOVED), None);
+        assert_eq!(
+            legacy_board_bytes(&conn).as_deref(),
+            Some(OLD_BOARD.as_bytes())
+        );
+    }
+
+    #[test]
+    fn a_planted_legacy_row_never_blocks_a_restore_and_is_never_changed() {
+        // A BLOB that is not text and an integer where the board should be: the restore goes
+        // through, the row is byte for byte as planted (the move, when it runs, refuses an
+        // unreadable board and says so in its strip).
+        for plant in ["x'ff00fe'", "7"] {
+            let (d, conn) = moved_without_mod_data();
+            conn.execute(
+                &format!("UPDATE settings SET value = {plant} WHERE key = 'pinboard'"),
+                [],
+            )
+            .unwrap();
+            let before = legacy_board_bytes(&conn);
+            reset_for_adopt(&conn, &dir_of(&d, A), VAULT)
+                .unwrap_or_else(|e| panic!("{plant}: {e}"));
+            assert_eq!(legacy_board_bytes(&conn), before, "{plant}");
+        }
+    }
+
+    #[test]
+    fn a_second_reset_changes_nothing() {
+        let (d, conn) = moved_without_mod_data();
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        let after_first = rearm_keys(&conn);
+        assert!(fired(&conn));
+        reset_for_adopt(&conn, &dir_of(&d, A), VAULT).unwrap();
+        assert_eq!(
+            rearm_keys(&conn),
+            after_first,
+            "the record is gone, so no re-arm"
+        );
+        assert_eq!(
+            legacy_board_bytes(&conn).as_deref(),
+            Some(OLD_BOARD.as_bytes())
+        );
+    }
+
+    #[test]
+    fn the_rearm_names_the_pending_key_only_by_its_constant() {
+        // The pending-key guard (`pinboard_move/tests.rs`) forbids the literal outside the files it
+        // lists; this file reaches the key only through `autoinstall::rearm_pinboard`.
+        let source = production(include_str!("adopt_mods.rs"));
+        assert!(!source.contains(concat!("pinboard_move_", "pending")));
+        assert!(!source.contains("pinboard_move::PENDING"));
+        assert!(source.contains("autoinstall::rearm_pinboard(&tx)"));
     }
 
     /// A crafted backup can carry a `mod_secrets` row (the strip writes none, but nothing stops a

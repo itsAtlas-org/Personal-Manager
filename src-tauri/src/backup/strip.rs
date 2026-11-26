@@ -20,7 +20,11 @@
 //!   its row, and the ledger doesn't record how it was installed, so every unsigned mod with no
 //!   `mods` row is treated as a test mod).
 //! - **Out unless the user keeps it** (`BACKUP_MOD_DATA_KEY`, default on): content-class `mod_kv`,
-//!   the mods' own saved data. Off, a restore brings those mods back empty.
+//!   the mods' own saved data. Off, a restore brings those mods back empty. One exception, made by
+//!   the restore and not here: a Pinboard that moved into its mod still has its legacy snapshot in
+//!   `settings` (never stripped), and the restore copies that back into the mod, so a backup then
+//!   holds the board as it was when the Pinboard moved, and not the edits made since
+//!   (`autoinstall::rearm_pinboard`).
 //! - **Never taken out:** `mod_overlay` and the gift rows (`mod_ledger` and the tasks and
 //!   milestones they name). The overlay is calendar entries a mod published into a core table; it
 //!   is derived and carries nothing private, so it stays. Gifts are core tasks and milestones that
@@ -1249,6 +1253,94 @@ mod tests {
                 .unwrap();
             assert_eq!(kv, if keep { 1 } else { 0 });
         }
+    }
+
+    /// The whole road of a mod-data-off backup of a moved Pinboard: the live store has moved its
+    /// board into the mod; the snapshot that leaves keeps the legacy row, the record of the move and
+    /// the signed row but not the mod's board; the restore's reset owes the copy again; the pass's
+    /// handover puts the legacy bytes back into the mod, byte for byte.
+    #[test]
+    fn a_mod_data_off_backup_of_a_moved_pinboard_restores_the_pre_move_board_into_the_mod() {
+        const BOARD: &str = "{\"widgets\" : [{\"kind\":\"note\",\"id\":\"n\",\"text\":\"my words\"}],\n\"version\":1}\n";
+        let key = fresh_key();
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = live_state(dir.path(), &key);
+        {
+            let conn = state.conn().unwrap();
+            add_mod(&conn, "atlas.pinboard", "catalogue", true, "active");
+            let sha = {
+                use sha2::Digest;
+                hex(&sha2::Sha256::digest(BOARD.as_bytes()))
+            };
+            for (k, v) in [
+                ("pinboard", BOARD),
+                ("pinboard_moved_sha", sha.as_str()),
+                ("pinboard_move_conflict", sha.as_str()),
+                ("mods_pilot_landed_pinboard", "1"),
+            ] {
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES (?1, ?2)",
+                    params![k, v],
+                )
+                .unwrap();
+            }
+            // The mod's board, edited since the move (it is not what the snapshot holds).
+            conn.execute(
+                "INSERT INTO mod_kv(mod_id, key, class, value) \
+                 VALUES ('atlas.pinboard', 'board', 'content', '{\"version\":1,\"widgets\":[]}')",
+                [],
+            )
+            .unwrap();
+            db::set_bool(&conn, BACKUP_MOD_DATA_KEY, false).unwrap();
+        }
+        let (_d, dest) = snapshot_dir();
+        leave(&state, &dest, false).unwrap();
+
+        // What was restored: the snapshot's own connection (no migration, as `restore` opens it).
+        let conn = db::open_snapshot(&dest, &key).unwrap();
+        let in_mod: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM mod_kv WHERE mod_id = 'atlas.pinboard'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_mod, 0, "the strip took the mod's board out");
+        let data_dir = tempfile::tempdir().unwrap();
+        crate::backup::adopt_mods::reset_for_adopt(&conn, data_dir.path(), "vault-1").unwrap();
+        let text = |k: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT CAST(value AS TEXT) FROM settings WHERE key = ?1",
+                [k],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        assert_eq!(text("pinboard_move_pending").as_deref(), Some("1"));
+        assert_eq!(text("pinboard_moved_sha"), None);
+        assert_eq!(text("pinboard_move_conflict"), None);
+        assert_eq!(text("pinboard_move_restored").as_deref(), Some("1"));
+
+        // The pass: the marker the reset wrote, then the handover in the store's own transaction.
+        let pinboard = &crate::mods::autoinstall::PILOTS[1];
+        crate::mods::autoinstall::finish(&conn, pinboard).unwrap();
+        let board: String = conn
+            .query_row(
+                "SELECT CAST(value AS TEXT) FROM mod_kv WHERE mod_id = 'atlas.pinboard' AND key = 'board'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(board, BOARD, "the pre-move board, byte for byte");
+        assert_eq!(
+            text("pinboard").as_deref(),
+            Some(BOARD),
+            "the old row stays"
+        );
+        assert!(text("pinboard_moved_sha").is_some());
+        assert_eq!(text("pinboard_move_pending"), None);
+        assert!(crate::mods::pinboard_move::state(&conn).unwrap().restored);
     }
 
     #[test]

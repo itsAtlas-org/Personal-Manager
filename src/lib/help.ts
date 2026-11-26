@@ -652,7 +652,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-backup-mod-data": {
     title: "Mods in your backups",
-    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
+    body: "Mods are small add-ons made by other people. What a mod saves in PM (a board or notes it keeps, for example) goes into your backups unless you turn this off; then a restore brings the mod back empty. The one exception is the Pinboard: if this is off, a backup holds only the board as it was when the Pinboard moved into a mod, and a restore puts that board back (later edits are not in it). A mod's passwords and API keys, and any app you've connected, are never saved in a backup or an export, whatever this says: after a restore you enter them again.",
   },
   "settings-license": {
     title: "License",

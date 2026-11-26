@@ -106,8 +106,10 @@ pub const PILOTS: [Pilot; 2] = [
     // The Pinboard (PR C). Awake since v62, which writes `mods_autoinstall_pinboard` for a store whose
     // board has a widget or that holds a `note:` document, and `pinboard_move_pending` for a store
     // whose board is not blank. `mark_restored` can also write the marker, for a restored store with
-    // a signed catalogue `atlas.pinboard` row, and that store has no pending move. The move itself
-    // (`pinboard_move`) runs only when the pending key is there.
+    // a signed catalogue `atlas.pinboard` row; and `rearm_pinboard` (the restore's next step) writes
+    // the pending key again for such a store whose backup left the mod's board out, so the move
+    // copies the pre-move board back. The move itself (`pinboard_move`) runs only when the pending
+    // key is there.
     Pilot {
         id: "atlas.pinboard",
         marker: "mods_autoinstall_pinboard",
@@ -144,6 +146,90 @@ pub fn mark_restored(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// A restore's second Pinboard step, in the same transaction as [`mark_restored`]: a backup taken
+/// after the board moved into the mod, with "Also save mod data in my backups" off, holds the legacy
+/// row (a frozen snapshot of the board as it was when it moved) and the move's record, but not the
+/// mod's board. Restored as it is, the store would say "moved" with no board anywhere the mod can
+/// read, so the move is owed again: the pending key is written, the record of the move and the stale
+/// strip notes are cleared (they describe boards that no longer exist in this copy), and a note
+/// says what the person gets back ([`pinboard_move::RESTORED`]). The normal pass then copies the
+/// legacy bytes into the mod, byte for byte, as it did the first time.
+///
+/// It fires only when ALL hold, and otherwise writes nothing:
+/// - the move was recorded (`pinboard_moved_sha`, non-blank text): a pre-move backup is owed its move
+///   by v62 already, and a store that never moved has nothing to re-copy;
+/// - the legacy row is a board the move can copy (not blank, valid UTF-8 JSON, within the size cap:
+///   [`pinboard_move::plan`]), so there is something to give back and the copy can land;
+/// - the mod's `board` row is absent: a backup with the mod's data keeps the board the person edited
+///   since the move, which is newer than the snapshot and must never be replaced by it;
+/// - the signed catalogue `atlas.pinboard` row is there: a person who uninstalled the Pinboard must
+///   not have `pinboard_moved_sha` cleared (the Calendar would read the stale snapshot again, and a
+///   rename would start rewriting the legacy row), since nothing would settle the copy.
+///
+/// It only ever INSERTS the pending key and never touches `settings['pinboard']`, the mod's rows or
+/// any board; the deletes are of the move's own bookkeeping keys. Every read tolerates a planted
+/// type (a shared vault's member, or a crafted backup, can put a BLOB anywhere in `settings`): a
+/// value that can't be read as text is "not there", never an error that would block the restore.
+/// Returns whether it fired. Never called for a shared-vault join (its store is not ours to write).
+pub fn rearm_pinboard(conn: &Connection) -> rusqlite::Result<bool> {
+    let recorded: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT CAST(value AS BLOB) FROM settings WHERE key = ?1",
+            [pinboard_move::MOVED],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    if !recorded.is_some_and(|b| std::str::from_utf8(&b).is_ok_and(|t| !t.trim().is_empty())) {
+        return Ok(false);
+    }
+    // A board the move can copy, not just a non-blank one: bytes it would refuse (not UTF-8, not
+    // JSON, too big) can never land, so clearing the record for them would leave an empty mod, a
+    // permanent "refused" strip and no record of the move, from a value a crafted backup can plant.
+    if !pinboard_move::legacy_bytes(conn)?
+        .is_some_and(|b| !pinboard_move::blank(&b) && pinboard_move::plan(&b).is_ok())
+    {
+        return Ok(false);
+    }
+    let board_in_mod: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mod_kv WHERE mod_id = ?1 AND key = 'board')",
+        [crate::pinboard_legacy::PINBOARD_MOD_ID],
+        |r| r.get(0),
+    )?;
+    if board_in_mod {
+        return Ok(false);
+    }
+    let signed_row: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mods WHERE id = ?1 AND installed_from = ?2 AND signed = 1)",
+        params![
+            crate::pinboard_legacy::PINBOARD_MOD_ID,
+            store::FROM_CATALOGUE
+        ],
+        |r| r.get(0),
+    )?;
+    if !signed_row {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, '1')",
+        [pinboard_move::PENDING],
+    )?;
+    // The move is owed again, so the legacy row is live again for renames, the Calendar and the
+    // notes until the copy lands (the same states as before the first move).
+    for key in [
+        pinboard_move::MOVED,
+        pinboard_move::CONFLICT,
+        pinboard_move::REPAIRED,
+    ] {
+        conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES (?1, '1')",
+        [pinboard_move::RESTORED],
+    )?;
+    Ok(true)
 }
 
 /// The text of a `settings` row, `None` for a missing row and for one that holds another type (a

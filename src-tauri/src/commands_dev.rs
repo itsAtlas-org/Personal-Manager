@@ -282,7 +282,8 @@ const COUNT_TABLES: &[&str] = &[
 ];
 
 /// `settings` is a key/value grab-bag that also holds personal blobs — the archived
-/// `learning_profile`, the `appearance`/`pinboard` UI blobs, the cached daily briefing — so
+/// `learning_profile`, the `appearance` blob, the frozen legacy `pinboard` board, the cached daily
+/// briefing — so
 /// its values are REDACTED BY DEFAULT. Only these short, operational, non-personal scalar
 /// keys are rendered in full; every other key shows type + length only.
 const SETTINGS_VALUE_SAFE: &[&str] = &[

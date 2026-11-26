@@ -50,6 +50,12 @@ describe("BackupModDataSection", () => {
     // The loss is on screen, not behind a fold.
     expect(screen.getByText(LOSS)).toBeTruthy();
     expect(screen.getByText(/Backups leave out what mods have saved in PM/)).toBeTruthy();
+    // The Pinboard is the one mod whose board a restore does bring back, as it was at the move.
+    expect(
+      screen.getByText(
+        /a backup holds only the board as it was when the Pinboard moved into a mod\./,
+      ),
+    ).toBeTruthy();
   });
 
   it("reads the stored value, so an off setting opens off", async () => {
