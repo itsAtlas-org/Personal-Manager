@@ -62,6 +62,16 @@ promise, and their codes below, `MOD-3004`, `MOD-3005`, `MOD-5004` to `MOD-5006`
 range, may still change before PM's first release that includes them. A message never carries what a
 website or an AI provider said, or the address asked for: only PM's own sentence.
 
+An app connected to PM over MCP (Settings > Data & Security, once PM offers it on your system)
+gets PM's own sentences, but the `MOD-####` code only on a protocol error, in `error.data.code`: a
+request PM refuses (PM is locked, the app is no longer connected, no such tool) comes back that way.
+A tool that fails for its own reasons (a bad argument, a limit, a timeout) comes back as a tool
+result marked as an error, carrying PM's sentence alone and no code, and a limit is told in the app's
+own words ("Too many requests from this app"). Nothing from the database or the disk is ever in the
+text. When you report a problem with a connected app, quote the code if its client shows one, or PM's
+sentence if not. `MOD-5007` is the code behind the sentence the `search` tool gives while PM's
+document engine isn't set up.
+
 | Code | What it means |
 |------|---------------|
 | `MOD-1001` | There is no call by that name in this version of PM. |

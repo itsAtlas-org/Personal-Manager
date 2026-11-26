@@ -90,6 +90,24 @@ and a local model stays on your own endpoint. The limit and the spend are kept i
 with the mod's record, so two edges are accepted: uninstalling and reinstalling a mod starts its month's spend at
 zero again, and restoring an older backup puts the spend back to what it was then.
 
+**Connected apps: the one standing inbound surface.** Everything above is traffic PM sends. PM can also
+answer an AI app running on the same computer, over MCP, through a local Unix socket (no network
+port; Linux and macOS only for now, Windows has no version of it yet). It is **off by default, per
+device and per vault**: a restored backup, a copied database or a shared vault never switches it
+on, and the Settings section for it is hidden in release builds on every system until PM has been
+tested there. When you turn it on, the socket sits in a folder only your account can enter (mode 0700,
+checked at every start; the socket itself is 0600 and a connection from another user is dropped),
+and an app is let in only with a token you generated for it in PM, shown once and kept only as a
+hash (on this device, and in the vault's list of connected apps). Each app is limited to the scopes you ticked (documents, tasks, calendar
+events without attendees, projects and milestones; documents are off unless you tick them) and can
+only **read**: in this version there is no way for it to change anything in PM. What it reads goes to that app and
+on to whichever AI provider the app uses, **outside PM's zero-data-retention promise**, which covers
+only PM's own requests. A document, task or event can contain instructions aimed at the app's AI,
+and PM can't stop an app acting on them; every tool says so in its description. The attacker this
+guards against is another program running as your user, a member of a shared vault who can edit its
+database, a stale or foreign socket and a malformed client; it does not defend against someone with
+root or your vault key.
+
 ## Supported versions
 
 PM auto-updates, and only the **most recent release** receives security fixes.

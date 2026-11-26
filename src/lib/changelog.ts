@@ -24,6 +24,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.194.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "PM can now share what you choose, read-only, with an AI app on this computer, so the app can look up your tasks, projects, milestones, coming events or document excerpts when you ask it something. It is built and switched off, and it stays hidden in this version until it has been tested on your system. Once it is offered it will be off until you switch it on, per computer, with a token you create for each app and see only once, and in this version it can only read, so it cannot change anything in PM. Documents are shared only if you tick them, and PM's contact records and event guests are never shared. What an app reads goes to that app's own AI provider, outside PM's own privacy promise, and the screen will say so.",
+      "For people who make mods: three new experimental calls (searching your documents by meaning, the calendar's agenda, and an event for when the calendar has synced), a starter folder to copy (mod-template/) and a plain-words guide (mods/README.md) for making a first mod. The experimental calls may still change before PM's first release that includes them.",
+    ],
+  },
+  {
     version: "3.193.0-alpha",
     date: "2026-11-26",
     highlights: [

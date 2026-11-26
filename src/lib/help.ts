@@ -558,7 +558,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-connected-apps": {
     title: "Connected apps",
-    body: "Lets an AI app on this computer read part of your PM data, such as your tasks or calendar events, through a private connection that only your account can reach. It is off until you turn it on, it applies to this computer only (a restored backup or a shared vault never turns it on somewhere else), and apps can read but never change anything. Each app gets its own key, shown once when you connect it and never again, and you choose what it may read: documents search starts off because it sends text from your documents. Be aware that the AI provider behind a connected app is outside PM's zero-data-retention promise, and that any program running as you can read the app's saved configuration and use its key. Revoke an app to cut it off at once.",
+    body: "Lets an AI app on this computer read part of your PM data, such as your tasks or calendar events, through a private connection that only your account can reach. It is off until you turn it on, it applies to this computer only (a restored backup or a shared vault never turns it on somewhere else), and in this version apps can only read, so they cannot change anything. Each app gets its own key, shown once when you connect it and never again, and you choose what it may read: documents search starts off because it sends text from your documents. Be aware that the AI provider behind a connected app is outside PM's zero-data-retention promise, and that any program running as you can read the app's saved configuration and use its key. Revoke an app to cut it off at once.",
   },
   "settings-connectors": {
     title: "Connectors",

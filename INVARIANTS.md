@@ -526,8 +526,10 @@ a `;` into the CSP, or a Windows device name into a path.
 
 **Co-signers.** The install path (Mods PR-1 slice 3) writes exactly a `VerifiedPackage`'s bytes, runs
 the checks the verifier can't (index, blacklist, newer version, publisher pin, API range) and calls
-`ids::check_tier`; storage, the dispatcher and the MCP server take a `ModId`, never a bare string; and
-nothing else registers a scheme, protocol or URL that serves mod files.
+`ids::check_tier`; storage and the dispatcher take a `ModId`, never a bare string (a connected app of
+the MCP server is not a mod: only its per-app limiter keys are `mcp.c<client id>`, which parse as a
+`ModId` so the limiter's types are reused, and no app is ever a `mods` row, a grant or a frame;
+I-39); and nothing else registers a scheme, protocol or URL that serves mod files.
 
 ### I-28 · A store a newer PM wrote is refused untouched, and the refusal never reaches a destructive path — **Held**
 
@@ -704,9 +706,12 @@ fixtures. The test reads every page of the stripped file decrypted (free pages i
 value left in the file is found where grepping the encrypted bytes could not. A restore's commit
 (`switch_to_vault`) runs `backup::adopt_mods::reset_for_adopt`: developer mode off for EVERY device
 (`devmode::all_devices_off`: an empty per-device record, and the old row written `"false"` for an
-older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, MCP off (PR C's switch), and
-the Pinboard's re-arm (`autoinstall::rearm_pinboard`, I-36), all in one
-transaction, before the store is attached, so before the first load of its mods; that load pauses
+older PM sharing the vault; this PM never reads it), `mcp_clients` cleared, the Pinboard's re-arm
+(`autoinstall::rearm_pinboard`, I-36), and the MCP server off (`adopt_mods::switch_mcp_off`: the vault
+forgotten in this device's own `mods-mcp.json`, which holds the switch and the pairings, written after
+every store step so a reset that fails earlier changes nothing there, and one that fails later leaves
+the server off; I-39). The store steps run in one transaction (the MCP file write is not part of
+it and can't be rolled back, which is why it comes after them), before the store is attached, so before the first load of its mods; that load pauses
 each active unsigned mod with the reason `dev-mode` (I-34), the same state switching developer mode
 off leaves. The re-arm is the one step that gives something back: a backup taken with "Also save mod
 data in my backups" off holds the Pinboard's legacy row but not the mod's board, so it owes the copy
@@ -759,9 +764,11 @@ folder mod's name there too. The strip doesn't touch `documents.source_id` (`mod
 mod-made note's file name (`mod-<id>-<key>.md`) today because nothing writes them yet: the Host
 API change that does decides, in that same change, whether a folder mod's id is rewritten there
 (it is a rebuild key and in the vault's front-matter, so a rewrite must reach both) or held as a
-limit here, and adds the column to `leftover` either way. PR C adds the MCP switch's off value to `adopt_mods::switch_mcp_off`
-and makes `adopt_mods::joiner_accepts_only_its_own_clients` true (clients bound to a device). A
-change that needs developer mode asks `mods::devmode` (I-34), never the old row.
+limit here, and adds the column to `leftover` either way. The MCP switch's off value is
+`adopt_mods::switch_mcp_off` (it forgets the vault in the device's own `mods-mcp.json`), and
+`adopt_mods::joiner_accepts_only_its_own_clients` is true because a client verifies only where this
+device holds its pairing (I-39). A change that needs developer mode asks `mods::devmode` (I-34),
+never the old row.
 
 ### I-33 · A signed mod installs only the bytes its consent screen showed, and only on its user's answer — **Held**
 
@@ -994,6 +1001,45 @@ must not cost every tab switch and quit the whole deadline, so the wait is opt-i
 runtime passes the manifest's `answersSuspend` (`InstalledMod::from_ledger` takes it as a required
 argument), and a mod whose code calls `flushed()` says `"answersSuspend": true` (`check-mods.mjs`
 holds the two together for every mod in this repo).
+
+### I-39 · The MCP server is read-only, off by default per device, and its clients are bound to the device that minted them — **Held**
+
+PM can answer a connected app (an AI app on this computer, speaking MCP) over a local socket, and it
+is the only standing way PM listens for another program (the loopback port of an account sign-in
+exists only while a sign-in is open; `mods::mcp`, Mods spec 1.16). Four things hold together.
+**It only reads**: `tools/list` is exactly five read tools (`search`, `tasks`, `events`, `projects`,
+`milestones`), filtered by the scopes the person ticked (`documents.text`, `tasks.read`,
+`calendar.read`, `projects.read`), and a test holds the list to those names; nothing the server
+reaches writes. **It is off until this device says on**: the switch and the pairings live in
+`data_dir/mods-mcp.json` (keyed by vault id and the vault folder's one-way tag, as developer mode is,
+I-34), never in the store, so a restore, a copied database or a joined shared vault carries no "on"
+and no pairing with it; a file that is missing, unreadable, over a cap or not what PM writes is off
+for every vault and verifies nobody, and nothing falls back to accepting. **A client belongs to the
+device that minted it**: a `mcp_clients` row verifies only when this device's file holds its (id,
+token hash) pair AND the row's scopes still hash to the pairing's `scopes_hash`, so another device's
+row, or a shared-store writer's widened row, is never accepted here, and widening a scope means
+pairing again. The token (`pmcp_<id>_<64 hex>`, shown once) is compared by its hash in constant time
+and is never logged, put in an argument list, a child's environment, an error or a tool result.
+**Every request re-proves it**: PM unlocked, the store the connection was made against (`store_epoch`,
+read under the DB guard), the row and the pairing and the switch, the scope, the app's own allowance,
+the argument caps, and the same three checks again before an answer is sent. Those checks are the
+guarantee; the hooks that close connections early (lock, store close, vault switch, revoke, quit) are
+tidying, and a test proves each refusal with the hooks off.
+
+**Why.** An AI app holding a token can read what its scopes cover and send it to its own AI
+provider, outside PM's zero-data-retention promise, so the only safe defaults are off, narrow, and
+bound to the machine that was asked. The store is shared by every device in a vault and can be
+written by any member, so nothing that decides who may read can live in it alone; and a restore must
+never be able to turn a listener on.
+
+**Co-signers.** A new tool is a read, names its scope in `tools::TOOLS`, and goes through the same
+cores as the mod calls over a `Projection` made from the client's scopes (a field the scopes do not
+cover is absent from the answer). Nothing listens but the 0700 folder's socket (no TCP, no loopback
+port), and the folder, the socket's mode and the peer's user are checked at every start and accept.
+Another table that holds anything a client may read is added to the strip and the reset
+(I-32). A shipped scope id or tool name is never renamed (they are frozen by API 1.0). A
+build offers the section only on an operating system whose live test passed
+(`mcp::commands::OFFERED_OSES`; a debug build always offers it).
 
 ---
 

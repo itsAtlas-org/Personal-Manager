@@ -171,9 +171,15 @@ release remain the open post-v1 work.
     INVARIANTS.md I-30); `runtime.rs` the `pmmod` scheme's
     registry, one-time entry URLs and frame sessions, with `headers.rs` (crate-free, like
     `engine.rs`) building every response header (INVARIANTS.md I-27). `api/` is the one Host
-    API dispatcher (check order, grant model, call limits, the handlers, the events); the frame
-    relay (`mod_call`) and the later MCP caller both go through it, so a grant is checked nowhere
-    else. `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements); a
+    API dispatcher (check order, grant model, call limits, the handlers, the events) for a mod's
+    frame (`mod_call`). The MCP server (`mods/mcp/`, INVARIANTS.md I-39) is a second front over the
+    same question cores: it does not go through the dispatcher, so the grant check lives in two
+    places (a frame's grants in `api/`, an app's scopes in `mcp/`) over one `Projection` and one core
+    per call (`task_calls::list_core` and the like, which the frame handlers wrap), and `Authorised`
+    is never reused for an app. `mods/mcp/` is read-only, off per device (`data_dir/mods-mcp.json`),
+    and reached by an app through `PM --mcp` (`mcp_shim.rs`); the Settings section is hidden in a
+    release build until an OS is added to `mcp::commands::OFFERED_OSES` after its live test.
+    `outbox.rs` is the per-session event pipe (bounded by the frame's acknowledgements); a
     mod's readable set is the documents that aren't archived, so a writer of
     `documents.importance` calls `events::note_listing_change` around its UPDATE and a writer of a
     new document calls `events::note_landed` after its commit (a test pins the list of writers);
@@ -234,7 +240,11 @@ release remain the open post-v1 work.
     core has no Pinboard of its own (the swap, #1044), and the old `settings['pinboard']` row is never
     deleted. A mod's build
     (`mods/vite.config.ts`) takes React and Tailwind, and Tailwind scans only `src/kit` and the mod's
-    own source.
+    own source. `mods/README.md` is the mod maker's guide and `mod-template/` the starter folder it
+    points at (plain HTML and script, no build step; its `app/pm-host.js` is generated from
+    `src/kit/host.ts` and held equal by `src/components/mods/modTemplate.test.ts`, so a change to
+    the kit's host or a bump of vite regenerates it with `npx vitest run
+    src/components/mods/modTemplate.test.ts -u`).
     `tests/sealed-frame/` is a regression app that never ships: it includes
     `engine.rs` and `headers.rs` and runs a hostile probe on all three engines
     (`.github/workflows/sealed-frame.yml`).
