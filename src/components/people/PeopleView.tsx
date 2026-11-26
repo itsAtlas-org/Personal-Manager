@@ -4,8 +4,8 @@
 // The People tab (Contacts, PR A): a header with the search box and "+ Add person", filters and the
 // list on the left, the person's record on the right. It holds the list, selecting several, Trash and
 // its Undo, the record with its editor, label management (a deleted label can be undone) and the
-// links to projects; import and export, merging and the timeline come in later slices, each joining
-// the pieces below as one more entry.
+// links to projects, merging, and the vCard import and export dialogs; the timeline comes in a later
+// slice, joining the pieces below as one more entry.
 //
 // The tab router unmounts a view on every tab switch, so this holds no truth of its own: the list is
 // re-read on mount, on a filter, search or sort change, and on `people://changed` (`usePeopleData`).
@@ -43,6 +43,11 @@ import {
   writePeopleSort,
 } from "../../lib/people";
 import { duplicatesButtonLabel, mergedNotice } from "../../lib/peopleMerge";
+import {
+  headerExportChoices,
+  selectionExportChoice,
+  type ExportChoice,
+} from "../../lib/peopleTransfer";
 import { personMenuItems, personMenuLabel } from "../../lib/personMenu";
 import type { SectionId } from "../../lib/personRecord";
 import type {
@@ -55,6 +60,8 @@ import type {
 } from "../../lib/types";
 import { Button, Callout, ConfirmDialog, Input, Select, Skeleton } from "../ui";
 import { DuplicatePeoplePanel } from "./DuplicatePeoplePanel";
+import { ExportPeopleDialog } from "./ExportPeopleDialog";
+import { ImportVcardDialog } from "./ImportVcardDialog";
 import { LabelNameDialog, LabelPicker } from "./LabelPicker";
 import { MergePeopleDialog } from "./MergePeopleDialog";
 import { MergeWithDialog } from "./MergeWithDialog";
@@ -120,6 +127,10 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
   const [dupesOpen, setDupesOpen] = useState(false);
   const [merging, setMerging] = useState<{ a: number; b: number } | null>(null);
   const [picking, setPicking] = useState<PersonRow | null>(null);
+  // The import dialog (it opens the file picker itself) and the export dialog (the choices of who
+  // it covers, fixed when it opens so a list that moves underneath can't change what it writes).
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState<ExportChoice[] | null>(null);
   // Moves after every write of this tab's own, so the open record reads again even in a build
   // where the change notice is slow; the notice itself moves `data.changes`.
   const [bump, setBump] = useState(0);
@@ -515,6 +526,8 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
           allStarred: targets.every((r) => r.starred),
           labels: data.labels,
           carriedByAll: all,
+          // Only where the selection bar, which carries Export…, is showing these people.
+          canExport: checked.has(row.id),
         },
         {
           open: () => {
@@ -540,6 +553,7 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
             if (targets.length === 2) setMerging({ a: targets[0].id, b: targets[1].id });
             else setPicking(row);
           },
+          exportThem: () => setExporting([selectionExportChoice(ids)]),
         },
       ),
       { withFallback: true },
@@ -576,8 +590,8 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               : `${rows.length} ${rows.length === 1 ? "person" : "people"}${searching ? " found" : ""}`}
           </p>
         </div>
-        <div className="flex w-full max-w-lg items-center gap-2">
-          <div className="min-w-0 flex-1" data-help="people-list">
+        <div className="flex w-full max-w-2xl flex-wrap items-center gap-2">
+          <div className="min-w-[12rem] flex-1" data-help="people-list">
             <Input
               type="search"
               aria-label="Search people"
@@ -586,6 +600,49 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               onChange={(e) => setTyped(e.target.value)}
             />
           </div>
+          <Button
+            variant="primary"
+            size="md"
+            className="shrink-0"
+            data-help="people-editor"
+            onClick={() => setEditor({ person: null })}
+          >
+            + Add person
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
+            className="shrink-0"
+            data-help="people-import"
+            onClick={() => setImporting(true)}
+          >
+            Import…
+          </Button>
+          {/* Nothing in Trash is exported, so its view has no Export…; every other view offers
+              everyone, and a label's view offers that label's people first. */}
+          {!inTrash && (
+            <Button
+              variant="secondary"
+              size="md"
+              className="shrink-0"
+              data-help="people-export"
+              onClick={() =>
+                setExporting(
+                  headerExportChoices(
+                    filter,
+                    typeof filter === "object"
+                      ? (data.labels.find((l) => l.id === filter.Label)?.name ?? null)
+                      : null,
+                    // A list still loading or failed shows no rows, which is not "nobody": the dialog
+                    // counts it itself then, as it does for a search.
+                    { count: rows.length, searching: searching || !data.settled || data.failed },
+                  ),
+                )
+              }
+            >
+              Export…
+            </Button>
+          )}
           {dupesButton && (
             <Button
               variant="secondary"
@@ -598,15 +655,6 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               {dupesButton}
             </Button>
           )}
-          <Button
-            variant="primary"
-            size="md"
-            className="shrink-0"
-            data-help="people-editor"
-            onClick={() => setEditor({ person: null })}
-          >
-            + Add person
-          </Button>
         </div>
       </header>
 
@@ -741,6 +789,14 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
                       Merge…
                     </Button>
                   )}
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    data-help="people-export"
+                    onClick={() => setExporting([selectionExportChoice(selected.map((r) => r.id))])}
+                  >
+                    Export…
+                  </Button>
                   <Button variant="danger" size="xs" onClick={() => void toTrash(selected)}>
                     Move to Trash
                   </Button>
@@ -859,6 +915,18 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
           onMerged={(done) => afterMerge(done, [Math.max(merging.a, merging.b)])}
         />
       )}
+      {importing && (
+        <ImportVcardDialog
+          labels={data.labels}
+          onClose={() => setImporting(false)}
+          onReview={() => {
+            // The import has announced its change; read the snapshot now rather than wait for it.
+            dupes.reload();
+            setDupesOpen(true);
+          }}
+        />
+      )}
+      {exporting && <ExportPeopleDialog choices={exporting} onClose={() => setExporting(null)} />}
       {editor && (
         <PersonEditor
           person={editor.person}

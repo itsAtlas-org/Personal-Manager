@@ -469,6 +469,10 @@ fn a_store_switch_mid_job_writes_nothing() {
     assert_eq!(err.to_string(), STALE);
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM people"), 0);
 
+    // The dialog recognises this refusal by its opening words (STALE_PREVIEW_START in
+    // src/lib/peopleTransfer.ts): rewording it must change both together.
+    assert!(STALE.starts_with("That file was read a while ago"));
+
     // The same store, in time: it commits, once.
     let done = commit_held(&conn, &hold, 1, &id, &plain(), now).unwrap();
     assert_eq!(done.added, 1);

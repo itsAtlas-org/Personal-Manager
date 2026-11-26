@@ -38,9 +38,14 @@ export interface PersonMenuHandlers {
   askDeleteNow: () => void;
   /** Start a merge: with one person, a picker for the other; with exactly two, the dialog. */
   merge: () => void;
+  /** Open the export dialog for the people the menu acts on (the selection bar's Export…). */
+  exportThem: () => void;
 }
 
 export interface PersonMenuState {
+  /** The selection bar, which carries Export…, is on screen for these people: the menu repeats it
+   *  only then, and never offers it for a lone unticked row. */
+  canExport?: boolean;
   /** How many people the menu acts on: 1 for a lone row, the selection's size for a checked one. */
   count: number;
   /** The row is in Trash (and so is everyone with it). */
@@ -85,6 +90,7 @@ export function personMenuItems(s: PersonMenuState, h: PersonMenuHandlers): Menu
       onSelect: () => h.star(!s.allStarred),
     },
     ...merge,
+    ...(s.canExport ? [{ label: "Export…", onSelect: h.exportThem } as MenuItem] : []),
     { kind: "separator" },
     ...s.labels.map((l): MenuItem => ({
       label: `Label: ${l.name}`,

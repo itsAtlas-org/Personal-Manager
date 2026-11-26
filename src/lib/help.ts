@@ -56,6 +56,14 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Merging two people",
     body: "A merge puts everything from both records on one: details, labels, timeline, project links and where each came from, with the same detail kept once. Where the two differ, in the name, birthday, where and when you met, or the notes, you choose which to keep, and the one you don't choose is dropped (for notes you can also keep both). Right after, a note at the bottom has an Undo for 30 seconds, and Ctrl+Z (Cmd+Z on a Mac) presses it. It stops working if you change that person in the meantime, and then PM says so. Select exactly two people and press Merge, or right-click one and choose Merge with.",
   },
+  "people-import": {
+    title: "Importing people from a file",
+    body: "Import reads a vCard file (.vcf), the kind your phone, iCloud, Google Contacts and most address books can export. PM opens the file picker, reads the file, and shows what is in it before anything is saved: how many people, how many you already have, how many look like people you have, and anything it skipped, like cards with no name, email or phone, and photos. People you already have keep what PM holds; only what is missing is filled in, and anyone from Trash comes back. You can put one label on everyone imported. After the import, Review possible duplicates opens the merge review. Files over 128 MB are refused, almost always because of photos: export again without them.",
+  },
+  "people-export": {
+    title: "Exporting people",
+    body: "Export writes people to a vCard file (.vcf) you can open in any address book or phone. Use it from the header for everyone, from a label for that label's people, or from the selection bar for the people you ticked. PM asks where to save the file; it never writes anywhere else. Tick Include the timeline to also get a spreadsheet file, people-timeline.csv, with one row for each person and each time you met. People in Trash are left out. A file exported from PM and imported again adds nobody twice.",
+  },
   "people-trash": {
     title: "People in Trash",
     body: "Moving someone to Trash keeps everything about them for 30 days, then PM deletes them for good. Right after you move someone, a note at the bottom of the window has an Undo, and Ctrl+Z (Cmd+Z on a Mac) presses it when you aren't typing in a box. In the Trash filter, Restore brings people back with their labels and details. Delete now removes them for good after asking, and that can't be undone.",

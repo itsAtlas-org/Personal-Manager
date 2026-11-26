@@ -26,6 +26,7 @@ function handlers() {
     restore: vi.fn(),
     askDeleteNow: vi.fn(),
     merge: vi.fn(),
+    exportThem: vi.fn(),
   };
 }
 
@@ -116,6 +117,18 @@ describe("personMenuItems", () => {
     expect(names(two)).not.toContain("Merge with…");
     pick(two, "Merge these two…").onSelect();
     expect(h.merge).toHaveBeenCalledOnce();
+  });
+
+  it("offers Export… only where the selection bar's Export… is on screen, never in Trash", () => {
+    const h = handlers();
+    expect(names(personMenuItems(state(), h))).not.toContain("Export…");
+    const ticked = personMenuItems(state({ canExport: true, count: 3 }), h);
+    expect(names(ticked)).toContain("Export…");
+    pick(ticked, "Export…").onSelect();
+    expect(h.exportThem).toHaveBeenCalledOnce();
+    expect(names(personMenuItems(state({ canExport: true, trashed: true }), h))).not.toContain(
+      "Export…",
+    );
   });
 
   it("has no merge in Trash", () => {
