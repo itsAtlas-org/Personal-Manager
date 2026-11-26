@@ -216,9 +216,14 @@ pub struct AiProviderStatus {
 }
 
 #[tauri::command]
-pub fn ai_provider_status(state: State<'_, AppState>) -> Result<AiProviderStatus> {
+pub fn ai_provider_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AiProviderStatus> {
     // Keychain read first (safe even when the store is locked), then the two store-backed reads.
-    let has_cloud_key = crate::secrets::get_openrouter_key()?.is_some();
+    // The Chat role's key is the one this has always reported (the primary key).
+    let has_cloud_key =
+        crate::llm_gateway::try_role_has_cloud(&app, crate::llm_gateway::Role::Chat)?;
     let conn = state.conn()?;
     let local_configured = crate::llm_gateway::local_chat_configured(&conn)?;
     let onboarding_done = db::get_bool(&conn, ONBOARDING_DONE_KEY, false)?;

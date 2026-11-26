@@ -4,12 +4,16 @@
 //! Streaming chat against OpenRouter (spec §6 — one key, any model, swappable).
 //! The API key is read from the keychain on the Rust side and never reaches the
 //! webview.
+//!
+//! The request, the stream loop and the one-shot completion are the OpenAI dialect and live in
+//! `cloud_openai.rs`; what is OpenRouter's own — its endpoint, the ZDR pin, the `models` fallback
+//! list, its error copy and its public catalogue — lives here, as [`FLAVOUR`].
 
 use std::collections::HashSet;
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use crate::cloud_openai::{self, Flavour};
 use crate::error::{Error, Result};
 
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -19,27 +23,9 @@ const MODELS_ENDPOINT: &str = "https://openrouter.ai/api/v1/models";
 /// rather than only failing closed at request time.
 const ZDR_ENDPOINT: &str = "https://openrouter.ai/api/v1/endpoints/zdr";
 
-/// One shared HTTP client for every OpenRouter call (F-16). A fresh `Client::builder().build()` per
-/// request threw away the connection pool each time; a single `LazyLock` client reuses pooled TLS
-/// connections across catalogue fetches, streamed chats, and background completions. It carries only
-/// the two client-level bounds that suit all three sites — `connect_timeout` (establishing the socket)
-/// and `read_timeout` (silence *between* chunks, reset on every byte received). The per-request TOTAL
-/// deadline is deliberately NOT here: it differs per call (30 s catalogue, 120 s `complete`, and none
-/// for a healthy stream — see `stream_chat`), so each site sets its own `.timeout()` on the request
-/// builder. Building a client that only sets timeouts is effectively infallible, hence `expect`.
-///
-/// No request carries OpenRouter's app-attribution headers (`HTTP-Referer`, `X-Title`, or any
-/// `X-OpenRouter-*`): OpenRouter uses them to put an app in its public usage rankings and to keep
-/// per-app analytics, so they would publish how much PM's users use which models. PM sets no
-/// `User-Agent` either, and reqwest sends none of its own. `no_request_carries_app_attribution`
-/// keeps it that way.
-static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(120))
-        .build()
-        .expect("reqwest client with static timeouts should build")
-});
+// The HTTP client every cloud call shares, and the rule that no request carries an app-attribution
+// header or a `User-Agent`, are in `cloud_openai.rs`; the catalogue and ZDR fetches below go through
+// the same client, and `no_request_carries_app_attribution` holds the rule here too.
 
 #[derive(Serialize)]
 pub struct ChatMessage {
@@ -142,47 +128,6 @@ impl Completion {
     }
 }
 
-/// The error a stream chunk reports, if any.
-///
-/// Mid-stream failures do NOT arrive as an HTTP status — the response was already 200 and some
-/// tokens may already have been emitted. They arrive as a `data:` event carrying an `error` object.
-/// Ignoring it meant the loop just ran out of chunks and returned the truncated text as a
-/// SUCCESSFUL completion, which the caller then persisted as a complete assistant turn.
-///
-/// Pure, so the shape-matching — the part that can silently be wrong — is testable without a socket.
-fn chunk_error(value: &serde_json::Value) -> Option<Error> {
-    let err = value.get("error")?;
-    let detail = err
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or("the model stream reported an error");
-    // The code is advisory here (the transport said 200). Routing through `request_error` means a
-    // ZDR refusal that arrives mid-stream gets the same actionable copy as one at request time.
-    let status = err
-        .get("code")
-        .and_then(|c| c.as_u64())
-        .and_then(|c| u16::try_from(c).ok())
-        .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
-        .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-    Some(request_error(status, detail))
-}
-
-/// Whether a chunk says the model stopped because it ran out of room, rather than because it had
-/// finished. Any other reason ("stop", "tool_calls", …) is a normal end.
-fn is_length_stop(value: &serde_json::Value) -> bool {
-    value["choices"][0]["finish_reason"].as_str() == Some("length")
-}
-
-/// Extract token usage from a response/chunk's `usage` object (absent fields → None). `cost` is
-/// present only when we asked for usage accounting (`usage.include`) and the provider reports it.
-fn parse_usage(value: &serde_json::Value) -> Usage {
-    Usage {
-        prompt_tokens: value["usage"]["prompt_tokens"].as_i64(),
-        completion_tokens: value["usage"]["completion_tokens"].as_i64(),
-        cost: value["usage"]["cost"].as_f64(),
-    }
-}
-
 /// One model from OpenRouter's public catalogue, trimmed to what the Settings
 /// picker needs: identity, pricing, context window, and input modalities (so the
 /// UI can tag vision-capable models). Prices are USD **per token**; the frontend
@@ -265,7 +210,7 @@ pub async fn fetch_catalogue() -> Result<Vec<ModelDetail>> {
         input_modalities: Vec<String>,
     }
 
-    let response = HTTP
+    let response = cloud_openai::http()
         .get(MODELS_ENDPOINT)
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -338,7 +283,7 @@ async fn fetch_zdr_model_ids() -> Result<HashSet<String>> {
         model_id: String,
     }
 
-    let response = HTTP
+    let response = cloud_openai::http()
         .get(ZDR_ENDPOINT)
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -456,52 +401,41 @@ fn chat_body(
     cache_through: Option<usize>,
     max_tokens: Option<u32>,
 ) -> serde_json::Value {
-    // Build the messages array by hand so we can optionally mark a stable system prefix with an
-    // ephemeral prompt-cache breakpoint. `cache_through` is the index of the LAST message of the
-    // stable prefix: OpenRouter forwards `cache_control` to providers that support prompt caching
-    // (e.g. Anthropic), which cache everything up to AND INCLUDING that message and bill the reused
-    // prefix at the cheap cache-read rate — a big saving when the same prefix repeats across calls (the
-    // per-document review loop marks index 0; chat marks the last of its profile/agenda/summary block,
-    // keeping the per-turn grounding + history AFTER the breakpoint where they stay uncached). Providers
-    // without caching, or a prefix below their minimum cacheable size, simply ignore it. Non-marked
-    // messages serialise exactly as before.
-    let msgs: Vec<serde_json::Value> = messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            if cache_through == Some(i) {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": [{
-                        "type": "text",
-                        "text": m.content,
-                        "cache_control": { "type": "ephemeral" },
-                    }],
-                })
-            } else {
-                serde_json::json!({ "role": m.role, "content": m.content })
-            }
-        })
-        .collect();
+    cloud_openai::build_body(
+        &FLAVOUR,
+        models,
+        messages,
+        stream,
+        cache_through,
+        max_tokens,
+    )
+}
 
-    let mut body = serde_json::json!({
-        "messages": msgs,
-        "stream": stream,
-        // Usage accounting: have OpenRouter report the actual USD cost (net of any prompt-cache
-        // discount) so the cost logger can store real spend, not just a tokens × price estimate.
-        "usage": { "include": true },
-    });
-    if stream {
-        // Ask OpenRouter to emit a final usage chunk so we can log token spend.
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
-    }
+/// OpenRouter's flavour of the OpenAI dialect. OpenRouter forwards `cache_control` to providers that
+/// support prompt caching (e.g. Anthropic), which cache everything up to AND INCLUDING the marked
+/// message; providers without caching, or a prefix below their minimum cacheable size, simply ignore
+/// it.
+pub(crate) const FLAVOUR: Flavour = Flavour {
+    name: "OpenRouter",
+    endpoint: ENDPOINT,
+    auth: cloud_openai::bearer,
+    cache_control_blocks: true,
+    decorate,
+    request_error,
+};
+
+/// The fields only OpenRouter's body carries: usage accounting, how the model(s) are named, and the
+/// privacy pin. With one model we send `"model"`; with several we send `"models"` (an ordered
+/// fallback list — OpenRouter advances to the next on a rate-limit/quota/provider error, which is
+/// how auto-switch works).
+fn decorate(body: &mut serde_json::Value, models: &[String]) {
+    // Usage accounting: have OpenRouter report the actual USD cost (net of any prompt-cache
+    // discount) so the cost logger can store real spend, not just a tokens × price estimate.
+    body["usage"] = serde_json::json!({ "include": true });
     if models.len() == 1 {
         body["model"] = serde_json::json!(models[0]);
     } else {
         body["models"] = serde_json::json!(models);
-    }
-    if let Some(limit) = max_tokens {
-        body["max_tokens"] = serde_json::json!(limit);
     }
     // PRIVACY (spec §6) — enforce Zero-Data-Retention on EVERY request, whichever model the
     // user picked. `zdr: true` keeps the request on endpoints that don't retain prompts;
@@ -521,7 +455,6 @@ fn chat_body(
     // for a model the request fails closed (privacy-preserving) and auto-switch falls
     // through to the next model in the list.
     body["provider"] = serde_json::json!({ "zdr": true, "data_collection": "deny" });
-    body
 }
 
 /// POST a streaming chat completion. `on_token` is called with each text delta as
@@ -532,7 +465,7 @@ pub async fn stream_chat<F>(
     models: &[String],
     messages: &[ChatMessage],
     cache_through: Option<usize>,
-    mut on_token: F,
+    on_token: F,
 ) -> Result<Completion>
 where
     F: FnMut(&str),
@@ -542,121 +475,7 @@ where
     // and growing history sit after it and stay uncached. `None` (no stable block) preserves the old
     // fully-uncached behaviour.
     let body = chat_body(models, messages, true, cache_through, None);
-
-    // A long, healthy streamed reply can legitimately run for many minutes (a slow or reasoning model,
-    // a large grounded answer). Bounding the WHOLE request with a total `.timeout` therefore severs a
-    // reply mid-stream — the user watches tokens arrive, then gets an error, and the aborted turn is
-    // never persisted → via F-02 the conversation wedges (F-16 / B4-5). The total deadline was only ever
-    // meant to bound a hung connection, not a healthy slow stream. Replace it with the two signals that
-    // actually indicate a dead connection: `connect_timeout` bounds establishing the socket, and
-    // `read_timeout` bounds *silence between chunks* — it resets on every byte received, so steady tokens
-    // never trip it however long the reply, while a genuinely stalled stream still aborts. Those two
-    // bounds now live on the shared `HTTP` client (F-16), so this request just adds NO total `.timeout()`.
-    // Non-streaming `complete` keeps its total deadline via its own per-request `.timeout()`: there the
-    // whole answer arrives at once, so a total bound fits.
-    let response = HTTP
-        .post(ENDPOINT)
-        .bearer_auth(api_key)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&body)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let detail = crate::error::truncate_detail(&response.text().await.unwrap_or_default());
-        return Err(request_error(status, &detail));
-    }
-
-    // Untrusted model output (rule #6): bound both the assembled reply and any
-    // single unterminated SSE line so a malicious/runaway endpoint can't grow
-    // memory without limit within the request timeout. (The ICS feed path caps
-    // fetched bytes the same way.) Both limits sit far above any real reply.
-    const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
-    const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
-
-    let mut full = String::new();
-    let mut served: Option<String> = None;
-    let mut usage = Usage::default();
-    // Raw bytes, decoded only one complete line at a time: a multi-byte UTF-8
-    // char split across two network chunks must not be lossily decoded in halves.
-    let mut truncated = false;
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        buffer.extend_from_slice(&chunk?);
-
-        // Server-Sent Events are newline-delimited; process whole lines only.
-        for line in drain_lines(&mut buffer) {
-            let Some(data) = line.strip_prefix("data:") else {
-                continue; // SSE comments / keep-alives
-            };
-            let data = data.trim();
-            if data == "[DONE]" {
-                return Ok(Completion {
-                    text: full,
-                    model: served,
-                    usage,
-                    truncated,
-                });
-            }
-            if data.is_empty() {
-                continue;
-            }
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                // A mid-stream failure. Erroring routes into `send_message`'s existing error path
-                // (ChatEvent::Error), whose dangling-user-turn self-heal already covers the user row
-                // persisted before the stream began. `full` is dropped on purpose: a partial reply
-                // from a failed call is exactly what must not be kept.
-                if let Some(e) = chunk_error(&value) {
-                    return Err(e);
-                }
-                // The chunk carries which model actually served the request — keep
-                // the first one we see so the stored message reflects any fallback.
-                if served.is_none() {
-                    if let Some(m) = value["model"].as_str() {
-                        served = Some(m.to_string());
-                    }
-                }
-                // Why the reply stopped. Flag, not error — the text is worth keeping; the caller
-                // marks the stored turn honest (see `Completion::truncated`).
-                if is_length_stop(&value) {
-                    truncated = true;
-                }
-                // The final chunk (empty choices) carries token usage — we asked for
-                // it via stream_options; keep it whenever present.
-                let u = parse_usage(&value);
-                if u.prompt_tokens.is_some() || u.completion_tokens.is_some() {
-                    usage = u;
-                }
-                if let Some(token) = value["choices"][0]["delta"]["content"].as_str() {
-                    full.push_str(token);
-                    if full.len() > MAX_REPLY_BYTES {
-                        return Err(Error::Other(
-                            "the model reply exceeded the size limit".into(),
-                        ));
-                    }
-                    on_token(token);
-                }
-            }
-        }
-
-        // After draining complete lines, only an unfinished line remains; if it has
-        // grown past the cap there's no newline coming — bail rather than buffer on.
-        if buffer.len() > MAX_SSE_LINE_BYTES {
-            return Err(Error::Other(
-                "the model stream sent an oversized line".into(),
-            ));
-        }
-    }
-
-    Ok(Completion {
-        text: full,
-        model: served,
-        usage,
-        truncated,
-    })
+    cloud_openai::stream(&FLAVOUR, api_key, &body, on_token).await
 }
 
 /// Drain every complete `\n`-terminated line from a raw SSE byte buffer, decoding
@@ -697,44 +516,24 @@ pub async fn complete(
         max_tokens,
     );
 
-    // Through `wire_mark::send` so a mod's `ai.complete` can tell a request that never connected
-    // (its booking is given back) from one that may have left; a plain send for everyone else.
-    let response = crate::wire_mark::send(
-        HTTP.post(ENDPOINT)
-            // A total deadline fits here (unlike `stream_chat`): the whole answer arrives at once.
-            .timeout(std::time::Duration::from_secs(120))
-            .bearer_auth(api_key)
-            .json(&body),
-    )
-    .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let detail = crate::error::truncate_detail(&response.text().await.unwrap_or_default());
-        return Err(request_error(status, &detail));
-    }
-
-    let value: serde_json::Value = response.json().await?;
-    let text = value["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| Error::Other("OpenRouter response had no message content".into()))?;
-    Ok(Completion {
-        text,
-        model: value["model"].as_str().map(str::to_string),
-        usage: parse_usage(&value),
-        // Same signal, same meaning — the non-streaming path gets it in one response rather than a
-        // chunk, and callers must not have to care which path produced the Completion.
-        truncated: value["choices"][0]["finish_reason"].as_str() == Some("length"),
-    })
+    // The send goes through `wire_mark::send` (in the shared core), so a mod's `ai.complete` can tell
+    // a request that never connected from one that may have left.
+    cloud_openai::complete(&FLAVOUR, api_key, &body).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The stream helpers moved to the shared core with the loop that uses them; these tests still
+    // hold them, through OpenRouter's flavour.
+    use crate::cloud_openai::{is_length_stop, parse_usage};
+
+    fn chunk_error(value: &serde_json::Value) -> Option<Error> {
+        cloud_openai::chunk_error(&FLAVOUR, value)
+    }
 
     /// OpenRouter's app-attribution headers put an app in its public rankings and per-app analytics,
-    /// so none may come back (see [`HTTP`]). Read case-insensitively from this file, the only one
+    /// so none may come back (see `cloud_openai::HTTP`). Read case-insensitively from this file, the only one
     /// that builds OpenRouter requests, with the names built from parts so the test can't match
     /// itself.
     #[test]

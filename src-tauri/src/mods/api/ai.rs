@@ -57,7 +57,7 @@ use serde_json::{json, Value};
 use super::handlers::{parse, within};
 use super::limits;
 use super::{blocking, recheck, still_current, Authorised, Code, Host, ModError, Reply};
-use crate::llm_gateway::{CallMeta, LlmOutcome, RoutePlan};
+use crate::llm_gateway::{CallMeta, CloudArm, CloudProvider, LlmOutcome, RoutePlan};
 use crate::local_slot::EndpointClass;
 use crate::mods::ai as money;
 use crate::openrouter::{ChatMessage, Completion};
@@ -164,17 +164,19 @@ impl ModelEdge for tauri::AppHandle {
 
 /// Whether `plan` may carry a mod's text. A cloud arm goes through OpenRouter, whose body pins
 /// zero-data-retention on every request (`openrouter::chat_body`, held by its tests), and a local arm
-/// stays on the user's own endpoint; a direct provider (outside ZDR by design) would be a new
-/// [`RoutePlan`] variant and is not one. The match is exhaustive on purpose: adding a variant fails
-/// to compile here until someone decides whether a mod may use it (I-13: a mod call never runs on
-/// a non-ZDR arm). A new PAID arm must also announce its requests on the call's [`WireMark`]
-/// (`wire_mark::send`), or a call that fails on it would be given back as free.
+/// stays on the user's own endpoint. A direct provider (the person's own Anthropic, Gemini or OpenAI
+/// key) is outside ZDR by design and is a [`CloudProvider`] on an ordinary cloud arm, not a route of
+/// its own, so the arm's provider is asked too: a route with ANY non-OpenRouter arm, including the
+/// cloud fallback of a local-first one, serves no mod. The match is exhaustive on purpose: adding a
+/// variant fails to compile here until someone decides whether a mod may use it (I-13: a mod call
+/// never runs on a non-ZDR arm). A new PAID arm must also announce its requests on the call's
+/// [`WireMark`] (`wire_mark::send`), or a call that fails on it would be given back as free.
 pub(super) fn serves_a_mod(plan: &RoutePlan) -> bool {
+    let zdr_pinned = |arm: &CloudArm| arm.provider == CloudProvider::OpenRouter;
     match plan {
-        RoutePlan::Cloud(_)
-        | RoutePlan::LocalOnly(_)
-        | RoutePlan::LocalThenCloud { .. }
-        | RoutePlan::CloudForPower { .. } => true,
+        RoutePlan::Cloud(arm) | RoutePlan::CloudForPower { cloud: arm, .. } => zdr_pinned(arm),
+        RoutePlan::LocalOnly(_) => true,
+        RoutePlan::LocalThenCloud { cloud, .. } => zdr_pinned(cloud),
     }
 }
 

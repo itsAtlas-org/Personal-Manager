@@ -811,6 +811,7 @@ mod tests {
 
     fn cloud_arm(ids: &[&str]) -> CloudArm {
         CloudArm {
+            provider: crate::llm_gateway::CloudProvider::OpenRouter,
             key: Secret::from("k".to_string()),
             models: models(ids),
         }

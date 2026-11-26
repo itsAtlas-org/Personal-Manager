@@ -42,7 +42,7 @@ use tauri::{AppHandle, Manager};
 use crate::context_budget::{self, COMPRESS_FLOOR_PAIRS};
 use crate::error::Result;
 use crate::openrouter::ChatMessage;
-use crate::{chat, secrets, AppState};
+use crate::{chat, AppState};
 
 /// The recency window context assembly (PR2) sends verbatim, in turn-pairs. The summary covers everything
 /// *before* this window. ~10 pairs ≈ the card's "10–20 turns" target. Kept here (not on the assembly side)
@@ -654,10 +654,7 @@ where
 fn ready(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     state.conn().is_ok()
-        && secrets::get_background_or_primary_key()
-            .ok()
-            .flatten()
-            .is_some()
+        && crate::llm_gateway::role_has_cloud(app, crate::llm_gateway::Role::Background)
 }
 
 /// Eagerly extend the just-active conversation's summary after its reply lands (card C's primary trigger).
