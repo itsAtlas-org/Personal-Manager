@@ -333,9 +333,9 @@ describe("CommandPalette", () => {
     await waitFor(() => expect(answers.has("team")).toBe(true));
     answers.get("team")?.([event("standup", "Team standup", "cal-work")]);
     await findByRole("option", { name: /Team standup/ });
-    answers.get("te")?.([event("tea", "Tea with Mats", "cal-work")]);
+    answers.get("te")?.([event("tea", "Tea with Noor", "cal-work")]);
     await new Promise((r) => setTimeout(r, 50));
-    expect(queryByRole("option", { name: /Tea with Mats/ })).toBeNull();
+    expect(queryByRole("option", { name: /Tea with Noor/ })).toBeNull();
   });
 
   it("keeps the arrowed row highlighted when the calendar's hits land, and keeps hits meanwhile", async () => {

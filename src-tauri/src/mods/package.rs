@@ -2993,7 +2993,7 @@ pub(crate) mod tests {
         // One to eight names read back in order.
         for names in [
             vec!["Bobby Yu"],
-            vec!["Bobby Yu", "Ramit", "Mats", "A", "B", "C", "D", "E"],
+            vec!["Bobby Yu", "Ramit", "Noor", "A", "B", "C", "D", "E"],
         ] {
             let f = with_manifest(|m| m["authors"] = json!(names));
             assert_eq!(f.verify().unwrap().manifest.authors, names);
