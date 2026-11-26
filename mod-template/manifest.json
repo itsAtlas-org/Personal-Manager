@@ -1,0 +1,26 @@
+{
+  "id": "example.hello",
+  "name": "Hello",
+  "description": "A starter mod: a tab that remembers a greeting. Copy this folder and change it.",
+  "version": "0.1.0",
+  "apiVersion": { "min": "1.0", "target": "1.0" },
+  "publisher": {
+    "tier": "third",
+    "author": "Your Name",
+    "sourceRepo": "your-name/your-mod",
+    "commit": "0000000000000000000000000000000000000000"
+  },
+  "licence": "AGPL-3.0-or-later",
+  "permissions": [
+    { "id": "ui.tab", "why": "Shows its page in its own tab." },
+    { "id": "storage", "why": "Remembers a greeting." }
+  ],
+  "contributions": {
+    "nav.tab": { "label": "Hello" }
+  },
+  "data": {
+    "keys": [{ "key": "greeting", "class": "content" }]
+  },
+  "entry": { "page": "app/index.html" },
+  "engines": { "frame": true }
+}

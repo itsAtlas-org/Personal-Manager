@@ -1,0 +1,52 @@
+/* SPDX-FileCopyrightText: 2026 Bobby Yu */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+/* The page's own look. PM's theme arrives as custom properties (main.js sets them on the root), so
+   each one below names a PM token first and a system colour second: until the theme arrives, and if
+   it never does, the page is still legible. A mod's stylesheet is the only style it may have: the
+   frame refuses a style attribute and a style tag. */
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 16px;
+  font-family: system-ui, sans-serif;
+  background: var(--bg, Canvas);
+  color: var(--ink, CanvasText);
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+}
+
+label {
+  display: block;
+  margin-top: 16px;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 24rem;
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--ink4, GrayText);
+  border-radius: var(--radius, 6px);
+}
+
+button {
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
