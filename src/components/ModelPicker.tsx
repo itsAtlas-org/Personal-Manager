@@ -29,6 +29,8 @@ interface Props {
   /** The trigger's accessible name. It must contain the visible `triggerLabel` words so speech input
    *  ("click Add a model") still lands, and say which control it is when there are two. */
   ariaLabel?: string;
+  /** The id of a line that describes what is chosen, read after the name when the trigger is focused. */
+  describedBy?: string;
 }
 
 type Sort = "default" | "asc" | "desc";
@@ -47,6 +49,7 @@ export function ModelPicker({
   source = { kind: "openrouter" },
   allowCustom = true,
   ariaLabel,
+  describedBy,
 }: Props) {
   const direct = source.kind === "direct";
   const [open, setOpen] = useState(false);
@@ -144,6 +147,7 @@ export function ModelPicker({
         ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
+        aria-describedby={describedBy}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         onClick={() => setOpen((o) => !o)}

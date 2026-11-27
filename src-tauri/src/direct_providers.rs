@@ -42,7 +42,7 @@ use crate::llm_gateway::{
 use crate::power::{DirectConsent, DIRECT_CONSENT_KEY};
 use crate::region::{Basis, Region, RegionRefusal};
 use crate::secret::Secret;
-use crate::{db, gemini_direct, openai_direct, secrets};
+use crate::{anthropic_direct, db, gemini_direct, openai_direct, secrets};
 
 /// The settings keys one provider keeps for one role.
 pub(crate) struct RoleKeys {
@@ -128,8 +128,31 @@ const GEMINI: DirectProvider = DirectProvider {
     well_formed: gemini_direct::well_formed,
 };
 
-/// Every direct provider. The Anthropic PR appends a row.
-pub(crate) const PROVIDERS: &[DirectProvider] = &[OPENAI, GEMINI];
+/// Anthropic has no data-sharing programme PM can't see (training needs the customer's express
+/// permission), so there is no tick-box; and no tiers: one key, one set of terms.
+const ANTHROPIC: DirectProvider = DirectProvider {
+    provider: CloudProvider::Anthropic,
+    name: "Anthropic",
+    opt_in: "direct_anthropic_enabled",
+    chat: RoleKeys {
+        models: "direct_anthropic_chat_models",
+        effort: "direct_anthropic_chat_effort",
+    },
+    background: RoleKeys {
+        models: "direct_anthropic_background_models",
+        effort: "direct_anthropic_background_effort",
+    },
+    key_check: "direct_anthropic_key_check",
+    shares_data: None,
+    tiers: false,
+    get_key: secrets::get_anthropic_key,
+    set_key: secrets::set_anthropic_key,
+    clear_key: secrets::clear_anthropic_key,
+    well_formed: anthropic_direct::well_formed,
+};
+
+/// Every direct provider, in the order the card list shows them.
+pub(crate) const PROVIDERS: &[DirectProvider] = &[OPENAI, GEMINI, ANTHROPIC];
 
 /// The table row for a provider, `None` for OpenRouter and for a provider with no call yet.
 pub(crate) fn provider(p: CloudProvider) -> Option<&'static DirectProvider> {
@@ -288,7 +311,8 @@ pub(crate) async fn check_key(p: CloudProvider, key: &str) -> KeyCheck {
     match p {
         CloudProvider::OpenAi => openai_direct::check_key(key).await,
         CloudProvider::Gemini => gemini_direct::check_key(key).await,
-        CloudProvider::OpenRouter | CloudProvider::Anthropic => KeyCheck::unsupported(),
+        CloudProvider::Anthropic => anthropic_direct::check_key(key).await,
+        CloudProvider::OpenRouter => KeyCheck::unsupported(),
     }
 }
 
@@ -369,15 +393,34 @@ pub(crate) fn arm_paused(arm: &crate::llm_gateway::CloudArm) -> bool {
 
 /// A key for another company is never sent to this one. No prefix rule is documented for either, so
 /// PM still never REQUIRES a prefix; it only refuses the one that is plainly someone else's: `sk-`
-/// is OpenAI's, OpenRouter's and Anthropic's, `AIza` is Google's. Pure.
+/// is OpenAI's, OpenRouter's and Anthropic's, `AIza` is Google's, and `sk-ant-` is Anthropic's alone
+/// (so OpenAI turns it away: sending it there would hand a key to another company). `sk-or-` is
+/// OpenRouter's documented prefix, so neither OpenAI nor Anthropic takes one (an unsaved OpenRouter
+/// key can't be caught by comparing with what PM already stores). Anthropic's keys are all `sk-ant-`,
+/// so its box turns away every other `sk-` key (OpenAI's project, service-account and admin keys
+/// among them) as well as `AIza`. OpenRouter's two boxes turn away `sk-ant-`, `AIza` and the three
+/// OpenAI shapes in [`OPENAI_KEY_PREFIXES`] (never `sk-or-`, which is its own). Pure.
 pub(crate) fn looks_like_another_providers_key(p: CloudProvider, key: &str) -> bool {
     let key = key.trim();
     match p {
         CloudProvider::Gemini => key.starts_with("sk-"),
-        CloudProvider::OpenAi => key.starts_with("AIza"),
-        CloudProvider::OpenRouter | CloudProvider::Anthropic => false,
+        CloudProvider::OpenAi => {
+            key.starts_with("AIza") || key.starts_with("sk-ant-") || key.starts_with("sk-or-")
+        }
+        CloudProvider::Anthropic => {
+            key.starts_with("AIza") || (key.starts_with("sk-") && !key.starts_with("sk-ant-"))
+        }
+        CloudProvider::OpenRouter => {
+            key.starts_with("AIza")
+                || key.starts_with("sk-ant-")
+                || OPENAI_KEY_PREFIXES.iter().any(|p| key.starts_with(p))
+        }
     }
 }
+
+/// The shapes of OpenAI key that carry a prefix of their own (project, service account, admin), the
+/// only OpenAI keys PM can tell from an OpenRouter one by shape alone.
+const OPENAI_KEY_PREFIXES: [&str; 3] = ["sk-proj-", "sk-svcacct-", "sk-admin-"];
 
 /// The last verdict as stored: when, what, and what the key could see.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1023,6 +1066,10 @@ pub(crate) struct DirectModelView {
     pub free_tier: Option<bool>,
     /// The next announced price change, so the picker can say what it will cost.
     pub next_price: Option<NextPrice>,
+    /// `"disabled"` on a model whose thinking Low effort switches off in the Background role
+    /// (Anthropic's Haiku), else null. So the Background effort line can say so and the switch is
+    /// not hidden.
+    pub thinking_off: Option<String>,
 }
 
 /// A price change still ahead. The current prices are on the view itself.
@@ -1057,6 +1104,7 @@ impl DirectModelView {
                 price_in: c.price_in,
                 price_out: c.price_out,
             }),
+            thinking_off: m.thinking_off.clone(),
         }
     }
 }
@@ -1265,7 +1313,23 @@ mod tests {
             role_cloud_provider(&conn, Role::Chat).unwrap(),
             CloudProvider::OpenRouter
         );
-        for raw in ["", "junk", "anthropic", "OPENROUTER"] {
+        // "anthropic" is an arm now too: stored, demoted until the person opts in.
+        db::set_setting(&conn, "chat_cloud_provider", "anthropic").unwrap();
+        assert_eq!(
+            stored_role_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::Anthropic
+        );
+        assert_eq!(
+            role_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::OpenRouter
+        );
+        set_opt_in(&conn, CloudProvider::Anthropic, true).unwrap();
+        assert_eq!(
+            role_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::Anthropic
+        );
+        set_opt_in(&conn, CloudProvider::Anthropic, false).unwrap();
+        for raw in ["", "junk", "Anthropic", "mythos", "OPENROUTER"] {
             db::set_setting(&conn, "chat_cloud_provider", raw).unwrap();
             assert_eq!(
                 role_cloud_provider(&conn, Role::Chat).unwrap(),

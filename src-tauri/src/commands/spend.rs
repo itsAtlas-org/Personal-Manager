@@ -665,6 +665,45 @@ mod tests {
         );
     }
 
+    /// A call on the person's own Anthropic key logs `anthropic/<catalogue id>` with PM's own worked
+    /// out cost. The summary sums that cost as it does an OpenRouter-reported one, with NO price-cache
+    /// row (`model_pricing` is OpenRouter's catalogue and holds nothing for it) and no network:
+    /// `build_cost_summary` is a read of `usage_log` alone. A call with no cost (a stream that never
+    /// reported its output) stays a dash, never a $0.
+    #[test]
+    fn an_anthropic_direct_row_sums_its_own_cost_with_no_openrouter_price() {
+        let (_dir, conn) = temp_db();
+        let usage = |cost: Option<f64>| openrouter::Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(200),
+            cost,
+            ..Default::default()
+        };
+        let sonnet = "anthropic/claude-sonnet-5-5";
+        log_usage(&conn, "chat", Some(sonnet), &usage(Some(0.0125)), &meta());
+        log_usage(&conn, "chat", Some(sonnet), &usage(Some(0.0075)), &meta());
+        log_usage(
+            &conn,
+            "background",
+            Some("anthropic/claude-haiku-5-5"),
+            &usage(None),
+            &meta(),
+        );
+        let priced: i64 = conn
+            .query_row("SELECT COUNT(*) FROM model_pricing", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(priced, 0, "nothing from OpenRouter is in the price cache");
+
+        let summary = build_cost_summary(&conn).unwrap();
+        let row = |m: &str| summary.all_time.iter().find(|r| r.model == m).unwrap();
+        let s = row(sonnet);
+        assert_eq!((s.request_count, s.prompt_tokens), (2, 2000));
+        assert!((s.cost_usd.unwrap() - 0.02).abs() < 1e-9);
+        assert_eq!(row("anthropic/claude-haiku-5-5").cost_usd, None);
+        assert!((summary.total_all_time_usd.unwrap() - 0.02).abs() < 1e-9);
+        assert!((summary.total_30d_usd.unwrap() - 0.02).abs() < 1e-9);
+    }
+
     /// `by_mod`: one line per mod across its models, priced row-additively like the per-model
     /// lists; PM's own rows are not in it; an uninstalled mod keeps its history with no name.
     #[test]

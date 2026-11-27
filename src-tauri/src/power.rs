@@ -213,7 +213,11 @@ impl serde::Serialize for Consent {
 
 /// The providers whose own consent is kept (the ones a role can be pointed at). A small FIXED list
 /// so the settings struct keeps its `Copy` derive; a provider PR adds one entry.
-const DIRECT_CONSENT_PROVIDERS: [CloudProvider; 2] = [CloudProvider::OpenAi, CloudProvider::Gemini];
+const DIRECT_CONSENT_PROVIDERS: [CloudProvider; 3] = [
+    CloudProvider::OpenAi,
+    CloudProvider::Gemini,
+    CloudProvider::Anthropic,
+];
 
 /// On-battery consent per direct provider: which roles have said yes while on THAT provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1291,14 +1295,20 @@ mod tests {
             DirectConsent::from_setting(Some(r#"{"openai":"both"}"#)).get(oa),
             Consent::ALL
         );
-        // Gemini keeps its own consent now; Anthropic has no call yet and still reads nothing.
+        // Gemini and Anthropic keep their own consent too.
         assert_eq!(
             DirectConsent::from_setting(Some(r#"{"gemini":"both"}"#)).get(CloudProvider::Gemini),
             Consent::ALL
         );
+        assert_eq!(
+            DirectConsent::from_setting(Some(r#"{"anthropic":"both"}"#))
+                .get(CloudProvider::Anthropic),
+            Consent::ALL
+        );
         for junk in [
-            r#"{"anthropic":"both"}"#,
             r#"{"openrouter":"both"}"#,
+            r#"{"mythos":"both"}"#,
+            r#"{"anthropic":"yes"}"#,
             r#"{"openai":"true"}"#,
             r#"{"openai":1}"#,
             r#"["openai"]"#,
@@ -1314,9 +1324,13 @@ mod tests {
         // A provider outside the list never reads a yes, however it is asked.
         let all = DirectConsent::from_setting(Some(r#"{"openai":"both"}"#));
         assert_eq!(all.get(CloudProvider::OpenRouter), Consent::NONE);
-        assert_eq!(all.get(CloudProvider::Anthropic), Consent::NONE);
-        // A yes given for OpenAI does not cover a role moved to Gemini.
+        // A yes given for OpenAI does not cover a role moved to Gemini or to Anthropic.
         assert_eq!(all.get(CloudProvider::Gemini), Consent::NONE);
+        assert_eq!(all.get(CloudProvider::Anthropic), Consent::NONE);
+        // A yes for Anthropic covers Anthropic's roles and not OpenAI's.
+        let anthropic = DirectConsent::from_setting(Some(r#"{"anthropic":"chat"}"#));
+        assert!(anthropic.get(CloudProvider::Anthropic).chat);
+        assert_eq!(anthropic.get(oa), Consent::NONE);
     }
 
     #[test]
@@ -1333,9 +1347,14 @@ mod tests {
         let both = c.with(oa, PowerScope::Chat);
         assert_eq!(both.get(oa), Consent::ALL);
         assert_eq!(
-            DirectConsent::NONE.with(CloudProvider::Anthropic, PowerScope::Both),
+            DirectConsent::NONE.with(CloudProvider::OpenRouter, PowerScope::Both),
             DirectConsent::NONE
         );
+        // Anthropic's yes is its own entry and round-trips by its word.
+        let a = DirectConsent::NONE.with(CloudProvider::Anthropic, PowerScope::Both);
+        assert_eq!(a.as_setting().as_deref(), Some(r#"{"anthropic":"both"}"#));
+        assert_eq!(DirectConsent::from_setting(a.as_setting().as_deref()), a);
+        assert_eq!(a.without(CloudProvider::Anthropic).as_setting(), None);
         // Gemini's yes is its own entry, and "none" clears both.
         let two = c.with(CloudProvider::Gemini, PowerScope::Chat);
         assert_eq!(

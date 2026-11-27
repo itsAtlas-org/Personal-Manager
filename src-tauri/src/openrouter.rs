@@ -73,8 +73,16 @@ pub struct Usage {
     /// The provider reported a prompt count but no total, so the output count may leave its thinking
     /// out (Gemini counts thoughts in a total, not in `completion_tokens`). A price worked out from
     /// such a count would look exact and under-count, so the cost reads "-" instead. False for every
-    /// provider that reports output whole.
+    /// provider that reports output whole. Anthropic also sets it for a reply that wrote one-hour
+    /// cache entries, which PM has no price for: the same "can't be priced exactly" dash.
     pub output_partial: bool,
+    /// The provider's safety system stopped this reply (Anthropic's `stop_reason: "refusal"`). It is
+    /// HTTP 200 and BILLED, so it travels as a completion with its usage and an empty text, not as an
+    /// `Err` (which carries no usage and would book nothing). It sits on `Usage` rather than on
+    /// `Completion` so the many `Completion { .. }` literals (and the mod tests, which this change
+    /// may not touch) keep compiling: every `Usage` outside the dialect builders is built from
+    /// `..Default::default()`. False for every provider that never says it.
+    pub refused: bool,
 }
 
 /// The result of a chat call: the assembled text, the model that actually served it
@@ -118,7 +126,7 @@ impl Completion {
     /// is what the pre-flight sizing in #797 is for; the two are complementary halves of "the reply
     /// PM got back is not the reply it asked for".
     pub fn usable_text(&self) -> Option<&str> {
-        if self.truncated {
+        if self.truncated || self.usage.refused {
             return None;
         }
         let text = self.text.trim();
@@ -128,7 +136,11 @@ impl Completion {
     /// Why [`Self::usable_text`] said no, phrased for a log line or an error the user may see.
     /// `None` when the reply was usable.
     pub fn unusable_reason(&self) -> Option<&'static str> {
-        if self.truncated {
+        // Checked first: a refused reply is empty AND may be cut, and "the model returned an empty
+        // reply" would hide that the provider's safety system stopped it.
+        if self.usage.refused {
+            Some("Anthropic's safety system stopped this reply")
+        } else if self.truncated {
             Some("the model's reply was cut off before it finished")
         } else if self.text.trim().is_empty() {
             Some("the model returned an empty reply")

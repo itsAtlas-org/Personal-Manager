@@ -577,7 +577,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-direct-keys": {
     title: "Your own keys",
-    body: "Use your own key from OpenAI or Google instead of going through OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention. OpenAI keeps them in abuse logs for up to 30 days and doesn't train on them unless your project shares data. A free Google Gemini key lets Google train on them and people at Google read them; a paid one doesn't, but Google still logs them for a limited time. Keys are stored in your keychain and never leave PM's engine.",
+    body: "Use your own key from OpenAI, Google Gemini or Anthropic instead of going through OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention. OpenAI keeps them in abuse logs for up to 30 days and doesn't train on them unless your project shares data. Anthropic can keep them for up to 30 days, or up to 2 years if it flags a request for breaking its usage policy (Claude Fable always keeps them 30 days), and doesn't train on them without your permission. A free Google Gemini key lets Google train on them and people at Google read them; a paid one doesn't, but Google still logs them for a limited time. Keys are stored in your keychain and never leave PM's engine.",
+  },
+  "settings-anthropic-key": {
+    title: "Anthropic API key",
+    body: "An API key from a workspace in the Anthropic Console (platform.claude.com/settings/keys). When you press Save and check, PM asks Anthropic which models the key can use, then sends one tiny test message to prove a chat works. A key Anthropic refuses isn't saved. If your account has no credit yet, or is at a spend limit, the key is kept: add some, then press Check again. Claude Fable needs a workspace with 30-day data retention switched on.",
   },
   "settings-gemini-key": {
     title: "Google Gemini API key",

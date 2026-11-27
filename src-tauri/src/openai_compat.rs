@@ -382,6 +382,7 @@ fn parse_usage(value: &serde_json::Value) -> Usage {
         cached_tokens: None,
         cache_write_tokens: None,
         output_partial: false,
+        refused: false,
     }
 }
 

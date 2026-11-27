@@ -613,3 +613,34 @@ describe("On battery with a cloud role on a provider of the person's own", () =>
     );
   });
 });
+
+describe("On battery with an Anthropic role", () => {
+  const onAnthropic = (over: Partial<PowerRoleView> = {}) =>
+    movable({ cloud_provider: "anthropic", ...over });
+
+  it("says Anthropic's own retention, once for one provider and once each for two", () => {
+    const own =
+      "Anthropic keeps requests for up to 30 days, or up to 2 years if it flags one for breaking its usage policy.";
+    expect(directRetentionNote(power({ chat: onAnthropic() }))).toBe(own);
+    // Each provider speaks for itself, so the verb never has to agree with a joined list of names.
+    expect(
+      directRetentionNote(
+        power({ chat: onAnthropic(), background: movable({ cloud_provider: "openai" }) }),
+      ),
+    ).toBe(`${own} OpenAI keeps requests for up to 30 days.`);
+  });
+
+  it("names Anthropic in the cloud, and asks about it by name", () => {
+    expect(cloudNames(power({ chat: onAnthropic() }))).toBe("Anthropic and OpenRouter");
+    const text = consentText(
+      power({
+        source: "battery",
+        percent: 41,
+        chat: onAnthropic({ route: "needs_consent" }),
+        background: movable(),
+      }),
+    );
+    expect(text).toContain("Anthropic");
+    expect(text).toMatch(/isn't zero data retention|not zero data retention/);
+  });
+});

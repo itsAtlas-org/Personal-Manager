@@ -21,12 +21,46 @@ pub fn has_openrouter_key() -> Result<bool> {
     Ok(secrets::get_openrouter_key()?.is_some())
 }
 
+/// A key for another provider pasted into an OpenRouter box would go to openrouter.ai as a Bearer
+/// token: a key handed to another company. Refused before any write, for two kinds of key. One PM
+/// already holds for a direct provider (`stored_elsewhere`, a comparison, so no prefix guess), and
+/// one whose prefix is plainly another company's (the shared list in `direct_providers`: Anthropic's
+/// `sk-ant-`, Google's `AIza`, OpenAI's project, service-account and admin shapes), which catches a
+/// key not yet saved. An OpenRouter-style key (`sk-or-`), and the same OpenRouter key saved again,
+/// pass. PURE over its arguments.
+fn refuse_another_providers_key(
+    key: &str,
+    stored_elsewhere: impl FnOnce(&str) -> bool,
+) -> Result<()> {
+    if crate::direct_providers::looks_like_another_providers_key(
+        crate::llm_gateway::CloudProvider::OpenRouter,
+        key,
+    ) || stored_elsewhere(key)
+    {
+        return Err(Error::Other(
+            "That looks like a key from another provider, not an OpenRouter key. Paste it into Your own keys instead."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn refuse_a_key_held_for_a_direct_provider(key: &str) -> Result<()> {
+    refuse_another_providers_key(key, |k| {
+        crate::llm_gateway::is_a_stored_key_of_another_provider(
+            crate::llm_gateway::CloudProvider::OpenRouter,
+            k,
+        )
+    })
+}
+
 #[tauri::command]
 pub fn set_openrouter_key(key: String) -> Result<()> {
     let key = key.trim();
     if key.is_empty() {
         return Err(Error::Other("API key is empty".into()));
     }
+    refuse_a_key_held_for_a_direct_provider(key)?;
     secrets::set_openrouter_key(key)
 }
 
@@ -41,7 +75,39 @@ pub fn set_openrouter_background_key(key: String) -> Result<()> {
     if key.is_empty() {
         return Err(Error::Other("API key is empty".into()));
     }
+    refuse_a_key_held_for_a_direct_provider(key)?;
     secrets::set_openrouter_background_key(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal is decided before any keychain write, whichever box the key was pasted into.
+    #[test]
+    fn a_key_for_another_provider_is_refused_in_an_openrouter_box() {
+        let held = |k: &str| k == "held-openai-key-0123456789";
+        // One PM already holds for a direct provider.
+        assert!(refuse_another_providers_key("held-openai-key-0123456789", held).is_err());
+        // An Anthropic key that is not saved yet, by its documented prefix.
+        let e =
+            refuse_another_providers_key("sk-ant-api03-abcdefghijklmnop", |_| false).unwrap_err();
+        assert!(e.to_string().contains("another provider"), "{e}");
+        // The other companies' unsaved keys, by the shared prefix list: OpenAI's three prefixed
+        // shapes and Google's.
+        for key in [
+            "sk-proj-abcdefghijklmnop",
+            "sk-svcacct-abcdefghijklmnop",
+            "sk-admin-abcdefghijklmnop",
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456",
+        ] {
+            let e = refuse_another_providers_key(key, |_| false).unwrap_err();
+            assert!(e.to_string().contains("another provider"), "{key}: {e}");
+        }
+        // An OpenRouter-style key, and the same OpenRouter key saved again, pass.
+        assert!(refuse_another_providers_key("sk-or-v1-abcdefghijklmnop", |_| false).is_ok());
+        assert!(refuse_another_providers_key("or-key-primary-0123456789", held).is_ok());
+    }
 }
 
 /// Run the OS verification (Windows Hello / Touch ID) to lift the launch lock. Returns

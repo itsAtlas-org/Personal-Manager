@@ -368,6 +368,9 @@ export function AiModelsSettings({
     dp.state?.providers.find(
       (p) => p.provider === "gemini" && (p.opted_in || p.key === "present"),
     ) ?? null;
+  const anthropicInUse = dp.state?.providers.some(
+    (p) => p.provider === "anthropic" && (p.opted_in || p.key === "present"),
+  );
 
   return (
     <>
@@ -758,6 +761,14 @@ export function AiModelsSettings({
                 version of PM (checked on {dayMonthYear(catalogueDate)}). Cached input is priced at
                 the cached rate. It leaves out tax and anything the provider adds. Check your
                 provider&apos;s own dashboard for the bill.
+              </p>
+            )}
+            {anthropicInUse && (
+              <p>
+                Writing to the cache costs a little more than plain input. On Claude Haiku, a
+                request with more than 100,000 tokens of input costs five times as much per token.
+                If Anthropic stops, cuts off or errors a reply partway, it still bills what it had
+                written; PM can&apos;t see those tokens, so they aren&apos;t counted here.
               </p>
             )}
             {geminiInUse && (

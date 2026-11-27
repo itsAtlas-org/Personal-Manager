@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import {
   directInfo,
@@ -19,6 +19,7 @@ import {
   roleChangedAnnouncement,
   roleIssue,
   roleIssueLine,
+  modelWarning,
   roleModel,
   roleName,
   routeNote,
@@ -81,6 +82,7 @@ export function RoleBlock({
 }: Props) {
   const [announce, setAnnounce] = useState("");
   const [effortLine, setEffortLine] = useState("");
+  const noteId = useId();
   const state = dp.state;
   const who = roleName(role);
   const lower = who.toLowerCase();
@@ -106,12 +108,16 @@ export function RoleBlock({
       await setRoleCloudProvider(role, next as CloudProviderId);
       const fresh = await dp.reload();
       const nextView = fresh && isDirect(next) ? providerView(fresh, next) : undefined;
+      const nextModel = nextView ? roleModel(nextView, role) : undefined;
+      // A model with a warning (Fable) is spoken as well as drawn: the standing line below is plain
+      // text a listener never lands on by itself.
       setAnnounce(
-        roleChangedAnnouncement(
-          role,
-          next,
-          nextView ? (roleModel(nextView, role)?.name ?? null) : null,
-        ),
+        [
+          roleChangedAnnouncement(role, next, nextModel?.name ?? null),
+          modelWarning(next, nextModel),
+        ]
+          .filter(Boolean)
+          .join(" "),
       );
     } catch (e) {
       onError(String(e));
@@ -131,6 +137,9 @@ export function RoleBlock({
       await setDirectRole(view.provider, role, [id], effort);
       await dp.reload();
       setEffortLine(coercedFrom ? effortCoercedLine(role, to, coercedFrom) : "");
+      // Only a CHANGE to a model with a warning is spoken (picking the same one again is not news).
+      const warning = modelWarning(view.provider, to);
+      if (to && warning && from?.id !== to.id) setAnnounce(`${to.name}. ${warning}`);
     } catch (e) {
       onError(String(e));
       await dp.reload();
@@ -185,6 +194,15 @@ export function RoleBlock({
   const model = view ? roleModel(view, role) : undefined;
   const efforts = direct ? effortOptions(role, model) : [];
   const effortValue = view?.roles[role].effort ?? "";
+  // The effective model's own warning, standing under its list: the picker draws a row's note only
+  // while its list is open, so after Fable is chosen nothing else would say it.
+  const modelNote = view ? modelWarning(view.provider, model) : null;
+  // Background on a model whose thinking Low switches off says so beside the Select, so the knob is
+  // not hidden ("Haiku" from "Claude Haiku 5.5").
+  const thinkingLine =
+    role === "background" && model?.thinking_off
+      ? ` Low also switches ${model.name.replace(/^Claude /, "").split(" ")[0]}'s thinking off.`
+      : "";
 
   return (
     <div className="space-y-3">
@@ -233,6 +251,7 @@ export function RoleBlock({
           allowCustom={false}
           roleName={lower}
           nameFor={(id) => view.models.find((m) => m.id === id)?.name}
+          describedBy={modelNote ? noteId : undefined}
         />
       ) : (
         <ModelListEditor
@@ -249,10 +268,18 @@ export function RoleBlock({
         />
       )}
 
+      {modelNote && (
+        // text-ink4 is the measured 4.5:1 floor the neighbouring lines use. Not folded: it is a
+        // warning about the model chosen, and the picker's list is closed by now.
+        <p id={noteId} className="text-xs text-ink4">
+          {modelNote}
+        </p>
+      )}
+
       {direct && efforts.length > 0 && (
         <SettingRow
           label={`${who} effort`}
-          description={EFFORT_TEXT[role]}
+          description={`${EFFORT_TEXT[role]}${thinkingLine}`}
           helpId="settings-role-effort"
           spacing="none"
         >

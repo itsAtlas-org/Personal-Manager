@@ -7,7 +7,9 @@ import {
   adoptRoles,
   BACKGROUND_NOT_SET_UP,
   directInfo,
+  directNames,
   eligibleProviders,
+  orList,
   providerOptionLabel,
   providerView,
   roleName,
@@ -79,7 +81,7 @@ export function OnboardingDirectKey({
     <div className="mt-5 border-t border-border pt-4">
       <SectionLabel>Your own key (optional)</SectionLabel>
       <p className="mt-1 text-xs text-ink4">
-        Rather not use OpenRouter? Use your own OpenAI or Google Gemini key. It's off unless you
+        Rather not use OpenRouter? Use your own {orList(directNames())} key. It's off unless you
         turn it on, and it isn't zero data retention.
       </p>
       <div className="mt-3 space-y-3">

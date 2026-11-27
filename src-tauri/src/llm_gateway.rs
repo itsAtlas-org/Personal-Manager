@@ -487,21 +487,47 @@ fn key_for(provider: CloudProvider, role: Role) -> Result<Option<Secret>> {
     }
 }
 
-/// Whether `candidate` is one of the stored OpenRouter keys (primary or background). The key check
-/// for a direct provider asks this BEFORE any request, so an OpenRouter key pasted into the wrong
-/// box is never sent to another company as a Bearer token. A comparison, so no prefix guess is
-/// needed; an unreadable keychain says no (the direct key's own write would fail there too).
-pub(crate) fn is_a_stored_openrouter_key(candidate: &str) -> bool {
-    let stored = [
+/// Whether `candidate` is a key PM already holds for ANOTHER provider than `own`: an OpenRouter key
+/// (primary or background) or any other direct provider's saved key. The key check for a direct
+/// provider asks this BEFORE any request, so a key pasted into the wrong box is never sent to another
+/// company; and the two OpenRouter key commands ask it with `own = OpenRouter`, so a saved OpenAI or
+/// Anthropic key can't be sent to openrouter.ai as a Bearer token either. A comparison, so no prefix
+/// guess is needed (re-saving the SAME provider's key is never refused: that provider is skipped);
+/// an unreadable keychain says no (the key's own write would fail there too).
+pub(crate) fn is_a_stored_key_of_another_provider(own: CloudProvider, candidate: &str) -> bool {
+    // An unreadable keychain reads as "no key" (the `Err` arms drop out).
+    let openrouter = [
         secrets::get_openrouter_key(),
         secrets::get_openrouter_background_key(),
-    ];
-    let stored: Vec<&str> = stored
+    ]
+    .into_iter()
+    .map(|k| k.ok().flatten())
+    .collect::<Vec<_>>();
+    let direct = crate::direct_providers::PROVIDERS
         .iter()
-        .filter_map(|k| k.as_ref().ok().and_then(|k| k.as_ref()))
-        .map(|k| k.expose())
-        .collect();
+        .map(|d| (d.provider, (d.get_key)().ok().flatten()))
+        .collect::<Vec<_>>();
+    let stored = keys_of_others(own, &openrouter, &direct);
+    let stored: Vec<&str> = stored.iter().map(|k| k.expose()).collect();
     is_one_of(candidate, &stored)
+}
+
+/// The stored keys that belong to someone other than `own`: the OpenRouter keys (unless `own` IS
+/// OpenRouter, so re-saving the same key is fine) and every other direct provider's. PURE.
+fn keys_of_others<'a>(
+    own: CloudProvider,
+    openrouter: &'a [Option<Secret>],
+    direct: &'a [(CloudProvider, Option<Secret>)],
+) -> Vec<&'a Secret> {
+    let or_keys = openrouter
+        .iter()
+        .filter(|_| own != CloudProvider::OpenRouter)
+        .flatten();
+    let direct_keys = direct
+        .iter()
+        .filter(|(p, _)| *p != own)
+        .filter_map(|(_, k)| k.as_ref());
+    or_keys.chain(direct_keys).collect()
 }
 
 /// The comparison alone, pure so it has a test: trimmed, and an empty candidate matches nothing.
@@ -824,8 +850,6 @@ pub(crate) fn ping_status(app: &AppHandle) {
 #[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
     OpenRouter,
-    // No arm for Anthropic yet (the next PR); the tests build it.
-    #[allow(dead_code)]
     Anthropic,
     Gemini,
     OpenAi,
@@ -850,14 +874,15 @@ impl CloudProvider {
         self != CloudProvider::OpenRouter
     }
 
-    /// Parse a stored provider choice. An ALLOW-LIST of the providers whose call exists: "openai" and
-    /// "gemini" are the direct providers today, and anything else (absent, junk, or an "anthropic"
-    /// stored by a newer PM before this one can answer it) is OpenRouter, so a stored value can never
-    /// name an arm that can't be built. Each provider PR adds its arm here.
+    /// Parse a stored provider choice. An ALLOW-LIST of the providers whose call exists: "openai",
+    /// "gemini" and "anthropic" are the direct providers today, and anything else (absent or junk) is
+    /// OpenRouter, so a stored value can never name an arm that can't be built. Each provider PR adds
+    /// its arm here.
     pub fn from_setting(raw: Option<&str>) -> Self {
         match raw.map(str::trim) {
             Some("openai") => CloudProvider::OpenAi,
             Some("gemini") => CloudProvider::Gemini,
+            Some("anthropic") => CloudProvider::Anthropic,
             _ => CloudProvider::OpenRouter,
         }
     }
@@ -888,10 +913,16 @@ pub struct CloudArm {
     /// verdict, which reads as free. A held plan is also judged by what calls learned since: see
     /// `gemini_direct`.
     pub tier: Option<crate::direct_providers::KeyTier>,
+    /// The role this arm was built for, set by the one real builder (`cloud_arm`). `None` for an arm
+    /// made any other way. Only `anthropic_direct` reads it, to switch Haiku's thinking off for the
+    /// BACKGROUND role alone: the effort can't stand in for it, because a chat role can store a level
+    /// too.
+    pub role: Option<Role>,
 }
 
 impl CloudArm {
-    /// An arm with no effort or tier set, which is every arm but a direct one with a chosen level.
+    /// An arm with no effort, tier or role set, which is every arm but a direct one with a chosen
+    /// level.
     pub fn new(provider: CloudProvider, key: Secret, models: Vec<String>) -> Self {
         Self {
             provider,
@@ -899,6 +930,7 @@ impl CloudArm {
             models,
             effort: None,
             tier: None,
+            role: None,
         }
     }
 }
@@ -1170,6 +1202,7 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
             models: inputs.models,
             effort: inputs.effort,
             tier,
+            role: Some(role),
         }));
     }
     let (models_key, auto_key) = match role {
@@ -1544,17 +1577,10 @@ async fn cloud_complete_via(
         CloudProvider::Gemini => {
             crate::gemini_direct::complete(arm, messages, cache_prefix, max_tokens).await
         }
-        other => Err(provider_not_available(other)),
+        CloudProvider::Anthropic => {
+            crate::anthropic_direct::complete(arm, messages, cache_prefix, max_tokens).await
+        }
     }
-}
-
-/// What a person is told if a route names a provider whose call isn't built yet. Nothing builds such
-/// a route today, so this is the stop that keeps a half-added provider from reaching the network.
-fn provider_not_available(provider: CloudProvider) -> Error {
-    Error::Other(format!(
-        "Your {} key can't be used yet in this version of PM.",
-        provider.as_str()
-    ))
 }
 
 /// Stream a chat completion through the resolved route, forwarding each answer delta to `on_delta`,
@@ -1870,7 +1896,9 @@ where
         CloudProvider::Gemini => {
             crate::gemini_direct::stream_chat(arm, messages, cache_through, on_token).await
         }
-        other => Err(provider_not_available(other)),
+        CloudProvider::Anthropic => {
+            crate::anthropic_direct::stream_chat(arm, messages, cache_through, on_token).await
+        }
     }
 }
 
@@ -1878,7 +1906,7 @@ where
 /// the old "No OpenRouter API key set", #297 PR3, changelog-noted). Neutral between the cloud and
 /// local paths so the keyless-onboarding direction (#295 PR7) reads right.
 pub fn no_provider_message() -> String {
-    "No AI provider is set up yet. Add an OpenRouter key, your own OpenAI or Google Gemini key, or set up a local model in Settings > AI."
+    "No AI provider is set up yet. Add an OpenRouter key, your own OpenAI, Anthropic or Google Gemini key, or set up a local model in Settings > AI."
         .to_string()
 }
 
@@ -2208,6 +2236,7 @@ mod tests {
             ("openrouter::complete(", 1),
             ("openai_direct::complete(", 1),
             ("gemini_direct::complete(", 1),
+            ("anthropic_direct::complete(", 1),
             ("openai_compat::complete(", 1),
             ("cloud_complete(\n", 4),
             ("run_local_complete(app", 2),
@@ -2241,29 +2270,33 @@ mod tests {
         // And so is your own Gemini key.
         assert_eq!(sites("gemini_direct::stream_chat("), 1);
         assert_eq!(sites("gemini_direct::complete("), 1);
+        // And your own Anthropic key.
+        assert_eq!(sites("anthropic_direct::stream_chat("), 1);
+        assert_eq!(sites("anthropic_direct::complete("), 1);
     }
 
-    /// A route that names a provider whose call isn't built is stopped before any request is made,
-    /// on both the one-shot and the streaming path, and says so in words.
+    /// Every provider has a call now, so the dispatch matches are exhaustive (a new provider fails to
+    /// compile until it has an arm) and there is no "not built yet" stop left. What stops a stale
+    /// setting before any request leaves is the catalogue refusal each direct module holds; for
+    /// Anthropic that is checked here through BOTH dispatch functions, with a model it doesn't list
+    /// and with Mythos, and nothing is sent either way.
     #[tokio::test]
-    async fn a_provider_without_a_call_yet_is_refused_without_touching_the_network() {
-        // OpenAi is not here: its call exists, and a catalogue refusal before the network is held by
-        // `an_openai_arm_naming_a_model_not_in_the_catalogue_is_refused_before_the_network`.
-        for provider in [CloudProvider::Anthropic] {
+    async fn an_anthropic_arm_naming_a_model_it_does_not_list_is_refused_before_the_network() {
+        for model in ["not/a-model", "anthropic/claude-mythos-5-2"] {
             let arm = CloudArm {
-                provider,
-                ..cloud(&["m"])
+                provider: CloudProvider::Anthropic,
+                ..cloud(&[model])
             };
             let e = cloud_complete_via(&arm, &msgs(1), false, Some(10))
                 .await
                 .err()
                 .expect("refused");
-            assert!(e.to_string().contains(provider.as_str()), "{e}");
+            assert!(e.to_string().contains("Anthropic"), "{e}");
             let e = cloud_stream_via(&arm, &msgs(1), None, |_| {})
                 .await
                 .err()
                 .expect("refused");
-            assert!(e.to_string().contains("can't be used yet"), "{e}");
+            assert!(e.to_string().contains("Anthropic"), "{e}");
         }
         assert_eq!(CloudProvider::OpenRouter.as_str(), "openrouter");
     }
@@ -2309,6 +2342,8 @@ mod tests {
             concat!("get_open", "ai_key("),
             // Gemini's too; `gemini_direct.rs` gets the key from the arm and is NOT on the allow-list.
             concat!("get_gem", "ini_key("),
+            // And Anthropic's, on the same terms: `anthropic_direct.rs` is handed the key by the arm.
+            concat!("get_anthr", "opic_key("),
         ];
         for file in files {
             let rel = file
@@ -2337,6 +2372,47 @@ mod tests {
         assert!(!is_one_of("another-key-0123456789abcd", &stored));
         assert!(!is_one_of("", &stored));
         assert!(!is_one_of("   ", &[""]));
+    }
+
+    /// The wrong-box guard compares a pasted key with every key held for SOMEONE ELSE: the OpenRouter
+    /// keys and every other direct provider's. The provider's own key is skipped, so saving the same
+    /// key again is fine, and an OpenRouter box skips OpenRouter's own two keys the same way.
+    #[test]
+    fn a_pasted_key_is_compared_with_every_other_providers_keys_and_never_its_own() {
+        let key = |s: &str| Some(Secret::from(s.to_string()));
+        let openrouter = [key("or-primary-0123456789"), None];
+        let direct = [
+            (CloudProvider::OpenAi, key("openai-fake-0123456789")),
+            (CloudProvider::Gemini, None),
+            (CloudProvider::Anthropic, key("anthropic-fake-0123456789")),
+        ];
+        let others = |own| -> Vec<String> {
+            keys_of_others(own, &openrouter, &direct)
+                .iter()
+                .map(|k| k.expose().to_string())
+                .collect()
+        };
+        // An Anthropic box sees OpenRouter's and OpenAI's keys, not its own.
+        assert_eq!(
+            others(CloudProvider::Anthropic),
+            ["or-primary-0123456789", "openai-fake-0123456789"]
+        );
+        // An OpenAI box sees OpenRouter's and Anthropic's.
+        assert_eq!(
+            others(CloudProvider::OpenAi),
+            ["or-primary-0123456789", "anthropic-fake-0123456789"]
+        );
+        // An OpenRouter box sees every direct key and none of OpenRouter's own.
+        assert_eq!(
+            others(CloudProvider::OpenRouter),
+            ["openai-fake-0123456789", "anthropic-fake-0123456789"]
+        );
+        // A blank candidate matches nothing, and an absent key matches nothing.
+        let held = others(CloudProvider::Anthropic);
+        let held: Vec<&str> = held.iter().map(String::as_str).collect();
+        assert!(is_one_of("openai-fake-0123456789", &held));
+        assert!(!is_one_of("anthropic-fake-0123456789", &held));
+        assert!(!is_one_of("", &held));
     }
 
     /// `role_has_cloud(` and `key_presence(` take a short `state.conn()` lock themselves to read the
@@ -2453,9 +2529,10 @@ mod tests {
             None,
             Some(""),
             Some("openrouter"),
-            Some("anthropic"),
+            Some("Anthropic"),
             Some("OPENAI"),
             Some("Gemini"),
+            Some("mythos"),
             Some("x"),
         ] {
             assert_eq!(
@@ -2464,6 +2541,15 @@ mod tests {
                 "{raw:?}"
             );
         }
+        // Anthropic is an arm now, on the same allow-list rule (exact words, trimmed).
+        for raw in ["anthropic", " anthropic "] {
+            assert_eq!(
+                CloudProvider::from_setting(Some(raw)),
+                CloudProvider::Anthropic,
+                "{raw:?}"
+            );
+        }
+        assert_eq!(CloudProvider::Anthropic.display_name(), "Anthropic");
         // Gemini is an arm now, on the same allow-list rule (exact words, trimmed).
         assert_eq!(
             CloudProvider::from_setting(Some("gemini")),
@@ -3683,6 +3769,35 @@ mod tests {
         assert!(
             seen < consent,
             "apply_seen must run before the consent is read"
+        );
+    }
+
+    /// A direct arm carries the role it was built for. Anthropic's request body reads it: Haiku's
+    /// thinking is switched off only for Background at Low. If `cloud_arm` ever dropped it, Haiku's
+    /// background calls would silently keep thinking on and bill more, with nothing looking broken.
+    /// The text is searched with its comments stripped, so a remark can't stand in for the field.
+    #[test]
+    fn the_direct_arm_is_built_with_its_role() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let sig = concat!("fn cloud_arm(app: &AppHandle, ", "role: Role)");
+        let at = live.find(sig).expect("cloud_arm");
+        let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let literal = code
+            .split("CloudArm {")
+            .nth(1)
+            .expect("the direct arm's struct literal");
+        let literal = &literal[..literal.find('}').unwrap()];
+        assert!(
+            literal.contains(concat!("role: Some(", "role)")),
+            "cloud_arm's direct arm must carry role: Some(role)"
         );
     }
 
