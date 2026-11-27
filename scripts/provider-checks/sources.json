@@ -1,5 +1,5 @@
 {
-  "about": "Where the weekly provider checks send requests, in one small file because vendors move their URLs (Google's docs moved hosts while this was researched). The canary sends a credential ONLY to a host named in `api_hosts`; leg.mjs refuses any other. The weekly drift check (a later change) adds its page URLs here.",
+  "about": "Where the weekly provider checks send requests, in one small file because vendors move their URLs (Google's docs moved hosts while this was researched). The canary sends a credential ONLY to a host named in `api_hosts`; leg.mjs refuses any other. `drift` is the keyless drift check's list of public pages (provider-drift.yml): a page is fetched only from a host in drift.hosts, with no credential, and `final_url` is the address it should end on (a change is a notice). For a price page, `known` lists the pricing columns (for Gemini, rows) PM prices (`priced`: header text in lower case, to the dimension it feeds) and the ones it knowingly does not (`ignored`): a header in neither that carries a price on a catalogue model's row is a finding, because it may be a cost PM is not counting. `known_other_models` are vendor models PM deliberately does not carry, so they never raise `new-model`. `phrases` are PM's own wording that a terms page must still contain; `stamp` is the page's last-read 'Effective' date. Batch prices are not read at all: PM never calls a batch API.",
   "api_hosts": {
     "openai": "https://api.openai.com",
     "gemini": "https://generativelanguage.googleapis.com",
@@ -9,5 +9,169 @@
     "version": "2026-10-21",
     "token_path": "/v1/oauth/token",
     "oidc_audience": "https://api.anthropic.com"
+  },
+  "drift": {
+    "user_agent": "pm-provider-check",
+    "hosts": [
+      "platform.claude.com",
+      "developers.openai.com",
+      "aistudio.google.com",
+      "openrouter.ai"
+    ],
+    "pages": {
+      "anthropic-pricing": {
+        "provider": "anthropic",
+        "kind": "prices",
+        "parser": "anthropic",
+        "url": "https://platform.claude.com/docs/en/about-claude/pricing.md",
+        "final_url": "https://platform.claude.com/docs/en/about-claude/pricing.md",
+        "known": {
+          "priced": {
+            "base input tokens": "in",
+            "5m cache writes": "write",
+            "cache hits and refreshes": "cached",
+            "output tokens": "out"
+          },
+          "ignored": ["1h cache writes"]
+        },
+        "known_other_models": [
+          "claude fable 5.1",
+          "claude fable 5",
+          "claude opus 5",
+          "claude opus 4.8",
+          "claude opus 4.7",
+          "claude opus 4.6",
+          "claude opus 4.5",
+          "claude opus 4.1",
+          "claude opus 4",
+          "claude sonnet 5",
+          "claude sonnet 4.6",
+          "claude sonnet 4.5",
+          "claude sonnet 4",
+          "claude haiku 4.5"
+        ]
+      },
+      "openai-pricing": {
+        "provider": "openai",
+        "kind": "prices",
+        "parser": "openai",
+        "url": "https://developers.openai.com/api/docs/pricing.md",
+        "final_url": "https://developers.openai.com/api/docs/pricing.md",
+        "known": {
+          "priced": {
+            "short context input": "in",
+            "short context output": "out",
+            "short context cached input": "cached",
+            "short context 30m write": "write",
+            "long context input": "long_in",
+            "long context output": "long_out",
+            "long context cached input": "long_cached",
+            "long context 30m write": "long_write",
+            "input": "in",
+            "output": "out",
+            "cached input": "cached"
+          },
+          "ignored": ["short context 12h write", "long context 12h write"]
+        },
+        "known_other_models": ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"]
+      },
+      "gemini-pricing": {
+        "provider": "gemini",
+        "kind": "prices",
+        "parser": "gemini",
+        "url": "https://aistudio.google.com/docs/pricing.md",
+        "final_url": "https://aistudio.google.com/docs/pricing.md",
+        "known": {
+          "priced": {},
+          "ignored": [
+            "free tier",
+            "paid tier, per 1m tokens in usd",
+            "grounding with google search",
+            "grounding with google maps",
+            "grounding with google web and image search",
+            "used to improve our products"
+          ],
+          "rows": {
+            "input price": "in",
+            "output price (including thinking tokens)": "out",
+            "context caching price": "cached"
+          }
+        },
+        "known_other_models": ["gemini-3.6-flash"],
+        "cache_storage_per_hour": {
+          "gemini-3.8-flash": 0.5,
+          "gemini-3.5-flash-lite": 1,
+          "gemini-3.1-flash-lite": 1,
+          "gemini-3.1-pro-preview": 4.5
+        }
+      },
+      "openrouter-models": {
+        "kind": "crosscheck",
+        "url": "https://openrouter.ai/api/v1/models",
+        "final_url": "https://openrouter.ai/api/v1/models",
+        "vendor_prefix": {
+          "openai": "openai",
+          "anthropic": "anthropic",
+          "gemini": "google"
+        }
+      },
+      "anthropic-retention": {
+        "provider": "anthropic",
+        "kind": "terms",
+        "url": "https://platform.claude.com/docs/en/manage-claude/api-and-data-retention.md",
+        "final_url": "https://platform.claude.com/docs/en/manage-claude/api-and-data-retention.md",
+        "phrases": [
+          {
+            "id": "covered-models-30-day",
+            "text": "the exception is Covered Models, which require 30-day retention"
+          },
+          {
+            "id": "retention-400-body",
+            "text": "your organization or workspace must have data retention enabled"
+          },
+          {
+            "id": "never-trained-on",
+            "text": "Retained data is never used for model training without your express permission"
+          }
+        ],
+        "covered_models": {
+          "id": "covered-models-sentence",
+          "marker": "are designated Covered Models"
+        }
+      },
+      "openai-data": {
+        "provider": "openai",
+        "kind": "terms",
+        "url": "https://developers.openai.com/api/docs/guides/your-data.md",
+        "final_url": "https://developers.openai.com/api/docs/guides/your-data.md",
+        "phrases": [
+          {
+            "id": "abuse-logs-30-days",
+            "text": "abuse monitoring logs are generated for all API feature usage and retained for up to 30 days"
+          },
+          {
+            "id": "not-used-to-train",
+            "text": "data sent to the OpenAI API is not used to train or improve OpenAI models"
+          }
+        ]
+      },
+      "gemini-terms": {
+        "provider": "gemini",
+        "kind": "terms",
+        "url": "https://aistudio.google.com/docs/terms",
+        "final_url": "https://aistudio.google.com/docs/terms",
+        "stamp": "march 23, 2026",
+        "phrases": [
+          {
+            "id": "paid-services-only-eea-uk-ch",
+            "text": "You may use only Paid Services when making API Clients available to users in the European Economic Area, Switzerland, or the United Kingdom"
+          },
+          {
+            "id": "paid-terms-apply-to-unpaid-quota",
+            "text": "apply to all Services, including Google AI Studio and unpaid quota"
+          }
+        ]
+      }
+    }
   }
 }

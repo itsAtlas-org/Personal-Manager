@@ -1,0 +1,49 @@
+<noscript><pre>&gt; ## AI Agent Context
+&gt; - Full documentation index: https://aistudio.google.com/llms.txt
+&gt; - Gemini Docs MCP server (consistent live info): https://gemini-api-docs-mcp.dev
+&gt; - Coding agent skills &amp; setup guide: https://aistudio.google.com/docs/coding-agents.md
+
+# Gemini API Additional Terms of Service
+
+Effective March 23, 2026
+
+To use [Gemini API](https://ai.google.dev/api),
+[Google AI Studio](https://aistudio.google.com), and the other Google developer
+services that reference these terms (collectively, the &quot;**APIs**&quot; or
+&quot;**Services**&quot;), you must accept (1) the
+[Google APIs Terms of Service](https://developers.google.com/terms)
+(the &quot;**API Terms**&quot;), and (2) these Gemini API Additional Terms of Service (the
+&quot;**Additional Terms**&quot;). Terms that are not defined in these Additional Terms
+have the meanings given in the API Terms.
+
+## Age Requirements  {% id=&quot;age-requirements&quot; %}
+
+You must be 18 years of age or older to use the APIs. You also will not use the
+Services as part of a website, application, or other service (collectively,
+
+[...]
+
+You may only access the Services (or make API Clients available to users) within
+an [available region](/docs/available-regions). **You may use
+only Paid Services when making API Clients available to users in the European
+Economic Area, Switzerland, or the United Kingdom.**
+
+You may not use the Services to develop models that compete with the Services
+(e.g., Gemini API or Google AI Studio). You also may not attempt to reverse
+engineer, extract or replicate any component of the Services, including the
+underlying data or models (e.g., parameter weights).
+
+[...]
+
+If you&#39;re in the European Economic Area, Switzerland, or the United Kingdom, the
+terms under &quot;[How Google uses Your Data](/docs/terms#data-use-paid)&quot; in
+&quot;[Paid Services](/docs/terms#paid-services)&quot; apply to all Services, including Google AI
+Studio and unpaid quota in the Gemini API, even though they are offered free of
+charge.
+
+## Paid Services  {% id=&quot;paid-services&quot; %}
+
+When a Service is being offered for a fee, it is considered to be a paid Service
+(the &quot;**Paid Services**&quot;). Your access to Google AI Stu
+[...]
+</pre></noscript>

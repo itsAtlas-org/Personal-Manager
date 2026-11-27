@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The shared issue reporter of the provider checks: `node report.mjs canary` (after the keyed jobs) or
-// `node report.mjs selftest`. It holds no secret and posts with the job's own read/issue token through
-// the preinstalled `gh`. One issue per (provider, check kind), found by labels through the REST list
-// (strongly consistent; `gh issue list --search` can lag and cause duplicates) and confirmed by a
-// hidden body marker.
+// The shared issue reporter of the provider checks: `node report.mjs canary` (after the keyed jobs),
+// `node report.mjs drift` (after the keyless drift job) or `node report.mjs selftest`. It holds no
+// secret and posts with the job's own read/issue token through the preinstalled `gh`. One issue per
+// (provider, check kind), found by labels through the REST list (strongly consistent; `gh issue list
+// --search` can lag and cause duplicates) and confirmed by a hidden body marker.
 //
 //   - status `ok`, no findings, the job's own result `success`, an open issue  -> comment, close.
 //   - findings, no open issue                                                   -> create it.
@@ -37,6 +37,7 @@ import {
   PROVIDERS,
   finding,
 } from "./lib/findings.mjs";
+import { loadSources } from "./lib/data.mjs";
 import { log, summary } from "./lib/log.mjs";
 import { looksSecret } from "./lib/redact.mjs";
 import { isEntry } from "./lib/leg.mjs";
@@ -58,7 +59,7 @@ export function ddmmyyyy(date) {
 const markerOf = (provider, kind) => `<!-- pm-provider-check:${provider}:${kind} -->`;
 
 /** The issue body: fixed text, the fingerprint and marker, and the template sentence of each finding. */
-export function issueBody({ provider, kind, findings, date }) {
+export function issueBody({ provider, kind, findings, date, urls = {} }) {
   const lines = [
     markerOf(provider, kind),
     `<!-- fp:${fingerprint(findings)} -->`,
@@ -69,11 +70,21 @@ export function issueBody({ provider, kind, findings, date }) {
   for (const f of findings) {
     const d = describe(f);
     lines.push(`- **${f.id}** (${d.severity}): ${d.detail}`);
+    // The drift check names the page a finding came from; the address is the one PM's own
+    // sources.json holds (never text from a reply), so a reader can open it.
+    const url =
+      f.fields?.source && Object.hasOwn(urls, f.fields.source) ? urls[f.fields.source] : undefined;
+    if (url) lines.push(`  - Page: ${url}`);
     lines.push(`  - Next step: ${d.action}`);
   }
+  // The self-test belongs to both workflows and has no file of its own.
+  const opener =
+    kind === "selftest"
+      ? "the provider-check workflows' self-test"
+      : `\`.github/workflows/provider-${kind}.yml\``;
   lines.push(
     "",
-    "This issue is opened and closed by `.github/workflows/provider-canary.yml`. It closes itself when a later run finds nothing, and a run that cannot finish never closes it. Nothing here is a key, an account detail or a vendor reply.",
+    `This issue is opened and closed by ${opener}. It closes itself when a later run finds nothing, and a run that cannot finish never closes it. Nothing here is a key, an account detail or a vendor reply.`,
   );
   return lines.join("\n");
 }
@@ -139,9 +150,10 @@ function ensureLabels({ gh, repo, provider, kind }) {
   }
 }
 
-// The fingerprint deliberately ignores counts and values, so a moving number never makes an issue flap.
+// The fingerprint ignores counts and codes but not the vendor's listed price (lib/findings.mjs): a price
+// that moves again is news, and an issue closed as "not planned" for the old number must not hide it.
 /** Bring one (provider, kind) issue in line with `findings` (an `ok` leg with a successful job). */
-export function sync({ gh, repo, provider, kind, findings, date }) {
+export function sync({ gh, repo, provider, kind, findings, date, urls }) {
   const open = findOpen({ gh, repo, provider, kind });
   if (findings.length === 0) {
     if (!open) return "clear (no issue open)";
@@ -151,11 +163,11 @@ export function sync({ gh, repo, provider, kind, findings, date }) {
     gh(["issue", "close", String(open.number), "--repo", repo, "--reason", "completed"]);
     return "clear (issue closed)";
   }
-  const body = issueBody({ provider, kind, findings, date });
+  const body = issueBody({ provider, kind, findings, date, urls });
   assertPublic(body);
   if (!open) {
     // Closed as "not planned" with these same findings means Bobby chose to live with them: without this
-    // the same issue would come back every Wednesday and he could not make it stop.
+    // the same issue would come back every week and he could not make it stop.
     const closed = findLatestClosed({ gh, repo, provider, kind });
     if (
       closed?.state_reason === "not_planned" &&
@@ -233,6 +245,66 @@ export function reportCanary({ env, gh, now = new Date(), write = summary }) {
   return Object.assign(lines, { allSkipped });
 }
 
+/**
+ * The drift report: one job output covers every provider, so it is filed one provider at a time.
+ * Same rules as the canary: only a result that validates, with status `ok` and a successful job, can
+ * open, change or close an issue; a provider the run could not fully check (`unchecked`) is left alone.
+ * Notices go to the summary only. `urls` is source key -> address, from sources.json.
+ */
+export function reportDrift({ env, gh, urls = {}, now = new Date(), write = summary }) {
+  const repo = env.GITHUB_REPOSITORY;
+  if (!repo) throw new Error("report: GITHUB_REPOSITORY is not set");
+  const date = ddmmyyyy(now);
+  const job = env.JOB_DRIFT ?? "";
+  const lines = [`## Provider drift check, ${date}`];
+  const parsed = parseResult(env.RESULT_DRIFT, null);
+  if (!parsed.ok) {
+    // A run that cannot say what it found must not look green: the job goes red and GitHub emails.
+    lines.push(
+      `No usable result (${parsed.reason}); job ${job || "unknown"}. No issue was touched.`,
+      "",
+      "NOTHING WAS REPORTED: the drift result could not be read. Open the drift job's log.",
+    );
+    write(lines, env);
+    return Object.assign(lines, { failed: true });
+  }
+  const r = parsed.value;
+  lines.push(`Status: ${r.status}${r.note ? ` (${r.note})` : ""}; job ${job || "unknown"}.`);
+  const finished = job === "success" && r.status === "ok";
+  for (const provider of PROVIDERS) {
+    lines.push("", `### ${PROVIDER_NAMES[provider]}`);
+    const own = r.findings.filter((f) => f.provider === provider);
+    for (const f of own) lines.push(`- FINDING ${f.id}: ${describe(f).detail}`);
+    for (const n of r.notices.filter((x) => x.provider === provider)) {
+      const who = [n.model, n.date].filter(Boolean).join(" ");
+      lines.push(`- notice ${n.id}${who ? ` (${who})` : ""}: ${NOTICES[n.id]}`);
+    }
+    if (!finished) {
+      lines.push('No issue was touched: a run that did not finish ok is never "clear".');
+      continue;
+    }
+    // A provider with one page unreachable (its terms page, say) is not fully known, so it is never
+    // CLEARED: but a real finding from the pages that did answer (a price that moved) still opens or
+    // updates its issue, or a blocked sibling page would hide the change that costs money.
+    if (r.unchecked.includes(provider) && own.length === 0) {
+      lines.push("Not fully checked this week, so its issue was left alone.");
+      continue;
+    }
+    lines.push(`Issue: ${sync({ gh, repo, provider, kind: "drift", findings: own, date, urls })}.`);
+    log({ provider: "report", step: `sync_${provider}`, ok: true });
+  }
+  // Every provider unchecked (the runner is blocked everywhere, say): nothing was read, and a green run
+  // would look healthy for months. As the canary does, say so and fail.
+  const nothingChecked = r.status === "inconclusive" && r.unchecked.length === PROVIDERS.length;
+  if (nothingChecked)
+    lines.push(
+      "",
+      "NOTHING WAS CHECKED: every provider's pages were unreachable this week. Open the drift job's log.",
+    );
+  write(lines, env);
+  return Object.assign(lines, { failed: nothingChecked });
+}
+
 /** The self-test: file a synthetic issue, prove the REST lookup finds it, close it. No keys. */
 export function reportSelftest({ env, gh, now = new Date(), write = summary }) {
   const repo = env.GITHUB_REPOSITORY;
@@ -260,9 +332,13 @@ if (isEntry(import.meta.url)) {
   if (mode === "canary") {
     const lines = reportCanary({ env: process.env, gh: realGh });
     if (lines.allSkipped) process.exitCode = 1;
+  } else if (mode === "drift") {
+    const pages = loadSources().drift.pages;
+    const urls = Object.fromEntries(Object.entries(pages).map(([k, p]) => [k, p.url]));
+    if (reportDrift({ env: process.env, gh: realGh, urls }).failed) process.exitCode = 1;
   } else if (mode === "selftest") reportSelftest({ env: process.env, gh: realGh });
   else {
-    log({ provider: "report", msg: "usage: report.mjs canary|selftest" });
+    log({ provider: "report", msg: "usage: report.mjs canary|drift|selftest" });
     process.exitCode = 2;
   }
 }

@@ -89,6 +89,11 @@ export async function send(
     retries = 3,
     backoff = DEFAULT_BACKOFF,
     expect = [],
+    // The keyless drift check reads PUBLIC pages: it follows redirects (Google moved its docs once) and
+    // never carries a credential, so "money" and "key refused" mean nothing to it. Pricing pages say
+    // "usage limits" and "spend" in their prose, and a bot-wall 403 is a busy CDN, not a bad key.
+    redirect = "error",
+    keyless = false,
   },
   deps = {},
 ) {
@@ -106,7 +111,7 @@ export async function send(
         headers,
         body:
           body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
-        redirect: "error",
+        redirect,
         signal: AbortSignal.timeout(timeoutMs),
       });
       text = (await res.text()).slice(0, MAX_TEXT);
@@ -119,10 +124,10 @@ export async function send(
     const status = res.status;
     // Money first, even for a status the caller expects: a 400 or 429 that says the key is out of credit
     // is a setup problem, never an answer to judge.
-    if (isBilling(status, text)) throw new NeedsCredit();
+    if (!keyless && isBilling(status, text)) throw new NeedsCredit();
     if (expect.includes(status)) return finish(res, status, text);
-    if (status === 401 || status === 403) throw new KeyRejected(status);
-    if (status >= 500 || status === 429) {
+    if (!keyless && (status === 401 || status === 403)) throw new KeyRejected(status);
+    if (status >= 500 || status === 429 || (keyless && (status === 401 || status === 403))) {
       last = `HTTP ${status}`;
       if (status !== 429) every429 = false;
       continue;
@@ -130,8 +135,9 @@ export async function send(
     return finish(res, status, text);
   }
   // A key used about ten times a week is never legitimately rate limited on every try: that is a
-  // quota or cap the key has hit (an error to fix), not a busy vendor.
-  if (every429) throw new RateLimited();
+  // quota or cap the key has hit (an error to fix), not a busy vendor. A keyless page fetch has no
+  // such quota: a page that stays busy is just inconclusive.
+  if (every429 && !keyless) throw new RateLimited();
   throw new Inconclusive(`no usable answer after ${retries + 1} tries (${last})`);
 }
 
@@ -142,5 +148,7 @@ function finish(res, status, text) {
   } catch {
     // Not JSON (an event stream, an HTML error page): the caller reads `text`.
   }
-  return { status, headers: headersOf(res.headers), text, json };
+  // `url` is where the request ended after any redirects (the drift check records and compares it).
+  const url = typeof res.url === "string" ? res.url : "";
+  return { status, headers: headersOf(res.headers), text, json, url };
 }

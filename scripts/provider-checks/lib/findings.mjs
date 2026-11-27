@@ -150,6 +150,76 @@ export const FINDINGS = {
   },
 };
 
+// The weekly keyless drift check's findings (provider-drift.yml). Prices are numbers per million
+// tokens, public vendor data; `source` is a key of sources.json's `drift.pages` (the URL is added from
+// that file when an issue is written, never taken from a reply); `phrase` is the id of a phrase PM's own
+// copy depends on, not the vendor's text.
+Object.assign(FINDINGS, {
+  "price-drift": {
+    severity: "high",
+    keys: ["model", "field", "listed", "catalogue", "source"],
+    text: (f) =>
+      `${f.model}: the vendor page lists ${f.field} as ${f.listed}; the catalogue says ${f.catalogue} (USD per million tokens, or a multiplier for long_*).`,
+    action:
+      "Check the page, then update the row in src-tauri/direct_models.json (or add a dated price_changes step) and bump checked_on. The script never edits the catalogue: it feeds the spend maths.",
+  },
+  "price-step-differs": {
+    severity: "high",
+    keys: ["model", "field", "date", "listed", "catalogue", "source"],
+    text: (f) =>
+      `${f.model}: from ${f.date} the vendor page lists ${f.field} as ${f.listed}; the catalogue's dated step says ${f.catalogue}.`,
+    action:
+      "Fix or add the price_changes step in src-tauri/direct_models.json so the price changes on the right day.",
+  },
+  "new-price-dimension": {
+    severity: "medium",
+    keys: ["model", "header", "source"],
+    text: (f) =>
+      `${f.model} now has a price PM does not know on the vendor page: ${f.header}. PM may be under-pricing it.`,
+    action:
+      "Find out whether PM's requests can be billed under this price. If so, price it (and its usage field); then add the header to the page's known lists in scripts/provider-checks/sources.json.",
+  },
+  "free-tier-changed": {
+    severity: "high",
+    keys: ["model", "listed", "catalogue", "source"],
+    text: (f) =>
+      `${f.model}: the vendor page shows free_tier as ${f.listed}; the catalogue says ${f.catalogue}.`,
+    action:
+      "PM's free-key refusal and the picker read free_tier. Update src-tauri/direct_models.json.",
+  },
+  "new-model": {
+    severity: "medium",
+    keys: ["model", "in", "cached", "out", "source"],
+    text: (f) =>
+      `The vendor lists a model the catalogue does not have: ${f.model} (input ${f.in}, cached ${f.cached}, output ${f.out}, USD per million tokens).`,
+    action:
+      "Add it to src-tauri/direct_models.json, or add its name to known_other_models for that page in scripts/provider-checks/sources.json if PM should not offer it.",
+  },
+  "source-unparsable": {
+    severity: "high",
+    keys: ["source", "what"],
+    text: (f) => `The page ${f.source} no longer reads the way this check expects: ${f.what}.`,
+    action:
+      "The page was restructured, moved or emptied, so this check cannot judge it. Read it, then fix the parser in scripts/provider-checks/lib/parse-prices.mjs or its URL in sources.json.",
+  },
+  "phrase-vanished": {
+    severity: "high",
+    keys: ["source", "phrase"],
+    text: (f) =>
+      `A sentence PM's wording depends on is no longer on the page ${f.source}: ${f.phrase}.`,
+    action:
+      "Read the page. If the vendor changed its terms, re-check the copy that rests on the sentence (the phrase text is in scripts/provider-checks/sources.json), then update the phrase.",
+  },
+  "covered-model-listed": {
+    severity: "high",
+    keys: ["model", "source"],
+    text: (f) =>
+      `Anthropic's Covered Models sentence now names ${f.model}, which PM does not treat as a 30-day-retention model.`,
+    action:
+      "PM's Fable-only retention note and its 400 handling assume only Fable needs retention. Read the page and update the copy and the catalogue notes.",
+  },
+});
+
 /** A notice: the job summary only, never an issue. */
 export const NOTICES = {
   "implicit-cache-not-seen":
@@ -163,6 +233,22 @@ export const NOTICES = {
   "thinking-not-seen":
     "Gemini's thinking request showed no thinking in total_tokens on either try, so that part of the usage identity was not exercised (the model may simply not have thought).",
   "cache-first-write-not-seen": "The first call of a cache pair did not report a write.",
+  // The weekly drift check's notices. None of them opens an issue.
+  "cross-check-only":
+    "OpenRouter's price differs from the catalogue while the vendor's own page agrees with it (OpenRouter is a second opinion, never a reason to edit the catalogue).",
+  "cross-check-no-row": "OpenRouter has no row for this catalogue model (it may simply lag).",
+  "openrouter-expiry-differs":
+    "OpenRouter lists an expiration date for this model that the catalogue's retires_on does not carry (cross-check only; read the vendor's deprecation page).",
+  "source-url-changed":
+    "A page this check reads ended at a different address than last time (the vendor may have moved its docs).",
+  "source-unreachable":
+    "A page could not be read this week (busy or blocked after retries), so its provider was not judged and its issue was left alone.",
+  "price-step-due":
+    "A dated price step in the catalogue falls within 14 days: confirm it on the vendor page.",
+  "terms-stamp-changed":
+    "A terms page's 'Effective' date changed: read what changed and re-check the copy that rests on it.",
+  "cache-storage-changed":
+    "The cache storage price per hour changed on a vendor page (PM does not price storage).",
 };
 
 // A field is a WORD: letters, digits and a few joiners, with `?` standing for anything else. Vendor
@@ -181,11 +267,29 @@ export function finding(id, provider, fields = {}) {
   return f;
 }
 
-/** A notice: `notice("fallback-key-used", "anthropic")`. */
-export function notice(id, provider) {
-  if (!(id in NOTICES) || !PROVIDERS.includes(provider))
-    throw new Error("notice: unknown id or provider");
-  return { id, provider };
+/** The optional fields a notice may carry: which model, and which date. Plain words, like a finding's. */
+const NOTICE_KEYS = ["model", "date"];
+
+/** Why a notice is not acceptable, or null. */
+function checkNotice(n) {
+  if (!n || typeof n !== "object" || Array.isArray(n)) return "not an object";
+  if (!Object.hasOwn(NOTICES, n.id) || !PROVIDERS.includes(n.provider))
+    return "unknown id or provider";
+  for (const key of Object.keys(n)) {
+    if (key === "id" || key === "provider") continue;
+    if (!NOTICE_KEYS.includes(key)) return `field not allowed on a notice: ${key}`;
+    if (typeof n[key] !== "string" || !WORD.test(n[key]) || looksSecret(n[key]))
+      return `notice field ${key} is not a plain word`;
+  }
+  return null;
+}
+
+/** A notice: `notice("fallback-key-used", "anthropic")`, or with a model or date: `notice("price-step-due", "gemini", { model, date })`. */
+export function notice(id, provider, extra = {}) {
+  const n = { id, provider, ...extra };
+  const problem = checkNotice(n);
+  if (problem) throw new Error(`notice: ${problem}`);
+  return n;
 }
 
 /** Why a finding is not acceptable, or null. */
@@ -218,9 +322,16 @@ export function describe(f) {
 }
 
 /** `ok`, or a result with only the pieces that pass; used to build a leg's own result. */
-export function makeResult(status, { findings = [], notices = [], note = "" } = {}) {
+export function makeResult(
+  status,
+  { findings = [], notices = [], note = "", unchecked = [] } = {},
+) {
   if (!STATUSES.includes(status)) throw new Error("makeResult: unknown status");
-  return { status, findings, notices, note };
+  // `unchecked` (providers a drift run could not judge) is present only when there are some, so a
+  // canary leg's result keeps its shape.
+  return unchecked.length > 0
+    ? { status, findings, notices, note, unchecked }
+    : { status, findings, notices, note };
 }
 
 /**
@@ -228,6 +339,9 @@ export function makeResult(status, { findings = [], notices = [], note = "" } = 
  * non-conforming string is `{ ok: false }` and the report treats the leg as errored (touching no issue).
  */
 export function parseResult(text, provider) {
+  // `provider` null: a result that speaks for every provider (the drift check's one job). Each
+  // finding and notice still names a known provider; the report files them one provider at a time.
+  const forProvider = (p) => (provider === null ? PROVIDERS.includes(p) : p === provider);
   if (typeof text !== "string" || text.length === 0) return { ok: false, reason: "no result" };
   if (Buffer.byteLength(text) > MAX_RESULT_BYTES) return { ok: false, reason: "result too large" };
   let v;
@@ -238,7 +352,7 @@ export function parseResult(text, provider) {
   }
   if (!v || typeof v !== "object" || Array.isArray(v))
     return { ok: false, reason: "result is not an object" };
-  const allowed = new Set(["status", "findings", "notices", "note"]);
+  const allowed = new Set(["status", "findings", "notices", "note", "unchecked"]);
   for (const k of Object.keys(v))
     if (!allowed.has(k)) return { ok: false, reason: `unexpected key ${k}` };
   if (!STATUSES.includes(v.status)) return { ok: false, reason: "unknown status" };
@@ -253,12 +367,18 @@ export function parseResult(text, provider) {
   for (const f of findings) {
     const problem = checkFinding(f);
     if (problem) return { ok: false, reason: problem };
-    if (f.provider !== provider) return { ok: false, reason: "finding for another provider" };
+    if (!forProvider(f.provider)) return { ok: false, reason: "finding for another provider" };
   }
   for (const n of notices) {
-    if (!n || !Object.hasOwn(NOTICES, n.id) || n.provider !== provider)
-      return { ok: false, reason: "bad notice" };
+    if (checkNotice(n) || !forProvider(n.provider)) return { ok: false, reason: "bad notice" };
   }
+  const unchecked = v.unchecked ?? [];
+  if (
+    !Array.isArray(unchecked) ||
+    unchecked.length > PROVIDERS.length ||
+    unchecked.some((p) => !PROVIDERS.includes(p))
+  )
+    return { ok: false, reason: "bad unchecked list" };
   const note = v.note ?? "";
   if (typeof note !== "string" || !SAFE_TEXT.test(note) || looksSecret(note)) {
     return { ok: false, reason: "note is not whitelisted text" };
@@ -268,14 +388,33 @@ export function parseResult(text, provider) {
     value: {
       status: v.status,
       findings,
-      notices: notices.map((n) => ({ id: n.id, provider: n.provider })),
+      notices: notices.map((n) => ({ ...n })),
       note,
+      unchecked: [...new Set(unchecked)],
     },
   };
 }
 
-/** The fields that say WHICH problem a finding is; counts and codes (value, http) are left out so a changing number never flaps an issue. */
-const IDENTITY_KEYS = ["model", "field", "step", "what"];
+/**
+ * The fields that say WHICH problem a finding is, and WHAT the vendor says: `listed` (and a new model's
+ * prices) are in, so a vendor that moves a price again re-edits the open issue, and re-opens one Bobby closed
+ * as "not planned" for the old number (the "racks up costs" case: acknowledging 0.30 is not acknowledging
+ * 0.60). Counts and codes (value, http) stay out, so a changing count never flaps an issue.
+ */
+const IDENTITY_KEYS = [
+  "model",
+  "field",
+  "step",
+  "what",
+  "header",
+  "phrase",
+  "source",
+  "date",
+  "listed",
+  "in",
+  "cached",
+  "out",
+];
 
 /**
  * Eight hex characters over the sorted findings, each as its id plus its identifying fields: the same

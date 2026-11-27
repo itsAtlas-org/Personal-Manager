@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: 2026 Bobby Yu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Provider drift check: once a week, read the PUBLIC pages where OpenAI, Google (Gemini) and Anthropic
+# publish their prices, and the terms and data-retention pages PM's wording rests on, and compare them
+# with src-tauri/direct_models.json. It opens ONE issue per provider if something is off: a price that
+# differs from the catalogue (or a dated price step on the wrong day), a price column PM does not know on
+# a model PM lists (a cost PM may not be counting), a new model the catalogue lacks, a page that was
+# restructured so the check can no longer read it, a free-tier change, or a terms sentence that is gone.
+# OpenRouter's public model list is read as a second opinion only (a difference there is a note in the
+# job summary, never an issue). It never edits the catalogue: that file feeds the spend maths, so a person
+# and a PR change it. Batch prices are not compared: PM never calls a batch API, so a batch change cannot
+# raise PM's costs.
+#
+# It is plain Node (no dependencies, no LLM, no key, no account, nothing that needs a Claude plan) in
+# scripts/provider-checks/drift.mjs, and it costs nothing: seven GETs a week with the generic
+# User-Agent `pm-provider-check`. The pages it reads are listed in scripts/provider-checks/sources.json.
+# A page it cannot fetch leaves that provider's issue alone; it is never taken for "clear".
+#
+# SECURITY: schedule and manual dispatch only, never `pull_request` or `pull_request_target`. This workflow
+# has NO secrets, NO environment and NO `id-token`: the job that reads the web has `contents: read` and
+# nothing else, and the job that posts has `issues: write` and reads nothing from the web. The first hands
+# the second one sanitised result (a status and a whitelist of finding ids with fixed sentences, plus
+# prices and short plain-word names read from the page), no page text and no raw header lines; nothing is
+# uploaded as an artifact (artifacts are public in a public repository) and nothing is cached. Workflow
+# logs, job summaries and issues in this repo are public. Actions are SHA-pinned, with the version
+# Dependabot reads in the trailing comment. Scheduled workflows in a public repository are disabled after
+# 60 days without repository activity; PM merges daily.
+name: Provider drift check
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC (sealed-frame.yml owns Mondays 04:23; the canary runs Wednesdays)
+  workflow_dispatch:
+    inputs:
+      selftest:
+        description: "Only file and close a synthetic issue (no page is read) to prove the plumbing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Shared with the weekly canary, so two provider workflows never race to create one issue. A run that
+# arrives while another is pending replaces the pending one: harmless, the next week runs again.
+concurrency:
+  group: provider-checks
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Read the vendors' pages
+    if: ${{ !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.drift.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Compare the pages with the catalogue
+        id: drift
+        run: node scripts/provider-checks/drift.mjs
+
+  # The one job that posts. No secrets, no environment, no id-token. A run that could not finish, crashed
+  # or left no result never counts as "clear" (report.mjs), so it touches no issue.
+  report:
+    name: Report
+    needs: [drift]
+    if: ${{ always() && !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # opens, updates and closes the provider-check issues; this job holds no secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: File, update or close the issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_DRIFT: ${{ needs.drift.outputs.result }}
+          JOB_DRIFT: ${{ needs.drift.result }}
+        run: node scripts/provider-checks/report.mjs drift
+
+  # Manual dispatch with `selftest`: files a synthetic issue and closes it, which proves the label,
+  # permission and de-duplication plumbing with no page read.
+  selftest:
+    name: Self-test
+    if: ${{ inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # files and closes one synthetic issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: File and close a synthetic issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/provider-checks/report.mjs selftest
