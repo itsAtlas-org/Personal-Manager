@@ -1791,6 +1791,94 @@ fn a_one_hour_cache_write_makes_the_cost_unknown_never_under_priced() {
     assert_eq!(settle(c, row(SONNET)).usage.cost, None);
 }
 
+// ---- typed failures: the class and the billing, through the real request path --------------------
+
+/// The status table: only the documented unbilled statuses are `Rejected` (an error RESPONSE before
+/// the stream began). The server answers twice so a status that earns the adapter's one retry still
+/// ends in the failure; the retry does not change the billing rule.
+#[tokio::test]
+async fn a_failed_status_is_rejected_only_for_the_documented_unbilled_ones() {
+    use crate::error::Billing::{MaybeBilled, Rejected};
+    for (status, want) in [
+        (400u16, Rejected),
+        (401, Rejected),
+        (402, Rejected),
+        (403, Rejected),
+        (404, Rejected),
+        (413, Rejected),
+        (422, Rejected),
+        (429, Rejected),
+        (503, Rejected),
+        (529, Rejected),
+        (408, MaybeBilled),
+        (500, MaybeBilled),
+        (502, MaybeBilled),
+        (504, MaybeBilled),
+        (524, MaybeBilled),
+    ] {
+        let reply = || Reply::Http(status, body("api_error", "x"));
+        let (base, _) = serve(vec![reply(), reply()]);
+        let p = prepared(SONNET, Role::Chat, None, &user_list());
+        let mut tokens = Vec::new();
+        let (c, _) = run_at(&format!("{base}/v1/messages"), &p, &mut tokens).await;
+        let e = c.err().expect("an error");
+        let f = e.provider_failure().expect("typed");
+        assert_eq!(f.billing, want, "{status}");
+        assert_eq!(f.provider, CloudProvider::Anthropic);
+    }
+}
+
+/// Anthropic can send an `overloaded_error` as an event AFTER a 200: PM cannot prove that unbilled,
+/// so it is class Busy and `MaybeBilled` (not `Rejected`), and nothing is tried after it.
+#[tokio::test]
+async fn an_overloaded_event_after_the_200_is_busy_and_may_have_billed() {
+    let stream = start("claude-sonnet-5-5", json!({"input_tokens":5}))
+        + &ev(json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}));
+    let (base, _) = serve(vec![Reply::Sse(chunks(&stream, 128))]);
+    let p = prepared(SONNET, Role::Chat, None, &user_list());
+    let mut tokens = Vec::new();
+    let (c, _) = run_at(&format!("{base}/v1/messages"), &p, &mut tokens).await;
+    let e = c.err().expect("an error");
+    let f = e.provider_failure().expect("typed");
+    assert_eq!(f.class, FailureClass::Busy);
+    assert_eq!(f.billing, crate::error::Billing::MaybeBilled);
+}
+
+/// Every Anthropic failure is told as its class, and the sentence is the table's own.
+#[test]
+fn every_failure_maps_to_its_class_and_keeps_its_sentence() {
+    use FailureClass as C;
+    let cases = [
+        (Failure::KeyRejected, C::KeyBad),
+        (Failure::OnHold, C::KeyBad),
+        (Failure::NotAllowed, C::KeyBad),
+        (Failure::OutOfCredit, C::NoCredit),
+        (Failure::SpendCap, C::NoCredit),
+        (Failure::OwnSpendLimit, C::NoCredit),
+        (Failure::RampLimit, C::RateLimited),
+        (Failure::RateLimited, C::RateLimited),
+        (Failure::NeedsRetention, C::NeedsRetention),
+        (Failure::OutputLimitStale, C::SetupStale),
+        (Failure::EffortRejected, C::SetupStale),
+        (Failure::SetupStale, C::SetupStale),
+        (Failure::ContextTooLong, C::ContextTooLong),
+        (Failure::TooLarge, C::ContextTooLong),
+        (Failure::ModelUnavailable, C::ModelGone),
+        (Failure::Overloaded, C::Busy),
+        (Failure::Other, C::Other),
+    ];
+    for (failure, class) in cases {
+        assert_eq!(class_of(&failure), class, "{failure:?}");
+        let f = ErrorFields::default();
+        let e = failure_error(&failure, Some(400), &f, row(SONNET), None);
+        assert_eq!(e.provider_failure().unwrap().class, class);
+        assert_eq!(
+            e.to_string(),
+            failure_text(&failure, Some(400), &f, row(SONNET), None)
+        );
+    }
+}
+
 /// A mid-stream error event arrives after the 200, so the request is billed and PM never retries it.
 #[tokio::test]
 async fn an_error_event_in_the_stream_is_never_retried() {

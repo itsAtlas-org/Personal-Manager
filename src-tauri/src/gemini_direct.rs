@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use crate::cloud_openai::{self, redact_detail, Flavour};
 use crate::direct_models::{self, DirectModel};
 use crate::direct_providers::{self, KeyCheck, KeyOutcome, KeyTier};
-use crate::error::{Error, Result};
+use crate::error::{Error, FailureClass, Result};
 use crate::llm_gateway::{CloudArm, CloudProvider};
 use crate::openrouter::{ChatMessage, Completion, Usage};
 use crate::region::{self, Basis, Region};
@@ -130,7 +130,12 @@ fn wire_effort<'a>(model: &DirectModel, arm: &'a CloudArm) -> Option<&'a str> {
 /// running plan that already holds a Gemini arm is not stopped by a refusal that lived only at resolve.
 fn seam(tier: Option<KeyTier>, region: &Region) -> Result<()> {
     match direct_providers::refuses(CloudProvider::Gemini, tier, region) {
-        Some(r) => Err(Error::Other(r.sentence(CloudProvider::Gemini))),
+        // PM's own refusal before a byte is sent: paused where the person is.
+        Some(r) => Err(Error::refused_before_send(
+            CloudProvider::Gemini,
+            FailureClass::Paused,
+            r.sentence(CloudProvider::Gemini),
+        )),
         None => Ok(()),
     }
 }
@@ -146,10 +151,12 @@ fn effective_tier(arm: &CloudArm) -> Option<KeyTier> {
 /// `None` when Google may be asked.
 fn spent_allowance(model: &DirectModel) -> Option<Error> {
     let wait = direct_providers::not_before(CloudProvider::Gemini, &model.wire)?;
-    Some(Error::Other(free_allowance_text(
-        Some(wait.as_secs().max(1)),
-        false,
-    )))
+    // PM's own refusal before a byte is sent: it already knows the allowance is spent until then.
+    Some(Error::refused_before_send(
+        CloudProvider::Gemini,
+        FailureClass::RateLimited,
+        free_allowance_text(Some(wait.as_secs().max(1)), false),
+    ))
 }
 
 /// A one-shot completion. Runs the stream and discards the deltas: a thinking model can sit silent for
@@ -729,7 +736,40 @@ fn error_of(e: &GErr, region: &Region) -> Error {
     if let Failure::FreeTier { zero, wait } = &f {
         mark_free(if *zero { None } else { *wait });
     }
-    Error::Other(failure_text(&f, region))
+    Error::provider(
+        CloudProvider::Gemini,
+        class_of(&f, region),
+        failure_text(&f, region),
+    )
+}
+
+/// The class a failure is told as. The sentence is `failure_text`'s and does not depend on this. A
+/// free-tier failure INSIDE the region is a pause (the sentence says so); outside it, a model with
+/// no free allowance is "no credit" and a spent allowance is a rate limit.
+pub(crate) fn class_of(f: &Failure, region: &Region) -> FailureClass {
+    match f {
+        Failure::OutOfCredit => FailureClass::NoCredit,
+        Failure::KeyRejected
+        | Failure::Leaked
+        | Failure::NeedsVerification
+        | Failure::NotAllowed => FailureClass::KeyBad,
+        Failure::FreeTier { zero, .. } => {
+            if region.refusal(Basis::Free).is_some() {
+                FailureClass::Paused
+            } else if *zero {
+                FailureClass::NoCredit
+            } else {
+                FailureClass::RateLimited
+            }
+        }
+        Failure::RateLimited { .. } => FailureClass::RateLimited,
+        Failure::Busy | Failure::Trouble => FailureClass::Busy,
+        Failure::NoFreeTierHere => FailureClass::Paused,
+        Failure::ModelUnavailable => FailureClass::ModelGone,
+        Failure::EffortRefused | Failure::LimitOutOfDate => FailureClass::SetupStale,
+        Failure::ContextTooLong => FailureClass::ContextTooLong,
+        Failure::Other { .. } => FailureClass::Other,
+    }
 }
 
 /// How a mid-stream `error` chunk reads: the same table.
@@ -740,8 +780,13 @@ fn stream_error(err: &Value) -> Error {
 /// A stop reason that is a failure: Google's safety filter withheld the reply (the compatible endpoint
 /// maps a safety stop to `content_filter`; UNVERIFIED until a live test provokes one).
 fn stop_error(reason: &str) -> Option<Error> {
-    (reason == "content_filter")
-        .then(|| Error::Other("Google withheld this reply (its safety filter).".into()))
+    (reason == "content_filter").then(|| {
+        Error::provider(
+            CloudProvider::Gemini,
+            FailureClass::Refused,
+            "Google withheld this reply (its safety filter).".into(),
+        )
+    })
 }
 
 // ---- the key check ------------------------------------------------------------------------------------------
@@ -2360,6 +2405,133 @@ mod tests {
         });
         let url: &'static str = Box::leak(format!("http://{addr}").into_boxed_str());
         (url, seen)
+    }
+
+    // ---- typed failures: the class and the billing, through the real request path -----------------------
+
+    /// The status table, through the real request (the compatible endpoint's array-wrapped error
+    /// body): only the documented unbilled statuses are `Rejected`.
+    #[tokio::test]
+    async fn a_failed_status_is_rejected_only_for_the_documented_unbilled_ones() {
+        use crate::error::Billing::{MaybeBilled, Rejected};
+        for (status, want) in [
+            (400u16, Rejected),
+            (401, Rejected),
+            (402, Rejected),
+            (403, Rejected),
+            (404, Rejected),
+            (413, Rejected),
+            (422, Rejected),
+            (429, Rejected),
+            (503, Rejected),
+            (529, Rejected),
+            (408, MaybeBilled),
+            (500, MaybeBilled),
+            (502, MaybeBilled),
+            (504, MaybeBilled),
+            (524, MaybeBilled),
+        ] {
+            let (url, _) = serve_scripted(vec![(status, BUSY_503_COMPAT.replace('\n', ""))]);
+            let flavour = Flavour {
+                endpoint: url,
+                ..flavour_copy()
+            };
+            let body = chat_body(gem("gemini-3.8-flash"), None, &msgs(), true, None, 10);
+            let e = cloud_openai::stream(&flavour, KEY_A, &body, |_| {})
+                .await
+                .err()
+                .expect("an error");
+            let f = e.provider_failure().expect("typed");
+            assert_eq!(f.billing, want, "{status}");
+            assert_eq!(f.provider, CloudProvider::Gemini);
+        }
+    }
+
+    /// A 200 stream whose first or later event is "high demand" is class Busy and may have billed,
+    /// so it never walks: this is the exact trap `classify` has (UNAVAILABLE with no HTTP status).
+    #[tokio::test]
+    async fn a_busy_event_after_the_200_is_busy_and_may_have_billed() {
+        let sse = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            BUSY_503_COMPAT.replace('\n', "")
+        );
+        let (url, _) = serve_scripted(vec![(200, sse)]);
+        let flavour = Flavour {
+            endpoint: url,
+            ..flavour_copy()
+        };
+        let body = chat_body(gem("gemini-3.8-flash"), None, &msgs(), true, None, 10);
+        let e = cloud_openai::stream(&flavour, KEY_A, &body, |_| {})
+            .await
+            .err()
+            .expect("an error");
+        let f = e.provider_failure().expect("typed");
+        assert_eq!(f.class, FailureClass::Busy);
+        assert_eq!(f.billing, crate::error::Billing::MaybeBilled);
+    }
+
+    /// Every Gemini failure is told as its class; a free-tier failure is a pause inside the region
+    /// and "no credit" (limit 0) or a rate limit outside it.
+    #[test]
+    fn every_failure_maps_to_its_class_with_the_region_deciding_the_free_tier() {
+        use FailureClass as C;
+        let nyc = region_of_on(Some("America/New_York"), false);
+        let uk = region_of_on(Some("Europe/London"), false);
+        let any = |f: Failure| class_of(&f, &nyc);
+        assert_eq!(any(Failure::OutOfCredit), C::NoCredit);
+        for f in [
+            Failure::KeyRejected,
+            Failure::Leaked,
+            Failure::NeedsVerification,
+            Failure::NotAllowed,
+        ] {
+            assert_eq!(any(f), C::KeyBad);
+        }
+        assert_eq!(
+            any(Failure::RateLimited {
+                wait: None,
+                daily: false
+            }),
+            C::RateLimited
+        );
+        assert_eq!(any(Failure::Busy), C::Busy);
+        assert_eq!(any(Failure::Trouble), C::Busy);
+        assert_eq!(any(Failure::NoFreeTierHere), C::Paused);
+        assert_eq!(any(Failure::ModelUnavailable), C::ModelGone);
+        assert_eq!(any(Failure::EffortRefused), C::SetupStale);
+        assert_eq!(any(Failure::LimitOutOfDate), C::SetupStale);
+        assert_eq!(any(Failure::ContextTooLong), C::ContextTooLong);
+        assert_eq!(
+            any(Failure::Other {
+                status: None,
+                detail: String::new()
+            }),
+            C::Other
+        );
+        let zero = || Failure::FreeTier {
+            zero: true,
+            wait: None,
+        };
+        assert_eq!(class_of(&zero(), &nyc), C::NoCredit);
+        assert_eq!(class_of(&zero(), &uk), C::Paused);
+        let spent = || Failure::FreeTier {
+            zero: false,
+            wait: Some(60),
+        };
+        assert_eq!(class_of(&spent(), &nyc), C::RateLimited);
+        assert_eq!(class_of(&spent(), &uk), C::Paused);
+    }
+
+    /// The send seam's refusal is PM's own, before anything is sent: class Paused, `NeverLeft`, and
+    /// the sentence is the one it has always been.
+    #[test]
+    fn the_region_seam_refuses_as_paused_and_never_left() {
+        let uk = region_of_on(Some("Europe/London"), false);
+        let e = seam(Some(KeyTier::Free), &uk).unwrap_err();
+        let f = e.provider_failure().expect("typed");
+        assert_eq!(f.class, FailureClass::Paused);
+        assert_eq!(f.billing, crate::error::Billing::NeverLeft);
+        assert!(e.to_string().starts_with("Gemini is paused"), "{e}");
     }
 
     // ---- the key check end to end, against a scripted server -----------------------------------------------

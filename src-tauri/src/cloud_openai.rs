@@ -341,7 +341,9 @@ where
         let status = response.status();
         // The raw body, bounded: each flavour shortens it for display (see `Flavour::request_error`).
         let detail = bounded_error_body(&response.text().await.unwrap_or_default());
-        return Err((flavour.request_error)(status, &detail));
+        // The one place that sees a failed STATUS before any body byte streamed, so the one place
+        // that may call the failure unbilled (and only for a status the vendors document as such).
+        return Err((flavour.request_error)(status, &detail).with_response_status(status.as_u16()));
     }
 
     // Untrusted model output (rule #6): bound both the assembled reply and any
@@ -465,7 +467,8 @@ pub(crate) async fn complete(
     if !response.status().is_success() {
         let status = response.status();
         let detail = bounded_error_body(&response.text().await.unwrap_or_default());
-        return Err((flavour.request_error)(status, &detail));
+        // As in `stream`: a status with no body consumed, so this is a site that may mark it unbilled.
+        return Err((flavour.request_error)(status, &detail).with_response_status(status.as_u16()));
     }
 
     let value: serde_json::Value = response.json().await?;

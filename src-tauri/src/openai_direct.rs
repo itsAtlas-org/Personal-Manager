@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use crate::cloud_openai::{self, redact_detail, Flavour};
 use crate::direct_models::{self, DirectModel};
 use crate::direct_providers::{KeyCheck, KeyNote, KeyOutcome};
-use crate::error::{Error, Result};
+use crate::error::{Error, FailureClass, Result};
 use crate::llm_gateway::{CloudArm, CloudProvider};
 use crate::openrouter::{ChatMessage, Completion, Usage};
 use crate::usage_keys;
@@ -391,11 +391,31 @@ fn failure_text(f: &Failure) -> String {
 
 /// How a failed response reads. Handed the RAW bounded body (see `Flavour::request_error`), so a
 /// long `message` ahead of the `code` can't cut the code off and mis-split a 429.
-fn request_error(status: reqwest::StatusCode, raw: &str) -> Error {
-    Error::Other(failure_text(&classify(
-        Some(status.as_u16()),
-        &fields_from_body(raw),
-    )))
+pub(crate) fn request_error(status: reqwest::StatusCode, raw: &str) -> Error {
+    typed(&classify(Some(status.as_u16()), &fields_from_body(raw)))
+}
+
+/// The class a failure is told as. The sentence is `failure_text`'s and does not depend on this.
+fn class_of(f: &Failure) -> FailureClass {
+    match f {
+        Failure::KeyRejected | Failure::NotAllowed => FailureClass::KeyBad,
+        // OpenAI's own "not available in your country or region": the provider is closed to this
+        // person, which reads as paused where they are.
+        Failure::RegionBlocked => FailureClass::Paused,
+        Failure::OutOfCredit => FailureClass::NoCredit,
+        Failure::RateLimited { .. } => FailureClass::RateLimited,
+        Failure::ModelUnavailable { .. } => FailureClass::ModelGone,
+        Failure::ContextTooLong { .. } => FailureClass::ContextTooLong,
+        Failure::EffortRefused { .. } | Failure::OutputLimitStale => FailureClass::SetupStale,
+        Failure::Overloaded => FailureClass::Busy,
+        Failure::Other { .. } => FailureClass::Other,
+    }
+}
+
+/// A failure as the typed error: the class, and the sentence `failure_text` has always given. Its
+/// billing is the safe default; only a response status seen before any body byte lowers it.
+fn typed(f: &Failure) -> Error {
+    Error::provider(CloudProvider::OpenAi, class_of(f), failure_text(f))
 }
 
 /// How a mid-stream `error` chunk reads: the same table, with the status the chunk carries as a
@@ -409,13 +429,21 @@ fn stream_error(err: &Value) -> Error {
         _ => None,
     };
     let status = text_of(&err["code"]).parse::<u16>().ok().or(derived);
-    Error::Other(failure_text(&classify(status, &f)))
+    // After the 200: whatever class the table gives it, it may have billed (billing stays at the
+    // default, and no status site ever sees this error).
+    typed(&classify(status, &f))
 }
 
-/// A stop reason that is a failure: the provider's safety filter withheld the reply.
+/// A stop reason that is a failure: the provider's safety filter withheld the reply. Billed, and the
+/// same prompt would be withheld again.
 fn stop_error(reason: &str) -> Option<Error> {
-    (reason == "content_filter")
-        .then(|| Error::Other("OpenAI withheld this reply (its safety filter).".into()))
+    (reason == "content_filter").then(|| {
+        Error::provider(
+            CloudProvider::OpenAi,
+            FailureClass::Refused,
+            "OpenAI withheld this reply (its safety filter).".into(),
+        )
+    })
 }
 
 // ---- the key check ---------------------------------------------------------------------------
@@ -1435,6 +1463,128 @@ mod tests {
         );
         let e = run(events).await.err().expect("an error");
         assert!(e.to_string().contains("out of credit"), "{e}");
+    }
+
+    // ---- typed failures: the class and the billing, through the real request path ----------------
+
+    async fn failure_of(head: String, body: String) -> crate::error::ProviderFailure {
+        let f = flavour_at(serve_raw(head, body));
+        let req = chat_body(sol(), None, &msgs(), true, None, 100);
+        let e = cloud_openai::stream(&f, "test-key-not-real", &req, |_| {})
+            .await
+            .err()
+            .expect("an error");
+        e.provider_failure().expect("a typed failure").clone()
+    }
+
+    fn json_head(status: u16, len: usize) -> String {
+        format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {len}\r\n\r\n"
+        )
+    }
+
+    /// The status table, through the real request: only the documented unbilled statuses are
+    /// `Rejected` (an error RESPONSE before any body streamed); a gateway timeout, a plain 500 and the
+    /// rest stay `MaybeBilled`, because a router can answer after the upstream finished.
+    #[tokio::test]
+    async fn a_failed_status_is_rejected_only_for_the_documented_unbilled_ones() {
+        use crate::error::Billing::{MaybeBilled, Rejected};
+        for (status, want) in [
+            (400u16, Rejected),
+            (401, Rejected),
+            (402, Rejected),
+            (403, Rejected),
+            (404, Rejected),
+            (413, Rejected),
+            (422, Rejected),
+            (429, Rejected),
+            (503, Rejected),
+            (529, Rejected),
+            (408, MaybeBilled),
+            (500, MaybeBilled),
+            (502, MaybeBilled),
+            (504, MaybeBilled),
+            (524, MaybeBilled),
+        ] {
+            let body = err_json("x", "x", "x");
+            let f = failure_of(json_head(status, body.len()), body).await;
+            assert_eq!(f.billing, want, "{status}");
+            assert_eq!(f.provider, CloudProvider::OpenAi);
+        }
+    }
+
+    /// Each documented failure is told as its class, with the sentence unchanged.
+    #[test]
+    fn every_failure_maps_to_its_class_and_keeps_its_sentence() {
+        use FailureClass as C;
+        let cases: Vec<(u16, String, C)> = vec![
+            (401, err_json("invalid_api_key", "x", "bad"), C::KeyBad),
+            (
+                403,
+                err_json(
+                    "unsupported_country_region_territory",
+                    "x",
+                    "Country, region, or territory not supported",
+                ),
+                C::Paused,
+            ),
+            (403, "{}".into(), C::KeyBad),
+            (429, err_json("insufficient_quota", "x", "x"), C::NoCredit),
+            (429, err_json("rate_limit_exceeded", "x", "slow"), C::RateLimited),
+            (404, err_json("model_not_found", "x", "x"), C::ModelGone),
+            (
+                400,
+                err_json("context_length_exceeded", "x", "maximum context length"),
+                C::ContextTooLong,
+            ),
+            (
+                400,
+                json!({"error":{"message":"x","type":"x","param":"reasoning_effort","code":"unsupported_value"}})
+                    .to_string(),
+                C::SetupStale,
+            ),
+            (503, err_json("server_is_overloaded", "x", "x"), C::Busy),
+            (418, err_json("x", "x", "teapot"), C::Other),
+        ];
+        for (status, body, class) in cases {
+            let e = request_error(reqwest::StatusCode::from_u16(status).unwrap(), &body);
+            let f = e.provider_failure().expect("typed");
+            assert_eq!(f.class, class, "{status} {body}");
+            // The sentence a person reads is the table's own, unchanged by the typing.
+            assert_eq!(
+                e.to_string(),
+                failure_text(&classify(Some(status), &fields_from_body(&body))),
+                "{status}"
+            );
+        }
+    }
+
+    /// A 200 stream whose LATER event is an error, or whose finish is the safety filter, may have
+    /// billed: it is never `Rejected`, so nothing is ever tried after it.
+    #[tokio::test]
+    async fn a_failure_after_the_200_may_have_billed() {
+        use crate::error::Billing::MaybeBilled;
+        for (events, class) in [
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"abc\"}}]}\n\n",
+                    "data: {\"error\":{\"message\":\"x\",\"type\":\"server_error\",\"code\":\"server_is_overloaded\"}}\n\n"
+                ),
+                FailureClass::Busy,
+            ),
+            (
+                "data: {\"error\":{\"message\":\"x\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+                FailureClass::NoCredit,
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
+                FailureClass::Refused,
+            ),
+        ] {
+            let e = run(events).await.err().expect("an error");
+            let f = e.provider_failure().expect("typed");
+            assert_eq!((f.class, f.billing), (class, MaybeBilled), "{events}");
+        }
     }
 
     // ---- the key check, end to end against a scripted server on loopback ------------------------

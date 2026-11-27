@@ -19,7 +19,9 @@ mod calendars;
 mod canon;
 mod connectors;
 mod conversations;
-mod direct_keys;
+// `pub(crate)`: the entry gate (`gate_entry`, `gate_entry_now`) is the one rule for putting a provider
+// in front of a reply, and the not-working card (`crate::offers`) asks it too.
+pub(crate) mod direct_keys;
 mod export;
 mod keys;
 mod organise;

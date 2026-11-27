@@ -26,6 +26,10 @@ struct Counts {
     sending: AtomicU32,
     /// Sends that failed before a connection existed, so nothing was written to the provider.
     never_left: AtomicU32,
+    /// The mark that was current when this one was made by [`WireMark::nested`], which every
+    /// request here is also counted on. A mod's booking is judged by the OUTER mark, so an attempt's
+    /// own mark must never hide a send from it.
+    parent: Option<WireMark>,
 }
 
 /// What one call's requests did. Cheap to clone; clones share the counts.
@@ -44,16 +48,34 @@ impl WireMark {
         MARK.scope(self.clone(), fut).await
     }
 
+    /// A fresh mark for ONE attempt, that also counts everything it sees on the mark that is current
+    /// (a mod's), if there is one. "Did this attempt send anything?" is read from the new mark, so
+    /// the answer is about this attempt alone; the outer mark still sees every request, so a mod's
+    /// booking refund is judged exactly as before. Chat has no outer mark, and then this is a plain
+    /// fresh one.
+    pub fn nested() -> Self {
+        WireMark(Arc::new(Counts {
+            parent: MARK.try_with(Clone::clone).ok(),
+            ..Counts::default()
+        }))
+    }
+
     /// A request is about to be written. Every request counts until its failure proves it did not
     /// leave ([`Self::never_left`]).
     pub fn sending(&self) {
         self.0.sending.fetch_add(1, Ordering::SeqCst);
+        if let Some(parent) = &self.0.parent {
+            parent.sending();
+        }
     }
 
     /// The request just announced failed before a connection was made (DNS, refused, a connect
     /// timeout): nothing of it reached the provider.
     pub fn never_left(&self) {
         self.0.never_left.fetch_add(1, Ordering::SeqCst);
+        if let Some(parent) = &self.0.parent {
+            parent.never_left();
+        }
     }
 
     /// Whether any request may have reached the provider. `sending` is counted before `never_left`
@@ -198,6 +220,57 @@ mod tests {
         let mark = marked(format!("http://127.0.0.1:{port}/")).await;
         peer.join().unwrap();
         assert!(mark.may_have_reached_the_wire());
+    }
+
+    /// Two attempts under one mod mark: the first fails at connect (it never left), the second
+    /// sends. Each attempt's OWN mark answers for that attempt alone, and the outer mark, which is
+    /// what a mod's booking refund reads, says a request left. This is the per-attempt rule the
+    /// typed failures rest on: an inner scope can never hide a send from the outer one.
+    #[tokio::test]
+    async fn an_attempts_own_mark_answers_for_that_attempt_and_the_outer_mark_sees_all() {
+        let outer = WireMark::new();
+        let (first, second) = outer
+            .scope(async {
+                let first = WireMark::nested();
+                let client = reqwest::Client::new();
+                let url = format!("http://127.0.0.1:{}/", closed_port());
+                let _ = first.scope(send(client.post(url))).await;
+
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let peer = std::thread::spawn(move || drop(listener.accept()));
+                let second = WireMark::nested();
+                let _ = second
+                    .scope(send(client.post(format!("http://127.0.0.1:{port}/"))))
+                    .await;
+                peer.join().unwrap();
+                (first, second)
+            })
+            .await;
+        assert!(!first.may_have_reached_the_wire(), "the refused connect");
+        assert!(second.may_have_reached_the_wire(), "the one that connected");
+        assert!(
+            outer.may_have_reached_the_wire(),
+            "the mod's mark sees both"
+        );
+    }
+
+    /// With only a refused connect, the outer mark also says nothing left: nesting changes no
+    /// answer a mod's booking already got.
+    #[tokio::test]
+    async fn a_refused_attempt_inside_a_mod_mark_still_reads_as_never_left_outside() {
+        let outer = WireMark::new();
+        let inner = outer
+            .scope(async {
+                let inner = WireMark::nested();
+                let client = reqwest::Client::new();
+                let url = format!("http://127.0.0.1:{}/", closed_port());
+                let _ = inner.scope(send(client.post(url))).await;
+                inner
+            })
+            .await;
+        assert!(!inner.may_have_reached_the_wire());
+        assert!(!outer.may_have_reached_the_wire());
     }
 
     #[tokio::test]

@@ -15,6 +15,8 @@ import { chatUpgradeApplies, footerRow } from "./lib/directProviders";
 import { ProviderChip } from "./components/ProviderChip";
 import { ThinkingToggle } from "./components/ThinkingToggle";
 import { FallbackStrip } from "./components/FallbackStrip";
+import { NotWorkingCard } from "./components/NotWorkingCard";
+import { useNotWorkingActions } from "./lib/useNotWorkingActions";
 import { PowerConsentStrip } from "./components/PowerConsentStrip";
 import { SignInStrip } from "./components/SignInStrip";
 import { ConversationTitle } from "./components/ConversationTitle";
@@ -92,6 +94,7 @@ import {
   appLockStatus,
   createConversation,
   deleteConversation,
+  directProvidersState,
   getMessages,
   getSettings,
   aiProviderStatus,
@@ -121,7 +124,10 @@ import {
   reviewQueueCount,
   setChatModels,
   setConversationProject,
+  setDirectRole,
   setHelpMode,
+  setLocalLlmRouting,
+  setRoleCloudProvider,
   syncCalendar,
   vaultLockStatus,
   vaultStatus,
@@ -1058,6 +1064,41 @@ export default function App() {
       .catch(() => {});
   }
 
+  // A click on the "not working" card. `fromNowOn` first changes the role's setting with the setters
+  // that already exist (the backend refuses a provider that isn't allowed, and the error shows), then
+  // the same turn is sent once more as an ordinary send; otherwise the turn goes once to exactly the
+  // model the offer named, through the backend's own checks. Never automatic: only a click gets here.
+  // The wiring itself lives in `useNotWorkingActions` (one click at a time, tested there).
+  const notWorkingActions = useNotWorkingActions({
+    card: chat.notWorking,
+    chatModels: settings?.chat_models ?? [],
+    setters: {
+      setDirectRole,
+      setRoleCloudProvider,
+      setChatModels,
+      setLocalLlmRouting,
+      // Keep an effort the person already set on this very model; a different model starts at the
+      // role's default (the setter checks an effort against the model it is written with).
+      chatEffortFor: async (provider, model) => {
+        const view = (await directProvidersState()).providers.find((p) => p.provider === provider);
+        return view && view.roles.chat.model === model ? view.roles.chat.effort : null;
+      },
+    },
+    resend: chat.resend,
+    setError: chat.setError,
+    settled: async (convId) => {
+      const [msgs, convs] = await Promise.all([getMessages(convId), listConversations()]);
+      setConversations(convs);
+      if (activeIdRef.current === convId) chat.setMessages(msgs);
+    },
+    refreshSettings,
+    focusComposer: () =>
+      document.querySelector<HTMLTextAreaElement>('[data-help="chat-composer"] textarea')?.focus(),
+    dropFailedSend: () => {
+      if (queue.failedId != null) queue.remove(queue.failedId);
+    },
+  });
+
   if (loading) {
     // A wireframe of the app shell (sidebar + content) rather than a bare spinner, so
     // the first paint already has PM's shape.
@@ -1414,6 +1455,17 @@ export default function App() {
                       onOpenChatCitation={openChatCitation}
                       focusTurn={focusTurn}
                     />
+                    {chat.notWorking && (
+                      <NotWorkingCard
+                        info={chat.notWorking.info}
+                        busy={chat.sending || notWorkingActions.busy}
+                        focusOnMount={notWorkingActions.afterClick}
+                        onUse={(offer) => void notWorkingActions.use(offer, false)}
+                        onUseFromNowOn={(offer) => void notWorkingActions.use(offer, true)}
+                        onEditList={() => openSettings("ai")}
+                        onRaiseLimit={() => openSettings("ai")}
+                      />
+                    )}
                     <QueuedMessages
                       queued={queue.queued}
                       stalled={queue.stalled}

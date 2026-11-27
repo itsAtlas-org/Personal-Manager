@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.208.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "When a chat reply can't be answered, PM now says why in plain words instead of a red line, with the provider's own message under it when that adds something, and offers up to three other models for that one reply: another model on the same key, each other company you have a key for, OpenRouter, or your Local AI model. Each button names the model and who gets the reply (this computer, or your Local AI server when it runs on another machine), with that company's own data line under it.",
+      "Nothing is sent until you press one. PM never moves a reply to another company by itself. A click sends only that reply, once; 'Use … from now on' also makes that model your Chat model. 'Edit my list' opens AI & Models, and a reply stopped by your daily limit has 'Raise your limit' too.",
+      "The card says 'Nothing was sent anywhere else' only when that is true, and says so plainly when a reply stopped partway or PM can't tell whether it was charged. A reply a provider's safety system stopped is never re-sent by PM: rephrase it, or ask another model.",
+      "A company you've turned off, have no key for, have paused with your daily limit, or can't use where you are (a free Google Gemini key in the UK, the EU or Switzerland) is never offered, nor is a model PM already tried for that reply, and PM checks it again when you press the button. In a project's chat you get the reason in plain words and a pointer to AI & Models, without the buttons.",
+    ],
+  },
+  {
     version: "3.207.0-alpha",
     date: "2026-11-27",
     highlights: [

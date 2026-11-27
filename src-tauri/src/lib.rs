@@ -110,6 +110,8 @@ mod mods;
 mod net_screen;
 mod notes;
 mod oauth_loopback;
+// "Not working, use something else": the card a failed chat reply shows, and the one-click offers on it.
+mod offers;
 mod onedrive;
 mod openai_compat;
 // Your own OpenAI key: the one module that knows OpenAI's wire (a flavour of the shared dialect).

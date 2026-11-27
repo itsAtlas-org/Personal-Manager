@@ -185,6 +185,7 @@ export function useProjectChat(project: string | null) {
     providers: chat.providers,
     fallback: chat.fallback,
     dismissFallback: chat.dismissFallback,
+    notWorking: chat.notWorking,
     streaming: chat.streaming,
     thoughts: chat.thoughts,
     streamingThought: chat.streamingThought,

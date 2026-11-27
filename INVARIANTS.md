@@ -1084,6 +1084,39 @@ Another table that holds anything a client may read is added to the strip and th
 build offers the section only on an operating system whose live test passed
 (`mcp::commands::OFFERED_OSES`; a debug build always offers it).
 
+### I-41 · A request bills at most one attempt, and a reply only moves to another company on the person's own click — **Held**
+
+A cloud call that fails comes back as a typed failure (`error::ProviderFailure`: a class, which is
+wording, and a `Billing`, which is the gate). `NeverLeft` (PM refused before anything was sent, or a
+connect failure proves nothing was) and `Rejected` (an HTTP error RESPONSE, received before any body
+byte, with one of the statuses the vendors document as unbilled: 400, 401, 402, 403, 404, 413, 422,
+429, 503, 529) are the only two a second attempt may follow. Everything else is `MaybeBilled`: a
+timeout after the send, a stream that began, an `error` event after a 200 (Anthropic's
+`overloaded_error` and Gemini's "high demand" included), a cut stream, a refusal by the model, and any
+failure PM cannot classify. So the most one request can bill is one attempt, however many ways out
+there are. `Billing::Rejected` is stamped in exactly the places that see a response status before the
+body is read (`cloud_openai::{stream, complete}`, `anthropic_direct::send_with_one_retry`);
+`NeverLeft` is read from a wire mark that is fresh for the attempt (`llm_gateway::attempt`) and still
+counts on a mod's outer mark, so a nested attempt never hides a send from a mod's booking refund.
+
+Nothing moves a chat reply to a different company by itself (a route the person configured, such as
+Local then cloud, is their own choice and not what this says). The "not working" card (`offers.rs`)
+offers other models, each only after it passes the same entry gate the role setters use
+(`gate_entry`: opted in, a readable key, not paused where the person is, which refuses a free Gemini
+key in the UK, the EEA and Switzerland), and never one the person's daily limit has paused; the
+re-send a click makes (`llm_gateway::plan_for_entry`) passes that gate again, takes only a catalogue
+row of that provider (Mythos is not one), builds a one-entry plan with no walk and no fallback, and
+cannot be named from `mods/`. A card never offers an entry already tried for the same turn
+(`NotWorking.tried`, handed back with each click).
+
+**Why.** Walking down a list of providers is only safe if the cost of the whole walk is the cost of
+one attempt, and sending a person's words to another company is only theirs to decide. A failure PM
+cannot prove unbilled must therefore stop, not try the next thing.
+
+**Co-signers.** A new adapter maps its failures to a class AND leaves billing at the default
+(`Error::provider`), lowering it only at a site that has just seen a response status. A new walk
+asks `Billing`, never the class, and a daily limit never walks to another company's paid row.
+
 ---
 
 ## 6. Build tooling and dependencies

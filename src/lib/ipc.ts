@@ -58,6 +58,7 @@ import type {
   CompressSnapshot,
   ContextStatus,
   Conversation,
+  EntryRef,
   PassphraseScore,
   CostSummary,
   DailyBriefing,
@@ -717,6 +718,13 @@ export function sendMessage(
   capturePrompt = false,
   /** The chat Thinking toggle (lib/chatPrefs `readShowThinking()`), read at send time. */
   showThinking = false,
+  /** A click on the "not working" card: send THIS turn to exactly this model, once. The backend
+   *  checks it against the person's own keys, settings and catalogue before anything is sent, and
+   *  refuses it (as the role setters would) when it isn't allowed. Absent for every ordinary send. */
+  routeOverride: EntryRef | null = null,
+  /** The entries the card said were already tried for this turn, echoed back on a re-send so the next
+   *  card never offers one again. Only an exclusion list; nothing is sent to any of them. */
+  tried: EntryRef[] | null = null,
 ): Promise<void> {
   const channel = new Channel<ChatEvent>();
   channel.onmessage = onEvent;
@@ -725,6 +733,8 @@ export function sendMessage(
     content,
     capturePrompt,
     showThinking,
+    routeOverride,
+    tried,
     onEvent: channel,
   });
 }

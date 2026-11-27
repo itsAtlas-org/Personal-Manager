@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 use crate::cloud_openai::{bounded_error_body, redact_detail, MAX_REPLY_BYTES, MAX_SSE_LINE_BYTES};
 use crate::direct_models::{self, names_mythos, DirectModel};
 use crate::direct_providers::{self, KeyCheck, KeyNote, KeyOutcome};
-use crate::error::{Error, Result};
+use crate::error::{Error, FailureClass, Result};
 use crate::llm_gateway::{CloudArm, CloudProvider, Role};
 use crate::openrouter::{drain_lines, ChatMessage, Completion, CostNote, Usage};
 use crate::usage_keys;
@@ -469,13 +469,15 @@ where
                 continue;
             }
         }
+        // A failed STATUS with no body streamed: the one site that may call it unbilled.
         return Err(failure_error(
             &failure,
             Some(status),
             &fields,
             prepared.model,
             prepared.effort.as_deref(),
-        ));
+        )
+        .with_response_status(status));
     }
 }
 
@@ -981,7 +983,30 @@ fn failure_error(
     m: &DirectModel,
     effort: Option<&str>,
 ) -> Error {
-    Error::Other(failure_text(failure, status, f, m, effort))
+    Error::provider(
+        CloudProvider::Anthropic,
+        class_of(failure),
+        failure_text(failure, status, f, m, effort),
+    )
+}
+
+/// The class a failure is told as. The sentence is `failure_text`'s and does not depend on this.
+/// Billing is the safe default here: only the response-status site in [`send_with_one_retry`] may
+/// lower it, and a mid-stream `error` event never reaches that site.
+fn class_of(f: &Failure) -> FailureClass {
+    match f {
+        Failure::KeyRejected | Failure::OnHold | Failure::NotAllowed => FailureClass::KeyBad,
+        Failure::OutOfCredit | Failure::SpendCap | Failure::OwnSpendLimit => FailureClass::NoCredit,
+        Failure::RampLimit | Failure::RateLimited => FailureClass::RateLimited,
+        Failure::NeedsRetention => FailureClass::NeedsRetention,
+        Failure::OutputLimitStale | Failure::EffortRejected | Failure::SetupStale => {
+            FailureClass::SetupStale
+        }
+        Failure::ContextTooLong | Failure::TooLarge => FailureClass::ContextTooLong,
+        Failure::ModelUnavailable => FailureClass::ModelGone,
+        Failure::Overloaded => FailureClass::Busy,
+        Failure::Other => FailureClass::Other,
+    }
 }
 
 // ---- the key check -----------------------------------------------------------------------------

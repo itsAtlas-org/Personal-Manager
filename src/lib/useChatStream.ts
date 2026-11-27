@@ -8,13 +8,24 @@ import { readShowThinking } from "./chatPrefs";
 import type {
   ChatFallback,
   ChatThought,
+  EntryRef,
   GroundingConfidence,
   LiveThought,
   Message,
+  NotWorkingInfo,
   PromptMessage,
   ServedBy,
   ThoughtFold,
 } from "./types";
+
+/** The "not working" card and what it needs to re-send the turn it belongs to: the conversation and
+ *  the text of the failed message (the backend discards the unanswered turn itself on the next send,
+ *  so re-sending the same text never duplicates it). */
+export interface NotWorkingState {
+  convId: number;
+  text: string;
+  info: NotWorkingInfo;
+}
 
 /**
  * Chat send + streaming state, shared by the global chat (App) and the
@@ -54,6 +65,13 @@ export function useChatStream(currentConvId: () => number | null) {
   // `fallback` event, which arrives after the tokens and before `done`). Rendered as the dismissible
   // FallbackStrip and cleared on dismiss / next send / conversation switch — NOT on `done`.
   const [fallback, setFallback] = useState<ChatFallback | null>(null);
+  // Transient like `error`, and instead of it: set when a reply could not be answered and there is
+  // something to offer (the `not_working` event). Cleared on the next send, a conversation switch or
+  // when the person picks an offer.
+  const [notWorking, setNotWorking] = useState<NotWorkingState | null>(null);
+  // Whether the latest send produced a card of its own (set during the send, read by `resend` once it
+  // settles to decide whether the card a click replaced must come back).
+  const lastSendCarded = useRef(false);
   // The chat Thinking toggle's output. `streamingThought` is the live thinking while a reply streams,
   // transient like `streaming`. `thoughts` has the same lifecycle as `prompts`: keyed by assistant
   // message id, committed on `done`, never persisted, kept across switches. Thinking is model output
@@ -91,6 +109,7 @@ export function useChatStream(currentConvId: () => number | null) {
     setSending(false);
     setError(null);
     setFallback(null);
+    setNotWorking(null);
   }, []);
 
   /** Dismiss the fallback honesty strip (the user has seen it). Transient-only; a new send or a
@@ -122,130 +141,199 @@ export function useChatStream(currentConvId: () => number | null) {
    *  alternation guard would reject anyway. Tracked in a local, not from `error` state: an error
    *  arriving for a conversation the user has since left never reaches `setError`, but it is still
    *  a failure the queue has to respect. Never rejects. */
-  const send = useCallback(async (convId: number, text: string): Promise<boolean> => {
-    const isCurrent = () => currentRef.current() === convId;
-    let ok = true;
-    setError(null);
-    setFallback(null);
-    const optimistic: Message = {
-      id: -Date.now(),
-      conversation_id: convId,
-      role: "user",
-      content: text,
-      model: null,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimistic]);
-    setStreaming("");
-    setStreamingThought(null);
-    setSending(true);
+  const send = useCallback(
+    async (
+      convId: number,
+      text: string,
+      routeOverride: EntryRef | null = null,
+      tried: EntryRef[] | null = null,
+    ): Promise<boolean> => {
+      const isCurrent = () => currentRef.current() === convId;
+      let ok = true;
+      // Set when the card was shown for this send: the rejection that follows carries the same
+      // sentence, and the card must not be replaced by it.
+      let carded = false;
+      lastSendCarded.current = false;
+      setError(null);
+      setFallback(null);
+      setNotWorking(null);
+      const optimistic: Message = {
+        id: -Date.now(),
+        conversation_id: convId,
+        role: "user",
+        content: text,
+        model: null,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, optimistic]);
+      setStreaming("");
+      setStreamingThought(null);
+      setSending(true);
 
-    let acc = "";
-    // Held from the `prompt` event (which fires before the first token) and committed to `prompts`
-    // under the assistant message id once `done` delivers it, so the dropdown attaches to its turn.
-    let captured: PromptMessage[] | null = null;
-    let capturedConfidence: GroundingConfidence | null = null;
-    // This turn's thinking, accumulated the same way as `acc` and committed to `thoughts` on `done`.
-    // `skipped` is a `no_room` note: the turn was answered without thinking, and the UI says so.
-    let live: LiveThought | null = null;
-    let skipped = false;
-    liveFolds.current.delete(convId);
-    // Publish the live thought with where the user left its fold, so a fold that mounts again (the
-    // user came back mid-reply) opens where they left it.
-    const showThought = () => {
-      if (live && isCurrent())
-        setStreamingThought({ ...live, fold: liveFolds.current.get(convId) });
-    };
-    try {
-      await sendMessage(
-        convId,
-        text,
-        (event) => {
-          // Always accumulate so a resumed view shows the full reply; only write to
-          // shared UI state while this is still the conversation on screen.
-          if (event.type === "token") {
-            acc += event.text;
-            if (isCurrent()) setStreaming(acc);
-            // The first answer token stops the thinking clock — once per turn. The thought is
-            // published on every token, not only that one: a view the user left and came back to
-            // mid-answer had it cleared, and would otherwise lose the fold until `done`.
-            if (live && live.answeredAt === null) live = { ...live, answeredAt: Date.now() };
-            showThought();
-          } else if (event.type === "thinking") {
-            live = live
-              ? { ...live, text: live.text + event.text }
-              : { text: event.text, startedAt: Date.now(), answeredAt: null };
-            // `streaming` too: ChatView draws the live block inside the streaming column, and a view
-            // the user left and came back to mid-thought had both cleared — without this it would
-            // stay blank until the first answer token, which can be minutes away.
-            if (isCurrent()) setStreaming(acc);
-            showThought();
-          } else if (event.type === "thinking_note") {
-            if (event.note === "fell_back") {
-              // The local model's thinking, under a reply the cloud is about to give: drop it.
-              live = null;
-              if (isCurrent()) setStreamingThought(null);
-            } else if (event.note === "no_room") {
-              skipped = true;
-            }
-          } else if (event.type === "prompt") {
-            captured = event.messages;
-            capturedConfidence = event.confidence;
-          } else if (event.type === "done") {
-            const p = captured;
-            if (p && isCurrent()) setPrompts((prev) => ({ ...prev, [event.message_id]: p }));
-            const c = capturedConfidence;
-            if (c && isCurrent()) setConfidences((prev) => ({ ...prev, [event.message_id]: c }));
-            const t: LiveThought | null = live;
-            // Only a reply the local model gave carries a thought. A cloud reply never sits under
-            // local thinking (`fell_back` already dropped any that was shown), nor under "Answered
-            // without thinking": a `no_room` turn whose local leg then failed before answering was
-            // answered by the cloud, which never thinks here, so neither that line's reason nor its
-            // fix applies to it.
-            if ((t || skipped) && event.served_by === "local" && isCurrent()) {
-              const thought: ChatThought = {
-                text: t?.text ?? "",
-                seconds: t
-                  ? Math.max(0, Math.floor(((t.answeredAt ?? Date.now()) - t.startedAt) / 1000))
-                  : null,
-                skipped,
-                fold: liveFolds.current.get(convId),
-              };
-              setThoughts((prev) => ({ ...prev, [event.message_id]: thought }));
-            }
-            if (isCurrent()) {
-              const servedBy: ServedBy = event.on_battery ? "cloud-on-battery" : event.served_by;
-              setProviders((prev) => ({ ...prev, [event.message_id]: servedBy }));
-            }
-          } else if (event.type === "fallback") {
-            if (isCurrent())
-              setFallback({
-                from_model: event.from_model,
-                to_model: event.to_model,
+      let acc = "";
+      // Held from the `prompt` event (which fires before the first token) and committed to `prompts`
+      // under the assistant message id once `done` delivers it, so the dropdown attaches to its turn.
+      let captured: PromptMessage[] | null = null;
+      let capturedConfidence: GroundingConfidence | null = null;
+      // This turn's thinking, accumulated the same way as `acc` and committed to `thoughts` on `done`.
+      // `skipped` is a `no_room` note: the turn was answered without thinking, and the UI says so.
+      let live: LiveThought | null = null;
+      let skipped = false;
+      liveFolds.current.delete(convId);
+      // Publish the live thought with where the user left its fold, so a fold that mounts again (the
+      // user came back mid-reply) opens where they left it.
+      const showThought = () => {
+        if (live && isCurrent())
+          setStreamingThought({ ...live, fold: liveFolds.current.get(convId) });
+      };
+      try {
+        await sendMessage(
+          convId,
+          text,
+          (event) => {
+            // Always accumulate so a resumed view shows the full reply; only write to
+            // shared UI state while this is still the conversation on screen.
+            if (event.type === "token") {
+              acc += event.text;
+              if (isCurrent()) setStreaming(acc);
+              // The first answer token stops the thinking clock — once per turn. The thought is
+              // published on every token, not only that one: a view the user left and came back to
+              // mid-answer had it cleared, and would otherwise lose the fold until `done`.
+              if (live && live.answeredAt === null) live = { ...live, answeredAt: Date.now() };
+              showThought();
+            } else if (event.type === "thinking") {
+              live = live
+                ? { ...live, text: live.text + event.text }
+                : { text: event.text, startedAt: Date.now(), answeredAt: null };
+              // `streaming` too: ChatView draws the live block inside the streaming column, and a view
+              // the user left and came back to mid-thought had both cleared — without this it would
+              // stay blank until the first answer token, which can be minutes away.
+              if (isCurrent()) setStreaming(acc);
+              showThought();
+            } else if (event.type === "thinking_note") {
+              if (event.note === "fell_back") {
+                // The local model's thinking, under a reply the cloud is about to give: drop it.
+                live = null;
+                if (isCurrent()) setStreamingThought(null);
+              } else if (event.note === "no_room") {
+                skipped = true;
+              }
+            } else if (event.type === "prompt") {
+              captured = event.messages;
+              capturedConfidence = event.confidence;
+            } else if (event.type === "done") {
+              const p = captured;
+              if (p && isCurrent()) setPrompts((prev) => ({ ...prev, [event.message_id]: p }));
+              const c = capturedConfidence;
+              if (c && isCurrent()) setConfidences((prev) => ({ ...prev, [event.message_id]: c }));
+              const t: LiveThought | null = live;
+              // Only a reply the local model gave carries a thought. A cloud reply never sits under
+              // local thinking (`fell_back` already dropped any that was shown), nor under "Answered
+              // without thinking": a `no_room` turn whose local leg then failed before answering was
+              // answered by the cloud, which never thinks here, so neither that line's reason nor its
+              // fix applies to it.
+              if ((t || skipped) && event.served_by === "local" && isCurrent()) {
+                const thought: ChatThought = {
+                  text: t?.text ?? "",
+                  seconds: t
+                    ? Math.max(0, Math.floor(((t.answeredAt ?? Date.now()) - t.startedAt) / 1000))
+                    : null,
+                  skipped,
+                  fold: liveFolds.current.get(convId),
+                };
+                setThoughts((prev) => ({ ...prev, [event.message_id]: thought }));
+              }
+              if (isCurrent()) {
+                const servedBy: ServedBy = event.on_battery ? "cloud-on-battery" : event.served_by;
+                setProviders((prev) => ({ ...prev, [event.message_id]: servedBy }));
+              }
+            } else if (event.type === "fallback") {
+              if (isCurrent())
+                setFallback({
+                  from_model: event.from_model,
+                  to_model: event.to_model,
+                  reason: event.reason,
+                });
+            } else if (event.type === "not_working") {
+              ok = false;
+              carded = true;
+              lastSendCarded.current = true;
+              // The card without the event's discriminant.
+              const info: NotWorkingInfo = {
+                turn_id: event.turn_id,
+                class: event.class,
+                headline: event.headline,
                 reason: event.reason,
-              });
-          } else if (event.type === "error") {
-            ok = false;
-            if (isCurrent()) setError(event.message);
-          }
-        },
-        devModeRef.current,
-        // Read at send time, synchronously, so `send` needs no dep on it: a queued message goes with
-        // the toggle as it stands the moment it is sent, not as it stood when it was typed.
-        readShowThinking(),
-      );
-    } catch (e) {
-      ok = false;
-      if (isCurrent()) setError(String(e));
-    } finally {
-      if (isCurrent()) {
-        setSending(false);
-        setStreaming(null);
-        setStreamingThought(null);
+                detail: event.detail,
+                reassurance: event.reassurance,
+                offers: event.offers,
+                can_edit_list: event.can_edit_list,
+                limit: event.limit,
+                tried: event.tried,
+              };
+              if (isCurrent()) setNotWorking({ convId, text, info });
+            } else if (event.type === "error") {
+              ok = false;
+              if (isCurrent()) setError(event.message);
+            }
+          },
+          devModeRef.current,
+          // Read at send time, synchronously, so `send` needs no dep on it: a queued message goes with
+          // the toggle as it stands the moment it is sent, not as it stood when it was typed.
+          readShowThinking(),
+          routeOverride,
+          tried,
+        );
+      } catch (e) {
+        ok = false;
+        if (isCurrent() && !carded) setError(String(e));
+      } finally {
+        if (isCurrent()) {
+          setSending(false);
+          setStreaming(null);
+          setStreamingThought(null);
+        }
       }
-    }
-    return ok;
-  }, []);
+      return ok;
+    },
+    [],
+  );
+
+  /** Re-send the turn the card belongs to, to one model the person picked (or, with no override, as
+   *  an ordinary send, which is what "from now on" does once the setting has changed). The failed
+   *  user message is taken off the screen first: the backend discards its unanswered row itself, so
+   *  the same text goes once. Resolves like `send`. */
+  const resend = useCallback(
+    async (card: NotWorkingState, override: EntryRef | null): Promise<boolean> => {
+      setNotWorking(null);
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        return last && last.role === "user" && last.content.trim() === card.text.trim()
+          ? prev.slice(0, -1)
+          : prev;
+      });
+      const ok = await send(card.convId, card.text, override, card.info.tried);
+      // A click the backend refused before sending anything (the entry gate, a vanished key, a
+      // limit) leaves the plain error and no card of its own: put the previous card back beside the
+      // error, so the person still has the other offers and "Edit my list".
+      // The entry just clicked is not put back: it was refused or failed, and offering it again is
+      // the loop the card must not make.
+      if (!ok && !lastSendCarded.current && currentRef.current() === card.convId) {
+        const same = (o: { provider: string; model: string }) =>
+          override !== null && o.provider === override.provider && o.model === override.model;
+        setNotWorking({
+          ...card,
+          info: {
+            ...card.info,
+            offers: card.info.offers.filter((o) => !same(o)),
+            tried: override ? [...card.info.tried, override] : card.info.tried,
+          },
+        });
+      }
+      return ok;
+    },
+    [send],
+  );
 
   return {
     messages,
@@ -256,6 +344,8 @@ export function useChatStream(currentConvId: () => number | null) {
     setError,
     clearTransient,
     send,
+    notWorking,
+    resend,
     prompts,
     confidences,
     providers,

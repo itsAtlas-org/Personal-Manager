@@ -141,20 +141,106 @@ pub enum Error {
 }
 
 /// Why a provider's call failed, as a class the code can branch on (the sentence is `message`, for
-/// the person). Only the daily limit is a class so far; the other failures a call can meet join it
-/// here, so the variant's shape never changes when they do.
+/// the person). The class is WORDING and what a one-click offer is worth; whether anything else may
+/// be tried after it is [`Billing`]'s call, never the class's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
+    /// Overloaded, a 5xx, "high demand".
+    Busy,
+    /// A per-minute (or daily allowance) rate limit on the key.
+    RateLimited,
+    /// The model is no longer offered to this key.
+    ModelGone,
+    /// The conversation is longer than the model can take.
+    ContextTooLong,
+    /// The provider does not accept this key (rejected, revoked, held, leaked, restricted).
+    KeyBad,
+    /// No credit left, or a spend cap or limit set at the provider.
+    NoCredit,
+    /// Anthropic's Fable on a workspace without 30-day retention.
+    NeedsRetention,
+    /// PM's own setup for the provider is out of date (an effort or output limit it refuses).
+    SetupStale,
     /// PM's own brake: the person's daily limit for this provider has been reached. Nothing was sent.
     LimitReached,
+    /// Paused where the person is (a free Gemini key in the UK, EEA or Switzerland; OpenAI's own
+    /// region refusal).
+    Paused,
+    /// The model refused or withheld the reply (billed, and the same prompt would refuse again).
+    Refused,
+    /// A failure after the request left that PM cannot class further: a cut stream, a timeout after
+    /// send, a mid-stream error with no code PM reads.
+    StoppedPartway,
+    /// Everything else; the sentence is the provider-mapped one.
+    Other,
+}
+
+impl FailureClass {
+    /// The stable token the webview's copy keys on and a log line carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureClass::Busy => "busy",
+            FailureClass::RateLimited => "rate_limited",
+            FailureClass::ModelGone => "model_gone",
+            FailureClass::ContextTooLong => "context_too_long",
+            FailureClass::KeyBad => "key_bad",
+            FailureClass::NoCredit => "no_credit",
+            FailureClass::NeedsRetention => "needs_retention",
+            FailureClass::SetupStale => "setup_stale",
+            FailureClass::LimitReached => "limit_reached",
+            FailureClass::Paused => "paused",
+            FailureClass::Refused => "refused",
+            FailureClass::StoppedPartway => "stopped_partway",
+            FailureClass::Other => "other",
+        }
+    }
+
+    /// A failure about the KEY or the account as a whole, so another model on the same key meets
+    /// the same wall. A model-level class (a model gone, a retention need, a stale setup) leaves the
+    /// provider's other models worth offering.
+    pub fn is_key_level(self) -> bool {
+        matches!(
+            self,
+            FailureClass::KeyBad
+                | FailureClass::NoCredit
+                | FailureClass::LimitReached
+                | FailureClass::Paused
+        )
+    }
 }
 
 /// Whether the failed call can have cost money. This is the gate on trying anything else after it
 /// (a request bills at most one attempt), so a failure PM cannot prove unbilled never reads as one.
+/// Only `NeverLeft` and `Rejected` may be followed by another attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Billing {
-    /// PM refused before anything left this computer.
+    /// PM refused before anything left this computer, or a connect failure proves nothing was sent.
     NeverLeft,
+    /// An HTTP error RESPONSE received before any body streamed, with a status the vendors document
+    /// as unbilled (see [`billing_for_status`]).
+    Rejected,
+    /// Anything else: a timeout after send, a stream that began, a mid-stream `error` event, a cut
+    /// stream, a failure PM cannot classify. It may have billed, so nothing is tried after it.
+    MaybeBilled,
+}
+
+impl Billing {
+    /// Whether the call may have cost money.
+    pub fn may_have_billed(self) -> bool {
+        self == Billing::MaybeBilled
+    }
+}
+
+/// The billing of a failed HTTP response, by status. PURE. Only the statuses the vendors document as
+/// unbilled are `Rejected`: 400, 401, 402, 403, 404, 413, 422, 429, 503 and 529. 500, 502, 504, 408,
+/// 524 and every other status are `MaybeBilled`, because a router or CDN timeout can arrive after the
+/// upstream finished the work. Called ONLY at the sites that see the status of a response before any
+/// body byte was read; a mid-stream error never reaches it.
+pub fn billing_for_status(status: u16) -> Billing {
+    match status {
+        400 | 401 | 402 | 403 | 404 | 413 | 422 | 429 | 503 | 529 => Billing::Rejected,
+        _ => Billing::MaybeBilled,
+    }
 }
 
 /// A failed provider call: what kind, whether it could have billed, whose it was and what to say.
@@ -171,6 +257,52 @@ pub struct ProviderFailure {
 }
 
 impl Error {
+    /// A typed provider failure. Billing starts at `MaybeBilled`, the safe default: it is lowered
+    /// only by the one place that can prove otherwise (an HTTP error response before any body byte,
+    /// or the attempt's own wire mark), never by the adapter that merely classifies the words.
+    pub fn provider(
+        provider: crate::llm_gateway::CloudProvider,
+        class: FailureClass,
+        message: String,
+    ) -> Error {
+        Error::Provider(Box::new(ProviderFailure {
+            class,
+            billing: Billing::MaybeBilled,
+            provider,
+            model: None,
+            message,
+        }))
+    }
+
+    /// A typed failure PM itself decided before anything was sent (a paused region, a free allowance
+    /// it knows is spent): `NeverLeft`, which is true by construction.
+    pub fn refused_before_send(
+        provider: crate::llm_gateway::CloudProvider,
+        class: FailureClass,
+        message: String,
+    ) -> Error {
+        Error::Provider(Box::new(ProviderFailure {
+            class,
+            billing: Billing::NeverLeft,
+            provider,
+            model: None,
+            message,
+        }))
+    }
+
+    /// This error, told it came back as an HTTP error response with `status` before any body was
+    /// read. A typed failure still at the `MaybeBilled` default takes the status's billing; anything
+    /// else is returned as it was.
+    pub fn with_response_status(self, status: u16) -> Error {
+        match self {
+            Error::Provider(mut f) if f.billing == Billing::MaybeBilled => {
+                f.billing = billing_for_status(status);
+                Error::Provider(f)
+            }
+            other => other,
+        }
+    }
+
     /// The typed provider failure inside this error, if it is one.
     pub fn provider_failure(&self) -> Option<&ProviderFailure> {
         match self {
@@ -339,6 +471,69 @@ mod tests {
         assert_eq!(f.model.as_deref(), Some("anthropic/claude-sonnet-5-5"));
         // Anything else is not one.
         assert!(Error::Other("x".into()).provider_failure().is_none());
+    }
+
+    /// Which statuses are proven unbilled: exactly the vendors' documented ones. A router or CDN
+    /// timeout (504, 524, 408) and a plain 500 or 502 can arrive after the upstream finished, so they
+    /// stay `MaybeBilled`. This is the table the billing property rests on.
+    #[test]
+    fn only_the_documented_unbilled_statuses_are_rejected() {
+        for s in [400u16, 401, 402, 403, 404, 413, 422, 429, 503, 529] {
+            assert_eq!(billing_for_status(s), Billing::Rejected, "{s}");
+        }
+        for s in [
+            200u16, 201, 300, 405, 408, 409, 418, 500, 501, 502, 504, 520, 524, 599,
+        ] {
+            assert_eq!(billing_for_status(s), Billing::MaybeBilled, "{s}");
+        }
+    }
+
+    /// A status only ever LOWERS a typed failure from its safe default, and only once: a failure
+    /// that was already proven (PM's own refusal) or is not typed is left as it was.
+    #[test]
+    fn a_response_status_lowers_only_the_default() {
+        let typed = |billing| {
+            Error::Provider(Box::new(ProviderFailure {
+                class: FailureClass::Busy,
+                billing,
+                provider: crate::llm_gateway::CloudProvider::OpenAi,
+                model: None,
+                message: "x".into(),
+            }))
+        };
+        let b = |e: Error| e.provider_failure().unwrap().billing;
+        assert_eq!(
+            b(typed(Billing::MaybeBilled).with_response_status(429)),
+            Billing::Rejected
+        );
+        assert_eq!(
+            b(typed(Billing::MaybeBilled).with_response_status(502)),
+            Billing::MaybeBilled
+        );
+        // A refusal PM made itself keeps its proof; a status never raises it.
+        assert_eq!(
+            b(typed(Billing::NeverLeft).with_response_status(502)),
+            Billing::NeverLeft
+        );
+        assert!(Error::Other("x".into())
+            .with_response_status(429)
+            .provider_failure()
+            .is_none());
+    }
+
+    /// The constructor defaults to the safe value: nothing is "unbilled" until something proves it.
+    #[test]
+    fn a_new_typed_failure_may_have_billed() {
+        let e = Error::provider(
+            crate::llm_gateway::CloudProvider::Gemini,
+            FailureClass::Busy,
+            "busy".into(),
+        );
+        let f = e.provider_failure().unwrap();
+        assert_eq!(f.billing, Billing::MaybeBilled);
+        assert!(f.billing.may_have_billed());
+        assert!(!Billing::NeverLeft.may_have_billed());
+        assert!(!Billing::Rejected.may_have_billed());
     }
 
     #[test]
