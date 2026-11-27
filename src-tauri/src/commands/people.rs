@@ -541,6 +541,20 @@ pub async fn commit_vcard_import(
     Ok(done)
 }
 
+/// Forget a preview whose dialog closed without importing, so the file's contacts don't sit in
+/// memory for the rest of the ten minutes. Nothing is written or announced; an id that is gone,
+/// replaced or already imported is simply nothing to forget.
+#[tauri::command]
+pub fn discard_vcard_preview(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    preview_id: String,
+) -> Result<()> {
+    require_people_main_window(&window)?;
+    people::import::discard_held(&state.people_import, &preview_id);
+    Ok(())
+}
+
 /// Write people as a vCard 3.0 file, and with `timeline` their timeline as a spreadsheet beside it
 /// (spec 5.3). The backend opens the save dialog (rule L-5: decrypted data is never written to a
 /// path the webview names). People in Trash are never written. A cancelled dialog answers `None`.
@@ -757,6 +771,7 @@ mod tests {
         ("restore_people_distinct", Tier::Main),
         ("pick_vcard_and_preview", Tier::Main),
         ("commit_vcard_import", Tier::Main),
+        ("discard_vcard_preview", Tier::Main),
         ("export_people", Tier::Main),
         ("list_timeline", Tier::Main),
         ("add_interaction", Tier::Main),
@@ -777,6 +792,7 @@ mod tests {
         "merge_people_preview",
         // The import's preview and the export write nothing in the store: the file is the write.
         "pick_vcard_and_preview",
+        "discard_vcard_preview",
         "export_people",
         "list_timeline",
     ];

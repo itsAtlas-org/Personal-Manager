@@ -2088,6 +2088,7 @@ pub fn run() {
             commands::restore_people_distinct,
             commands::pick_vcard_and_preview,
             commands::commit_vcard_import,
+            commands::discard_vcard_preview,
             commands::export_people,
             commands::search_people,
             commands::list_timeline,

@@ -11,6 +11,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatClock } from "../../lib/format";
+import { forgetAllDrafts } from "../../lib/meetingDrafts";
 import type { CalendarEvent, OwedMeeting, OwedUnknownGuest, PersonRow } from "../../lib/types";
 
 const ipc = vi.hoisted(() => ({
@@ -43,6 +44,7 @@ const meeting = (over: Partial<OwedMeeting> = {}): OwedMeeting => ({
 });
 
 const ANN = { id: 3, display_name: "Ann Able", email: "ann@example.com" };
+const BEN = { id: 4, display_name: "Ben Bryce", email: "ben@example.com" };
 const NEWT: OwedUnknownGuest = { name: "Newt Nobody", email: "newt@example.com", trashed_id: null };
 const TESS: OwedUnknownGuest = { name: "Tess Trashed", email: "tess@example.com", trashed_id: 8 };
 
@@ -67,6 +69,7 @@ function wrap(node: React.ReactNode) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  forgetAllDrafts();
   localStorage.clear();
   vi.useFakeTimers({ toFake: ["Date"] });
   // Pinned by instant, and the strip is given a UTC zone, so no machine zone moves "today".
@@ -350,6 +353,143 @@ describe("the meeting dialog's cards", () => {
     dialog([meeting({ known: [ANN] })], { onOpenPerson });
     fireEvent.click(screen.getByRole("button", { name: "Open Ann Able" }));
     await waitFor(() => expect(onOpenPerson).toHaveBeenCalledWith("0".repeat(31) + "3"));
+  });
+});
+
+describe("what a card keeps while its dialog is closed", () => {
+  // Clicking a guest's name opens their record and closes the dialog: the owner unmounts it and
+  // mounts it again, with the same meetings, when the dialog is reopened.
+  const open = (meetings: OwedMeeting[], onOpenPerson?: () => void) =>
+    wrap(<MeetingDialog meetings={meetings} onClose={() => {}} onOpenPerson={onOpenPerson} />);
+  const tick = (name: string) =>
+    (screen.getByRole("checkbox", { name }) as HTMLInputElement).checked;
+  const note = () =>
+    (screen.getByRole("textbox", { name: "Note (optional)" }) as HTMLTextAreaElement).value;
+  const m = () => meeting({ known: [ANN, BEN], unknown: [NEWT] });
+
+  it("keeps what was ticked, written and picked when another guest's name is clicked", async () => {
+    ipc.searchPeople.mockResolvedValue([row(9, "Cleo Cole")]);
+    let view = open([m()], () => view.unmount());
+    // Ann un-ticked, the unknown guest ticked, a note written, someone else picked.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Newt Nobody (newt@example.com) was there" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Note (optional)" }), {
+      target: { value: "Talked about the trip" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Someone else…" }));
+    fireEvent.change(screen.getByLabelText("Someone else who was at Standup"), {
+      target: { value: "cleo" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /Cleo Cole/ }));
+    // Clicking Ben's name opens his record: the dialog goes.
+    fireEvent.click(screen.getByRole("button", { name: "Open Ben Bryce" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // Opened again, it is as it was left.
+    view = open([m()]);
+    expect(tick("Ann Able was there")).toBe(false);
+    expect(tick("Ben Bryce was there")).toBe(true);
+    expect(tick("Newt Nobody (newt@example.com) was there")).toBe(true);
+    expect(note()).toBe("Talked about the trip");
+    expect(screen.getByRole("list", { name: "Other people" }).textContent).toContain("Cleo Cole");
+    // And it saves what is shown.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(ipc.answerMeeting).toHaveBeenCalledOnce());
+    expect(ipc.answerMeeting.mock.calls[0][2]).toEqual([
+      { id: 4 },
+      { new: { name: "Newt Nobody", email: "newt@example.com" } },
+      { id: 9 },
+    ]);
+    expect(ipc.answerMeeting.mock.calls[0][4]).toBe("Talked about the trip");
+  });
+
+  it("starts clean once the card was answered", async () => {
+    const view = open([m()]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Note (optional)" }), {
+      target: { value: "Gone after saving" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(ipc.answerMeeting).toHaveBeenCalledOnce());
+    view.unmount();
+    // The same meeting again (a card an event's "Log who you met" builds, say).
+    open([m()]);
+    expect(tick("Ann Able was there")).toBe(true);
+    expect(note()).toBe("");
+  });
+
+  it("starts clean after Skip, and after Skip all", async () => {
+    let view = open([m()]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(ipc.answerMeeting).toHaveBeenCalledOnce());
+    view.unmount();
+    view = open([m()]);
+    expect(tick("Ann Able was there")).toBe(true);
+    view.unmount();
+
+    ipc.answerMeeting.mockClear();
+    view = open([m(), meeting({ uid: "b", title: "Two" })]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    fireEvent.click(screen.getByRole("button", { name: "Skip all" }));
+    await waitFor(() => expect(ipc.answerMeeting).toHaveBeenCalledTimes(2));
+    view.unmount();
+    open([m()]);
+    expect(tick("Ann Able was there")).toBe(true);
+  });
+
+  it("keeps a card's input apart from another meeting's", () => {
+    const view = open([m()]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    view.unmount();
+    open([meeting({ uid: "other", known: [ANN] })]);
+    expect(tick("Ann Able was there")).toBe(true);
+  });
+
+  it("ticks a guest PM has come to know since the card was left", () => {
+    const view = open([meeting({ known: [ANN], unknown: [NEWT] })]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Ann Able was there" }));
+    view.unmount();
+    // Newt was added to People meanwhile (known, so ticked as a fresh card has them); Ann stays off.
+    open([
+      meeting({ known: [ANN, { id: 7, display_name: "Newt Nobody", email: "newt@example.com" }] }),
+    ]);
+    expect(tick("Ann Able was there")).toBe(false);
+    expect(tick("Newt Nobody was there")).toBe(true);
+  });
+
+  it("ignores Escape while an answer is in flight, as the Close button does", async () => {
+    let finish: () => void = () => {};
+    ipc.answerMeeting.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)));
+    const onClose = vi.fn();
+    wrap(
+      <MeetingDialog
+        meetings={[meeting({ known: [ANN] }), meeting({ uid: "b", title: "Two" })]}
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Meeting Standup" })).getByRole("button", {
+        name: "Save",
+      }),
+    );
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      ),
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    finish();
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 

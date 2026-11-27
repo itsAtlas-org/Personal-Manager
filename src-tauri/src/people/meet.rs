@@ -216,7 +216,9 @@ struct Guest {
 }
 
 /// Add the other human guests of one copy of an event to `into`, once per address (the same meeting
-/// on two calendars names the same people), cleaned and clipped.
+/// on two calendars names the same people), cleaned and clipped. Google lists a meeting's organiser
+/// among its guests and the Outlook parser adds them the same way (`graph_attendees`); an iCal feed
+/// names whoever its ATTENDEE lines name.
 fn add_guests(
     into: &mut Vec<Guest>,
     keys: &mut HashSet<String>,

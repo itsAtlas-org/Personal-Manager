@@ -23,6 +23,7 @@ import { PeopleView } from "./components/people/PeopleView";
 import { MeetingDialog } from "./components/people/MeetingDialog";
 import { MeetStrip } from "./components/people/MeetStrip";
 import { useOwedMeetings } from "./components/people/useOwedMeetings";
+import { forgetAllDrafts } from "./lib/meetingDrafts";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { ContextMeter } from "./components/ContextMeter";
@@ -236,6 +237,11 @@ export default function App() {
   // the open tab changes (PM works it out when it looks), on a calendar sync and on a people change.
   const storeOpen = !loading && !vaultNeedsUnlock && !vault?.fault && vaultLock?.active !== false;
   const owedMeetings = useOwedMeetings(storeOpen, view);
+  // What a "who did you meet?" card was given and not yet saved holds people's names and a note: it
+  // goes when the store closes behind a lock, as the rest of the people data does.
+  useEffect(() => {
+    if (!storeOpen) forgetAllDrafts();
+  }, [storeOpen]);
   /** The meetings the dialog is showing, when it is open (Review on the strip, or on the People tab). */
   const [meetingDialog, setMeetingDialog] = useState<OwedMeeting[] | null>(null);
 

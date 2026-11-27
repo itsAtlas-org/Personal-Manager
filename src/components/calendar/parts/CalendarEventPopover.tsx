@@ -41,6 +41,7 @@ import type {
   CalendarEvent,
   Flag,
   Milestone,
+  OwedKnownGuest,
   Rsvp,
   RsvpScope,
   WriteOutcome,
@@ -54,7 +55,7 @@ import {
 } from "../../../lib/calendarEdit/editReasons";
 import { responseLabel, type Reply } from "../../../lib/calendarEdit/guests";
 import { linkTarget, parseDescription } from "../../../lib/calendarEdit/descriptionHtml";
-import { eventFlags, openUrl } from "../../../lib/ipc";
+import { eventFlags, eventGuests, getPerson, openUrl } from "../../../lib/ipc";
 import { dismissLinkFailure } from "../../../lib/linkFailure";
 import { eventIsPast } from "../../../lib/meetings";
 import { useRestoreFocus } from "../../../lib/useRestoreFocus";
@@ -80,6 +81,9 @@ interface Props {
   milestone: Milestone | null;
   onClose: () => void;
   onOpenProject?: (project: string) => void;
+  /** Open a person's record (spec 3.1). Given, a guest PM knows from People is a link to their
+   *  record; without it (Focus › Upcoming) every guest is plain text and PM never looks them up. */
+  onOpenPerson?: (uid: string) => void;
   /** What PM may do to the event (#884). Passed only by CalendarView; without it the popover is
    *  read-only, as FocusUpcoming shows it. */
   editing?: PopoverEditing;
@@ -242,6 +246,7 @@ export function CalendarEventPopover({
   milestone,
   onClose,
   onOpenProject,
+  onOpenPerson,
   editing,
   onLogMeeting,
   closeRef,
@@ -387,6 +392,45 @@ export function CalendarEventPopover({
 
   const attendees = event.attendees ?? [];
 
+  // Which guests PM knows from People (not in Trash), asked once when the popover opens on an event
+  // (and again only if it is re-pointed at another): the guests' addresses go to the backend, the
+  // people it matches come back. Kept with the event it was asked for, so one event's people never
+  // show on the next. A failed read leaves every guest as plain text, with nothing said.
+  const addresses = attendees.map((a) => a.email ?? "").join("\n");
+  const canLookUp = !!onOpenPerson && attendees.some((a) => a.email);
+  const [known, setKnown] = useState<{ id: string; byEmail: Map<string, OwedKnownGuest> } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!canLookUp) return;
+    let alive = true;
+    eventGuests(event.attendees ?? [])
+      .then((got) => {
+        if (!alive) return;
+        setKnown({
+          id: event.id,
+          byEmail: new Map(got.known.map((g) => [g.email.trim().toLowerCase(), g])),
+        });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // `event.attendees` is what `addresses` is made of; the address list is the dependency, so a new
+    // array with the same guests doesn't ask again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event.id, addresses, canLookUp]);
+  const people = known?.id === event.id ? known.byEmail : null;
+
+  async function openGuest(id: number) {
+    try {
+      const person = await getPerson(id);
+      if (person?.uid) onOpenPerson?.(person.uid);
+    } catch {
+      // A link that can't be followed just doesn't go.
+    }
+  }
+
   // A Google description draws its formatting when it has some Google writes (C19b, critique C1-H1);
   // any other keeps the Markdown path, as Outlook's and a feed's always do (DECISIONS 10-10: their
   // "<https://…>" addresses are links there). Read once per description, not per render.
@@ -501,11 +545,23 @@ export function CalendarEventPopover({
             <ul className="flex flex-col gap-0.5">
               {attendees.map((a, i) => {
                 const resp = responseLabel(a.response);
+                const person = a.email ? people?.get(a.email.trim().toLowerCase()) : undefined;
                 return (
                   <li key={a.email ?? a.name ?? i} className="flex min-w-0 gap-1">
                     {/* A long address gives way, never the answer after it. */}
                     <span className="truncate" title={a.email ?? undefined}>
-                      {a.name ?? a.email ?? "(unknown)"}
+                      {person ? (
+                        <button
+                          type="button"
+                          className="text-accent-text underline underline-offset-2 hover:brightness-110"
+                          aria-label={`Open ${person.display_name}`}
+                          onClick={() => void openGuest(person.id)}
+                        >
+                          {person.display_name}
+                        </button>
+                      ) : (
+                        (a.name ?? a.email ?? "(unknown)")
+                      )}
                       {a.optional ? " (optional)" : ""}
                     </span>
                     {resp ? <span className="shrink-0 text-ink4">— {resp}</span> : null}

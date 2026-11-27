@@ -351,6 +351,11 @@ function Sections({
   // focus really did fall to the page, so a click elsewhere in the meantime is not undone.
   const answerAt = useRef<HTMLLIElement>(null);
   const refocusAnswer = useRef(false);
+  // A question answered just before the record moved to someone else must not pull focus when that
+  // person's own answer shows. Declared before the effect below, so it runs first.
+  useEffect(() => {
+    refocusAnswer.current = false;
+  }, [person.id]);
   useEffect(() => {
     if (!refocusAnswer.current || person.leap_day === null) return;
     refocusAnswer.current = false;

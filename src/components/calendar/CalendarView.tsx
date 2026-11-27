@@ -2196,6 +2196,14 @@ export function CalendarView({
                 }
               : undefined
           }
+          onOpenPerson={
+            onOpenPerson
+              ? (uid) => {
+                  setEventPopup(null);
+                  onOpenPerson(uid);
+                }
+              : undefined
+          }
           editing={popoverEditing(popupEvent)}
           describeSeries={writes.describeSeries}
           onLogMeeting={() => {

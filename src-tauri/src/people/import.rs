@@ -156,6 +156,8 @@ impl std::fmt::Debug for ImportHold {
 impl ImportHold {
     /// Hold a parse for the store open now (`epoch`), replacing any earlier one. Returns its id.
     pub fn put(&mut self, epoch: u64, cards: Vec<HeldCard>, at: Instant) -> Result<String> {
+        // The new parse replaces whatever is held, expired or not, so there is no eviction here;
+        // `get` is where an expired parse is let go. An id that can't be made keeps the old entry.
         let id = new_ident()?;
         self.entry = Some(Held {
             id: id.clone(),
@@ -170,22 +172,25 @@ impl ImportHold {
     /// same plain refusal.
     pub fn get(&mut self, id: &str, epoch: u64, at: Instant) -> Result<Arc<Vec<HeldCard>>> {
         // An expired parse is let go here, not kept in memory for the rest of the session.
-        if self
-            .entry
-            .as_ref()
-            .is_some_and(|h| at.duration_since(h.at) >= PREVIEW_HOLD)
-        {
-            self.entry = None;
-        }
+        self.evict_expired(at);
         match &self.entry {
-            Some(h) if h.id == id && h.epoch == epoch && at.duration_since(h.at) < PREVIEW_HOLD => {
-                Ok(Arc::clone(&h.cards))
-            }
+            Some(h) if h.id == id && h.epoch == epoch => Ok(Arc::clone(&h.cards)),
             _ => Err(refuse(STALE)),
         }
     }
 
-    /// Let go of the preview `id` (after it was imported).
+    /// Let go of the held parse when it is over [`PREVIEW_HOLD`] old: it holds contact values.
+    fn evict_expired(&mut self, at: Instant) {
+        if self
+            .entry
+            .as_ref()
+            .is_some_and(|h| at.saturating_duration_since(h.at) >= PREVIEW_HOLD)
+        {
+            self.entry = None;
+        }
+    }
+
+    /// Let go of the preview `id` (after it was imported, or when its dialog was dismissed).
     pub fn finish(&mut self, id: &str) {
         if self.entry.as_ref().is_some_and(|h| h.id == id) {
             self.entry = None;
@@ -882,4 +887,13 @@ pub fn commit_held(
         h.finish(preview_id);
     }
     Ok(result)
+}
+
+/// Forget the preview `preview_id`: its dialog closed without importing, so the parse (contact
+/// values, in memory) goes now rather than at its ten minutes. Another preview, a newer one the
+/// user has since picked, is left alone; so is an id nothing holds.
+pub fn discard_held(hold: &Mutex<ImportHold>, preview_id: &str) {
+    if let Ok(mut h) = hold.lock() {
+        h.finish(preview_id);
+    }
 }

@@ -22,6 +22,7 @@ const ipc = vi.hoisted(() => ({
   listLabels: vi.fn(),
   pickVcardAndPreview: vi.fn(),
   commitVcardImport: vi.fn(),
+  discardVcardPreview: vi.fn(),
   exportPeople: vi.fn(),
   peopleDuplicatesSnapshot: vi.fn(),
 }));
@@ -140,6 +141,7 @@ beforeEach(() => {
   ipc.listPeople.mockImplementation(async (f: PeopleFilter) => answer(f));
   ipc.listLabels.mockResolvedValue(LABELS);
   ipc.peopleDuplicatesSnapshot.mockResolvedValue(null);
+  ipc.discardVcardPreview.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -230,6 +232,60 @@ describe("the import dialog's preview", () => {
     cleanup();
     await act(async () => late(preview()));
     expect(onClose).toHaveBeenCalledOnce();
+    // The file it read after all is let go of at once: nothing will ever import it.
+    expect(ipc.discardVcardPreview).toHaveBeenCalledExactlyOnceWith("prev-1");
+  });
+
+  it("forgets the file when the dialog closes without importing", async () => {
+    // Cancel, Escape and the backdrop all end here; so does the dialog simply going away.
+    ipc.pickVcardAndPreview.mockResolvedValue(preview());
+    const first = await importDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(first.onClose).toHaveBeenCalledOnce();
+    expect(ipc.discardVcardPreview).toHaveBeenCalledExactlyOnceWith("prev-1");
+    // Once: going away after that is nothing more to say.
+    cleanup();
+    expect(ipc.discardVcardPreview).toHaveBeenCalledOnce();
+
+    ipc.discardVcardPreview.mockClear();
+    ipc.pickVcardAndPreview.mockResolvedValue(preview({ preview_id: "prev-2" }));
+    await importDialog();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(ipc.discardVcardPreview).toHaveBeenCalledExactlyOnceWith("prev-2");
+    cleanup();
+
+    ipc.discardVcardPreview.mockClear();
+    ipc.pickVcardAndPreview.mockResolvedValue(preview({ preview_id: "prev-3" }));
+    await importDialog();
+    cleanup();
+    expect(ipc.discardVcardPreview).toHaveBeenCalledExactlyOnceWith("prev-3");
+  });
+
+  it("does not discard when the picker is cancelled, or after a file was imported", async () => {
+    ipc.pickVcardAndPreview.mockResolvedValue(null);
+    await importDialog();
+    cleanup();
+    expect(ipc.discardVcardPreview).not.toHaveBeenCalled();
+
+    ipc.pickVcardAndPreview.mockResolvedValue(preview());
+    ipc.commitVcardImport.mockResolvedValue(result());
+    await importDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    cleanup();
+    expect(ipc.discardVcardPreview).not.toHaveBeenCalled();
+  });
+
+  it("keeps the file while an import fails for another reason, and lets it go on Cancel", async () => {
+    ipc.pickVcardAndPreview.mockResolvedValue(preview());
+    ipc.commitVcardImport.mockRejectedValueOnce("Something broke.");
+    await importDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await act(async () => {});
+    expect(ipc.discardVcardPreview).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(ipc.discardVcardPreview).toHaveBeenCalledExactlyOnceWith("prev-1");
   });
 
   it("says the too-big message plainly and offers to pick again", async () => {

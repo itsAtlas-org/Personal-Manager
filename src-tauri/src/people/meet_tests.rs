@@ -284,6 +284,19 @@ fn table(conn: &Connection, now: DateTime<Utc>, z: Tz) -> BTreeSet<String> {
     e.calendar = OUTLOOK;
     e.guests.push(outlook_me("accepted"));
     add("o-accepted", true, e);
+    // An Outlook invite someone else sent to the user alone: the parser lists its organiser the way
+    // Google does (`graph_attendees`), with Graph's "organizer" status, so it is owed.
+    let organiser = json!({ "name": "Olive Organiser", "email": "olive.organiser@example.com",
+                            "response": "organizer", "optional": false, "organizer": true,
+                            "self": false });
+    let mut e = ev("o-invited", &hours(-4), Some(&hours(-3)), false);
+    e.calendar = OUTLOOK;
+    e.guests = vec![outlook_me("accepted"), organiser.clone()];
+    add("o-invited", true, e);
+    let mut e = ev("o-invited-declined", &hours(-4), Some(&hours(-3)), false);
+    e.calendar = OUTLOOK;
+    e.guests = vec![outlook_me("declined"), organiser];
+    add("o-invited-declined", false, e);
     // ICS: nobody can be identified as the user, so a "declined" guest is somebody else's answer
     // and the meeting is asked about.
     let mut e = ev("ics-nobody", &hours(-4), Some(&hours(-3)), false);

@@ -95,6 +95,8 @@ fn rich() -> PersonDraft {
             },
             d("former_name", "", "Ada Maiden"),
             d("custom", "Pet; name", "Rex"),
+            // The importer's own row for a birthday it couldn't read: it must survive a file too.
+            d("custom", "Birthday (as written)", "circa 1800"),
             d("nickname", "", "Addie"),
             d("nickname", "", "Lady A"),
             d("date", "Anniversary", "2010-06-01"),
@@ -591,6 +593,67 @@ fn an_old_or_replaced_preview_refuses_and_a_clear_forgets_it() {
 }
 
 #[test]
+fn a_dismissed_preview_is_forgotten() {
+    let (_dir, conn) = store();
+    let hold = Mutex::new(ImportHold::default());
+    let cards = || prepare(parse_vcf(b"BEGIN:VCARD\nFN:Hana Example\nEND:VCARD\n")).cards;
+    let t0 = Instant::now();
+    let first = hold.lock().unwrap().put(1, cards(), t0).unwrap();
+    import::discard_held(&hold, &first);
+    // The dialog closed: the id no longer commits, and nothing is held.
+    assert!(format!("{:?}", hold.lock().unwrap()).contains("held: false"));
+    assert_eq!(
+        commit_held(&conn, &hold, 1, &first, &plain(), t0)
+            .unwrap_err()
+            .to_string(),
+        STALE
+    );
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM people"), 0);
+
+    // A discard from a dialog that was already replaced must not drop the newer preview; nor does
+    // an id nothing holds.
+    let second = hold.lock().unwrap().put(1, cards(), t0).unwrap();
+    import::discard_held(&hold, &first);
+    import::discard_held(&hold, "no-such-preview");
+    assert_eq!(
+        commit_held(&conn, &hold, 1, &second, &plain(), t0)
+            .unwrap()
+            .added,
+        1
+    );
+    // Discarding after the import went through is nothing to do.
+    import::discard_held(&hold, &second);
+}
+
+#[test]
+fn an_expired_preview_is_gone_after_a_get_and_replaced_by_the_next_put() {
+    let (_dir, conn) = store();
+    let hold = Mutex::new(ImportHold::default());
+    let cards = || prepare(parse_vcf(b"BEGIN:VCARD\nFN:Hana Example\nEND:VCARD\n")).cards;
+    let held = |h: &Mutex<ImportHold>| format!("{:?}", h.lock().unwrap()).contains("held: true");
+    let t0 = Instant::now();
+    let late = t0 + Duration::from_secs(10 * 60 + 1);
+
+    // A get past the ten minutes lets go of it (and refuses).
+    let old = hold.lock().unwrap().put(1, cards(), t0).unwrap();
+    assert!(held(&hold));
+    assert!(commit_held(&conn, &hold, 1, &old, &plain(), late).is_err());
+    assert!(!held(&hold), "an expired parse is not kept after a get");
+
+    // A put replaces what is held, expired or not (put does not evict on its own): the old id
+    // refuses, the new one commits.
+    let stale = hold.lock().unwrap().put(1, cards(), t0).unwrap();
+    let fresh = hold.lock().unwrap().put(1, cards(), late).unwrap();
+    assert!(commit_held(&conn, &hold, 1, &stale, &plain(), late).is_err());
+    assert_eq!(
+        commit_held(&conn, &hold, 1, &fresh, &plain(), late)
+            .unwrap()
+            .added,
+        1
+    );
+}
+
+#[test]
 fn a_refused_import_leaves_nothing_behind() {
     let (_dir, conn) = store();
     // A label the import can't make (too long) refuses the whole file after the people before it.
@@ -688,6 +751,52 @@ fn a_label_cannot_inject_a_vcard_parameter() {
     let email_line = vcf.split("\r\n").find(|l| l.contains(".EMAIL")).unwrap();
     assert!(email_line.ends_with(";TYPE=INTERNET:mal@example.com"));
     // And it reads back as the label it was.
+    let back = parse_vcf(vcf.as_bytes());
+    assert!(back.cards[0] == card_of(&conn, id));
+}
+
+#[test]
+fn a_custom_label_cannot_inject_a_vcard_parameter() {
+    let (_dir, conn) = store();
+    let evil = "x;TYPE=EVIL:y";
+    let id = create_person(
+        &conn,
+        &PersonDraft {
+            details: vec![
+                d("custom", evil, "Rex"),
+                d("custom", "line\nX-PM-CUSTOM:forged", "Fido"),
+                d("custom", "Birthday (as written)", "circa 1800"),
+                d("custom", "", "no label"),
+                d("school", "", "Example; University\nFN:Forged"),
+                d("former_name", "", "Ada\r\nTEL:+1 555 0100 Maiden"),
+            ],
+            ..draft("Mal", "Example")
+        },
+    )
+    .unwrap();
+    let vcf = export_vcf(&conn, &all());
+    // The label is the escaped value of its own X-ABLabel, never a parameter or a line of its own.
+    assert!(vcf.contains("X-ABLabel:x\\;TYPE=EVIL:y\r\n"));
+    for line in vcf.split("\r\n") {
+        assert!(
+            !line.replace("\\;", "").contains(";TYPE=EVIL"),
+            "a custom label became a parameter"
+        );
+        assert!(
+            !line.starts_with("FN:Forged")
+                && !line.starts_with("TEL:")
+                && !line.starts_with("X-PM-CUSTOM:forged"),
+            "a value or label started a line"
+        );
+    }
+    assert_eq!(
+        vcf.split("\r\n")
+            .filter(|l| l.starts_with("X-PM-CUSTOM:") || l.contains(".X-PM-CUSTOM:"))
+            .count(),
+        4,
+        "four custom rows, no forged fifth"
+    );
+    // Every one reads back as what it was, including the importer's own "as written" row.
     let back = parse_vcf(vcf.as_bytes());
     assert!(back.cards[0] == card_of(&conn, id));
 }

@@ -401,6 +401,38 @@ describe("dates", () => {
     expect(document.activeElement).toBe(line.closest("li"));
   });
 
+  it("does not pull focus to someone else's answer when the record moved on after a click", async () => {
+    ipc.updatePerson.mockResolvedValue({ id: 1, display_name: "Ada Example", updated_at: "x" });
+    const asked = bare({ birthday: "--02-29" });
+    const other = {
+      ...bare({ birthday: "--02-29", leap_day: "feb28" }),
+      id: 2,
+      display_name: "Ben",
+    };
+    ipc.getPerson.mockResolvedValue(asked);
+    const ui = (who: typeof asked, id: number) => (
+      <ThemeProvider>
+        <PersonRecord
+          row={{ ...row, id, display_name: who.display_name }}
+          version={0}
+          labels={LABELS}
+          {...handlers}
+        />
+      </ThemeProvider>
+    );
+    const { rerender } = render(ui(asked, 1));
+    await act(async () => {});
+    const button = screen.getByRole("button", { name: "1 March" });
+    button.focus();
+    fireEvent.click(button);
+    // The click is answered, but before the re-read lands the list moves to someone else.
+    ipc.getPerson.mockResolvedValue(other);
+    rerender(ui(other, 2));
+    await act(async () => {});
+    const line = screen.getByText("In years without 29 February, marked on 28 February.");
+    expect(document.activeElement).not.toBe(line.closest("li"));
+  });
+
   it("says the answer instead once there is one, and does not ask again", async () => {
     await show(bare({ birthday: "--02-29", leap_day: "feb28" }));
     const dates = region("Dates")!;

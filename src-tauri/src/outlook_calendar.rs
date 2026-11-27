@@ -241,21 +241,30 @@ fn graph_show_as(e: &Value) -> Option<String> {
     .map(str::to_string)
 }
 
-/// Graph attendees → the shared `Attendee` shape (empty when none). Graph doesn't flag self/organizer
-/// on an attendee row, so those stay false; the organiser is carried separately (`graph_organizer`).
+/// Graph attendees → the shared `Attendee` shape (empty when none). Graph doesn't flag self on an
+/// attendee row, so that stays false.
+///
+/// Graph also leaves the organiser out of `attendees`, where Google lists them flagged
+/// `organizer`. So a meeting with guests gets its organiser added here the same way (or the matching
+/// row flagged), and Outlook and Google guest lists read alike: a one-to-one invite someone else
+/// sent names them as well as the user, which is who "Who did you meet?" asks about. An event with
+/// no guests stays empty, as Google's does.
 fn graph_attendees(e: &Value) -> Vec<Attendee> {
-    e.get("attendees")
+    let text = |v: Option<&Value>, key: &str| {
+        v.and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let mut list: Vec<Attendee> = e
+        .get("attendees")
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
                 .map(|a| {
                     let email = a.get("emailAddress");
                     Attendee {
-                        name: email
-                            .and_then(|m| m.get("name"))
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string),
+                        name: text(email, "name"),
                         email: email
                             .and_then(|m| m.get("address"))
                             .and_then(Value::as_str)
@@ -272,7 +281,29 @@ fn graph_attendees(e: &Value) -> Vec<Attendee> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let host = e.get("organizer").and_then(|o| o.get("emailAddress"));
+    if let (false, Some(address)) = (list.is_empty(), text(host, "address")) {
+        let key = address.trim().to_lowercase();
+        let listed = list.iter_mut().find(|a| {
+            a.email
+                .as_deref()
+                .is_some_and(|m| m.trim().to_lowercase() == key)
+        });
+        match listed {
+            Some(row) => row.organizer = true,
+            None => list.push(Attendee {
+                name: text(host, "name"),
+                email: Some(address),
+                // Graph's own word for the organiser's status, which the popover names.
+                response: Some("organizer".to_string()),
+                optional: false,
+                organizer: true,
+                is_self: false,
+            }),
+        }
+    }
+    list
 }
 
 /// The organiser as a display string (name preferred, else the address).
@@ -596,6 +627,65 @@ mod tests {
         assert!(allday.all_day);
         assert_eq!(allday.start, "2026-06-28");
         assert_eq!(allday.end.as_deref(), Some("2026-06-29"));
+    }
+
+    /// Graph keeps the organiser out of `attendees`; the mirror lists them the way Google does, so a
+    /// one-to-one invite someone else sent has a guest besides the user. No guests, no organiser row.
+    #[test]
+    fn a_meeting_lists_its_organiser_among_the_guests_as_google_does() {
+        let event = |attendees: Value, organizer: Value| {
+            serde_json::json!({
+                "subject": "Catch-up", "iCalUId": "UID-O",
+                "start": {"dateTime": "2026-06-27T09:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-06-27T09:30:00.0000000", "timeZone": "UTC"},
+                "isAllDay": false, "attendees": attendees, "organizer": organizer
+            })
+        };
+        let me = serde_json::json!({
+            "emailAddress": {"name": "Me", "address": "me@example.com"},
+            "status": {"response": "accepted"}, "type": "required"
+        });
+        let olive = serde_json::json!({
+            "emailAddress": {"name": "Olive Organiser", "address": "Olive.Organiser@example.com"}
+        });
+
+        // Someone else's invite to the user alone: the organiser joins the list, named and flagged.
+        let got = graph_attendees(&event(serde_json::json!([me]), olive.clone()));
+        assert_eq!(got.len(), 2);
+        let host = &got[1];
+        assert!(host.organizer && !host.is_self && !host.optional);
+        assert_eq!(host.name.as_deref(), Some("Olive Organiser"));
+        assert_eq!(host.email.as_deref(), Some("Olive.Organiser@example.com"));
+        assert_eq!(host.response.as_deref(), Some("organizer"));
+        assert!(!got[0].organizer);
+        // The display line keeps its name, and the parsed event carries the same list.
+        let parsed = parse_event(
+            "outlook:me@example.com:AAA",
+            &event(serde_json::json!([me]), olive.clone()),
+        )
+        .expect("an event");
+        assert_eq!(parsed.organizer.as_deref(), Some("Olive Organiser"));
+        assert_eq!(parsed.attendees, got);
+
+        // Already on the list (in any case): flagged, never doubled.
+        let listed = serde_json::json!({
+            "emailAddress": {"name": "Olive", "address": "olive.organiser@example.com"},
+            "status": {"response": "organizer"}
+        });
+        let got = graph_attendees(&event(serde_json::json!([me, listed]), olive.clone()));
+        assert_eq!(got.len(), 2);
+        assert!(got[1].organizer);
+        assert_eq!(got[1].name.as_deref(), Some("Olive"));
+
+        // An event with no guests (the user's own, or a feed-like booking) gains no organiser row.
+        assert!(graph_attendees(&event(serde_json::json!([]), olive.clone())).is_empty());
+        assert!(graph_attendees(&event(Value::Null, olive)).is_empty());
+        // An organiser with no address adds nothing.
+        let nameless = serde_json::json!({"emailAddress": {"name": "Olive"}});
+        assert_eq!(
+            graph_attendees(&event(serde_json::json!([me]), nameless)).len(),
+            1
+        );
     }
 
     #[test]

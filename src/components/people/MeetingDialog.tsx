@@ -9,6 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { answerMeeting } from "../../lib/ipc";
+import { forgetDraft } from "../../lib/meetingDrafts";
 import { meetingKey } from "../../lib/meetings";
 import { errorWords } from "../../lib/people";
 import type { OwedMeeting } from "../../lib/types";
@@ -71,6 +72,8 @@ export function MeetingDialog({
         if (m.uid === "") continue;
         await answerMeeting(m.uid, m.start, [], "skipped", null, m.title);
         skipped.add(meetingKey(m));
+        // A skipped card's unsaved ticks and note go with it.
+        forgetDraft(m);
       }
     } catch (err) {
       setProblem(errorWords(err));
@@ -85,10 +88,13 @@ export function MeetingDialog({
   }
 
   const many = left.length > 1;
+  // Escape and a click on the backdrop wait for an answer in flight, as the Close button does: a
+  // dialog that vanished under a Save could not say whether it worked.
+  const busy = skipping || inFlight > 0;
   return (
     <Dialog
       open
-      onClose={onClose}
+      onClose={busy ? () => {} : onClose}
       title={title}
       subtitle={
         many
@@ -100,15 +106,11 @@ export function MeetingDialog({
       footer={
         <>
           {many && (
-            <Button
-              variant="tertiary"
-              disabled={skipping || inFlight > 0}
-              onClick={() => void skipAll()}
-            >
+            <Button variant="tertiary" disabled={busy} onClick={() => void skipAll()}>
               Skip all
             </Button>
           )}
-          <Button variant="secondary" disabled={skipping || inFlight > 0} onClick={onClose}>
+          <Button variant="secondary" disabled={busy} onClick={onClose}>
             Close
           </Button>
         </>
@@ -132,7 +134,7 @@ export function MeetingDialog({
             meeting={m}
             locked={skipping}
             onAnswered={gone}
-            onBusy={(busy) => setInFlight((n) => n + (busy ? 1 : -1))}
+            onBusy={(on) => setInFlight((n) => n + (on ? 1 : -1))}
             onOpenPerson={onOpenPerson}
           />
         ))}

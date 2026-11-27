@@ -13,14 +13,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { formatClock, formatEventWhen } from "../../lib/format";
 import { answerMeeting, getPerson } from "../../lib/ipc";
-import {
-  foldGuests,
-  guestKey,
-  guestLine,
-  initialTicks,
-  personKey,
-  refsFor,
-} from "../../lib/meetings";
+import { foldGuests, guestKey, guestLine, personKey, refsFor } from "../../lib/meetings";
+import { forgetDraft, keepDraft, restoreDraft } from "../../lib/meetingDrafts";
 import { errorWords } from "../../lib/people";
 import type { MeetingAnswer, OwedMeeting, PersonRow } from "../../lib/types";
 import { Button, Callout, Textarea } from "../ui";
@@ -49,11 +43,14 @@ function whenLine(m: OwedMeeting): string {
 
 export function MeetCard({ meeting, onAnswered, onOpenPerson, locked, onBusy }: Props) {
   const base = useId();
-  const [ticks, setTicks] = useState<Set<string>>(() => initialTicks(meeting));
+  // What was ticked, picked and written before the dialog last closed (clicking a guest's name
+  // opens their record and closes it), kept in memory by `meetingDrafts`; else a fresh card.
+  const [kept] = useState(() => restoreDraft(meeting));
+  const [ticks, setTicks] = useState<Set<string>>(kept.ticks);
   // People picked with "Someone else…": ticked, and listed under the guests.
-  const [extra, setExtra] = useState<PersonRow[]>([]);
+  const [extra, setExtra] = useState<PersonRow[]>(kept.extra);
   const [picking, setPicking] = useState(false);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(kept.note);
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -66,6 +63,13 @@ export function MeetCard({ meeting, onAnswered, onOpenPerson, locked, onBusy }: 
       elseButton.current?.focus();
     }
   }, [picking]);
+
+  // Unsaved input is kept as it changes, so it survives the dialog closing; an answered card has
+  // had its entry dropped by the dialog and must not write it back.
+  const answered = useRef(false);
+  useEffect(() => {
+    if (!answered.current) keepDraft(meeting, { ticks, extra, note });
+  }, [meeting, ticks, extra, note]);
 
   const { shown, hidden } = foldGuests(meeting.unknown, expanded);
   const refs = useMemo(() => refsFor(meeting, ticks, extra), [meeting, ticks, extra]);
@@ -100,6 +104,8 @@ export function MeetCard({ meeting, onAnswered, onOpenPerson, locked, onBusy }: 
         how === "logged" ? note.trim() || null : null,
         meeting.title,
       );
+      answered.current = true;
+      forgetDraft(meeting);
       onAnswered(meeting);
     } catch (err) {
       setProblem(errorWords(err));

@@ -13,16 +13,20 @@
 // be wrong. There is no scrim, the calendar behind stays live, and clicking a different event is how
 // you move between them — Tab must be able to leave.
 
-import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAsk, Calendar, CalendarEvent, WriteOutcome } from "../../../lib/types";
 
 const eventFlags = vi.fn();
 const openUrl = vi.fn();
+const eventGuests = vi.fn();
+const getPerson = vi.fn();
 
 vi.mock("../../../lib/ipc", () => ({
   eventFlags: (...a: unknown[]) => eventFlags(...a),
   openUrl: (...a: unknown[]) => openUrl(...a),
+  eventGuests: (...a: unknown[]) => eventGuests(...a),
+  getPerson: (...a: unknown[]) => getPerson(...a),
 }));
 
 // The description is untrusted provider text and renders through the real sanitising boundary in the
@@ -110,6 +114,8 @@ function chip(label: string): HTMLElement {
 beforeEach(() => {
   eventFlags.mockResolvedValue([]);
   openUrl.mockResolvedValue(undefined);
+  eventGuests.mockResolvedValue({ known: [], unknown: [] });
+  getPerson.mockResolvedValue(null);
   markdownView.mockImplementation(plainMarkdown);
 });
 
@@ -1420,5 +1426,130 @@ describe("Log who you met", () => {
   it("does not offer it where the calendar can't log (Focus › Upcoming passes no handler)", () => {
     const view = popover(past);
     expect(view.queryByRole("button", { name: "Log who you met" })).toBeNull();
+  });
+});
+
+describe("Guests who are people", () => {
+  const guest = (name: string | null, email: string) => ({
+    name,
+    email,
+    response: "accepted",
+    optional: false,
+    organizer: false,
+    self: false,
+  });
+  const ANN_UID = "a".repeat(32);
+  const popover = (
+    attendees = [
+      guest("Ann A.", "ann@example.com"),
+      guest("Newt Nobody", "newt@example.com"),
+      guest("Tess Trashed", "tess@example.com"),
+    ],
+    onOpenPerson: ((uid: string) => void) | null = vi.fn(),
+    id = "e1",
+  ) =>
+    render(
+      <CalendarEventPopover
+        event={calendarEvent({ id, attendees })}
+        anchor={rect(100)}
+        calendar={null}
+        color="#000"
+        milestone={null}
+        onClose={() => {}}
+        onOpenPerson={onOpenPerson ?? undefined}
+      />,
+    );
+  const known = [{ id: 3, display_name: "Ann Able", email: "Ann@Example.com" }];
+  const sorted = {
+    known,
+    unknown: [
+      { name: "Newt Nobody", email: "newt@example.com", trashed_id: null },
+      { name: "Tess Trashed", email: "tess@example.com", trashed_id: 8 },
+    ],
+  };
+
+  it("makes a known guest's name a button that opens the record by the person's uid", async () => {
+    eventGuests.mockResolvedValue(sorted);
+    getPerson.mockResolvedValue({ uid: ANN_UID });
+    const onOpenPerson = vi.fn();
+    const view = popover(undefined, onOpenPerson);
+    const link = await view.findByRole("button", { name: "Open Ann Able" });
+    expect(link.tagName).toBe("BUTTON");
+    expect(link.textContent).toBe("Ann Able");
+    fireEvent.click(link);
+    await waitFor(() => expect(onOpenPerson).toHaveBeenCalledExactlyOnceWith(ANN_UID));
+    expect(getPerson).toHaveBeenCalledWith(3);
+  });
+
+  it("leaves a guest PM doesn't know, and one in Trash, as plain text", async () => {
+    eventGuests.mockResolvedValue(sorted);
+    const view = popover();
+    await view.findByRole("button", { name: "Open Ann Able" });
+    expect(view.getByText("Newt Nobody")).toBeTruthy();
+    expect(view.getByText("Tess Trashed")).toBeTruthy();
+    expect(view.queryByRole("button", { name: /Newt|Tess/ })).toBeNull();
+    expect(view.getAllByRole("button", { name: /^Open / })).toHaveLength(1);
+  });
+
+  it("asks once when it opens, not on every render", async () => {
+    eventGuests.mockResolvedValue(sorted);
+    const attendees = [guest("Ann A.", "ann@example.com")];
+    const view = popover(attendees);
+    await view.findByRole("button", { name: "Open Ann Able" });
+    view.rerender(
+      <CalendarEventPopover
+        event={calendarEvent({ id: "e1", attendees: [...attendees] })}
+        anchor={rect(100)}
+        calendar={null}
+        color="#000"
+        milestone={null}
+        onClose={() => {}}
+        onOpenPerson={vi.fn()}
+      />,
+    );
+    expect(eventGuests).toHaveBeenCalledOnce();
+    expect(eventGuests).toHaveBeenCalledWith(attendees);
+  });
+
+  it("says nothing and shows plain names when the read fails", async () => {
+    eventGuests.mockRejectedValue("nope");
+    const view = popover();
+    await act(async () => {});
+    expect(view.getByText("Ann A.")).toBeTruthy();
+    expect(view.queryByRole("button", { name: /^Open / })).toBeNull();
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("doesn't look anyone up where it can't open a record", async () => {
+    eventGuests.mockResolvedValue(sorted);
+    const view = popover(undefined, null);
+    await act(async () => {});
+    expect(eventGuests).not.toHaveBeenCalled();
+    expect(view.getByText("Ann A.")).toBeTruthy();
+  });
+
+  it("doesn't carry one event's people over to the next it is pointed at", async () => {
+    eventGuests.mockResolvedValue(sorted);
+    const view = popover();
+    await view.findByRole("button", { name: "Open Ann Able" });
+    // The panel is re-pointed at another event with the same address on it: until its own answer
+    // arrives the first event's link is gone.
+    let answer: (v: unknown) => void = () => {};
+    eventGuests.mockReturnValue(new Promise((r) => (answer = r)));
+    view.rerender(
+      <CalendarEventPopover
+        event={calendarEvent({ id: "e2", attendees: [guest("Ann A.", "ann@example.com")] })}
+        anchor={rect(100)}
+        calendar={null}
+        color="#000"
+        milestone={null}
+        onClose={() => {}}
+        onOpenPerson={vi.fn()}
+      />,
+    );
+    expect(view.queryByRole("button", { name: "Open Ann Able" })).toBeNull();
+    await act(async () => answer(sorted));
+    expect(view.getByRole("button", { name: "Open Ann Able" })).toBeTruthy();
+    expect(eventGuests).toHaveBeenCalledTimes(2);
   });
 });

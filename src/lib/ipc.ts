@@ -1381,6 +1381,11 @@ export const pickVcardAndPreview = () =>
 export const commitVcardImport = (previewId: string, options: PeopleImportOptions) =>
   invoke<PeopleImportResult>("commit_vcard_import", { previewId, options });
 
+/** Forget a preview whose dialog closed without importing, so the file's contacts don't stay in
+ *  memory for the rest of the ten minutes. Writes nothing; an id that is already gone is fine. */
+export const discardVcardPreview = (previewId: string) =>
+  invoke<void>("discard_vcard_preview", { previewId });
+
 /** Write people as a vCard file, and with `timeline` their timeline as a spreadsheet beside it. The
  *  backend opens the save dialog. Resolves to `null` when it is cancelled. */
 export const exportPeople = (scope: PeopleExportScope, timeline: boolean) =>

@@ -11,12 +11,14 @@
 //   done      what the import did: who came back from Trash, where PM kept its own details, and
 //             "Review possible duplicates".
 // The parse is held in the backend for ten minutes. If it has gone stale when Import is pressed the
-// backend refuses in plain words, writes nothing, and the dialog offers to pick the file again.
+// backend refuses in plain words, writes nothing, and the dialog offers to pick the file again. A
+// dialog that closes without importing (Cancel, Escape, the backdrop, or simply going away) tells
+// the backend to forget the file at once, so its contacts don't sit in memory for the ten minutes.
 //
 // The file's name and the people's names come from outside: they are rendered as text only.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { commitVcardImport, pickVcardAndPreview } from "../../lib/ipc";
+import { commitVcardImport, discardVcardPreview, pickVcardAndPreview } from "../../lib/ipc";
 import { errorWords, foldName } from "../../lib/people";
 import {
   KEPT_SHOWN,
@@ -61,6 +63,23 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
   // True once the dialog has gone: a picker that answers late (or never) must not touch it. The
   // person can close the dialog while the picker is out, so a hidden or stuck picker never traps them.
   const gone = useRef(false);
+  // The preview held in the backend that nothing has imported yet.
+  const held = useRef<string | null>(null);
+
+  /** Tell the backend to forget the file, once, if it is still held. A failure is no one's problem:
+   *  the hold lapses by itself. */
+  function discardHeld() {
+    const id = held.current;
+    if (id === null) return;
+    held.current = null;
+    discardVcardPreview(id).catch(() => {});
+  }
+
+  /** Close the dialog without importing (or after): the held file, if any, is let go first. */
+  function close() {
+    discardHeld();
+    onClose();
+  }
 
   /** Open the picker, then read the file. Nothing else is on screen while it is out. */
   async function pick() {
@@ -68,11 +87,16 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
     setProblem(null);
     try {
       const preview = await pickVcardAndPreview();
-      if (gone.current) return;
+      if (gone.current) {
+        // The dialog went while the picker was out: nothing will ever import this one.
+        if (preview) discardVcardPreview(preview.preview_id).catch(() => {});
+        return;
+      }
       if (preview === null) {
         onClose();
         return;
       }
+      held.current = preview.preview_id;
       setStep({ kind: "preview", preview });
     } catch (err) {
       if (gone.current) return;
@@ -89,6 +113,7 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
     }
     return () => {
       gone.current = true;
+      discardHeld();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -107,9 +132,13 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
     setProblem(null);
     try {
       const result = await commitVcardImport(preview.preview_id, { label: labelName() });
+      // Imported: the backend let the parse go itself.
+      held.current = null;
       setStep({ kind: "done", result });
     } catch (err) {
       if (isStalePreview(err)) {
+        // The backend no longer holds it.
+        held.current = null;
         // Nothing was written: the file has to be read again, which is a new picker.
         setStep({ kind: "failed", words: errorWords(err) });
       } else {
@@ -127,14 +156,14 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
   if (step.kind === "done") title = "Import finished";
 
   let footer = (
-    <Button variant="tertiary" onClick={onClose} disabled={locked}>
+    <Button variant="tertiary" onClick={close} disabled={locked}>
       Cancel
     </Button>
   );
   if (step.kind === "preview") {
     footer = (
       <>
-        <Button variant="tertiary" onClick={onClose} disabled={busy}>
+        <Button variant="tertiary" onClick={close} disabled={busy}>
           Cancel
         </Button>
         <Button
@@ -149,7 +178,7 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
   } else if (step.kind === "failed") {
     footer = (
       <>
-        <Button variant="tertiary" onClick={onClose}>
+        <Button variant="tertiary" onClick={close}>
           Cancel
         </Button>
         <Button variant="primary" onClick={() => void pick()}>
@@ -165,13 +194,13 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
             variant="secondary"
             onClick={() => {
               onReview();
-              onClose();
+              close();
             }}
           >
             Review possible duplicates
           </Button>
         )}
-        <Button variant="primary" onClick={onClose}>
+        <Button variant="primary" onClick={close}>
           Done
         </Button>
       </>
@@ -182,7 +211,7 @@ export function ImportVcardDialog({ labels, onClose, onReview }: Props) {
     <Dialog
       open
       onClose={() => {
-        if (!locked) onClose();
+        if (!locked) close();
       }}
       title={title}
       helpId="people-import"
