@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.206.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "You can now set a daily spending limit for OpenRouter, OpenAI, Gemini or Anthropic. It's off until you turn it on, and starts from $5 a day. Once PM has logged that much spent on a provider, it stops sending new requests there until 00:00 in your day, or until you raise or clear the limit. It's on each provider's card in Your own keys, and under your OpenRouter key.",
+      "A paused own-key provider (OpenAI, Gemini or Anthropic) says so on its card, in the chat chip and under Chat or Background. A paused OpenRouter says so under its key. The reply that was refused says why. PM never sends it to another company on its own: you choose. If OpenRouter is paused, a mod's AI calls are paused with it.",
+      "Usage shows a 'Today' line for each limit that is on. It says 'at least' when some of today's calls couldn't be priced in full. The reply that crosses the line can go over a little, and PM counts only what it logged: a reply that fails halfway, or a key used outside PM or on another computer, isn't counted. For a hard stop, also set a limit in your provider's account.",
+      "A limit stays when you reset the tab, and it travels in a backup. A Gemini key that PM has found to be free has nothing to limit, so its switch can't be turned on. If PM can't read today's usage while a limit is on, it pauses that provider to be safe and says so.",
+      "On battery, PM never moves a role onto a provider your limit has paused.",
+      "Fixed: when a provider refused to summarise a stretch of a chat, PM asked again every few minutes, paying each time. It now asks once until PM restarts.",
+    ],
+  },
+  {
     version: "3.205.0-alpha",
     date: "2026-11-27",
     highlights: [

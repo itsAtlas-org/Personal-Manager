@@ -7,6 +7,7 @@
 // component. What a request does, where it goes and what a move is stays in Rust: this file only
 // words what the backend's own answers say (`direct_providers_state`, the key check, a `RoleMove`).
 
+import { pausedLine } from "./dailyLimit";
 import type {
   CloudProviderId,
   DirectModelView,
@@ -15,6 +16,7 @@ import type {
   KeyCheckResult,
   KeyOutcome,
   KeyTier,
+  LimitView,
   ModelInfo,
   RegionRefusal,
   RoleMove,
@@ -966,7 +968,8 @@ export function providerView(
 }
 
 /** Why a role's stored provider can't answer, or null when nothing is wrong. */
-export type RoleIssue = "turned_off" | "key_missing" | "key_unreadable" | "blocked" | "no_credit";
+export type RoleIssue =
+  "turned_off" | "key_missing" | "key_unreadable" | "blocked" | "limit_reached" | "no_credit";
 
 export function roleIssue(state: DirectProvidersState, role: RoleName): RoleIssue | null {
   const r = state.roles[role];
@@ -979,6 +982,8 @@ export function roleIssue(state: DirectProvidersState, role: RoleName): RoleIssu
   // Paused beats an empty balance: the pause is the thing the person can fix first, and Rust only
   // sets `blocked` for a key that is here and a provider that is on.
   if (p.blocked) return "blocked";
+  // The person's own daily limit: a pause too, and one that ends by itself at midnight.
+  if (p.limit.reached) return "limit_reached";
   if (p.key_check?.outcome === "no_credit") return "no_credit";
   return null;
 }
@@ -989,6 +994,8 @@ export interface IssueContext {
   id?: CloudProviderId | string;
   blocked?: RegionRefusal | null;
   tier?: KeyTier | null;
+  /** The provider's daily limit, for a role paused by it. */
+  limit?: LimitView;
 }
 
 /** The sentence for a role's issue (the "turned off" one also carries a button, drawn by the caller). */
@@ -1017,6 +1024,12 @@ export function roleIssueLine(
         : "your key reads as free";
       return `${who} is set to ${providerLabel}, but ${short} is paused (${why}). ${who} won't answer until the project is paid, or until you pick another provider.`;
     }
+    case "limit_reached":
+      return `${who} is set to ${providerLabel}. ${
+        ctx?.limit
+          ? pausedLine(ctx.limit, providerLabel)
+          : "Paused for today by your daily limit. It starts again at 00:00 (your day), or sooner if you raise the limit."
+      } PM won't send this to another company on its own.`;
     case "no_credit":
       return info
         ? info.noCredit.role(who)
@@ -1036,6 +1049,12 @@ export function unavailableLabel(
   if (issue === "key_unreadable") return `${name} (key unreadable)`;
   if (issue === "key_missing") return `${name} (no key)`;
   if (issue === "blocked") return `${name} (paused)`;
+  if (issue === "limit_reached") {
+    // An unreadable limit does not lift at midnight, so "for today" would promise too much.
+    return providerView(state, id)?.limit.unreadable
+      ? `${name} (paused)`
+      : `${name} (paused for today)`;
+  }
   if (issue === "no_credit" && directInfo(id)?.noCredit.offered === false) {
     return `${name} (out of credit)`;
   }

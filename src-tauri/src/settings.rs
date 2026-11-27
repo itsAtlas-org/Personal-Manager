@@ -415,7 +415,11 @@ pub fn set_time_zone(state: State<'_, AppState>, zone: String) -> Result<()> {
         return Err(Error::Other(format!("unrecognised time zone: {zone}")));
     }
     let conn = state.conn()?;
-    db::set_setting(&conn, TIME_ZONE_KEY, zone)
+    db::set_setting(&conn, TIME_ZONE_KEY, zone)?;
+    // "Today" is a different span in the new zone: a provider paused by its daily limit is judged
+    // again from the new zone's midnight (documented as harmless: the day just restarts).
+    crate::daily_limit::forget_all();
+    Ok(())
 }
 
 /// The webview-owned UI preference blobs — the ONLY `settings` keys the webview may read or write.
@@ -828,11 +832,27 @@ mod tests {
             "chat_cloud_provider",
             "background_cloud_provider",
             "local_llm_power_cloud_consent_direct",
+            // The daily spend limits: a safety brake on money. A page that could write one could lift
+            // the brake (or set one that never lifts); `set_daily_limit` alone writes them.
+            "daily_limit_openrouter_usd",
+            "daily_limit_openai_usd",
+            "daily_limit_gemini_usd",
+            "daily_limit_anthropic_usd",
         ] {
             assert!(
                 !WEBVIEW_PREFS.contains(&sensitive),
                 "{sensitive} must never be readable/writable from the webview"
             );
+        }
+        // The keys the limit really uses, not only the names listed above.
+        for p in [
+            CloudProvider::OpenRouter,
+            CloudProvider::OpenAi,
+            CloudProvider::Gemini,
+            CloudProvider::Anthropic,
+        ] {
+            let key = crate::daily_limit::limit_key(p);
+            assert!(!WEBVIEW_PREFS.contains(&key), "{key} is Rust's alone");
         }
     }
 

@@ -129,8 +129,55 @@ pub enum Error {
     #[error("{0}")]
     Reauth(String),
 
+    /// A cloud provider's call that failed in a way the caller can tell from the rest (see
+    /// [`ProviderFailure`]). Boxed so the common `Result` stays small. It Displays and serialises as
+    /// its sentence alone, exactly as the `Other(String)` it stands in for did, so the ~200
+    /// `String(e)` sites and the webview's error shape do not change.
+    #[error("{}", .0.message)]
+    Provider(Box<ProviderFailure>),
+
     #[error("{0}")]
     Other(String),
+}
+
+/// Why a provider's call failed, as a class the code can branch on (the sentence is `message`, for
+/// the person). Only the daily limit is a class so far; the other failures a call can meet join it
+/// here, so the variant's shape never changes when they do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// PM's own brake: the person's daily limit for this provider has been reached. Nothing was sent.
+    LimitReached,
+}
+
+/// Whether the failed call can have cost money. This is the gate on trying anything else after it
+/// (a request bills at most one attempt), so a failure PM cannot prove unbilled never reads as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Billing {
+    /// PM refused before anything left this computer.
+    NeverLeft,
+}
+
+/// A failed provider call: what kind, whether it could have billed, whose it was and what to say.
+/// The webview never sees these fields; `Display` and `Serialize` are the message alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub class: FailureClass,
+    pub billing: Billing,
+    pub provider: crate::llm_gateway::CloudProvider,
+    /// The model the call was for, when the failure is about one.
+    pub model: Option<String>,
+    /// The sentence a person reads. Never carries a key or a provider's own wording of the failure.
+    pub message: String,
+}
+
+impl Error {
+    /// The typed provider failure inside this error, if it is one.
+    pub fn provider_failure(&self) -> Option<&ProviderFailure> {
+        match self {
+            Error::Provider(f) => Some(f),
+            _ => None,
+        }
+    }
 }
 
 impl Error {
@@ -268,6 +315,30 @@ mod tests {
             serde_json::to_value(VaultFaultCode::NewerStore).unwrap(),
             "newer-store"
         );
+    }
+
+    /// The typed provider failure reads and travels as its sentence alone: the ~200 `String(e)` sites
+    /// and the webview's rejection shape (a bare string) must not notice the new variant.
+    #[test]
+    fn a_provider_failure_displays_and_serialises_as_its_sentence() {
+        let e = Error::Provider(Box::new(ProviderFailure {
+            class: FailureClass::LimitReached,
+            billing: Billing::NeverLeft,
+            provider: crate::llm_gateway::CloudProvider::Anthropic,
+            model: Some("anthropic/claude-sonnet-5-5".into()),
+            message: "Anthropic is paused.".into(),
+        }));
+        assert_eq!(e.to_string(), "Anthropic is paused.");
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            serde_json::json!("Anthropic is paused.")
+        );
+        let f = e.provider_failure().expect("typed");
+        assert_eq!(f.class, FailureClass::LimitReached);
+        assert_eq!(f.billing, Billing::NeverLeft);
+        assert_eq!(f.model.as_deref(), Some("anthropic/claude-sonnet-5-5"));
+        // Anything else is not one.
+        assert!(Error::Other("x".into()).provider_failure().is_none());
     }
 
     #[test]

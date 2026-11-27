@@ -62,6 +62,48 @@ const LAUNCH_WAIT_SECS: u64 = 5;
 const IDLE_TICK_SECS: u64 = 300;
 const IDLE_THRESHOLD_SECS: u64 = 900;
 
+/// The spans a provider REFUSED to summarise, as `(conversation, the turn id the span ends at)`.
+///
+/// A refusal is billed and deterministic: the same words sent again are refused again, and the idle
+/// tick comes round every five minutes. Without this the span was re-asked on every tick, one billed
+/// call each, forever. A refused span is skipped until PM restarts (the set is per process, so the
+/// person gets another try after an update). The key is the conversation and where the span ends, not
+/// the model: a new model does not retry it before a restart. A different conversation, or a span
+/// that ends elsewhere, is a different key and is asked as usual. No other unusable reply goes in
+/// here: a cut-off or empty one can come out differently next time, and keeps its retry.
+#[derive(Default)]
+struct RefusedSpans(std::collections::HashSet<(i64, i64)>);
+
+impl RefusedSpans {
+    fn skips(&self, conversation_id: i64, span_end: i64) -> bool {
+        self.0.contains(&(conversation_id, span_end))
+    }
+
+    /// What the pass does with a reply it could not use: only a REFUSAL is remembered.
+    fn note_unusable(&mut self, conversation_id: i64, span_end: i64, refused: bool) {
+        if refused {
+            self.0.insert((conversation_id, span_end));
+        }
+    }
+}
+
+static REFUSED: std::sync::LazyLock<std::sync::Mutex<RefusedSpans>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether this span was refused before in this run of PM.
+fn span_was_refused(conversation_id: i64, span_end: i64) -> bool {
+    REFUSED
+        .lock()
+        .map(|r| r.skips(conversation_id, span_end))
+        .unwrap_or(false)
+}
+
+fn note_unusable_reply(conversation_id: i64, span_end: i64, refused: bool) {
+    if let Ok(mut r) = REFUSED.lock() {
+        r.note_unusable(conversation_id, span_end, refused);
+    }
+}
+
 /// What a single conversation's summary pass did.
 pub(crate) enum Outcome {
     /// The un-summarised tail is within the window — nothing to do (a short chat, or already caught up).
@@ -336,6 +378,11 @@ pub(crate) async fn extend_summary(app: &AppHandle, conversation_id: i64) -> Res
         {
             plan.new_cursor = fitted;
         }
+        // A span the provider already refused is not sent again this run: the answer would be the
+        // same refusal, and the call is billed.
+        if span_was_refused(conversation_id, plan.new_cursor) {
+            break;
+        }
         let messages = render_summary_request(plan.existing_summary.as_deref(), &plan.segment);
         let crate::llm_gateway::LlmOutcome { completion, meta } =
             crate::llm_gateway::complete(app, &route, &messages, false).await?;
@@ -356,6 +403,9 @@ pub(crate) async fn extend_summary(app: &AppHandle, conversation_id: i64) -> Res
                     .unusable_reason()
                     .unwrap_or("the reply could not be used")
             );
+            // A refusal is the one unusable reply that repeats itself: remember the span so the
+            // next idle tick does not pay for the same refusal again.
+            note_unusable_reply(conversation_id, plan.new_cursor, completion.usage.refused);
             // The call went out and was billed, so it is logged for the same reason a lost
             // compare-and-swap below is: the spend happened whatever became of the answer.
             let state = app.state::<AppState>();
@@ -1097,5 +1147,74 @@ mod tests {
             Some(9000),
             "meter restored to its pre-compress reading"
         );
+    }
+
+    /// A refused span is asked once, not once per idle tick (a refusal is billed and repeats). The
+    /// loop below ticks twelve times through `skips` and `note_unusable`, the two calls the pass makes
+    /// (the scan below pins that the pass makes them): one call, then silence; the memory is exact, so
+    /// another conversation or a span that ends elsewhere is still asked; and an unusable reply that
+    /// is NOT a refusal (a cut-off, an empty one) is never remembered, so it keeps its retry.
+    #[test]
+    fn a_refused_span_is_asked_once_not_on_every_tick() {
+        let mut refused = RefusedSpans::default();
+        let mut calls = 0;
+        for _tick in 0..12 {
+            if refused.skips(7, 40) {
+                continue;
+            }
+            calls += 1; // the billed call, and the provider refuses it
+            refused.note_unusable(7, 40, true);
+        }
+        assert_eq!(calls, 1, "one billed call, not twelve");
+        assert!(!refused.skips(8, 40), "another conversation is asked");
+        assert!(!refused.skips(7, 45), "a span that ends elsewhere is asked");
+
+        let mut cut_off = RefusedSpans::default();
+        let mut calls = 0;
+        for _tick in 0..3 {
+            if cut_off.skips(7, 40) {
+                continue;
+            }
+            calls += 1;
+            cut_off.note_unusable(7, 40, false);
+        }
+        assert_eq!(
+            calls, 3,
+            "a reply that was not a refusal is retried each pass"
+        );
+    }
+
+    /// The pass really consults that memory before the model call, and remembers only a REFUSAL (a
+    /// cut-off or empty reply can come out differently next time and keeps its retry). A scan,
+    /// because the pure set above cannot prove the pass uses it.
+    #[test]
+    fn the_summary_pass_asks_the_refused_set_before_the_call_and_notes_only_refusals() {
+        let src = include_str!("chat_summary.rs");
+        let body = src
+            .split("pub(crate) async fn extend_summary(")
+            .nth(1)
+            .and_then(|b| b.split("\n}\n").next())
+            .expect("extend_summary");
+        let asked = body
+            .find("span_was_refused(conversation_id, plan.new_cursor)")
+            .expect("the pass asks before it calls");
+        let called = body
+            .find("crate::llm_gateway::complete(")
+            .expect("the model call");
+        assert!(asked < called, "asked after the call");
+        // The refusal flag is handed to the set, which keeps only a refusal; the note sits in the
+        // unusable-reply branch, after the pass's "could not be used" log line and before it breaks.
+        assert_eq!(body.matches("note_unusable_reply(").count(), 1);
+        assert!(
+            body.contains(
+                "note_unusable_reply(conversation_id, plan.new_cursor, completion.usage.refused)"
+            ),
+            "the note must carry the reply's own refusal flag"
+        );
+        let noted = body.find("note_unusable_reply(").unwrap();
+        let branch = body[..noted]
+            .rfind("let Some(segment_text) = completion.usable_text() else {")
+            .expect("noted only in the unusable-reply branch");
+        assert!(noted > branch);
     }
 }

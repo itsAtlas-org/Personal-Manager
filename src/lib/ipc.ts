@@ -69,6 +69,7 @@ import type {
   CloudProviderId,
   DirectProvidersState,
   KeyCheckResult,
+  LimitView,
   RoleMove,
   RoleName,
   Document,
@@ -335,6 +336,15 @@ export const setDirectRole = (
 /** The person's own "my project shares data with this provider" tick-box. Display only. */
 export const setDirectDataSharing = (provider: CloudProviderId, shares: boolean) =>
   invoke<void>("set_direct_data_sharing", { provider, shares });
+
+/** Set a provider's daily spend limit in dollars (OpenRouter included), or clear it with null. Off is
+ *  null, never 0: an amount that isn't above zero is refused. The write lifts a pause at once. */
+export const setDailyLimit = (provider: CloudProviderId, usd: number | null) =>
+  invoke<void>("set_daily_limit", { provider, usd });
+
+/** OpenRouter's daily limit as its key block shows it. The three direct providers' ride in
+ *  `directProvidersState`. */
+export const openrouterLimitState = () => invoke<LimitView>("openrouter_limit_state");
 
 export const getSettings = () => invoke<Settings>("get_settings");
 

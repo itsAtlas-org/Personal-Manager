@@ -282,12 +282,17 @@ pub(super) fn require_people_main_window(window: &tauri::Window) -> Result<()> {
 /// (`Intl`) and stored; UTC is the stable default matching every `strftime('now')`.
 /// Infallible by design (worst case UTC) so call sites stay one-liners.
 pub(crate) fn resolve_zone(conn: &Connection) -> chrono_tz::Tz {
+    try_resolve_zone(conn).unwrap_or(chrono_tz::Tz::UTC)
+}
+
+/// [`resolve_zone`] that says when the store could not be READ. An unset or unparseable zone is still
+/// UTC (that is the rule, not a failure); only a failed read is an error. The daily limit asks this
+/// one: it must not count the wrong day because a read quietly became UTC.
+pub(crate) fn try_resolve_zone(conn: &Connection) -> crate::error::Result<chrono_tz::Tz> {
     use std::str::FromStr;
-    db::get_setting(conn, TIME_ZONE_KEY)
-        .ok()
-        .flatten()
+    Ok(db::get_setting(conn, TIME_ZONE_KEY)?
         .and_then(|s| chrono_tz::Tz::from_str(s.trim()).ok())
-        .unwrap_or(chrono_tz::Tz::UTC)
+        .unwrap_or(chrono_tz::Tz::UTC))
 }
 
 /// A throwaway encrypted store (also exercises the migration-in-transaction
