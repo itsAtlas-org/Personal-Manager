@@ -858,8 +858,9 @@ export interface TagProposalRow {
 // --- Canonical entities (the Teach tab; entity-resolution foundation) ---
 
 /** A canonical entity with its known aliases — the unit the Teach tab manages. `type` is
- *  "project" today (the schema reserves "person"/"thing"). The canonical name is itself one of
- *  `aliases` (stored as a self-alias), so every name a document was filed under is listed. */
+ *  "project" today (people are not entities: they have their own tables). The canonical name is
+ *  itself one of `aliases` (stored as a self-alias), so every name a document was filed under is
+ *  listed. */
 export interface Entity {
   id: number;
   type: string;

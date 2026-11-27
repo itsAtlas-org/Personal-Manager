@@ -1123,7 +1123,7 @@ mod tests {
         );
     }
 
-    /// A person row by plain SQL (the people module is a later slice); returns its id. Invented names only.
+    /// A person row by plain SQL (keeps this test independent of the people module); returns its id. Invented names only.
     fn person(conn: &Connection, ident: &str, name: &str) -> i64 {
         conn.execute(
             "INSERT INTO people(uid, display_name) VALUES (?1, ?2)",

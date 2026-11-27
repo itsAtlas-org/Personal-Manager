@@ -28,6 +28,8 @@ export const CHANGELOG: ChangelogEntry[] = [
     date: "2026-11-27",
     highlights: [
       "Meet People: your own address book in PM. Add the people in your life with their numbers, emails, socials, work and school, birthdays and where you met. Import contacts from your phone or iCloud with a vCard file, merge duplicates, and keep a timeline of when you met. After a meeting with guests, PM asks who you met so it remembers for you.",
+      "You stay in charge of your address book. Merging two people has an Undo, someone you delete waits in a Trash for 30 days before they are gone for good, and Export writes everyone, one label or just the people you pick to a vCard file any address book can open, with your timeline as a spreadsheet if you want it. People are found in the Ctrl K search by name, nickname, email, phone number or company.",
+      "A birthday on 29 February asks which day PM should mark it in other years, 28 February or 1 March, because people born that day differ. Until you say, PM uses 28 February.",
     ],
   },
   {

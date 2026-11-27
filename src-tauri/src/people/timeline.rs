@@ -45,8 +45,9 @@ pub const ENTRY_PEOPLE_MAX: usize = 500;
 /// The longest an event start copied onto an entry may be (an ISO instant or a date).
 pub(super) const START_MAX: usize = 64;
 
-/// The `kind` of the entry that makes someone "met".
-pub const KIND_MET: &str = "met";
+/// The `kind` of the entry that makes someone "met": the first of [`INTERACTION_KINDS`], not a second
+/// literal, so the set keeps one owner (I-12).
+pub const KIND_MET: &str = INTERACTION_KINDS[0];
 
 fn no_such_entry() -> crate::error::Error {
     refuse("That entry isn't in PM any more.")

@@ -83,6 +83,11 @@ the UID **and** the instance instant (`flags.instance_at`); the UID alone names 
 **Co-signers.** Anything that stores a reference to a calendar event stores the UID, never the row
 id. Anything that means "this Tuesday's standup, not every standup" stores the instant too.
 
+The timeline of People (`interactions.event_uid` + `event_start`, v63) signs this: an entry made from a
+meeting holds the iCal UID and the occurrence's start, with the title copied beside it and no FK, so a
+mirror rebuild or a provider re-sync never orphans it. `meet_prompt_answers` keys the same way, and a
+"don't ask about this series" answer stores an empty start so it names the series.
+
 ### I-05 · Flags anchor only on durable ids — **Held**
 
 `flags.anchor_kind` names the identity space (`calendar` → an iCal UID; `milestone` → a milestone
@@ -222,6 +227,16 @@ Where a `CHECK (x IN (…))` constrains a column, one Rust type owns the string 
 path nobody exercised. Relaxing a `CHECK` afterwards is a `writable_schema` text-patch — see the
 AGENTS.md rule-3 gotcha — which is far more expensive than getting the set right once.
 
+**Co-signers.** A vocabulary column with no `CHECK` still has exactly one owner, which is what lets a
+new value skip a migration (the v60 mod tables, `mods/store.rs`, were the precedent). The People
+tables of v63 are owned in `people/mod.rs`, one const per vocabulary: `DETAIL_KINDS`
+(`person_details.kind`), `PROVIDERS` (`person_sources.provider`, `label_sources.provider`),
+`SOURCE_STATES` (`person_sources.state`), `INTERACTION_KINDS` (`interactions.kind`), `PROMPT_ANSWERS`
+(`meet_prompt_answers.answer`) and `LEAP_DAYS` (`people.leap_day`, the day a 29 February birthday is
+marked in years without one). A writer takes its value from the const (or an enum that maps onto it,
+like `LeapDay`) or checks the value against the const before SQL, so a bad one is a clear refusal,
+not a stored row nothing reads.
+
 ### I-13 · Models with no zero-data-retention endpoint are uncallable ON OPENROUTER, and the carve-outs are visible — **Held**
 
 PM pins `zdr: true` and `data_collection: "deny"` on every OpenRouter request, and the catalogue is
@@ -300,6 +315,14 @@ sensible-seeming default.
 **Co-signers.** A new action in this class ships behind a confirmation, and its confirmation names
 what will actually happen (which account, how many items, whether it can be undone).
 
+People (v63) applies it to the actions that destroy a person's record: "Delete now" and deleting a
+timeline entry are irreversible, so they always ask and say it cannot be undone. Deleting a label
+and merging every identical pair at once ask too, even though Undo exists. A single merge shows its
+preview with a Merge button but needs no typed confirmation, and moving someone to Trash and
+applying a label do not ask: they are reversible (the 30-day Trash, the Undo strip). A merge or a delete
+that would reach a Google contact says so, with the account and the count, in the confirmation
+(PR B); PR A has no Google link to confirm.
+
 ### I-17 · Ingested and inbound content is data, never instructions — **Held**
 
 This is AGENTS.md rule 6, repeated here because it is the invariant most often broken by *adding a
@@ -309,6 +332,12 @@ issue comments and chat imports are all untrusted.
 **Co-signers.** A new surface that puts third-party text near a model puts it in the user message,
 never the system prompt, and keeps the system prompt byte-identical regardless of the item being
 processed.
+
+A contact is the plainest case. A person's names, notes and a vCard file's text are third parties'
+words, so they are rendered as text (never as Markdown or HTML), and nothing on a model path, in a
+mod or behind the MCP server names `people::` or `commands::people`: the assistant does not see people
+in v1. When a later feature lets it, it gets names, last met and birthdays through a permission
+designed then, never phones, emails or addresses by default.
 
 ### I-19 · `safeUrl` gets the last word on a rendered URL — **Enforced**
 

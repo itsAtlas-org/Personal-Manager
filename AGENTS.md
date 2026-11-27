@@ -60,7 +60,9 @@ that replaced the Learning-You blob; **chat as a first-class source** (PM's own 
 chunked, embedded, indexed and retrievable, with bounded context cost); **index-only
 connectors** for Google Drive, OneDrive and local folders (pointer + embedding, bytes
 fetched live — never imported); a **multi-provider calendar** (Google events editable, #884) with a unified
-**Calendar** view tab; **project milestones** and a **structured flag layer**; **encrypted
+**Calendar** view tab; a **People** address book (a permanent id per person, vCard in and out,
+duplicates and merging, a timeline, and "who did you meet?" after a meeting); **project
+milestones** and a **structured flag layer**; **encrypted
 portable backups** (Proton Drive / Google Drive); the **Document Map** and the **Pinboard**, two mods
 PM downloads once for people who used them; **spreadsheet**
 and **photo/OCR** ingestion; a **document reader**; runtime **developer
@@ -79,13 +81,15 @@ release remain the open post-v1 work.
     everywhere but this file, and the `frontend` CI job (pr.yml) runs it.
   - `src/lib/types.ts` — shared types mirroring the Rust structs.
   - `src/components/` — the nav surfaces (`Sidebar` → Focus / Chats / Documents / Review /
-    Calendar, any installed mod's tab (the Document Map and the Pinboard are two), plus the capability-gated Teach + Dev; the list itself, its gating
+    Calendar / People, any installed mod's tab (the Document Map and the Pinboard are two), plus
+    the capability-gated Teach + Dev; the list itself, its gating
     and the user's pin and hide live in `src/lib/nav.ts`, which the sidebar, the command palette
     and App's fallback all read): `FocusView` (status
     cards + triage + milestones + the calendar agenda + the daily briefing), `ProjectView`
     (per-project files + scoped chat), `ChatView` / `Composer` (+ `ContextMeter`,
     `RetrievalExplainPanel`), `DocumentsView` + `DocumentReader`, `ReviewView`,
-    `calendar/` (the unified calendar view, incl. a Terminal fork),
+    `calendar/` (the unified calendar view, incl. a Terminal fork), `people/` (the People tab: list,
+    record, editor, duplicates and merge, import and export, the timeline and the meeting prompt),
     `TeachView` / `TeachPreferences` (entities + preferences), `DevView`
     (read-only inspectors), `ConnectorsSettings` + per-provider connection components,
     `SettingsView` (tabbed: keys/model, appearance, storage, backup, security, developer…),
@@ -125,6 +129,14 @@ release remain the open post-v1 work.
     corrections), `projects.rs` (triage + the pure `derive_status`, spec §4.1), `entities.rs`,
     `preferences.rs`, `milestones.rs`, `flags.rs`, `project_activity.rs`,
     `briefing.rs`.
+  - **People** — `people/` (the address book: tables of v63, one owner per vocabulary const
+    (INVARIANTS.md I-12), write-time search keys in `fold.rs`, the 30-day Trash, `dupes.rs` and
+    `merge.rs`, `timeline.rs` and `meet.rs` for the timeline and the meetings owed an answer) and
+    `people/vcard.rs` (the byte-level vCard parser and writer, no crate); `commands/people.rs` is the thin
+    command surface. People are NOT `entities` rows (`entities.rs`), and no model path, mod or MCP
+    tool names them (INVARIANTS.md I-17). `people://changed` is emitted only by
+    `people::announce_changed` (`just people-emit`). Contact values never reach a log, a panic or an
+    error string, and a type holding them never derives `Debug`: CodeQL gates on it.
   - **Chat pipeline** — `chat.rs` (turn model, vault-as-truth), `chat_index.rs` (append-only
     indexing), `chat_summary.rs` (rolling summary), `chat_title.rs`, `chat_prefs.rs`,
     `context_budget.rs`.

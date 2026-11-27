@@ -2268,7 +2268,7 @@ mod tests {
     }
 
     /// A store with the people schema, foreign keys ON as every real connection has them, and a
-    /// project to link people to. Plain SQL only: the people module is a later slice.
+    /// project to link people to. Plain SQL only, so this test does not depend on the people module.
     fn people_store() -> (tempfile::TempDir, rusqlite::Connection) {
         const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         let dir = tempfile::tempdir().unwrap();

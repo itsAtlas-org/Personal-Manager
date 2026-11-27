@@ -556,7 +556,7 @@ fn resolve(tx: &Connection, who: &PersonRef, out: &mut MeetingAnswered) -> Resul
             };
             if !email.is_empty() {
                 draft.details.push(DetailDraft {
-                    kind: "email".into(),
+                    kind: super::KIND_EMAIL.into(),
                     value: email,
                     ..Default::default()
                 });
