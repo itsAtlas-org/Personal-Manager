@@ -946,6 +946,22 @@ fn a_label_added_after_a_merge_refuses_the_undo() {
 }
 
 #[test]
+fn a_project_renamed_after_a_merge_refuses_the_undo() {
+    let (_d, conn) = store();
+    let (a, b, _) = rich_pair(&conn);
+    let step = merge_ab(&conn, a, b);
+    // The survivor now holds b's "Garden" link; renaming re-keys it, so Undo could no longer
+    // take it back off the survivor or give it back to b.
+    crate::projects::rename_project_satellites(&conn, "Garden", "Allotment").unwrap();
+    let e = merge::undo_steps(&conn, &[step]).unwrap_err().to_string();
+    assert!(e.contains(NO_LONGER));
+    assert!(
+        get_person(&conn, b).is_err(),
+        "a refused Undo writes nothing"
+    );
+}
+
+#[test]
 fn a_meeting_logged_after_a_merge_does_not_refuse_the_undo_and_stays() {
     let (_d, conn) = store();
     let (a, b, _) = rich_pair(&conn);
@@ -1017,6 +1033,19 @@ fn the_shelf_hands_a_merge_back_once_and_only_while_fresh() {
         "too late"
     );
     assert!(shelf.put(7, Vec::new(), t0).is_none(), "nothing to hold");
+}
+
+#[test]
+fn a_look_at_the_shelf_lets_go_of_merges_whose_time_is_up() {
+    let (_d, conn) = store();
+    let (a, b, _) = rich_pair(&conn);
+    let t0 = Instant::now();
+    let mut shelf = UndoShelf::default();
+    shelf.put(1, vec![merge_ab(&conn, a, b)], t0).unwrap();
+    assert!(format!("{shelf:?}").contains("merges: 1"));
+    // Asking for something else, long after, still sweeps the stale before-image away.
+    let _ = shelf.take("not-a-token", 1, t0 + UNDO_HOLD + Duration::from_secs(1));
+    assert!(format!("{shelf:?}").contains("merges: 0"));
 }
 
 #[test]

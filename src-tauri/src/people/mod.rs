@@ -30,7 +30,8 @@
 //!   holding ids (spec 2.2).
 //!
 //! Not model-path code: nothing here may be named from `chat`, `briefing`, `mods` or the MCP tools
-//! (E13, gated in a later slice).
+//! (E13; the fence that fails the build on it, `scripts/check-contacts-write-fence.mjs`, arrives
+//! with PR B).
 
 pub mod card;
 pub mod dupes;
@@ -87,8 +88,10 @@ pub const DETAIL_KINDS: [&str; 12] = [
     "location",
 ];
 /// `person_sources.provider` (and `label_sources.provider`). `icloud` comes later.
+#[allow(dead_code)] // PR B (Google sync) reads the list; a test pins its width until then
 pub const PROVIDERS: [&str; 2] = [PROVIDER_VCARD, PROVIDER_GOOGLE];
 /// `person_sources.state`.
+#[allow(dead_code)] // PR B (Google sync) reads the list; a test pins its width until then
 pub const SOURCE_STATES: [&str; 6] = [
     STATE_LINKED,
     STATE_PENDING_CREATE,
@@ -136,12 +139,15 @@ pub const PROVIDER_VCARD: &str = "vcard";
 /// A Google contact (the Google PR).
 pub const PROVIDER_GOOGLE: &str = "google";
 pub const STATE_LINKED: &str = "linked";
+#[allow(dead_code)] // PR B (Google sync) sets these states
 pub const STATE_PENDING_CREATE: &str = "pending_create";
 /// The user ticked "Also delete them from Google" and Google's delete is not confirmed yet.
 pub const STATE_PENDING_DELETE: &str = "pending_delete";
+#[allow(dead_code)] // PR B (Google sync) sets these states
 pub const STATE_GONE: &str = "gone";
 /// A tombstone holding ids only.
 pub const STATE_IGNORED: &str = "ignored";
+#[allow(dead_code)] // PR B (Google sync) sets these states
 pub const STATE_LOCAL_ONLY: &str = "local_only";
 
 const KIND_EMAIL: &str = "email";
@@ -182,7 +188,7 @@ pub const CHANGED_ELSEWHERE: &str =
 pub const PEOPLE_CHANGED: &str = "people://changed";
 
 /// Tell every open view the address book changed. **The one place [`PEOPLE_CHANGED`] is emitted**
-/// (a gate in a later slice fails the build on any other emit of it). Call it once the DB guard is
+/// (`just people-emit` fails the build on any other emit of it). Call it once the DB guard is
 /// dropped. Nothing is told to mods: people never reach them (E13).
 pub fn announce_changed(app: &tauri::AppHandle) {
     use tauri::Emitter;
@@ -1613,12 +1619,15 @@ pub fn create_label_in(tx: &Connection, name: &str) -> Result<i64> {
     Ok(tx.last_insert_rowid())
 }
 
-/// The label a name means, made if it doesn't exist yet (a typed new label).
+/// [`ensure_label_in`] in a transaction of its own. The app always has one open already (an
+/// import's), so only the tests call this.
+#[cfg(test)]
 pub fn ensure_label(conn: &Connection, name: &str) -> Result<i64> {
     in_tx(conn, |tx| ensure_label_in(tx, name))
 }
 
-/// [`ensure_label`] in the caller's transaction (an import's labels).
+/// The label a name means, made if it doesn't exist yet (a typed new label), in the caller's
+/// transaction (an import's labels).
 pub fn ensure_label_in(tx: &Connection, name: &str) -> Result<i64> {
     require_transaction(tx)?;
     let key = fold_key(&clean_label_name(name)?);

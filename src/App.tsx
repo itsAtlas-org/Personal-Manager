@@ -24,6 +24,7 @@ import { MeetingDialog } from "./components/people/MeetingDialog";
 import { MeetStrip } from "./components/people/MeetStrip";
 import { useOwedMeetings } from "./components/people/useOwedMeetings";
 import { forgetAllDrafts } from "./lib/meetingDrafts";
+import { forgetAllMergeOffers } from "./lib/mergeOffers";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { ContextMeter } from "./components/ContextMeter";
@@ -239,11 +240,17 @@ export default function App() {
   const owedMeetings = useOwedMeetings(storeOpen, view);
   // What a "who did you meet?" card was given and not yet saved holds people's names and a note: it
   // goes when the store closes behind a lock, as the rest of the people data does.
-  useEffect(() => {
-    if (!storeOpen) forgetAllDrafts();
-  }, [storeOpen]);
+  // The dialog's own list of guests goes with them, so it never comes back over a store that has
+  // answered some of those meetings in the meantime.
   /** The meetings the dialog is showing, when it is open (Review on the strip, or on the People tab). */
   const [meetingDialog, setMeetingDialog] = useState<OwedMeeting[] | null>(null);
+  useEffect(() => {
+    if (!storeOpen) {
+      forgetAllDrafts();
+      forgetAllMergeOffers();
+      setMeetingDialog(null);
+    }
+  }, [storeOpen]);
 
   function openPerson(uid: string) {
     setPeopleReveal({ uid, nonce: Date.now() });

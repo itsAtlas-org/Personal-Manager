@@ -239,6 +239,26 @@ describe("the Timeline section", () => {
     expect(within(timeline()).queryByRole("button", { name: "Show earlier entries" })).toBeNull();
   });
 
+  it("keeps the earlier pages already read when the record is read again for another reason", async () => {
+    const cursor = { on_date: "2026-11-12", at: "", id: 10 };
+    store.person = personWith([entry()], {}, cursor as never);
+    ipc.listTimeline.mockResolvedValue({
+      entries: [entry({ id: 5, on_date: "2026-10-01", note: "Much earlier" })],
+      next: null,
+    });
+    await view();
+    await openAda();
+    fireEvent.click(within(timeline()).getByRole("button", { name: "Show earlier entries" }));
+    await within(timeline()).findByText("Much earlier");
+    // A star or a label re-reads the record; its timeline page is the same as before.
+    store.person = personWith([entry()], {}, cursor as never);
+    const reads = ipc.getPerson.mock.calls.length;
+    ipc.listeners.forEach((f) => f());
+    await waitFor(() => expect(ipc.getPerson.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => {});
+    expect(within(timeline()).getByText("Much earlier")).toBeTruthy();
+  });
+
   it("drops an earlier page that lands after the record was read again", async () => {
     const cursor = { on_date: "2026-11-12", at: "", id: 10 };
     store.person = personWith([entry()], {}, cursor as never);

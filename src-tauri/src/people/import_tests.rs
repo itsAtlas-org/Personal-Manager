@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use super::card::Card;
-use super::export::{self, ExportScope, TIMELINE_FILE};
+use super::export::{self, ExportScope, TIMELINE_STEM};
 use super::import::{
     self, commit_held, commit_in, prepare, preview_counts, read_capped, ImportHold, ImportOptions,
     ImportResult, STALE, TOO_BIG,
@@ -102,6 +102,9 @@ fn rich() -> PersonDraft {
             d("date", "Anniversary", "2010-06-01"),
             d("date", "Graduation", "--06-30"),
             d("date", "", "2001-01-02"),
+            // The editor also offers a year alone and a year with a month: both must survive a file.
+            d("date", "Founded", "2019"),
+            d("date", "Moved", "2019-05"),
             d("relation", "Spouse", "Charles Example"),
             DetailDraft {
                 from_date: Some("2026-03".into()),
@@ -892,10 +895,12 @@ fn writing_puts_the_spreadsheet_beside_the_file_and_never_replaces_one() {
     assert_eq!(first.people, 1);
     assert_eq!(first.files.len(), 2);
     assert!(dir.path().join("people.vcf").is_file());
-    assert!(dir.path().join(TIMELINE_FILE).is_file());
+    let timeline = format!("{TIMELINE_STEM}.csv");
+    assert_eq!(timeline, "people-timeline.csv");
+    assert!(dir.path().join(&timeline).is_file());
     let second = export::write(&dir.path().join("people.vcf"), &out).unwrap();
     assert!(second.files[1].ends_with("people-timeline-2.csv"));
-    assert!(dir.path().join(TIMELINE_FILE).is_file());
+    assert!(dir.path().join(&timeline).is_file());
 }
 
 #[test]
@@ -1002,6 +1007,37 @@ fn a_label_alone_makes_a_matched_person_updated_and_a_full_person_makes_no_label
     let result = import_text(&conn, &vcf, &plain());
     assert_eq!(result.unchanged, 1);
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM contact_labels"), before);
+}
+
+#[test]
+fn a_matched_person_at_the_details_limit_is_told_what_was_left_out() {
+    let (_dir, conn) = store();
+    let full: Vec<DetailDraft> = (0..DETAILS_MAX)
+        .map(|n| d("custom", &format!("Field {n}"), &format!("value {n}")))
+        .collect();
+    let id = create_person(
+        &conn,
+        &PersonDraft {
+            details: full,
+            ..draft("Full", "Example")
+        },
+    )
+    .unwrap();
+    let ident = text(&conn, &format!("SELECT uid FROM people WHERE id = {id}"));
+    let vcf = format!(
+        "BEGIN:VCARD\nUID:{ident}\nFN:Full Example\nEMAIL:full@example.com\nEMAIL:full2@example.com\nEND:VCARD\n"
+    );
+    let result = import_text(&conn, &vcf, &plain());
+    assert_eq!(result.kept.len(), 1);
+    // Said once for the person, however many details did not fit.
+    assert_eq!(result.kept[0].fields, vec!["some details (over the limit)"]);
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM person_details WHERE person_id = {id}")
+        ),
+        DETAILS_MAX as i64
+    );
 }
 
 #[test]

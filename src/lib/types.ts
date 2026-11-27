@@ -3833,7 +3833,8 @@ export type PersonRef = { id: number } | { new: { name: string; email: string } 
 /** What a card answered (`people::PROMPT_ANSWERS`). */
 export type MeetingAnswer = "logged" | "skipped" | "series_skipped";
 
-/** What answering did (`people::meet::MeetingAnswered`). */
+/** What answering did (`people::meet::MeetingAnswered`). The card closes on its answer and does not
+ *  show these counts. */
 export interface MeetingAnswered {
   /** The "met" entry written, when the answer was "logged". */
   interaction: number | null;
@@ -3993,7 +3994,7 @@ export interface PeopleImportOptions {
 /** A person PM kept its own values for, and which (`people::import::KeptNote`). */
 export interface PeopleImportKept {
   name: string;
-  /** "name", "birthday", "where you met" or "notes". */
+  /** "name", "birthday", "where you met", "notes" or "some details (over the limit)". */
   fields: string[];
 }
 

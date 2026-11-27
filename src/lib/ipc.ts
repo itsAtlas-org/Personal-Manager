@@ -1225,7 +1225,8 @@ export const onTasksChanged = (handler: () => void): Promise<UnlistenFn> =>
 //
 // PM's own address book, one owner (`people/`). The People tab and the pop-out Calendar's meeting
 // card read through these wrappers and re-read on `onPeopleChanged`, which every write fires. A
-// read (`listPeople`, `getPerson`, `searchPeople`) may come from the main window or the pop-out
+// read (`listPeople`, `getPerson`, `searchPeople`) or a meeting card's call (`owedMeetings`,
+// `eventGuests`, and `answerMeeting`, which writes) may come from the main window or the pop-out
 // Calendar; everything else is the main window's, and the backend refuses it elsewhere.
 
 /** The People list: one filter, an optional search, one sort. Trash shows only under "Trash". */

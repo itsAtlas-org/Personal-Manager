@@ -85,6 +85,8 @@ export function useOwedMeetings(enabled: boolean, watch?: unknown): OwedMeetings
     if (enabled) return;
     sent.current++;
     window.clearTimeout(endTimer.current);
+    // Guest names and emails are not kept behind a lock; the read after it brings them back.
+    setMeetings([]);
   }, [enabled]);
   useEffect(
     () => () => {

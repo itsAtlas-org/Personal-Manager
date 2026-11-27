@@ -32,6 +32,7 @@ import {
   vaultLockStatus,
   vaultStatus,
 } from "./lib/ipc";
+import { forgetAllDrafts } from "./lib/meetingDrafts";
 import { PINBOARD_VIEW } from "./lib/nav";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { subscribeUntilCleanup } from "./lib/subscribe";
@@ -78,6 +79,12 @@ export default function CalendarWindow() {
   // on screen, and with it hidden in the tray this window may be the only one. Not behind the lock
   // gate, where there is no store to read and nothing to refresh.
   useCalendarChangeCheck(gate === "open");
+
+  // This window keeps its own copy of what a "who did you meet?" card was given and not yet saved
+  // (names and a note): it goes whenever the store is closed behind a gate, as in the main window.
+  useEffect(() => {
+    if (gate !== "open") forgetAllDrafts();
+  }, [gate]);
 
   if (gate === "open")
     return (

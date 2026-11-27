@@ -53,6 +53,7 @@ import { PeopleView } from "./PeopleView";
 import { ThemeProvider } from "../../theme";
 import { ContextMenuHost } from "../ui/ContextMenuHost";
 import { closeContextMenu } from "../../lib/contextMenu";
+import { forgetAllMergeOffers } from "../../lib/mergeOffers";
 
 function row(id: number, name: string): PersonRow {
   return {
@@ -169,6 +170,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  forgetAllMergeOffers();
   rows = [ADA, ADA2, BEN, BEN2, CAL].map((r) => ({ ...r }));
   snapshot = report();
   ipc.changed = null;
@@ -647,6 +649,38 @@ describe("Undo after a merge", () => {
     await mergeTwo();
     fireEvent.click(screen.getByRole("button", { name: "Undo: Merged into Ben Sample." }));
     expect(await screen.findByText("This merge can no longer be undone.")).toBeTruthy();
+  });
+
+  it("is still on offer when the tab is left and come back to within the 30 seconds", async () => {
+    await mergeTwo();
+    // The tab router unmounts the view on a tab switch.
+    cleanup();
+    expect(screen.queryByText("Merged into Ben Sample.")).toBeNull();
+    await view();
+    fireEvent.click(await screen.findByRole("button", { name: "Undo: Merged into Ben Sample." }));
+    await waitFor(() => expect(ipc.undoMergePeople).toHaveBeenCalledWith("token-2"));
+  });
+
+  it("is not offered again once it was dismissed or used, or after its time", async () => {
+    await mergeTwo();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    cleanup();
+    await view();
+    expect(screen.queryByText("Merged into Ben Sample.")).toBeNull();
+    cleanup();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await mergeTwo();
+      cleanup();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31_000);
+      });
+      await view();
+      expect(screen.queryByText("Merged into Ben Sample.")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stays for 30 seconds, not the 12 of a Trash notice", async () => {

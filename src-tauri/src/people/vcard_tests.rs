@@ -240,6 +240,36 @@ fn a_birthday_that_is_not_a_date_is_kept_as_written() {
 }
 
 #[test]
+fn a_date_of_a_year_or_a_month_reads_as_a_date_but_a_birthday_must_be_a_day() {
+    let p = parse_text(
+        "BEGIN:VCARD\nFN:Eve Example\nX-ABDATE;X-ABLABEL=Founded:2019\nANNIVERSARY:2019-05\nBDAY:2019-05\nEND:VCARD\n",
+    );
+    let c = &p.cards[0];
+    assert_eq!(values_of(c, "date"), vec!["2019", "2019-05"]);
+    assert!(detail(c, "custom")
+        .iter()
+        .all(|d| d.label != "Date (as written)"));
+    // A birthday of a year and month is not a day: kept as written, with the warning.
+    assert_eq!(c.born_on, None);
+    assert_eq!(warned(&p, Warning::BadDate), 1);
+}
+
+#[test]
+fn a_list_cut_at_its_limit_says_so() {
+    let labels: Vec<String> = (0..100).map(|i| format!("Group {i}")).collect();
+    let text = format!(
+        "BEGIN:VCARD\nFN:Many Groups\nCATEGORIES:{}\nEND:VCARD\n",
+        labels.join(",")
+    );
+    let p = parse_text(&text);
+    assert_eq!(p.cards.len(), 1);
+    assert_eq!(warned(&p, Warning::TooManyDetails), 1);
+    // A list that fits, even with a trailing comma, is no warning.
+    let p = parse_text("BEGIN:VCARD\nFN:Few\nCATEGORIES:One,Two,\nEND:VCARD\n");
+    assert_eq!(warned(&p, Warning::TooManyDetails), 0);
+}
+
+#[test]
 fn a_photo_is_skipped_without_being_buffered() {
     // A line cap far below the photo: had the photo been built as a line, it would have been cut
     // and warned about. It is stepped over, and the property after it still reads.
@@ -490,7 +520,7 @@ fn the_parser_never_fetches() {
         "use serde::Serialize;",
         "use serde_json::{Map, Value};",
         "use super::card::{truncate_bytes, truncate_chars, Card, CardDetail};",
-        "use super::partial_date::PartialDate;",
+        "use super::partial_date::{normalise_any, PartialDate};",
     ];
     for line in shipped.lines().filter(|l| l.starts_with("use ")) {
         assert!(allowed.contains(&line), "an unexpected import: {line}");

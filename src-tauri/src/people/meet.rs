@@ -151,7 +151,9 @@ impl MeetingAnswer {
     }
 }
 
-/// What answering did, so the card can say so ("2 people came back from Trash").
+/// What answering did. The card closes on its answer and shows nothing of this (a person ticked
+/// "In Trash" came back because the user ticked them); the counts are for the tests and for any
+/// caller that wants to say so.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct MeetingAnswered {
     /// The `met` entry written, when the answer was "logged".

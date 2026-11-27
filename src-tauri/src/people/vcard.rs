@@ -42,7 +42,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::card::{truncate_bytes, truncate_chars, Card, CardDetail};
-use super::partial_date::PartialDate;
+use super::partial_date::{normalise_any, PartialDate};
 
 /// The biggest file read. Photo-heavy exports are big; the message that refuses a bigger one says
 /// that an export without photos works.
@@ -65,6 +65,9 @@ const IGNORED_NAMES_MAX: usize = 200;
 const NAME_MAX: usize = 64;
 /// Parameters read from one property.
 const PARAMS_MAX: usize = 64;
+/// Values kept from one parameter (`TYPE=a,b,c`). A 1 MiB line of bare commas would otherwise hold
+/// half a million strings, so the rest are read past, not kept.
+const PARAM_VALUES_MAX: usize = 16;
 /// Bytes of one parameter value (an address `LABEL=` is the long one).
 const PARAM_VALUE_MAX: usize = 2 * 1024;
 
@@ -468,7 +471,9 @@ fn parse_head(line: &[u8]) -> Option<Head> {
                                 pos += 1;
                             }
                         }
-                        values.push(param_text(&raw));
+                        if values.len() < PARAM_VALUES_MAX {
+                            values.push(param_text(&raw));
+                        }
                         if line.get(pos) == Some(&b',') {
                             pos += 1;
                         } else {
@@ -543,6 +548,12 @@ fn warn(warnings: &mut BTreeMap<Warning, usize>, w: Warning) {
 /// Split on an unescaped `sep` (a backslash escapes the byte after it), keeping at most `max`
 /// parts. Done on the raw bytes, before any unescaping or quoted-printable decoding.
 fn split_unescaped(raw: &[u8], sep: u8, max: usize) -> Vec<&[u8]> {
+    split_unescaped_cut(raw, sep, max).0
+}
+
+/// [`split_unescaped`], and whether it stopped at `max` with something left unread (so the caller
+/// can say a list was cut rather than let the rest vanish).
+fn split_unescaped_cut(raw: &[u8], sep: u8, max: usize) -> (Vec<&[u8]>, bool) {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut i = 0;
@@ -553,7 +564,8 @@ fn split_unescaped(raw: &[u8], sep: u8, max: usize) -> Vec<&[u8]> {
                 parts.push(&raw[start..i]);
                 start = i + 1;
                 if parts.len() >= max {
-                    return parts;
+                    let left = &raw[start.min(raw.len())..];
+                    return (parts, left.iter().any(|b| !b.is_ascii_whitespace()));
                 }
             }
             _ => {}
@@ -563,7 +575,7 @@ fn split_unescaped(raw: &[u8], sep: u8, max: usize) -> Vec<&[u8]> {
     if parts.len() < max {
         parts.push(&raw[start.min(raw.len())..]);
     }
-    parts
+    (parts, false)
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -959,12 +971,20 @@ impl Parser {
                 }
             }
             "ORG" | "X-PM-SCHOOL" => {
-                for p in split_unescaped(raw, b';', 8) {
+                let (split, cut) = split_unescaped_cut(raw, b';', 8);
+                if cut {
+                    self.warn(Warning::TooManyDetails);
+                }
+                for p in split {
                     parts.push(decode_part(p, &ctx, limit, &mut self.warnings));
                 }
             }
             "NICKNAME" | "CATEGORIES" => {
-                for p in split_unescaped(raw, b',', 64) {
+                let (split, cut) = split_unescaped_cut(raw, b',', 64);
+                if cut {
+                    self.warn(Warning::TooManyDetails);
+                }
+                for p in split {
                     parts.push(decode_part(p, &ctx, limit, &mut self.warnings));
                 }
             }
@@ -1591,7 +1611,12 @@ fn build_card(props: &[Prop], warnings: &mut BTreeMap<Warning, usize>) -> Built 
                         l
                     }
                 };
-                match parse_card_date(value, param(&p.params, "X-APPLE-OMIT-YEAR")) {
+                // A `date` detail may be a year, or a year and month, as well as a day (PM's own
+                // export writes them as stored), so those read back as dates too. Only BDAY,
+                // above, must be a whole day.
+                let date = parse_card_date(value, param(&p.params, "X-APPLE-OMIT-YEAR"))
+                    .or_else(|| normalise_any(value.trim()));
+                match date {
                     Some(date) => found.push(Found {
                         detail: plain("date", label, date),
                         pref: false,
@@ -1777,6 +1802,23 @@ mod tests {
             parse_card_date("1900-04-15", Some("1900")).as_deref(),
             Some("--04-15")
         );
+    }
+
+    #[test]
+    fn a_long_list_of_parameter_values_is_kept_only_in_part() {
+        // About half a million values in one line (the line cap): none of the rest is held.
+        let mut line = b"EMAIL;TYPE=".to_vec();
+        for _ in 0..500_000 {
+            line.extend_from_slice(b"a,");
+        }
+        line.extend_from_slice(b"b:x@example.com");
+        line.truncate(LINE_MAX);
+        let head = parse_head(&line).unwrap();
+        assert_eq!(head.params.len(), 1);
+        assert_eq!(head.params[0].values.len(), PARAM_VALUES_MAX);
+        // A normal list is untouched.
+        let head = parse_head(b"TEL;TYPE=home,voice:+44 20 7946 0103").unwrap();
+        assert_eq!(head.params[0].values, ["home", "voice"]);
     }
 
     #[test]

@@ -147,7 +147,8 @@ impl std::fmt::Debug for DupesReport {
 
 impl DupesReport {
     /// The scan looked at everything: no group skipped, nothing cut short. Only then is "no pairs"
-    /// the same as "no duplicates".
+    /// the same as "no duplicates". The page reads `skipped` and `cut_short` itself; this pins the rule.
+    #[cfg(test)]
     pub fn complete(&self) -> bool {
         self.skipped.is_empty() && !self.cut_short
     }

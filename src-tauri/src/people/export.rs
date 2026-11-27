@@ -64,9 +64,9 @@ impl std::fmt::Debug for ExportDone {
     }
 }
 
-/// The name the timeline spreadsheet is written under, beside the vCard file.
-pub const TIMELINE_FILE: &str = "people-timeline.csv";
-const TIMELINE_STEM: &str = "people-timeline";
+/// The name the timeline spreadsheet is written under, beside the vCard file (`.csv` is added, and
+/// a number if the name is taken).
+pub(super) const TIMELINE_STEM: &str = "people-timeline";
 
 // --- escaping and folding ------------------------------------------------------------------------------------
 
@@ -434,7 +434,8 @@ fn scope_ids(conn: &Connection, scope: &ExportScope) -> Result<Vec<i64>> {
 }
 
 /// The timeline entries of these people, oldest first, one row per person per entry. Interactions
-/// have their own commands in a later slice; this reads the table directly.
+/// have their own commands (`commands::people`) and the page reads them through the timeline
+/// module; an export wants every person's rows in one pass, so it reads the table directly.
 fn timeline_rows(conn: &Connection, ids: &[i64]) -> Result<Vec<TimelineRow>> {
     let json = serde_json::to_string(ids).map_err(|_| refuse("Those people can't be read."))?;
     let mut stmt = conn.prepare(

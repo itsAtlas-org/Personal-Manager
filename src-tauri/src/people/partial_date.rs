@@ -9,7 +9,7 @@
 //! checked against a leap year. Pure: no clock, no database.
 //!
 //! A 29 February birthday keeps one more fact, which day to mark in years without one
-//! ([`kept_leap_day`], [`born_on_in`]; spec E22).
+//! ([`kept_leap_day`], and `born_on_in` for the tests; spec E22).
 
 use super::LeapDay;
 
@@ -123,6 +123,8 @@ impl PartialDate {
     }
 
     /// How PM shows it: `DD-MM-YYYY`, `MM-YYYY`, `YYYY`, or "15 April" when the year is unknown.
+    /// The page formats dates itself (`format.ts`); this is the Rust twin the tests hold it to.
+    #[cfg(test)]
     pub fn to_display(self) -> String {
         const MONTHS: [&str; 12] = [
             "January",
@@ -170,7 +172,9 @@ pub fn kept_leap_day(born_on: Option<&str>, answer: Option<LeapDay>) -> Option<L
 /// The civil date a birthday falls on in `year`, as month and day. A 29 February one lands on
 /// itself in a leap year, and in other years on the day the person chose: 28 February, or 1 March.
 /// Unanswered reads as 28 February. `None` when `born_on` is not a full day. The one owner of this
-/// rule on the Rust side; `partialDate.ts` holds its twin.
+/// rule on the Rust side; `partialDate.ts` holds its twin. Nothing in PR A calls it (the page does
+/// this sum); it is here for the tests to pin the rule against the TS twin.
+#[cfg(test)]
 pub fn born_on_in(born_on: &str, answer: Option<LeapDay>, year: u16) -> Option<PartialDate> {
     let d = PartialDate::parse(born_on).filter(PartialDate::is_day)?;
     let (month, day) = (d.month?, d.day?);

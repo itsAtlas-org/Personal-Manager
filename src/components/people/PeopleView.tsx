@@ -47,6 +47,7 @@ import {
   upcomingBirthdays,
   writePeopleSort,
 } from "../../lib/people";
+import { mergesStillOnOffer, offerMerge, withdrawMerge } from "../../lib/mergeOffers";
 import { duplicatesButtonLabel, mergedNotice } from "../../lib/peopleMerge";
 import {
   headerExportChoices,
@@ -136,6 +137,15 @@ export function PeopleView({
   const [activeId, setActiveId] = useState<number | null>(null);
   const undo = useUndoNotices();
   useUndoShortcut(undo.undoNewest);
+  /** Which notice carries which merge's token, so a dismiss can forget the offer. */
+  const mergeNotices = useRef(new Map<number, string>());
+  // Coming back to the tab within a merge's 30 seconds: its Undo is still on offer.
+  useEffect(() => {
+    const ids = mergesStillOnOffer().map((m) => offerMergeUndo(m.token, m.words, m.leftMs));
+    return () => ids.forEach((id) => undo.dismiss(id));
+    // Once per mount: the offers are read from the module's map as they stand then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [note, setNote] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ ids: number[]; name: string } | null>(null);
@@ -451,9 +461,17 @@ export function PeopleView({
       setNote(words);
       return;
     }
-    undo.push(
+    offerMerge(token, words, MERGE_UNDO_MS);
+    offerMergeUndo(token, words, MERGE_UNDO_MS);
+  }
+
+  /** The merge's notice, with an Undo that takes the merge back and forgets the offer. Returns the
+   *  notice's id. */
+  function offerMergeUndo(token: string, words: string, ttlMs: number): number {
+    const id = undo.push(
       words,
       async () => {
+        withdrawMerge(token);
         try {
           await undoMergePeople(token);
         } catch (err) {
@@ -464,9 +482,19 @@ export function PeopleView({
           setBump((n) => n + 1);
         }
       },
-      MERGE_UNDO_MS,
+      ttlMs,
       "people-merge",
     );
+    mergeNotices.current.set(id, token);
+    return id;
+  }
+
+  /** A dismissed merge notice is a merge nobody wants to undo: it is not offered again. */
+  function dismissNotice(id: number) {
+    const token = mergeNotices.current.get(id);
+    if (token) withdrawMerge(token);
+    mergeNotices.current.delete(id);
+    undo.dismiss(id);
   }
 
   /** "Merge these N": the backend judges every pair again and merges only those that lose nothing. */
@@ -1070,7 +1098,7 @@ export function PeopleView({
           Their details and labels are deleted too. This can't be undone.
         </p>
       </ConfirmDialog>
-      <UndoStrip notices={undo.notices} onUndo={undo.undo} onDismiss={undo.dismiss} />
+      <UndoStrip notices={undo.notices} onUndo={undo.undo} onDismiss={dismissNotice} />
     </div>
   );
 }

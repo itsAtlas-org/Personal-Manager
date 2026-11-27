@@ -35,31 +35,40 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
   const [next, setNext] = useState(first.next);
   const [reading, setReading] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
-  // The page the record came with when a read was sent: a reply that finds a newer one is stale.
-  const current = useRef(first);
-  current.current = first;
+  // Bumped whenever the pages read so far are thrown away: a reply sent before that is stale.
+  const generation = useRef(0);
 
-  // The record read again (an entry was logged, edited or deleted, here or elsewhere): start over
-  // from its first page, which is the truth.
+  // The record is read again after every write on it (a star, a label), and none of those touch the
+  // timeline: the pages read so far stay. Start over from the first page, which is the truth, only
+  // when it really changed (another person, other entries, another next page), or when this view
+  // sent a log, an edit or a delete (that may sit on an earlier page the first page doesn't show).
+  const seen = useRef({ id: person.id, page: JSON.stringify(first) });
+  const touched = useRef(false);
   useEffect(() => {
+    const page = JSON.stringify(first);
+    const same = seen.current.id === person.id && seen.current.page === page && !touched.current;
+    seen.current = { id: person.id, page };
+    touched.current = false;
+    if (same) return;
+    generation.current++;
     setMore([]);
     setNext(first.next);
     setFailed(null);
-  }, [first]);
+  }, [first, person.id]);
 
   async function showMore() {
     if (!next || reading) return;
     setReading(true);
     setFailed(null);
-    const sentFor = first;
+    const sentFor = generation.current;
     try {
       const page = await listTimeline(person.id, next);
-      // The record was read again while this was out: its first page is the truth, this is not.
-      if (current.current !== sentFor) return;
+      // The timeline was started over while this was out: the new first page is the truth.
+      if (generation.current !== sentFor) return;
       setMore((prev) => [...prev, ...page.entries]);
       setNext(page.next);
     } catch (err) {
-      if (current.current === sentFor) {
+      if (generation.current === sentFor) {
         setFailed(errorWords(err, "PM couldn't read earlier entries just now."));
       }
     } finally {
@@ -81,7 +90,14 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
           <div className="flex flex-wrap items-center justify-between gap-2">
             {open && lastMet}
             {!trashed && (
-              <Button variant="secondary" size="xs" onClick={onLog}>
+              <Button
+                variant="secondary"
+                size="xs"
+                onClick={() => {
+                  touched.current = true;
+                  onLog();
+                }}
+              >
                 + Log
               </Button>
             )}
@@ -115,7 +131,10 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
                           variant="tertiary"
                           size="xs"
                           aria-label={`Edit the ${kindNoun(e.kind)} on ${when}`}
-                          onClick={() => onEdit(e)}
+                          onClick={() => {
+                            touched.current = true;
+                            onEdit(e);
+                          }}
                         >
                           Edit
                         </Button>
@@ -123,7 +142,10 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
                           variant="tertiary"
                           size="xs"
                           aria-label={`Delete the ${kindNoun(e.kind)} on ${when}`}
-                          onClick={() => onDelete(e)}
+                          onClick={() => {
+                            touched.current = true;
+                            onDelete(e);
+                          }}
                         >
                           Delete
                         </Button>

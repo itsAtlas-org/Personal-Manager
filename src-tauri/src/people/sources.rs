@@ -251,7 +251,9 @@ pub fn person_for_source(
 
 /// The person an id belongs to, and whether they are in Trash: their own `uid`, or a uid folded
 /// into them by a merge (so a file exported before the merge still finds the survivor). A person in
-/// Trash is still found: restoring them is the import's job (E4).
+/// Trash is still found: restoring them is the import's job (E4). The import asks the two halves
+/// apart (own uid, then folded uids); this is the one-call form the tests pin.
+#[cfg(test)]
 pub fn person_for_ident(conn: &Connection, ident: &str) -> Result<Option<(i64, bool)>> {
     if let Some(found) = person_for_own_ident(conn, ident)? {
         return Ok(Some(found));

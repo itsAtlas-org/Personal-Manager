@@ -130,6 +130,8 @@ export function MeetCard({ meeting, onAnswered, onOpenPerson, locked, onBusy }: 
         type="button"
         className="min-w-0 break-words text-left text-accent-text underline underline-offset-2"
         aria-label={`Open ${display}`}
+        // Not while an answer is being saved: opening a record closes the dialog under it.
+        disabled={off}
         onClick={() => void open(id)}
       >
         {display}

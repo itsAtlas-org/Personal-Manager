@@ -112,9 +112,6 @@ mod openrouter;
 mod outlook_calendar;
 mod pathguard;
 mod paths;
-// The commands that call into this arrive with the next slice of the People PR; until then most of it
-// has no caller. Drop this allow when `commands/people.rs` lands.
-#[allow(dead_code)]
 mod people;
 mod photos;
 mod pinboard_legacy;

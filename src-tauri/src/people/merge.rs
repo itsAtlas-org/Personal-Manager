@@ -1322,8 +1322,9 @@ pub fn undo_steps(conn: &Connection, steps: &[UndoStep]) -> Result<usize> {
 }
 
 /// The merges that can still be taken back: in memory, in `AppState`, never written anywhere. An
-/// entry goes when it is used, when [`UNDO_HOLD`] is up, when the store changes, or when 20 newer
-/// ones push it out.
+/// entry goes when it is used, when the store changes, or when 20 newer ones push it out. Once
+/// [`UNDO_HOLD`] is up it can no longer be used, and it is let go the next time the shelf is
+/// touched (a merge or an Undo): there is no timer, so until then it stays in memory.
 #[derive(Default)]
 pub struct UndoShelf {
     entries: Vec<ShelfEntry>,
@@ -1388,13 +1389,12 @@ impl UndoShelf {
     /// while they are fresh. A second try with the same token finds nothing.
     pub fn take(&mut self, token: &str, epoch: u64, at: Instant) -> Result<Vec<UndoStep>> {
         let found = self.entries.iter().position(|e| e.token == token);
-        let Some(i) = found else {
-            return Err(refuse(NO_LONGER));
-        };
-        let entry = self.entries.remove(i);
-        if entry.epoch != epoch || entry.expires <= at {
-            return Err(refuse(NO_LONGER));
+        let taken = found.map(|i| self.entries.remove(i));
+        // Any look at the shelf lets go of every entry whose time is up, not only the one asked for.
+        self.entries.retain(|e| e.expires > at);
+        match taken {
+            Some(entry) if entry.epoch == epoch && entry.expires > at => Ok(entry.steps),
+            _ => Err(refuse(NO_LONGER)),
         }
-        Ok(entry.steps)
     }
 }

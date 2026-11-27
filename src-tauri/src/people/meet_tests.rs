@@ -179,10 +179,6 @@ fn owed_uids(conn: &Connection, now: DateTime<Utc>, z: Tz) -> BTreeSet<String> {
         .collect()
 }
 
-fn set(names: &[&str]) -> BTreeSet<String> {
-    names.iter().map(|s| s.to_string()).collect()
-}
-
 /// A day relative to the user's civil today in `z` at `now`: `YYYY-MM-DD`.
 fn day(now: DateTime<Utc>, z: Tz, offset: i64) -> String {
     let today = crate::clock::today_in_at(z, now);

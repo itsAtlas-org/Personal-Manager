@@ -462,7 +462,7 @@ impl std::fmt::Debug for ImportOptions {
 #[derive(Clone, Serialize)]
 pub struct KeptNote {
     pub name: String,
-    /// "name", "birthday", "where you met" or "notes".
+    /// "name", "birthday", "where you met", "notes" or "some details (over the limit)".
     pub fields: Vec<String>,
 }
 
@@ -692,6 +692,10 @@ fn apply_card(tx: &Connection, id: i64, card: &Card) -> Result<Applied> {
                     new.id = None;
                     draft.details.push(new);
                     changed = true;
+                } else if !kept.contains(&"some details (over the limit)") {
+                    // A person holds so many details; the rest of the file's are left out, and the
+                    // result says so rather than dropping them without a word.
+                    kept.push("some details (over the limit)");
                 }
             }
             Fate::Drop(at, fill) => {

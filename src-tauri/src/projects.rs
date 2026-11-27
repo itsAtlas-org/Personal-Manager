@@ -576,6 +576,13 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
     //    both projects would hit the primary key with a plain UPDATE and fail the whole merge: OR
     //    IGNORE keeps the survivor's row, and the leftover old-name rows go with step 6's cascade
     //    (the FK has no ON UPDATE, which is why this runs after step 1 and before step 6).
+    //    A link that changes name is a write to the person, so their updated_at moves too: a
+    //    merge's Undo (people/merge.rs) reads it to refuse an Undo over a link that has changed.
+    let linked: Vec<i64> = conn
+        .prepare("SELECT person_id FROM person_projects WHERE project_name = ?1")?
+        .query_map(params![old], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    crate::people::touch_people(conn, &linked)?;
     conn.execute(
         "UPDATE OR IGNORE person_projects SET project_name = ?2 WHERE project_name = ?1",
         params![old, new],
