@@ -1227,8 +1227,9 @@ fn parse_card_date(raw: &str, omit_year: Option<&str>) -> Option<String> {
 }
 
 /// The text of an address from its parts: the street, the extra line and the PO box, then the city,
-/// region and postcode on one line, then the country.
-pub(super) fn address_value(parts: &Map<String, Value>) -> String {
+/// region and postcode on one line, then the country. Public so the Google mapping composes an
+/// address's text the same way a file's does.
+pub fn address_value(parts: &Map<String, Value>) -> String {
     let get = |k: &str| {
         parts
             .get(k)

@@ -114,6 +114,7 @@ mod outlook_calendar;
 mod pathguard;
 mod paths;
 mod people;
+mod people_google;
 mod photos;
 mod pinboard_legacy;
 /// The Calendar in a window of its own (#1039).
