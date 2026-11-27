@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-11-27",
+  "about": "Every NUMERIC key a provider's usage object has been seen to carry, by dotted path from the usage object (arrays are not walked). known_priced: PM turns it into money. known_info: PM reads or knowingly ignores it, and it never changes a price (it is already inside a priced count, or it is a count of something free). known_unpriced: PM cannot price it; a value above 0 makes the row 'at least', and the value is the closed cost_note slug. A numeric key in none of the three is a new token type. Non-numeric keys (service_tier, inference_geo, speed ...) and arrays (Gemini's promptTokensDetails, whose non-text modality is the slug non_text_prompt) are never walked, so slugs lists only the ones a key maps to. The Rust usage reader and the weekly provider canary read this one file.",
+  "slugs": ["partial_usage", "audio_tokens", "prediction_tokens", "server_tool_use"],
+  "providers": {
+    "openai": {
+      "known_priced": [
+        "prompt_tokens",
+        "completion_tokens",
+        "prompt_tokens_details.cached_tokens",
+        "prompt_tokens_details.cache_write_tokens"
+      ],
+      "known_info": [
+        "total_tokens",
+        "completion_tokens_details.reasoning_tokens",
+        "cache_write_tokens",
+        "cache_write_tokens_details.ttl_30m_tokens",
+        "cache_write_tokens_details.ttl_12h_tokens",
+        "prompt_tokens_details.cache_write_tokens_details.ttl_30m_tokens"
+      ],
+      "known_unpriced": {
+        "prompt_tokens_details.cache_write_tokens_details.ttl_12h_tokens": "partial_usage",
+        "prompt_tokens_details.audio_tokens": "audio_tokens",
+        "completion_tokens_details.audio_tokens": "audio_tokens",
+        "completion_tokens_details.accepted_prediction_tokens": "prediction_tokens",
+        "completion_tokens_details.rejected_prediction_tokens": "prediction_tokens"
+      }
+    },
+    "gemini": {
+      "known_priced": [
+        "prompt_tokens",
+        "completion_tokens",
+        "prompt_tokens_details.cached_tokens",
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "cachedContentTokenCount"
+      ],
+      "known_info": [
+        "total_tokens",
+        "completion_tokens_details.reasoning_tokens",
+        "totalTokenCount",
+        "thoughtsTokenCount"
+      ],
+      "known_unpriced": {
+        "toolUsePromptTokenCount": "server_tool_use",
+        "prompt_tokens_details.audio_tokens": "audio_tokens",
+        "completion_tokens_details.audio_tokens": "audio_tokens"
+      }
+    },
+    "anthropic": {
+      "known_priced": [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens"
+      ],
+      "known_info": [
+        "cache_creation.ephemeral_5m_input_tokens",
+        "output_tokens_details.thinking_tokens"
+      ],
+      "known_unpriced": {
+        "cache_creation.ephemeral_1h_input_tokens": "partial_usage",
+        "server_tool_use.web_search_requests": "server_tool_use",
+        "server_tool_use.web_fetch_requests": "server_tool_use"
+      }
+    }
+  }
+}

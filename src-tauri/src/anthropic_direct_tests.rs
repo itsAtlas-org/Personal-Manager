@@ -1121,6 +1121,39 @@ fn the_test_chat_tries_the_cheapest_and_never_fable_unless_it_is_alone() {
     assert_eq!(ids(&[SONNET.to_string(), OPUS.to_string()]), [SONNET, OPUS]);
 }
 
+/// The weekly provider canary sends these bodies (tests/golden/request_bodies.json), so they are built
+/// here by the real builders and compared byte for byte. Haiku is the canary's model, and the arm is
+/// the cheap background job at `low`, the one row of the matrix where PM also sends `thinking`.
+#[test]
+fn request_bodies_match_the_canary_golden() {
+    use crate::golden_request_bodies::{assert_matches, SYSTEM, USER};
+    let say = [msg("system", SYSTEM), msg("user", USER)];
+    let a = arm(HAIKU, Some(Role::Background), Some("low"));
+    let stream = prepare(&a, &say, Some(0), Some(64)).unwrap();
+    assert_eq!(
+        stream.body["thinking"],
+        json!({"type": "disabled"}),
+        "the canary's body is the one that carries thinking, so it covers that field too"
+    );
+    let m = row(HAIKU);
+    let plain = chat_body(
+        m,
+        wire_effort(m, &a),
+        thinking_setting(m, a.role, wire_effort(m, &a)),
+        to_wire(&say, None).unwrap(),
+        false,
+        64,
+    );
+    assert_matches(
+        "anthropic",
+        &[
+            ("stream", stream.body),
+            ("plain", plain),
+            ("key_check", probe_body(m)),
+        ],
+    );
+}
+
 #[test]
 fn the_test_chat_body_is_the_smallest_proof_a_chat_works() {
     for id in ALL_FOUR {

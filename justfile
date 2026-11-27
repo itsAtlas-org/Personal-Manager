@@ -26,7 +26,7 @@ default:
 # `just ci-membership` asserts BOTH directions of that claim: every member below has a
 # step in pr.yml AND a hook in .pre-commit-config.yaml. The claim used to be prose only,
 # and pre-commit had drifted to 9 of the 13 — missing, of all things, the drift guards.
-check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence tasks-emit people-emit script-deps action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
+check-fast: prettier eslint tsc cargo-fmt ruff ruff-fmt version files headers mods license-subset ci-membership sync-set ipc-commands calendar-write-fence tasks-emit people-emit script-deps provider-checks-offline action-pins requirements-lock node-version npm-licenses sidecar-licences model-licences
 
 # Everything a PR is gated on (adds the compile/test/supply-chain/security checks).
 check: check-fast frontend-test build-frontend build-mods clippy cargo-check rust-test sidecar-test deny pip-audit npm-audit gitleaks gitleaks-history zizmor
@@ -298,6 +298,15 @@ people-emit:
 # in CI. Also asserts each exception is still imported, dev-only, and exactly pinned.
 script-deps:
     node scripts/check-script-deps.mjs
+
+# The weekly provider canary's offline suite (scripts/provider-checks, node:test, no dependencies, so it
+# runs in pr.yml's hygiene job with no `npm ci`): recorded vendor replies and deliberately drifted copies
+# through a fake fetch and a fake `gh`, the usage-key allow-list, the golden request bodies, the
+# no-print scan and the workflow's security shape. Node 24's runner takes a glob, not a folder. The live
+# canary (.github/workflows/provider-canary.yml) needs keys and the network, so it is not a member of
+# `just check`; this is. vitest skips this folder (vitest.config.ts) because these files run here.
+provider-checks-offline:
+    node --test 'scripts/provider-checks/**/*.test.mjs'
 
 # Every `uses:` in .github/workflows is pinned to a 40-char commit SHA with a readable
 # version comment. Both workflow headers already CLAIM "the repo enforces it" — until

@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 Bobby Yu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Provider canary: once a week, ask OpenAI, Google (Gemini) and Anthropic the questions PM's own-key
+# routes depend on, with the same request bodies PM sends (src-tauri/tests/golden/request_bodies.json,
+# pinned to PM's real builders by a Rust test), and open ONE issue per provider if an assumption
+# broke: a model gone or retired, a limit or capability changed, a usage field that moved, a NEW kind
+# of token PM may not be pricing, a cache that stopped hitting, an error shape that changed. It asserts
+# shapes and invariants PM prices or parses by, never reply text. It is plain Node (no dependencies,
+# no LLM, nothing that needs a Claude plan) in scripts/provider-checks/, and costs under $0.01 a run.
+#
+# Setup lives outside the repo, and none of it is secret. GitHub environment `provider-canary`, deployment
+# branches limited to `main` only (the one thing stopping a branch dispatch from reaching the keys).
+# Secrets on it: OPENAI_CANARY_KEY and GEMINI_CANARY_KEY, keys of two dedicated low-limit projects. The
+# Claude leg uses Anthropic Workload Identity Federation, so no key is stored: ANTHROPIC_ORG_ID,
+# ANTHROPIC_FEDERATION_RULE_ID, ANTHROPIC_SERVICE_ACCOUNT_ID and ANTHROPIC_WORKSPACE_ID (all four, or
+# the leg errors "partly configured"). The Console federation rule: issuer
+# https://token.actions.githubusercontent.com; audience https://api.anthropic.com; subject EXACTLY
+# repo:itsAtlas-org/Personal-Manager:environment:provider-canary (never a wildcard); claims
+# repository_owner and ref (refs/heads/main); scope workspace:developer. Plan B, only if the exchange
+# cannot be made to work: ANTHROPIC_CANARY_KEY, a key in the dedicated workspace.
+# A leg whose secrets are absent says "not configured" and ends green; it never opens an issue. If ALL
+# three legs are unconfigured the report step fails, so a renamed environment or deleted secrets cannot
+# leave the canary silently watching nothing.
+#
+# SECURITY: schedule and manual dispatch only, never `pull_request` or `pull_request_target`, so no
+# branch or fork can run this with secrets. The keyed jobs hold the secrets (at step level only, on an
+# environment limited to `main`) and have no `issues: write`; the one job that posts holds no secrets
+# and no `id-token`. A keyed job writes one sanitised result (a status and a whitelist of finding ids
+# and fixed sentences), never a raw reply, header or key; nothing is uploaded as an artifact and
+# nothing is cached. GitHub masks only registered secrets, so the script also masks the OIDC token
+# and the token it is exchanged for the moment it has them. Workflow logs, job summaries and issues
+# in this repo are public: no step prints a body, an id or a figure of the account behind a key. If a
+# log ever shows something it should not: rotate the key (or delete the federation rule) first, then
+# fix the script. Edits to this file and to scripts/provider-checks/ run with secrets once merged, so
+# review them as secret-bearing code. Actions are SHA-pinned, with the version Dependabot reads in the
+# trailing comment. Scheduled workflows in a public repository are disabled after 60 days without
+# repository activity; PM merges daily.
+name: Provider canary
+
+on:
+  schedule:
+    - cron: "41 5 * * 3" # Wednesdays, 05:41 UTC (sealed-frame.yml owns Mondays 04:23)
+  workflow_dispatch:
+    inputs:
+      selftest:
+        description: "Only file and close a synthetic issue (no keys, no provider calls) to prove the plumbing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Shared with the weekly drift check, so two provider workflows never race to create one issue. A run
+# that arrives while another is pending replaces the pending one: harmless, the next week runs again.
+concurrency:
+  group: provider-checks
+  cancel-in-progress: false
+
+jobs:
+  openai:
+    name: OpenAI
+    if: ${{ !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: provider-canary
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.canary.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Ask OpenAI
+        id: canary
+        env:
+          OPENAI_CANARY_KEY: ${{ secrets.OPENAI_CANARY_KEY }}
+        run: node scripts/provider-checks/canary-openai.mjs
+
+  gemini:
+    name: Gemini
+    if: ${{ !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: provider-canary
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.canary.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Ask Gemini
+        id: canary
+        env:
+          GEMINI_CANARY_KEY: ${{ secrets.GEMINI_CANARY_KEY }}
+        run: node scripts/provider-checks/canary-gemini.mjs
+
+  anthropic:
+    name: Anthropic
+    if: ${{ !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: provider-canary
+    # The only job with id-token: it asks GitHub for the token Anthropic exchanges for a short-lived one.
+    permissions:
+      contents: read
+      id-token: write # GitHub's OIDC token, which Anthropic exchanges for a short-lived one (WIF)
+    outputs:
+      result: ${{ steps.canary.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Ask Anthropic
+        id: canary
+        env:
+          ANTHROPIC_ORG_ID: ${{ secrets.ANTHROPIC_ORG_ID }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ secrets.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ secrets.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_CANARY_KEY: ${{ secrets.ANTHROPIC_CANARY_KEY }}
+        run: node scripts/provider-checks/canary-anthropic.mjs
+
+  # The one job that posts. No secrets, no environment, no id-token. A leg that was skipped, could not
+  # finish, crashed or left no result never counts as "clear" (report.mjs), so it touches no issue.
+  report:
+    name: Report
+    needs: [openai, gemini, anthropic]
+    if: ${{ always() && !inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # opens, updates and closes the provider-check issues; this job holds no secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: File, update or close the issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_OPENAI: ${{ needs.openai.outputs.result }}
+          RESULT_GEMINI: ${{ needs.gemini.outputs.result }}
+          RESULT_ANTHROPIC: ${{ needs.anthropic.outputs.result }}
+          JOB_OPENAI: ${{ needs.openai.result }}
+          JOB_GEMINI: ${{ needs.gemini.result }}
+          JOB_ANTHROPIC: ${{ needs.anthropic.result }}
+        run: node scripts/provider-checks/report.mjs canary
+
+  # Manual dispatch with `selftest`: files a synthetic issue and closes it, which proves the label,
+  # permission and de-duplication plumbing with no keys and no provider call.
+  selftest:
+    name: Self-test
+    if: ${{ inputs.selftest }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # files and closes one synthetic issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: File and close a synthetic issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/provider-checks/report.mjs selftest

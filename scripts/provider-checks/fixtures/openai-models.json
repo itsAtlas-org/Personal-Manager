@@ -1,0 +1,180 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-5-2025-08-07",
+      "object": "model",
+      "created": 1754075360,
+      "owned_by": "system",
+      "shutdown_date": "2026-12-11"
+    },
+    {
+      "id": "tts-1-1106",
+      "object": "model",
+      "created": 1699053241,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "object": "model",
+      "created": 1776894349,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5-pro-2025-10-06",
+      "object": "model",
+      "created": 1759469707,
+      "owned_by": "system",
+      "shutdown_date": "2026-12-11"
+    },
+    {
+      "id": "chat-latest",
+      "object": "model",
+      "created": 1777704602,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5.2-pro-2025-12-11",
+      "object": "model",
+      "created": 1765343959,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-audio-2025-08-28",
+      "object": "model",
+      "created": 1756256146,
+      "owned_by": "system",
+      "shutdown_date": "2027-01-20"
+    },
+    {
+      "id": "gpt-5.4-pro-2026-03-05",
+      "object": "model",
+      "created": 1772659657,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-realtime-translate",
+      "object": "model",
+      "created": 1777950216,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "object": "model",
+      "created": 1782228018,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5.5-pro-2026-04-23",
+      "object": "model",
+      "created": 1776894470,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-6.2-astra",
+      "object": "model",
+      "created": 1793430042,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-6.2-astra-healthcare",
+      "object": "model",
+      "created": 1793430049,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-realtime-2.1-mini",
+      "object": "model",
+      "created": 1782254706,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "tts-1",
+      "object": "model",
+      "created": 1681940951,
+      "owned_by": "openai-internal",
+      "shutdown_date": "2027-01-06"
+    },
+    {
+      "id": "gpt-5-mini",
+      "object": "model",
+      "created": 1754425928,
+      "owned_by": "system",
+      "shutdown_date": "2026-12-11"
+    },
+    {
+      "id": "omni-moderation-2024-09-26",
+      "object": "model",
+      "created": 1732734466,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5-mini-2025-08-07",
+      "object": "model",
+      "created": 1754425867,
+      "owned_by": "system",
+      "shutdown_date": "2026-12-11"
+    },
+    {
+      "id": "gpt-realtime-2025-08-28",
+      "object": "model",
+      "created": 1756271773,
+      "owned_by": "system",
+      "shutdown_date": "2027-01-20"
+    },
+    {
+      "id": "gpt-5.4-2026-03-05",
+      "object": "model",
+      "created": 1772654062,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-live-transcribe",
+      "object": "model",
+      "created": 1785168034,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-5-nano",
+      "object": "model",
+      "created": 1754426384,
+      "owned_by": "system",
+      "shutdown_date": "2026-12-11"
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "object": "model",
+      "created": 1793000001,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1793000002,
+      "owned_by": "system",
+      "shutdown_date": null
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1793000003,
+      "owned_by": "system",
+      "shutdown_date": null
+    }
+  ]
+}

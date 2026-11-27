@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // The frontend test harness. Started as T-07 (pure `src/lib` modules the audit flagged as guarded by
@@ -27,6 +27,10 @@ export default defineConfig({
     // `mods/**` is listed on purpose: it is a top-level folder, so `src/**` never reached it and a
     // mod's tests would have been collected by nothing. Same proof: check-files-in-place.mjs.
     include: ["src/**/*.test.{ts,tsx}", "mods/**/*.test.{ts,tsx}", "scripts/**/*.test.mjs"],
+    // scripts/provider-checks/ is the weekly provider canary's offline suite. It runs on node:test
+    // (`just provider-checks-offline`), so it also runs in pr.yml's dependency-free hygiene job; vitest
+    // would report each of its files as having no suite. check-files-in-place.mjs names that runner.
+    exclude: [...configDefaults.exclude, "scripts/provider-checks/**"],
     environment: "node",
   },
 });

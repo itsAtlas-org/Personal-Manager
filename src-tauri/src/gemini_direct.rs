@@ -1930,6 +1930,41 @@ mod tests {
 
     // ---- the wire ---------------------------------------------------------------------------------------
 
+    /// The weekly provider canary sends these bodies (tests/golden/request_bodies.json), so they are
+    /// built here by the real builders and compared byte for byte. 3.5 Flash-Lite is the canary's
+    /// model; `none` is a 400 on it, so its lowest listed level (`minimal`) is the one that is sent.
+    #[test]
+    fn request_bodies_match_the_canary_golden() {
+        use crate::golden_request_bodies::{assert_matches, SYSTEM, USER};
+        let say = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: SYSTEM.into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: USER.into(),
+            },
+        ];
+        let m = gem("gemini-3.5-flash-lite");
+        assert_eq!(m.effort_default.as_deref(), Some("minimal"));
+        let probe: Value = serde_json::from_str(PROBE_BODY).unwrap();
+        assert_matches(
+            "gemini",
+            &[
+                (
+                    "stream",
+                    chat_body(m, Some("minimal"), &say, true, Some(0), 256),
+                ),
+                (
+                    "plain",
+                    chat_body(m, Some("minimal"), &say, false, None, 256),
+                ),
+                ("tier_probe", probe),
+            ],
+        );
+    }
+
     #[test]
     fn the_body_is_what_pm_means_to_send_and_nothing_else() {
         let m = gem("gemini-3.8-flash");
