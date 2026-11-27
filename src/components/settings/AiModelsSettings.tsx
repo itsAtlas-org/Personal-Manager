@@ -25,6 +25,14 @@ import {
 } from "../../lib/ipc";
 import { useDirectProviders } from "../../lib/useDirectProviders";
 import type { CostSummary, RoleName, Settings } from "../../lib/types";
+import {
+  atLeast,
+  detailLine,
+  fmtUsd,
+  partialTitle,
+  unpricedWarning,
+  viaLabel,
+} from "../../lib/usageFormat";
 import { IngestProgress } from "../IngestProgress";
 import { modText } from "../mods/modText";
 import {
@@ -51,21 +59,15 @@ function sameList(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((m, i) => m === b[i]);
 }
 
-/** Format a USD cost, or "—" when unknown (the model isn't in the price cache yet). */
-function fmtUsd(v: number | null): string {
-  if (v == null) return "—";
-  if (v === 0) return "$0.00";
-  return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
-}
-
 /** What mods spent, all time, from the by-mod rows: the sum of what could be priced, and whether
- *  some could not (then the sum is a floor, never presented as the whole). */
+ *  some could not (then the sum is a floor, never presented as the whole). PM says which rows are
+ *  incomplete (`partial`); a mod that only used a model on this computer cost nothing and is not. */
 function modTotal(rows: CostSummary["by_mod"]): { usd: number; partial: boolean } {
   let usd = 0;
   let partial = false;
   for (const r of rows) {
-    if (r.cost_usd == null) partial = true;
-    else usd += r.cost_usd;
+    if (r.partial) partial = true;
+    if (r.cost_usd != null) usd += r.cost_usd;
   }
   return { usd, partial };
 }
@@ -642,38 +644,90 @@ export function AiModelsSettings({
           <div className="mt-3 flex gap-6 text-sm">
             <div>
               <div className="text-xs text-ink4">Last 30 days</div>
-              <div className="font-mono text-ink2">{fmtUsd(cost.total_30d_usd)}</div>
+              <div
+                className="font-mono text-ink2"
+                title={partialTitle(cost.total_30d_usd, cost.total_30d_partial)}
+              >
+                {atLeast(cost.total_30d_usd, cost.total_30d_partial)}
+              </div>
             </div>
             <div>
               <div className="text-xs text-ink4">All time</div>
-              <div className="font-mono text-ink2">{fmtUsd(cost.total_all_time_usd)}</div>
+              <div
+                className="font-mono text-ink2"
+                title={partialTitle(cost.total_all_time_usd, cost.total_all_time_partial)}
+              >
+                {atLeast(cost.total_all_time_usd, cost.total_all_time_partial)}
+              </div>
             </div>
           </div>
+          {/* Status, so it is never folded: how many calls the 30-day figure leaves out, and the
+              named token types PM can't price. The "Why?" beside it is the explanation. */}
+          {/* The count covers the last 30 days only; the "Why?" shows whenever either total says "at
+              least", because an all-time floor can come from calls older than that. */}
+          {cost.unpriced_30d > 0 && (
+            <p className="mt-1 text-xs text-ink3">
+              {cost.unpriced_30d === 1
+                ? "1 call in the last 30 days couldn't be priced in full"
+                : `${cost.unpriced_30d} calls in the last 30 days couldn't be priced in full`}
+            </p>
+          )}
+          {(cost.unpriced_30d > 0 || cost.total_30d_partial || cost.total_all_time_partial) && (
+            <SectionInfo title="Why?">
+              <p>
+                Some replies don&apos;t say what they cost: ones that came back with no token count,
+                ones PM can only price in part, or ones that used a kind of token PM doesn&apos;t
+                know how to price. Your provider&apos;s own usage page has the exact figure.
+              </p>
+            </SectionInfo>
+          )}
+          {cost.partial_reasons.map((r) => {
+            const words = unpricedWarning(r.slug, r.replies);
+            return words ? (
+              <Callout key={r.slug} tone="warning" body="ink" live={false} className="mt-2">
+                {words}
+              </Callout>
+            ) : null;
+          })}
           {cost.all_time.length > 0 ? (
             <div className="mt-3">
               <p className="pb-1 font-mono text-[0.625rem] uppercase tracking-wide text-ink4">
                 By model · most expensive first (all time)
               </p>
-              <table className="w-full text-left text-xs">
+              <table className="w-full text-left text-xs" data-help="settings-usage-via">
                 <thead className="font-mono uppercase tracking-wide text-ink4">
                   <tr className="border-b border-rule">
                     <th className="py-1 font-medium">Model</th>
+                    <th className="py-1 font-medium">Via</th>
                     <th className="py-1 text-right font-medium">Reqs</th>
                     <th className="py-1 text-right font-medium">Tokens in/out</th>
                     <th className="py-1 text-right font-medium">Cost</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {cost.all_time.map((s) => (
-                    <tr key={s.model} className="border-b border-rule">
-                      <td className="py-1 pr-2 text-ink2">{s.model}</td>
-                      <td className="py-1 text-right text-ink3">{s.request_count}</td>
-                      <td className="py-1 text-right font-mono text-ink4">
-                        {s.prompt_tokens.toLocaleString()} / {s.completion_tokens.toLocaleString()}
-                      </td>
-                      <td className="py-1 text-right font-mono text-ink3">{fmtUsd(s.cost_usd)}</td>
-                    </tr>
-                  ))}
+                  {cost.all_time.map((s) => {
+                    const detail = detailLine(s);
+                    return (
+                      <tr key={`${s.model}|${s.served ?? ""}`} className="border-b border-rule">
+                        <td className="py-1 pr-2 text-ink2">
+                          {s.model}
+                          {detail && <div className="text-ink4">{detail}</div>}
+                        </td>
+                        <td className="py-1 pr-2 text-ink3">{viaLabel(s.served)}</td>
+                        <td className="py-1 text-right text-ink3">{s.request_count}</td>
+                        <td className="py-1 text-right font-mono text-ink4">
+                          {s.prompt_tokens.toLocaleString()} /{" "}
+                          {s.completion_tokens.toLocaleString()}
+                        </td>
+                        <td
+                          className="py-1 text-right font-mono text-ink3"
+                          title={partialTitle(s.cost_usd, s.partial)}
+                        >
+                          {s.served === "local" ? "No cost" : atLeast(s.cost_usd, s.partial)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -706,7 +760,16 @@ export function AiModelsSettings({
                       <td className="py-1 text-right font-mono text-ink4">
                         {m.prompt_tokens.toLocaleString()} / {m.completion_tokens.toLocaleString()}
                       </td>
-                      <td className="py-1 text-right font-mono text-ink3">{fmtUsd(m.cost_usd)}</td>
+                      <td
+                        className="py-1 text-right font-mono text-ink3"
+                        title={partialTitle(m.cost_usd, m.partial)}
+                      >
+                        {/* A mod that only used models on this computer cost nothing (a dash would
+                            read as "couldn't be priced"). */}
+                        {m.cost_usd == null && !m.partial
+                          ? "No cost"
+                          : atLeast(m.cost_usd, m.partial)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -722,11 +785,12 @@ export function AiModelsSettings({
               </p>
             </div>
           )}
-          {/* Names a tab that only exists while Local AI is on. */}
+          {/* Names a tab that only exists while Local AI is on. The table above lists the models on
+              this computer (the log keeps them), so this says what that listing means. */}
           {localAi?.on && (
             <p className="mt-2 text-xs text-ink4">
-              Local models (Settings → Local AI) aren&apos;t counted here — this ledger tracks only
-              your paid cloud calls.
+              Models on this computer are listed with their request count. They don&apos;t cost
+              anything.
             </p>
           )}
           <SectionInfo title="How this is calculated">
@@ -753,6 +817,12 @@ export function AiModelsSettings({
               open this page, so a later price change re-prices your history. A model with no
               reported cost and not yet in the price cache shows{" "}
               <span className="font-mono text-ink4">—</span>, never an understated&nbsp;$0.
+            </p>
+            <p>
+              Cached tokens are billed at a lower price and thinking tokens are billed as output; PM
+              shows both so a total makes sense. A figure that says &ldquo;at least&rdquo; leaves
+              out calls PM couldn&apos;t price. A reply that failed after the provider began billing
+              it, and anything done with a key outside PM, isn&apos;t in this log at all.
             </p>
             {catalogueDate && (
               <p>

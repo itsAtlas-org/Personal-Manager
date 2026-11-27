@@ -168,6 +168,7 @@ mod tags;
 mod tasks;
 mod tray;
 mod update_delivery;
+mod usage_keys;
 mod vault;
 mod wipe;
 mod wire_mark;

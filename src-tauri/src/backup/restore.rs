@@ -561,6 +561,14 @@ mod tests {
             let conn = db::open_at_version(&src.join("pm.sqlite"), &key_hex, version).unwrap();
             conn.execute("INSERT INTO tasks(title) VALUES ('call Sam')", [])
                 .unwrap();
+            // A row from before the usage detail columns, so a restore that climbs the ladder
+            // shows what v64 does to a row that already exists.
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, prompt_tokens, completion_tokens) \
+                 VALUES ('old/model', 'chat', 10, 5)",
+                [],
+            )
+            .unwrap();
             if document {
                 conn.execute(
                     "INSERT INTO documents(vault_path, title, content_hash) \
@@ -686,6 +694,92 @@ mod tests {
                 .unwrap();
             assert_eq!(title, "call Sam");
         }
+    }
+
+    /// A backup taken one build before the usage detail columns (a v62 store, a whole-store snapshot
+    /// of the v36-patched `usage_log`) restores here: the open runs v64, so the old row reads NULL
+    /// for every new column, the index on the patched table exists and the table still takes a row
+    /// that carries them. The restore itself touches no usage column (`strip.rs` only clears `mod_id`).
+    #[test]
+    fn a_v62_backup_restores_with_the_usage_detail_columns_and_their_index() {
+        let root = tempfile::tempdir().unwrap();
+        let (inputs, key_hex) = vault_at_version(root.path(), 62);
+        assert_eq!(schema_version(&inputs.db_snapshot, &key_hex), 62);
+        let archive = root.path().join("v62.pmbackup");
+        let cancel = AtomicBool::new(false);
+        pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
+
+        let target = root.path().join("restored");
+        restore(&archive, "pw", &target, |_, _| {}, &cancel).unwrap();
+        let restored = target.join("pm.sqlite");
+        assert_eq!(schema_version(&restored, &key_hex), latest_version());
+        let conn = db::open_unmigrated(&restored, &key_hex).unwrap();
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM usage_log WHERE model = 'old/model' \
+                   AND served_provider IS NULL AND cached_tokens IS NULL \
+                   AND cache_write_tokens IS NULL AND thinking_tokens IS NULL \
+                   AND outcome IS NULL AND cost_note IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1, "the old row reads NULL in every new column");
+        let index: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_usage_log_provider_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1, "the index on the patched table came through");
+        conn.execute(
+            "INSERT INTO usage_log(model, kind, served_provider, thinking_tokens) \
+             VALUES ('openai/m', 'chat', 'openai', 7)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// The same restore from a store AT v63 (Contacts' build, the one everyone on 3.202.0 has): only
+    /// v64 runs, the old row reads NULL in every new column, the index exists, and the people tables
+    /// Contacts added survive the restore.
+    #[test]
+    fn a_v63_backup_restores_with_the_usage_detail_columns_and_the_people_tables() {
+        let root = tempfile::tempdir().unwrap();
+        let (inputs, key_hex) = vault_at_version(root.path(), 63);
+        assert_eq!(schema_version(&inputs.db_snapshot, &key_hex), 63);
+        let archive = root.path().join("v63.pmbackup");
+        let cancel = AtomicBool::new(false);
+        pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
+
+        let target = root.path().join("restored");
+        restore(&archive, "pw", &target, |_, _| {}, &cancel).unwrap();
+        let restored = target.join("pm.sqlite");
+        assert_eq!(schema_version(&restored, &key_hex), latest_version());
+        let conn = db::open_unmigrated(&restored, &key_hex).unwrap();
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM usage_log WHERE model = 'old/model' \
+                   AND served_provider IS NULL AND cached_tokens IS NULL \
+                   AND cache_write_tokens IS NULL AND thinking_tokens IS NULL \
+                   AND outcome IS NULL AND cost_note IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1, "the old row reads NULL in every new column");
+        let objects: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE \
+                   (type = 'index' AND name = 'idx_usage_log_provider_created') \
+                   OR (type = 'table' AND name IN ('people', 'person_details', 'interactions'))",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objects, 4, "the index and Contacts' tables are all there");
     }
 
     /// Pack a store at `version` (optionally holding a board), restore it, and report the schema

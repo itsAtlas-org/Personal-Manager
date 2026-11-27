@@ -1196,6 +1196,7 @@ mod tests {
             latency_ms: 12,
             fallback: None,
             displaced_local_model: None,
+            cloud_provider: None,
         }
     }
 

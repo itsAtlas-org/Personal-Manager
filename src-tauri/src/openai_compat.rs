@@ -383,6 +383,8 @@ fn parse_usage(value: &serde_json::Value) -> Usage {
         cache_write_tokens: None,
         output_partial: false,
         refused: false,
+        thinking_tokens: None,
+        cost_note: None,
     }
 }
 

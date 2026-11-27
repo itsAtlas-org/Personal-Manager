@@ -83,6 +83,73 @@ pub struct Usage {
     /// may not touch) keep compiling: every `Usage` outside the dialect builders is built from
     /// `..Default::default()`. False for every provider that never says it.
     pub refused: bool,
+    /// The part of `completion_tokens` the model spent thinking, when the provider says so (OpenAI's
+    /// `reasoning_tokens`, Anthropic's `thinking_tokens`, Gemini's `total - prompt - completion`).
+    /// Information only: thinking is already inside `completion_tokens` and priced as output, so
+    /// nothing may add it to a cost again.
+    pub thinking_tokens: Option<i64>,
+    /// Why the cost on this reply is missing or partial, when an adapter saw a reason (a token type
+    /// PM has no price for). The logger adds the reasons it can derive itself ([`CostNote`]).
+    pub cost_note: Option<CostNote>,
+}
+
+/// Why a reply's cost is missing or partial. A FIXED list of slugs: it is what the log stores
+/// (`usage_log.cost_note`) and what the Usage tab names, so a vendor's own words, which are
+/// untrusted text, can never reach the log or a page. A usage key PM has never heard of is
+/// `NewTokenType`; its name is not kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CostNote {
+    /// One side of the count is missing or can't be priced exactly (one-hour cache writes, a total
+    /// with no prompt count): the cost reads "-" rather than a confident under-count.
+    PartialUsage,
+    /// An answer that carried no usage at all.
+    NoUsage,
+    AudioTokens,
+    PredictionTokens,
+    /// Images or audio in the prompt, which some providers bill at their own rate.
+    NonTextPrompt,
+    /// Anthropic's server-side tools (web search and the like), billed per use.
+    ServerToolUse,
+    /// A numeric usage key in none of the lists in `provider_usage_keys.json`.
+    NewTokenType,
+}
+
+impl CostNote {
+    /// Every note, in the order the Usage tab lists them.
+    pub const ALL: [CostNote; 7] = [
+        CostNote::PartialUsage,
+        CostNote::NoUsage,
+        CostNote::AudioTokens,
+        CostNote::PredictionTokens,
+        CostNote::NonTextPrompt,
+        CostNote::ServerToolUse,
+        CostNote::NewTokenType,
+    ];
+
+    /// The slug stored in `usage_log.cost_note` and sent to the page.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CostNote::PartialUsage => "partial_usage",
+            CostNote::NoUsage => "no_usage",
+            CostNote::AudioTokens => "audio_tokens",
+            CostNote::PredictionTokens => "prediction_tokens",
+            CostNote::NonTextPrompt => "non_text_prompt",
+            CostNote::ServerToolUse => "server_tool_use",
+            CostNote::NewTokenType => "new_token_type",
+        }
+    }
+
+    /// The note a stored slug names; `None` for anything else, so an odd value in an old or edited
+    /// store is read as no note, never shown.
+    pub fn from_slug(slug: &str) -> Option<CostNote> {
+        CostNote::ALL.into_iter().find(|n| n.as_str() == slug)
+    }
+
+    /// Whether this note names a token type PM can't price (the Usage tab warns about those by
+    /// name). `PartialUsage` and `NoUsage` are gaps in what the provider reported instead.
+    pub fn is_unpriced_type(self) -> bool {
+        !matches!(self, CostNote::PartialUsage | CostNote::NoUsage)
+    }
 }
 
 /// The result of a chat call: the assembled text, the model that actually served it

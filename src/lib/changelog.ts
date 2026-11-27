@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.205.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "Usage & cost now says which way each call went: through OpenRouter, through one of your own keys (OpenAI, Gemini or Anthropic), or on this computer. Calls from before PM recorded this say so, and PM doesn't guess from the model name.",
+      "Under a model, Usage shows how many cached tokens, thinking tokens and refused replies there were. PM can see refused replies only on your Anthropic key.",
+      "When PM can't put a price on some calls, the totals and costs now say 'at least', and a line under the total counts the calls from the last 30 days that it couldn't price. If a reply carried a kind of token PM can't price, such as audio, predicted output or tool use, the Usage tab names it.",
+      "Models on this computer are listed in Usage with their request count. They don't cost anything.",
+      "A new call on your own key can no longer be priced from an OpenRouter model that happens to have the same name. Older calls keep the price they had.",
+      "In 'How this is calculated', PM now says that a reply that failed after the provider began billing it, and anything done with a key outside PM, isn't in this log.",
+    ],
+  },
+  {
     version: "3.204.0-alpha",
     date: "2026-11-27",
     highlights: [

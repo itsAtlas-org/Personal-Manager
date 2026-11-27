@@ -2069,6 +2069,33 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (low_uid, high_uid)
     );
     "#,
+    // v64: the Usage detail (#1140, PR 4a): which company answered each row, what the cache and the
+    // thinking did, whether the reply was refused or cut off, and why a cost is missing or partial.
+    //
+    // Before this a row said only 'cloud' or 'local', so a direct row and an OpenRouter row with the
+    // same model id could not be told apart, and the Usage tab printed every total as if it were exact.
+    // All six columns are nullable and additive, like v37 and v60: an older row reads NULL, which the
+    // page shows as "Before PM recorded this" and never guesses from a model id. No UPDATE, so no
+    // backfill and no `guard:allow`.
+    //
+    // `served_provider` is 'openrouter' | 'openai' | 'gemini' | 'anthropic'; NULL is a local row or a
+    // row from before v64. `outcome` is 'refused' | 'truncated' | NULL (an ordinary reply).
+    // `cost_note` holds a fixed slug (never vendor text) saying why `cost_usd` is NULL or partial.
+    // The index is here so the daily limit (a later change) can sum one provider's day without a
+    // migration of its own.
+    //
+    // `usage_log` is the table v36 patched through `writable_schema`, so this opens with the same RESET
+    // as v37 and v60 (AGENTS.md rule 3). It is also the first index created on that table since v7.
+    r#"
+    PRAGMA writable_schema = RESET;
+    ALTER TABLE usage_log ADD COLUMN served_provider    TEXT;     -- which company answered; NULL = local or pre-v64
+    ALTER TABLE usage_log ADD COLUMN cached_tokens      INTEGER;  -- NULL = not reported
+    ALTER TABLE usage_log ADD COLUMN cache_write_tokens INTEGER;  -- NULL = not reported
+    ALTER TABLE usage_log ADD COLUMN thinking_tokens    INTEGER;  -- already inside completion_tokens; NULL = not reported
+    ALTER TABLE usage_log ADD COLUMN outcome            TEXT;     -- 'refused' | 'truncated' | NULL
+    ALTER TABLE usage_log ADD COLUMN cost_note          TEXT;     -- why cost_usd is NULL or partial: a fixed slug
+    CREATE INDEX idx_usage_log_provider_created ON usage_log(served_provider, created_at);
+    "#,
 ];
 
 /// Whether a store at `stored` is one this build can open: at or below the migrations it knows.
@@ -2179,6 +2206,13 @@ mod tests {
              DROP TABLE ai_reservations;
              DROP TABLE mods;
              DROP TABLE mcp_clients;
+             DROP INDEX idx_usage_log_provider_created;
+             ALTER TABLE usage_log DROP COLUMN served_provider;
+             ALTER TABLE usage_log DROP COLUMN cached_tokens;
+             ALTER TABLE usage_log DROP COLUMN cache_write_tokens;
+             ALTER TABLE usage_log DROP COLUMN thinking_tokens;
+             ALTER TABLE usage_log DROP COLUMN outcome;
+             ALTER TABLE usage_log DROP COLUMN cost_note;
              ALTER TABLE usage_log DROP COLUMN mod_id;
              DROP TABLE tasks;
              DROP TABLE task_stacks;
@@ -2456,7 +2490,7 @@ mod tests {
             "every migration applied"
         );
         assert_eq!(
-            version, 63,
+            version, 64,
             "migration count pin (connector registry is v14; usage cost_usd is v15; \
              semantic-map doc_layout is v16; importance 'archive' level is v17; \
              multi-provider calendar foundation is v18; shared-drive access relation is v19; \
@@ -2491,7 +2525,8 @@ mod tests {
              the mods tables and usage_log.mod_id are v60; \
              the Map's doc_layout drop and its auto-install marker are v61; \
              the Pinboard's existing-user markers are v62; \
-             the people address book is v63)"
+             the people address book is v63; \
+             the usage detail columns and their index are v64)"
         );
 
         // A minimal insert takes the additive defaults (index_only mode, ok state, NULL cursor).
@@ -4925,5 +4960,203 @@ mod tests {
         assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
         assert_eq!(pinboard_markers(&conn), (None, None));
         assert_eq!(board_row(&conn), None, "v62 does not invent a board row");
+    }
+
+    // --- v64: the usage detail columns ------------------------------------------------------------
+
+    /// The six values a v64 row can carry, read back in column order.
+    type DetailRow = (
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+
+    fn detail_of(conn: &rusqlite::Connection, model: &str) -> DetailRow {
+        conn.query_row(
+            "SELECT served_provider, cached_tokens, cache_write_tokens, thinking_tokens, outcome, \
+                    cost_note FROM usage_log WHERE model = ?1",
+            [model],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    /// After v64 `usage_log` carries the served provider, the cache and thinking counts, the outcome
+    /// and the cost note; a row that sets none of them (every row from before v64) reads NULL, and the
+    /// index on (served_provider, created_at) exists. The same table still admits the kinds v36 relaxed
+    /// it for, so the RESET at the top of v64 left the earlier patch alone.
+    #[test]
+    fn usage_log_carries_provider_columns_after_v64() {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("pm.sqlite"), DB_KEY).unwrap();
+
+        conn.execute(
+            "INSERT INTO usage_log(model, kind, served_provider, cached_tokens, cache_write_tokens, \
+                                   thinking_tokens, outcome, cost_note) \
+             VALUES ('anthropic/m', 'chat_summary', 'anthropic', 40, 8, 70, 'truncated', 'partial_usage')",
+            [],
+        )
+        .expect("the v64 columns accept a fully tagged row, on the v36-relaxed table");
+        conn.execute(
+            "INSERT INTO usage_log(model, kind) VALUES ('old/m', 'background')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            detail_of(&conn, "anthropic/m"),
+            (
+                Some("anthropic".into()),
+                Some(40),
+                Some(8),
+                Some(70),
+                Some("truncated".into()),
+                Some("partial_usage".into())
+            )
+        );
+        assert_eq!(
+            detail_of(&conn, "old/m"),
+            (None, None, None, None, None, None),
+            "a row that sets none of them reads NULL"
+        );
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT SUM(cost_usd) FROM usage_log \
+                 WHERE served_provider = 'openai' AND created_at >= '2026-11-27T00:00:00.000Z'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("idx_usage_log_provider_created"),
+            "a day's sum for one provider reads the index: {plan}"
+        );
+    }
+
+    /// The index is the first one created on the v36-patched `usage_log` since v7, so it is proved on
+    /// the real ladder: a store at v62 (patched table, rows already in it) climbs to the top with the
+    /// rows intact and NULL in the new columns, the index exists, and the file REOPENS and takes a
+    /// tagged row (a stale schema parse after the patch would fault here, not at the migration).
+    #[test]
+    fn v64_climbs_a_v36_patched_store_and_it_reopens() {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pm.sqlite");
+        {
+            let conn = crate::db::open_keyed(&path, DB_KEY).unwrap();
+            apply_through(&conn, 62);
+            assert_eq!(user_version(&conn), 62);
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, prompt_tokens, completion_tokens, cost_usd, provider) \
+                 VALUES ('vendor/old', 'chat_title', 11, 3, 0.02, 'cloud')",
+                [],
+            )
+            .unwrap();
+            super::run(&conn).unwrap();
+            assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+            assert_eq!(
+                detail_of(&conn, "vendor/old"),
+                (None, None, None, None, None, None)
+            );
+            let (tokens, cost): (i64, f64) = conn
+                .query_row(
+                    "SELECT prompt_tokens, cost_usd FROM usage_log WHERE model = 'vendor/old'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((tokens, cost), (11, 0.02), "the old row is untouched");
+        }
+        let conn = crate::db::open(&path, DB_KEY).unwrap();
+        let index: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_usage_log_provider_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        conn.execute(
+            "INSERT INTO usage_log(model, kind, served_provider) VALUES ('openai/m', 'chat', 'openai')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// The store a user on 3.202.0 actually has is AT v63 (Contacts' people tables), not v62: it takes
+    /// only v64, the old usage row reads NULL in every new column, the index exists after a reopen,
+    /// and the people tables and the person already in them come through untouched.
+    #[test]
+    fn v64_climbs_a_v63_store_leaving_the_people_tables_alone() {
+        const DB_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pm.sqlite");
+        {
+            let conn = crate::db::open_keyed(&path, DB_KEY).unwrap();
+            apply_through(&conn, 63);
+            assert_eq!(user_version(&conn), 63);
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, prompt_tokens, completion_tokens, cost_usd, provider) \
+                 VALUES ('vendor/old', 'chat_title', 11, 3, 0.02, 'cloud')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO people(uid, display_name) VALUES ('aa11', 'Sam Example')",
+                [],
+            )
+            .unwrap();
+            super::run(&conn).unwrap();
+            assert_eq!(user_version(&conn), super::MIGRATIONS.len() as i64);
+            assert_eq!(
+                detail_of(&conn, "vendor/old"),
+                (None, None, None, None, None, None)
+            );
+        }
+        let conn = crate::db::open(&path, DB_KEY).unwrap();
+        let index: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_usage_log_provider_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        assert!(has_table(&conn, "people") && has_table(&conn, "interaction_people"));
+        let name: String = conn
+            .query_row(
+                "SELECT display_name FROM people WHERE uid = 'aa11'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "Sam Example", "Contacts' data is untouched");
+    }
+
+    /// v64 only ADDs columns and an index: the SQL holds no UPDATE, DELETE, DROP or RENAME, so no
+    /// `guard:allow` is needed and an old row can only read NULL.
+    #[test]
+    fn v64_is_additive_only() {
+        let sql = super::MIGRATIONS[63].to_uppercase();
+        for forbidden in ["UPDATE ", "DELETE ", "DROP ", "RENAME ", "GUARD:ALLOW"] {
+            assert!(!sql.contains(forbidden), "v64 must not contain {forbidden}");
+        }
+        assert_eq!(sql.matches("ADD COLUMN").count(), 6);
+        assert_eq!(sql.matches("CREATE INDEX").count(), 1);
     }
 }

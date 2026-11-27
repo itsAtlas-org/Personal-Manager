@@ -1293,6 +1293,13 @@ mod tests {
              DROP TABLE ai_reservations; \
              DROP TABLE mods; \
              DROP TABLE mcp_clients; \
+             DROP INDEX idx_usage_log_provider_created; \
+             ALTER TABLE usage_log DROP COLUMN served_provider; \
+             ALTER TABLE usage_log DROP COLUMN cached_tokens; \
+             ALTER TABLE usage_log DROP COLUMN cache_write_tokens; \
+             ALTER TABLE usage_log DROP COLUMN thinking_tokens; \
+             ALTER TABLE usage_log DROP COLUMN outcome; \
+             ALTER TABLE usage_log DROP COLUMN cost_note; \
              ALTER TABLE usage_log DROP COLUMN mod_id; \
              DROP TABLE tasks; \
              DROP TABLE task_stacks; \
@@ -1518,6 +1525,13 @@ mod tests {
              DROP TABLE ai_reservations; \
              DROP TABLE mods; \
              DROP TABLE mcp_clients; \
+             DROP INDEX idx_usage_log_provider_created; \
+             ALTER TABLE usage_log DROP COLUMN served_provider; \
+             ALTER TABLE usage_log DROP COLUMN cached_tokens; \
+             ALTER TABLE usage_log DROP COLUMN cache_write_tokens; \
+             ALTER TABLE usage_log DROP COLUMN thinking_tokens; \
+             ALTER TABLE usage_log DROP COLUMN outcome; \
+             ALTER TABLE usage_log DROP COLUMN cost_note; \
              ALTER TABLE usage_log DROP COLUMN mod_id; \
              DROP TABLE tasks; \
              DROP TABLE task_stacks; \

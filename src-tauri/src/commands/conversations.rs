@@ -26,7 +26,7 @@ use crate::{
 
 use super::shared::resolve_zone;
 use super::spend::cached_catalogue;
-use super::spend::log_usage;
+use super::spend::log_usage_truncated;
 
 /// Caps for chat: the most we'll store for a single message, and how many prior
 /// turns we replay into a request. A long conversation or one giant pasted message
@@ -204,7 +204,14 @@ fn book_an_empty_reply(
     meta: &llm_gateway::CallMeta,
 ) {
     let used = completion.model.as_deref().unwrap_or(requested_model);
-    log_usage(conn, "chat", Some(used), &completion.usage, meta);
+    log_usage_truncated(
+        conn,
+        "chat",
+        Some(used),
+        &completion.usage,
+        meta,
+        completion.truncated,
+    );
 }
 
 // --- conversations & messages ---
@@ -896,7 +903,8 @@ pub async fn send_message(
     // model meant to end there. Mark it once, here, so every downstream copy carries the caveat.
     // (A mid-stream provider ERROR is a different animal and now returns Err above — a failure must
     // not be persisted as a turn at all.)
-    let reply = if completion.truncated {
+    let truncated = completion.truncated;
+    let reply = if truncated {
         format!(
             "{}\n\n_(This reply was cut off — the model reached its maximum length.)_",
             completion.text.trim_end()
@@ -934,7 +942,7 @@ pub async fn send_message(
             let chunk_ids: Vec<i64> = retrieved.iter().map(|c| c.chunk_id).collect();
             let _ = retrieval_feedback::record_grounding(&conn, id, &chunk_ids);
         }
-        log_usage(&conn, "chat", Some(&used_model), &usage, &meta);
+        log_usage_truncated(&conn, "chat", Some(&used_model), &usage, &meta, truncated);
         // Record the exact prompt size OpenRouter just measured as the context-meter's numerator (card 7D).
         // Because it counted the real assembled prompt, this already reflects everything that rode along —
         // profile, agenda, rolling summary, recency window, retrieved grounding. Best-effort: a session row
@@ -1547,6 +1555,7 @@ mod tests {
             latency_ms: 5,
             fallback: None,
             displaced_local_model: None,
+            cloud_provider: Some(llm_gateway::CloudProvider::Anthropic),
         };
         book_an_empty_reply(&conn, &refused, "anthropic/claude-haiku-5-5", &meta);
         let count: i64 = conn

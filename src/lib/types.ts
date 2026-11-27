@@ -481,7 +481,23 @@ export interface ModelSpend {
   completion_tokens: number;
   request_count: number;
   cost_usd: number | null;
+  /** Which road the calls took. `null` is a cloud row from before PM recorded it ("Before PM
+   *  recorded this"): never guessed from the model id. */
+  served: ServedRoad | null;
+  /** Prompt tokens read from the provider's cache, and tokens spent thinking (already inside
+   *  `completion_tokens`, so never added to a cost). */
+  cached_tokens: number;
+  thinking_tokens: number;
+  /** Replies the provider's safety system refused. Only Anthropic reports it in a way PM reads. */
+  refused_requests: number;
+  /** Calls PM could not price, or could only price in part. */
+  unpriced_requests: number;
+  /** `cost_usd` is a floor ("at least"), or unknown, for a model that isn't local. */
+  partial: boolean;
 }
+
+/** Which road a Usage row took: OpenRouter, one of the person's own keys, or this computer. */
+export type ServedRoad = "openrouter" | "openai" | "gemini" | "anthropic" | "local";
 
 /** Spend for one mod, all time. `name` is null once the mod is uninstalled (its history stays); the
  *  page words that as "removed mod". `cost_usd` is null when nothing it spent could be priced. */
@@ -492,6 +508,18 @@ export interface ModAiSpend {
   completion_tokens: number;
   request_count: number;
   cost_usd: number | null;
+  /** Some of what the mod spent could not be priced, so `cost_usd` is a floor. */
+  partial: boolean;
+}
+
+/** The token types PM can't price, as the fixed slugs the log stores (never a vendor's own words). */
+export type UnpricedTokenSlug =
+  "audio_tokens" | "prediction_tokens" | "non_text_prompt" | "server_tool_use" | "new_token_type";
+
+/** How many replies in the last 30 days carried one such token type. */
+export interface PartialReason {
+  slug: UnpricedTokenSlug;
+  replies: number;
 }
 
 /** The Settings "Usage & cost" payload (token spend priced from OpenRouter). */
@@ -502,6 +530,13 @@ export interface CostSummary {
   by_mod: ModAiSpend[];
   total_30d_usd: number | null;
   total_all_time_usd: number | null;
+  /** The totals are floors: some calls in the window couldn't be priced ("at least"). */
+  total_30d_partial: boolean;
+  total_all_time_partial: boolean;
+  /** Calls in the last 30 days that couldn't be priced. */
+  unpriced_30d: number;
+  /** The named token types PM can't price in the last 30 days, with how many replies each. */
+  partial_reasons: PartialReason[];
   pricing_updated_at: string | null;
 }
 
