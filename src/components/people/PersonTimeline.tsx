@@ -22,12 +22,14 @@ interface Props {
   person: Person;
   trashed: boolean;
   today: Date;
+  /** Moves each time a write that may change an entry beyond the first page has finished. */
+  rev: number;
   onLog: () => void;
   onEdit: (entry: TimelineEntry) => void;
   onDelete: (entry: TimelineEntry) => void;
 }
 
-export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete }: Props) {
+export function PersonTimeline({ person, trashed, today, rev, onLog, onEdit, onDelete }: Props) {
   const [open, setOpen] = useRememberedFold("people.record.timeline", true);
   const first: TimelinePage = person.timeline;
   // Later pages, read on request; the record's own page is always the newest, so they follow it.
@@ -40,21 +42,22 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
 
   // The record is read again after every write on it (a star, a label), and none of those touch the
   // timeline: the pages read so far stay. Start over from the first page, which is the truth, only
-  // when it really changed (another person, other entries, another next page), or when this view
-  // sent a log, an edit or a delete (that may sit on an earlier page the first page doesn't show).
-  const seen = useRef({ id: person.id, page: JSON.stringify(first) });
-  const touched = useRef(false);
+  // when it really changed (another person, other entries, another next page), or when `rev` moved:
+  // the owner bumps it once a log, an edit, a delete or a merge has FINISHED, and any of those may
+  // sit on an earlier page the first page doesn't show. (Not when the button is clicked: an
+  // unrelated re-read can land between the click and the write and would swallow the signal.)
+  const seen = useRef({ id: person.id, page: JSON.stringify(first), rev });
   useEffect(() => {
     const page = JSON.stringify(first);
-    const same = seen.current.id === person.id && seen.current.page === page && !touched.current;
-    seen.current = { id: person.id, page };
-    touched.current = false;
+    const same =
+      seen.current.id === person.id && seen.current.page === page && seen.current.rev === rev;
+    seen.current = { id: person.id, page, rev };
     if (same) return;
     generation.current++;
     setMore([]);
     setNext(first.next);
     setFailed(null);
-  }, [first, person.id]);
+  }, [first, person.id, rev]);
 
   async function showMore() {
     if (!next || reading) return;
@@ -90,14 +93,7 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
           <div className="flex flex-wrap items-center justify-between gap-2">
             {open && lastMet}
             {!trashed && (
-              <Button
-                variant="secondary"
-                size="xs"
-                onClick={() => {
-                  touched.current = true;
-                  onLog();
-                }}
-              >
+              <Button variant="secondary" size="xs" onClick={onLog}>
                 + Log
               </Button>
             )}
@@ -131,10 +127,7 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
                           variant="tertiary"
                           size="xs"
                           aria-label={`Edit the ${kindNoun(e.kind)} on ${when}`}
-                          onClick={() => {
-                            touched.current = true;
-                            onEdit(e);
-                          }}
+                          onClick={() => onEdit(e)}
                         >
                           Edit
                         </Button>
@@ -142,10 +135,7 @@ export function PersonTimeline({ person, trashed, today, onLog, onEdit, onDelete
                           variant="tertiary"
                           size="xs"
                           aria-label={`Delete the ${kindNoun(e.kind)} on ${when}`}
-                          onClick={() => {
-                            touched.current = true;
-                            onDelete(e);
-                          }}
+                          onClick={() => onDelete(e)}
                         >
                           Delete
                         </Button>

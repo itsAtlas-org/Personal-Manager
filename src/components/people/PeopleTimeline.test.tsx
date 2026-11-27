@@ -259,6 +259,33 @@ describe("the Timeline section", () => {
     expect(within(timeline()).getByText("Much earlier")).toBeTruthy();
   });
 
+  it("drops a paged-in entry once it is deleted, even when an unrelated re-read landed first", async () => {
+    const cursor = { on_date: "2026-11-12", at: "", id: 10 };
+    store.person = personWith([entry()], {}, cursor as never);
+    ipc.listTimeline.mockResolvedValue({
+      entries: [entry({ id: 5, on_date: "2026-10-01", note: "Much earlier" })],
+      next: null,
+    });
+    await view();
+    await openAda();
+    fireEvent.click(within(timeline()).getByRole("button", { name: "Show earlier entries" }));
+    const old = (await within(timeline()).findByText("Much earlier")).closest("li") as HTMLElement;
+    fireEvent.click(within(old).getByRole("button", { name: /^Delete the meeting on/ }));
+    // A star elsewhere re-reads the record while the question is still open: same first page.
+    const reads = ipc.getPerson.mock.calls.length;
+    ipc.listeners.forEach((f) => f());
+    await waitFor(() => expect(ipc.getPerson.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => {});
+    expect(within(timeline()).getByText("Much earlier")).toBeTruthy();
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Delete this entry?" })).getByRole("button", {
+        name: "Delete entry",
+      }),
+    );
+    await waitFor(() => expect(ipc.deleteInteraction).toHaveBeenCalledWith(5));
+    await waitFor(() => expect(within(timeline()).queryByText("Much earlier")).toBeNull());
+  });
+
   it("drops an earlier page that lands after the record was read again", async () => {
     const cursor = { on_date: "2026-11-12", at: "", id: 10 };
     store.person = personWith([entry()], {}, cursor as never);

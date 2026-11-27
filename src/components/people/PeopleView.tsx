@@ -177,6 +177,9 @@ export function PeopleView({
   // Moves after every write of this tab's own, so the open record reads again even in a build
   // where the change notice is slow; the notice itself moves `data.changes`.
   const [bump, setBump] = useState(0);
+  // Moves when a write that can change an entry on any page of a timeline has FINISHED (a log, an
+  // edit, a delete, a merge or its Undo), so the open timeline drops the earlier pages it paged in.
+  const [timelineRev, setTimelineRev] = useState(0);
   // A person just added: kept open until the list has caught up and shows them.
   const fresh = useRef<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -455,6 +458,7 @@ export function PeopleView({
     reload();
     dupes.reload();
     setBump((n) => n + 1);
+    setTimelineRev((n) => n + 1);
     const words = mergedNotice(done);
     const token = done.undo;
     if (!token) {
@@ -480,6 +484,7 @@ export function PeopleView({
           reload();
           dupes.reload();
           setBump((n) => n + 1);
+          setTimelineRev((n) => n + 1);
         }
       },
       ttlMs,
@@ -549,6 +554,7 @@ export function PeopleView({
     } finally {
       reload();
       setBump((n) => n + 1);
+      setTimelineRev((n) => n + 1);
     }
   }
 
@@ -556,6 +562,7 @@ export function PeopleView({
     if (!deletingEntry) return;
     setEntryBusy(true);
     await run(() => deleteInteraction(deletingEntry.entry.id));
+    setTimelineRev((n) => n + 1);
     setEntryBusy(false);
     setDeletingEntry(null);
   }
@@ -963,6 +970,7 @@ export function PeopleView({
                   person={person}
                   trashed={person.trashed_at !== null}
                   today={today}
+                  rev={timelineRev}
                   onLog={() => setLogging({ person: active, entry: null })}
                   onEdit={(entry) => setLogging({ person: active, entry })}
                   onDelete={(entry) => setDeletingEntry({ person: active, entry })}
