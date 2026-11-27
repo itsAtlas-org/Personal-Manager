@@ -28,6 +28,54 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Calendar",
     body: "One place to see everything from the calendars you've connected (Google, Outlook and iCal subscriptions), laid over each other. PM keeps every event they've ever had: the first sync downloads each calendar's whole history, events that ended over a year ago are stored compressed, and months more than a year ahead load as you scroll to them. Switch between Day, Week, Month, Year and Agenda (your tasks on the Runway board, or a dated list of events), jump to today, and choose which calendars show. On a Google account with editing turned on you can do most of what Google Calendar does from here: create events, change, move and delete the ones you can edit, and answer invitations, and every change goes straight to Google. PM also reads these events to answer schedule questions in chat and to flag a project 'Due soon' when an event names it.",
   },
+  "nav-people": {
+    title: "People",
+    body: "Your own address book, kept on this computer and encrypted with the rest of your PM. Everyone you know lives here with their details, labels and a star. Search by name, nickname, email, company or phone number, and press Ctrl K anywhere to jump straight to someone. People you delete wait in Trash for 30 days. Right-click this tab in the sidebar to pin it to the top or hide it.",
+  },
+  "people-list": {
+    title: "The People list",
+    body: "Pick a filter on the left: everyone, starred people, a label, people with no label, or Trash. Sort by first name, last name or who you met most recently; the choice is remembered on this computer. Point at someone's circle to tick them, or press Tab to reach it, and Shift-click a second circle to tick everyone between. Once anyone is ticked, a bar offers Star, Label and Move to Trash for all of them, and Merge when exactly two are ticked. Birthdays in the next 30 days show at the top of the full list. Right-click a person (or press the Menu key) for the same actions.",
+  },
+  "people-record": {
+    title: "A person's record",
+    body: "Everything PM holds about this person, in sections you can fold: contact details, work and school, dates, where you met, where they are now, relations, custom fields, notes, the projects they are linked to, and where their details came from. A section with nothing in it stays hidden; Add details offers them and opens the editor there. Under their name you see when you last met. Web links open in your browser, and anything that isn't a link, like an Instagram handle or a phone number, has a Copy button. Edit opens the editor. Star and labels change right away.",
+  },
+  "people-editor": {
+    title: "Adding and editing a person",
+    body: "Fill in what you know: names, emails, phone numbers, addresses, links and socials, work and school, a birthday, where you met, and your own custom fields. Each value has a label, and you can pick one of the suggestions or choose Other label and write your own. Use the arrows to put values in order: the first of each kind is their main one. Dates are three small boxes, day, month and year, and a birthday's year is optional. For a birthday on 29 February PM asks which day to mark it on in other years, 28 February or 1 March, because people born that day differ; until you say, PM uses 28 February. Nothing is saved until you press Save. If this person changed somewhere else while you were editing, PM keeps what you typed, says so, and lets you load their latest details instead.",
+  },
+  "people-labels": {
+    title: "Labels",
+    body: "Labels group people any way you like, and a person can carry several. Add a label under the filter list, then put it on people from their record, the selection bar or the right-click menu. The three dots beside a label rename it or delete it. Deleting a label never deletes anyone: the people stay in PM, and a note at the bottom of the window has an Undo that puts the label back on the same people.",
+  },
+  "people-duplicates": {
+    title: "Possible duplicates",
+    body: "PM looks for people you may have twice: the same email address, the same phone number, the same name, or names that are alike, like Sam and Samuel. The button shows how many pairs it found and only appears when there are some, or when PM couldn't compare everyone or you have hidden pairs. Each pair is shown side by side with the reason. Merge asks you to choose where the two differ, Not the same person hides the pair for good (Show them again brings hidden pairs back), and Decide later leaves it for now. Pairs that differ in nothing can be merged in one go. PM never merges on its own, and a group of 200 or more people with one key is skipped and said so rather than called clean.",
+  },
+  "people-merge": {
+    title: "Merging two people",
+    body: "A merge puts everything from both records on one: details, labels, timeline, project links and where each came from, with the same detail kept once. Where the two differ, in the name, birthday, where and when you met, or the notes, you choose which to keep, and the one you don't choose is dropped (for notes you can also keep both). Right after, a note at the bottom has an Undo for 30 seconds, and Ctrl+Z (Cmd+Z on a Mac) presses it. It stops working if you change that person in the meantime, and then PM says so. Select exactly two people and press Merge, or right-click one and choose Merge with.",
+  },
+  "people-import": {
+    title: "Importing people from a file",
+    body: "Import reads a vCard file (.vcf), the kind your phone, iCloud, Google Contacts and most address books can export. PM opens the file picker, reads the file, and shows what is in it before anything is saved: how many people, how many you already have, how many look like people you have, and anything it skipped, like cards with no name, email or phone, and photos. People you already have keep what PM holds; only what is missing is filled in, and anyone from Trash comes back. You can put one label on everyone imported. After the import, Review possible duplicates opens the merge review. Files over 128 MB are refused, almost always because of photos: export again without them.",
+  },
+  "people-export": {
+    title: "Exporting people",
+    body: "Export writes people to a vCard file (.vcf) you can open in any address book or phone. Use it from the header for everyone, from a label for that label's people, or from the selection bar for the people you ticked. PM asks where to save the file; it never writes anywhere else. Tick Include the timeline to also get a spreadsheet file, people-timeline.csv, with one row for each person and each time you met. People in Trash are left out. A file exported from PM and imported again adds nobody twice.",
+  },
+  "people-timeline": {
+    title: "A person's timeline",
+    body: "The Timeline section keeps what happened with this person, newest first: a meeting, a call, a message or a note, each with its day and an optional note. At the top it says when you last met, or that you haven't yet. Press + Log, or Log a meeting in the record or its right-click menu, to add one: pick what happened, type the day (today to begin with) and add a note. Edit changes an entry, and Delete asks first, then takes it off everyone it names. A meeting PM asked you about shows the event it came from. Show earlier entries reads further back. Someone in Trash has a timeline you can read but not change.",
+  },
+  "people-meet": {
+    title: "Who did you meet?",
+    body: "After a meeting with guests, PM asks who you met so it can remember for you. A strip at the top says how many are waiting, and the People tab lists them too, with a count beside People in the sidebar. Review opens one card for each meeting: guests already in People are ticked, guests PM doesn't know sit under Not in People yet, unticked, and ticking one adds them. Someone else lets you pick anyone from People, and a note is optional. Save logs the meeting, Skip stops PM asking about that meeting, Don't ask about this series silences a repeating meeting, and Skip all skips every card. Not now hides the strip until tomorrow or until another meeting is waiting. Log who you met on any past event, in its details or its right-click menu, opens the same card, even for an event with no guests.",
+  },
+  "people-trash": {
+    title: "People in Trash",
+    body: "Moving someone to Trash keeps everything about them for 30 days, then PM deletes them for good. Right after you move someone, a note at the bottom of the window has an Undo, and Ctrl+Z (Cmd+Z on a Mac) presses it when you aren't typing in a box. In the Trash filter, Restore brings people back with their labels and details. Delete now removes them for good after asking, and that can't be undone.",
+  },
   "nav-documents": {
     title: "Documents",
     body: "Your ingested files. Drag files or a folder in and PM converts them to Markdown, splits them into chunks, and indexes them so they become searchable.",

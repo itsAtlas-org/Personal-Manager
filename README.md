@@ -93,6 +93,12 @@ not an exhaustive list; the in-app **What's New** is the complete, current recor
   change goes straight to Google, a save never overwrites a field someone changed there in the
   meantime, and a new event whose save loses the connection is looked for in Google before it's
   ever sent again.
+- **An address book of your own.** People are records with a permanent id, so two Sams never
+  collide and a rename never loses anyone: names, emails, phones, addresses, socials, work and
+  school, a birthday (a 29 February one asks which day to mark in other years), where you met,
+  and the projects they belong to. Import a vCard file from your phone or iCloud, export one any
+  time, merge duplicates (with Undo), and keep a timeline of when you met. After a meeting with
+  guests PM asks who you met, and remembers. Deleting someone keeps them in a 30-day Trash.
 - **Bring your own model.** Choose your model through OpenRouter — separate chat and
   background models, spend at a glance, and zero-data-retention requested on every call. The
   list offers only models a provider will actually serve on those terms, so a model can't

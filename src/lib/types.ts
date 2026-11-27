@@ -858,8 +858,9 @@ export interface TagProposalRow {
 // --- Canonical entities (the Teach tab; entity-resolution foundation) ---
 
 /** A canonical entity with its known aliases — the unit the Teach tab manages. `type` is
- *  "project" today (the schema reserves "person"/"thing"). The canonical name is itself one of
- *  `aliases` (stored as a self-alias), so every name a document was filed under is listed. */
+ *  "project" today (people are not entities: they have their own tables). The canonical name is
+ *  itself one of `aliases` (stored as a self-alias), so every name a document was filed under is
+ *  listed. */
 export interface Entity {
   id: number;
   type: string;
@@ -3565,4 +3566,458 @@ export type SweepRefusal =
 export interface SweepPlan {
   orphans: string[];
   refusal: SweepRefusal | null;
+}
+
+// --- People (Contacts, PR A): mirrors of `people::*` ---
+//
+// Field names are the wire names, not the Rust ones: a person's `uid` is `people::Person::ident`
+// and a birthday is `born_on`, renamed in serde so CodeQL's name heuristics stay quiet.
+
+/** Which day a 29 February birthday is marked on in years without one. Mirrors `people::LEAP_DAYS`;
+ *  null on a person means "not answered yet", which reads as 28 February. */
+export type LeapDay = "feb28" | "mar1";
+
+/** What a detail is. Mirrors `people::DETAIL_KINDS`. */
+export type PersonDetailKind =
+  | "email"
+  | "phone"
+  | "address"
+  | "web"
+  | "work"
+  | "school"
+  | "nickname"
+  | "former_name"
+  | "date"
+  | "relation"
+  | "custom"
+  | "location";
+
+/** One stored detail of a person (an email, a phone, an address, a job…). `parts` is the flat
+ *  string map a structured kind (address, work, school) keeps beside its one-line `value`. */
+export interface PersonDetail {
+  id: number;
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+  parts: Record<string, string> | null;
+  from_date: string | null;
+  to_date: string | null;
+  is_current: boolean;
+  position: number;
+}
+
+/** A label as a person carries it. */
+export interface PersonLabelRef {
+  id: number;
+  name: string;
+}
+
+/** A label and how many people outside Trash carry it (`people::Label`). */
+export interface PersonLabel {
+  id: number;
+  uid: string;
+  name: string;
+  people: number;
+}
+
+/** One link from a person to a vCard file or a Google contact (`people::sources::SourceInfo`).
+ *  Never holds the contact's own copy. */
+export interface PersonSource {
+  id: number;
+  provider: "vcard" | "google";
+  /** The account the link belongs to (a lowercased address); empty for a file. */
+  account: string;
+  state: string;
+  synced_at: string | null;
+  created_at: string;
+  /** PM changed something since the last write to the source. */
+  dirty: boolean;
+  /** How many "same field changed" questions are open. */
+  open_conflicts: number;
+}
+
+/** One person, everything (`people::Person`). */
+export interface Person {
+  id: number;
+  uid: string;
+  display_name: string;
+  given_name: string;
+  middle_name: string;
+  family_name: string;
+  name_prefix: string;
+  name_suffix: string;
+  /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
+  birthday: string | null;
+  /** For a 29 February birthday, the day to mark in other years; null until answered. */
+  leap_day: LeapDay | null;
+  met_where: string;
+  /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. */
+  met_on: string | null;
+  notes: string;
+  starred: boolean;
+  /** When they went to Trash, or null. */
+  trashed_at: string | null;
+  created_at: string;
+  /** Moves on every change; the editor sends it back as `base_updated_at`. */
+  updated_at: string;
+  details: PersonDetail[];
+  labels: PersonLabelRef[];
+  /** The newest "met" entry's date, or null. */
+  last_met: string | null;
+  /** The first page of their timeline, newest first. */
+  timeline: TimelinePage;
+  sources: PersonSource[];
+  /** The names of the projects they are linked to. */
+  projects: string[];
+}
+
+/** One row of the People list (`people::PersonRow`). */
+export interface PersonRow {
+  id: number;
+  uid: string;
+  display_name: string;
+  /** The primary email, else the primary phone. */
+  primary: string | null;
+  /** The first work organisation. */
+  company: string | null;
+  labels: PersonLabelRef[];
+  starred: boolean;
+  last_met: string | null;
+  /** The state of the person's first Google link, if any. */
+  google_state: string | null;
+  trashed_at: string | null;
+  /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
+  birthday: string | null;
+  /** The 29 February answer, so the strip needs no second trip. */
+  leap_day: LeapDay | null;
+}
+
+/** One detail to save (`people::DetailDraft`). A detail that carries its `id` is updated in
+ *  place; one without is new; a stored one the draft leaves out is deleted. */
+export interface PersonDetailDraft {
+  id: number | null;
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+  parts: Record<string, string> | null;
+  from_date: string | null;
+  to_date: string | null;
+  is_current: boolean;
+}
+
+/** One person to create or save (`people::PersonDraft`): the whole record. Every field is
+ *  required on purpose: Rust defaults an omitted one, and a save writes every column, so a
+ *  draft that left out `notes` or `starred` would blank them on the stored person. */
+export interface PersonDraft {
+  display_name: string;
+  given_name: string;
+  middle_name: string;
+  family_name: string;
+  name_prefix: string;
+  name_suffix: string;
+  birthday: string | null;
+  /** Only kept with a 29 February birthday: any other birthday stores nothing here. */
+  leap_day: LeapDay | null;
+  met_where: string;
+  met_on: string | null;
+  notes: string;
+  starred: boolean;
+  details: PersonDetailDraft[];
+}
+
+// --- People: the timeline and "who did you meet?" (`people::timeline`, `people::meet`) ---
+
+/** What an entry on a timeline is. Mirrors `people::INTERACTION_KINDS`. */
+export type InteractionKind = "met" | "call" | "message" | "note";
+
+/** Someone else on a shared entry (`people::timeline::EntryPerson`). */
+export interface EntryPerson {
+  id: number;
+  display_name: string;
+}
+
+/** One entry on a person's timeline (`people::timeline::TimelineEntry`). */
+export interface TimelineEntry {
+  id: number;
+  kind: InteractionKind;
+  /** The user's civil date, `YYYY-MM-DD`. */
+  on_date: string;
+  /** An instant (ISO UTC) when the time is known. */
+  at: string | null;
+  note: string;
+  /** The calendar event's iCal id, when the entry came from one. */
+  event_uid: string | null;
+  /** That occurrence's start as the calendar stored it. */
+  event_start: string | null;
+  /** The event's title, copied. */
+  event_title: string | null;
+  /** Everyone else on the entry (never the viewer, never anyone in Trash). */
+  others: EntryPerson[];
+  created_at: string;
+}
+
+/** Where the next page of a timeline starts: pass the last page's `next` back unchanged. */
+export interface TimelineCursor {
+  on_date: string;
+  at: string;
+  id: number;
+}
+
+/** One page of a timeline, newest first (`people::timeline::TimelinePage`). */
+export interface TimelinePage {
+  entries: TimelineEntry[];
+  next: TimelineCursor | null;
+}
+
+/** The calendar occurrence an entry came from. */
+export interface InteractionEventLink {
+  uid: string;
+  start: string;
+  title: string;
+}
+
+/** One entry to add, or the edit to save over an existing one (an edit leaves `event` as it was). */
+export interface InteractionDraft {
+  kind: InteractionKind;
+  /** `YYYY-MM-DD`. */
+  on_date: string;
+  /** An RFC 3339 instant, or null when the time isn't known. */
+  at: string | null;
+  note: string;
+  /** Everyone the entry names: at least one, none in Trash. */
+  people: number[];
+  event?: InteractionEventLink | null;
+}
+
+/** A guest PM knows (someone in People, not in Trash): pre-ticked on the card. */
+export interface OwedKnownGuest {
+  id: number;
+  display_name: string;
+  email: string;
+}
+
+/** A guest PM doesn't know: listed unticked under "Not in People yet". */
+export interface OwedUnknownGuest {
+  /** The name on the invite (empty when it has none). */
+  name: string;
+  email: string;
+  /** Set when the address belongs only to someone in Trash: say "In Trash", and ticking them
+   *  sends `{ id }` so they come back instead of a second person being made. */
+  trashed_id: number | null;
+}
+
+/** One meeting owed an answer (`people::meet::OwedMeeting`). */
+export interface OwedMeeting {
+  /** The event's iCal id. */
+  uid: string;
+  /** The occurrence's start as the calendar stored it (an instant, or a date for all-day). */
+  start: string;
+  end: string | null;
+  title: string;
+  all_day: boolean;
+  /** Part of a series, so "Don't ask about this series" applies. */
+  recurs: boolean;
+  known: OwedKnownGuest[];
+  unknown: OwedUnknownGuest[];
+}
+
+/** An event's guests sorted for the card (`people::meet::EventGuests`). */
+export interface EventGuests {
+  known: OwedKnownGuest[];
+  unknown: OwedUnknownGuest[];
+}
+
+/** Who a card ticked: someone in People (also one in Trash, who is brought back) or a new guest. */
+export type PersonRef = { id: number } | { new: { name: string; email: string } };
+
+/** What a card answered (`people::PROMPT_ANSWERS`). */
+export type MeetingAnswer = "logged" | "skipped" | "series_skipped";
+
+/** What answering did (`people::meet::MeetingAnswered`). The card closes on its answer and does not
+ *  show these counts. */
+export interface MeetingAnswered {
+  /** The "met" entry written, when the answer was "logged". */
+  interaction: number | null;
+  /** People made from guests PM didn't know. */
+  created: number;
+  /** People brought back from Trash because they were ticked. */
+  restored: number;
+}
+
+/** What a save answers (`people::PersonSaved`). */
+export interface PersonSaved {
+  id: number;
+  display_name: string;
+  updated_at: string;
+}
+
+/** Which people the list shows. Everything but "Trash" hides people in Trash. */
+export type PeopleFilter = "All" | "Starred" | "Trash" | "Unlabelled" | { Label: number };
+
+/** How the list is ordered. */
+export type PeopleSort = "First" | "Last" | "RecentlyMet";
+
+// --- People: possible duplicates and merging (`people::dupes`, `people::merge`) ---
+
+/** Why two people look like one. Mirrors `people::dupes::Reason`, strongest first. */
+export type DupeReason = "Email" | "Phone" | "Name" | "Similar";
+
+/** Which single-value fields differ between two people (`people::merge::Differs`). */
+export interface MergeDiffers {
+  name: boolean;
+  birthday: boolean;
+  met: boolean;
+  notes: boolean;
+}
+
+/** Two people who may be one (`people::dupes::DupePair`). `a` is the older record. */
+export interface DupePair {
+  a: number;
+  b: number;
+  reasons: DupeReason[];
+  differs: MergeDiffers;
+  /** A merge of the two loses nothing (the "Nothing differs" group). */
+  nothing_differs: boolean;
+}
+
+/** One detail on a duplicate card. */
+export interface DupeCardDetail {
+  kind: PersonDetailKind;
+  label: string;
+  value: string;
+}
+
+/** What a pair shows of one person (`people::dupes::DupeCard`). */
+export interface DupeCard {
+  id: number;
+  uid: string;
+  display_name: string;
+  birthday: string | null;
+  leap_day: LeapDay | null;
+  met_where: string;
+  met_on: string | null;
+  /** The start of the note, or "A long note". */
+  note: string;
+  details: DupeCardDetail[];
+}
+
+/** The finder's snapshot (`people::dupes::DupesReport`). */
+export interface DupesReport {
+  pairs: DupePair[];
+  /** Everyone in `pairs`, once. */
+  cards: DupeCard[];
+  /** Pairs found that were marked "not the same person". */
+  hidden: number;
+  /** Groups too big to compare: a report with any is never "clean". */
+  skipped: { reason: DupeReason; people: number }[];
+  /** The scan stopped at its pair limit: there may be more. */
+  cut_short: boolean;
+  scanned: number;
+}
+
+/** What a merge would do, counted from the rows (`people::merge::PeopleMergePreview`). Counts are of the
+ *  merged record. */
+export interface PeopleMergePreview {
+  details: number;
+  details_dropped: number;
+  labels: number;
+  timeline: number;
+  projects: number;
+  sources: number;
+  differs: MergeDiffers;
+  lossless: boolean;
+}
+
+/** Which person's value a merge keeps: the survivor's (the older record) or the folded one's. */
+export type MergeSide = "Survivor" | "Folded";
+
+/** The answers a merge needs, one per field that differs (`people::merge::MergeChoices`). */
+export interface MergeChoices {
+  name?: MergeSide | null;
+  birthday?: MergeSide | null;
+  met?: MergeSide | null;
+  notes?: MergeSide | "Both" | null;
+}
+
+/** What a merge answers (`people::merge::MergeDone`). `undo` is the token for 30 seconds. */
+export interface MergeDone {
+  survivor: number;
+  display_name: string;
+  merged: number;
+  undo: string | null;
+}
+
+/** What the vCard parser says about a file, by kind (`people::vcard::Warning`). Counts of cards or
+ *  values, never a value. */
+export type PeopleImportWarningKind =
+  | "no_name"
+  | "bad_encoding"
+  | "value_cut"
+  | "bad_date"
+  | "unfinished_card"
+  | "too_many_properties"
+  | "too_many_details"
+  | "unreadable_line";
+
+/** The import dialog's facts about the chosen file (`people::import::ImportPreview`). Nothing is
+ *  written yet; the parse is held in memory under `preview_id` for ten minutes. */
+export interface PeopleImportPreview {
+  preview_id: string;
+  /** The file's name, for "{n} people in {file}". Untrusted text: render it as text only. */
+  file_name: string;
+  /** People in the file. */
+  people: number;
+  /** Already in PM (by id). */
+  already: number;
+  /** Of those, in Trash: they come back. */
+  from_trash: number;
+  /** New ones that look like people PM has (the same email or phone). */
+  look_alike: number;
+  /** Cards skipped for having no name, email or phone. */
+  no_name: number;
+  /** Cards that repeated an earlier card's id. */
+  repeated: number;
+  photos_skipped: boolean;
+  /** False when the file was cut short or hit a limit. */
+  complete: boolean;
+  warnings: { kind: PeopleImportWarningKind; count: number }[];
+  /** Properties set aside, by name. */
+  ignored: { name: string; count: number }[];
+}
+
+/** What the import dialog sends back (`people::import::ImportOptions`). */
+export interface PeopleImportOptions {
+  /** A label to put on everyone in the file. */
+  label?: string | null;
+}
+
+/** A person PM kept its own values for, and which (`people::import::KeptNote`). */
+export interface PeopleImportKept {
+  name: string;
+  /** "name", "birthday", "where you met", "notes" or "some details (over the limit)". */
+  fields: string[];
+}
+
+/** What an import did (`people::import::ImportResult`). */
+export interface PeopleImportResult {
+  added: number;
+  /** People already in PM that gained something. */
+  updated: number;
+  /** People already in PM that gained nothing. */
+  unchanged: number;
+  /** Names of people who came back from Trash. */
+  restored: string[];
+  kept: PeopleImportKept[];
+  /** People in this import who now have a possible duplicate. */
+  review: number;
+}
+
+/** Who an export covers (`people::export::ExportScope`). */
+export type PeopleExportScope = "All" | { Label: number } | { Ids: number[] };
+
+/** What an export wrote (`people::export::ExportDone`). */
+export interface PeopleExportDone {
+  people: number;
+  /** The files written, the vCard first. */
+  files: string[];
 }

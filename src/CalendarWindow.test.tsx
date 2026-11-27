@@ -42,6 +42,7 @@ vi.mock("./components/calendar/CalendarView", () => ({
   CalendarView: (p: {
     onOpenProject: (p: string) => void;
     onOpenPinboard: () => void;
+    onOpenPerson: (uid: string) => void;
     rosterInHeader?: boolean;
   }) => (
     <div>
@@ -49,6 +50,7 @@ vi.mock("./components/calendar/CalendarView", () => ({
       <p>{p.rosterInHeader ? "list in the header" : "no list in the header"}</p>
       <button onClick={() => p.onOpenProject("Atlas")}>project</button>
       <button onClick={() => p.onOpenPinboard()}>pinboard</button>
+      <button onClick={() => p.onOpenPerson("0123456789abcdef0123456789abcdef")}>person</button>
     </div>
   ),
 }));
@@ -94,6 +96,15 @@ describe("CalendarWindow", () => {
     expect(ipc.showInMainWindow).toHaveBeenCalledWith({ view: "project", project: "Atlas" });
     fireEvent.click(screen.getByRole("button", { name: "pinboard" }));
     expect(ipc.showInMainWindow).toHaveBeenCalledWith({ view: "mod:atlas.pinboard" });
+  });
+
+  it("sends a person on the meeting card to the main window by their people uid", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "person" }));
+    expect(ipc.showInMainWindow).toHaveBeenCalledWith({
+      view: "people",
+      person: "0123456789abcdef0123456789abcdef",
+    });
   });
 
   it("shows nothing of the calendar while PM is locked, or its vault waits for a passphrase", async () => {

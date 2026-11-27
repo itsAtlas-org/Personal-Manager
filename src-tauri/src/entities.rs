@@ -19,18 +19,26 @@
 //!
 //! The rules file is encrypted with the **Markdown-at-rest subkey** (XChaCha20-Poly1305 via
 //! [`crate::vault::crypto`]) — the same primitive the vault uses, NOT a second mechanism — but
-//! ALWAYS, even for device vaults whose Markdown is plaintext: an alias map of projects (and
-//! later people) is more revealing than any single document, so it gets parity with the
-//! always-encrypted SQLCipher store.
+//! ALWAYS, even for device vaults whose Markdown is plaintext: an alias map of projects is
+//! more revealing than any single document, so it gets parity with the always-encrypted SQLCipher
+//! store.
 //!
 //! ## Lean-spine rule (Stage-3 spine hardening, §8.5)
 //! `entities` is the GENERIC canonical-identity spine and nothing more — `id`, `type`, canonical
 //! name, timestamps, `confidence`, `user_confirmed`. **Type-specific attributes never live here.**
-//! Per-type facts (a person's email/phone, a place's coordinates/work-suitability, a project's
-//! deadline/size) belong in dedicated TYPE TABLES keyed to `entities.id` (Stage 4, the
-//! "Entity relational model" card) — never smeared onto this spine, and never as a shapeless JSON
-//! blob. Code written against this table must assume the lean shape so the Stage-4 decomposition
-//! stays a free extension, not a migration of hardened assumptions.
+//! Per-type facts (a place's coordinates/work-suitability, a project's deadline/size) belong in
+//! dedicated TYPE TABLES keyed to `entities.id` (Stage 4, the "Entity relational model" card) —
+//! never smeared onto this spine, and never as a shapeless JSON blob. Code written against this
+//! table must assume the lean shape so the Stage-4 decomposition stays a free extension, not a
+//! migration of hardened assumptions.
+//!
+//! **People are NOT entities.** A person is a record in the `people` tables (`people/`, v63) with
+//! a permanent random `uid` of its own, never keyed by `entities.id` and never an FK to `entities`
+//! or `documents`. This table is name-keyed (`UNIQUE(type, canonical_name)`, a global alias
+//! `UNIQUE`) and is rebuilt from the rules file at session open with every id reassigned, so two
+//! Sams could not exist here and a rename would lose someone. A future "tagged in a document" link
+//! will name a person by that uid, not through this spine, so INVARIANTS.md I-06 does not apply to
+//! them.
 //!
 //! The two hardening columns split by who owns them:
 //! - **`user_confirmed`** is PORTABLE user truth — a deliberate user vouch that cannot be
@@ -49,7 +57,8 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 use crate::vault::crypto;
 
-/// The only entity type populated in PR 1 (the `person`/`thing` seam is banked in the schema).
+/// The only entity type populated (the `thing` seam is banked in the schema; `person` stays in the
+/// CHECK list but is unused: people live in their own tables, `people/`, never as entities).
 pub const TYPE_PROJECT: &str = "project";
 
 /// Current rules-file schema version. Bumped 1 → 2 by spine hardening (§8.5): a `RuleEntity` now

@@ -1271,7 +1271,20 @@ mod tests {
             // first, then its stacks.
             // v60: the mod tables go first of all: `mod_ledger` points at `tasks` and
             // `project_milestones`, and every other one at `mods`, which drops after its children.
-            "DROP TABLE mod_ledger; \
+            // v63: the eleven people tables go before everything, children first: `person_projects`
+            // points at `projects` and every other one at `people` or `contact_labels`.
+            "DROP TABLE person_distinct_pairs; \
+             DROP TABLE person_projects; \
+             DROP TABLE meet_prompt_answers; \
+             DROP TABLE interaction_people; \
+             DROP TABLE interactions; \
+             DROP TABLE person_sources; \
+             DROP TABLE label_sources; \
+             DROP TABLE person_labels; \
+             DROP TABLE contact_labels; \
+             DROP TABLE person_details; \
+             DROP TABLE people; \
+             DROP TABLE mod_ledger; \
              DROP TABLE mod_grants; \
              DROP TABLE mod_kv; \
              DROP TABLE mod_doc_data; \
@@ -1483,7 +1496,20 @@ mod tests {
             // first, then its stacks.
             // v60: the mod tables go first of all: `mod_ledger` points at `tasks` and
             // `project_milestones`, and every other one at `mods`, which drops after its children.
-            "DROP TABLE mod_ledger; \
+            // v63: the eleven people tables go before everything, children first: `person_projects`
+            // points at `projects` and every other one at `people` or `contact_labels`.
+            "DROP TABLE person_distinct_pairs; \
+             DROP TABLE person_projects; \
+             DROP TABLE meet_prompt_answers; \
+             DROP TABLE interaction_people; \
+             DROP TABLE interactions; \
+             DROP TABLE person_sources; \
+             DROP TABLE label_sources; \
+             DROP TABLE person_labels; \
+             DROP TABLE contact_labels; \
+             DROP TABLE person_details; \
+             DROP TABLE people; \
+             DROP TABLE mod_ledger; \
              DROP TABLE mod_grants; \
              DROP TABLE mod_kv; \
              DROP TABLE mod_doc_data; \

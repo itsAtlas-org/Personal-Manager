@@ -185,6 +185,7 @@ import {
 import { TaskEditor } from "../tasks/TaskEditor";
 import { Callout, Skeleton, VisuallyHidden } from "../ui";
 import { useNowTick } from "../../lib/useNowTick";
+import { EventMeetingDialog } from "../people/EventMeetingDialog";
 import {
   CalendarEventPopover,
   type PopoverAsk,
@@ -344,6 +345,10 @@ interface CalendarViewProps {
   reveal?: { event: CalendarEvent; nonce: number } | null;
   /** Called once `reveal` is taken, so the owner can drop it and a later visit doesn't jump. */
   onRevealTaken?: () => void;
+  /** Open a person in the People tab, from a name on the "Log who you met" card: the main window
+   *  opens it itself, the pop-out asks the main window to (`showInMainWindow`). Without it the names
+   *  are plain text. */
+  onOpenPerson?: (uid: string) => void;
 }
 
 /** How long a revealed event may take to be drawn before its details open over the grid instead
@@ -362,6 +367,7 @@ export function CalendarView({
   rosterInHeader = false,
   reveal,
   onRevealTaken,
+  onOpenPerson,
 }: CalendarViewProps) {
   const { system, accent, colorblind } = useTheme();
   const { coords } = useUserTime();
@@ -890,6 +896,9 @@ export function CalendarView({
   const popoverOpenRef = useRef(false);
   // The event popup that's open, anchored at the clicked element's rect (null = closed).
   const [eventPopup, setEventPopup] = useState<{ ev: CalendarEvent; anchor: DOMRect } | null>(null);
+  // The event "Log who you met" was asked on (from its details or its right-click menu): the card
+  // opens over the calendar, in the main window and in the pop-out alike.
+  const [metEvent, setMetEvent] = useState<CalendarEvent | null>(null);
   useEffect(() => {
     popoverOpenRef.current = eventPopup !== null;
   }, [eventPopup]);
@@ -1530,6 +1539,7 @@ export function CalendarView({
     editing: popoverEditing,
     openDetails: onEventClick,
     editTask: (task) => setTaskEditing({ task }),
+    logMeeting: setMetEvent,
     onOpenProject,
     onOpenPinboard,
     quickOpen,
@@ -2186,8 +2196,34 @@ export function CalendarView({
                 }
               : undefined
           }
+          onOpenPerson={
+            onOpenPerson
+              ? (uid) => {
+                  setEventPopup(null);
+                  onOpenPerson(uid);
+                }
+              : undefined
+          }
           editing={popoverEditing(popupEvent)}
           describeSeries={writes.describeSeries}
+          onLogMeeting={() => {
+            setEventPopup(null);
+            setMetEvent(popupEvent);
+          }}
+        />
+      )}
+      {metEvent && (
+        <EventMeetingDialog
+          event={metEvent}
+          onClose={() => setMetEvent(null)}
+          onOpenPerson={
+            onOpenPerson
+              ? (uid) => {
+                  setMetEvent(null);
+                  onOpenPerson(uid);
+                }
+              : undefined
+          }
         />
       )}
 

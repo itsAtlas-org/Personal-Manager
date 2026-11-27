@@ -112,6 +112,7 @@ mod openrouter;
 mod outlook_calendar;
 mod pathguard;
 mod paths;
+mod people;
 mod photos;
 mod pinboard_legacy;
 /// The Calendar in a window of its own (#1039).
@@ -572,6 +573,14 @@ pub struct AppState {
     /// from the store, so persisting it would be a second copy of a derived thing to keep in step
     /// with deletions, re-embeds and dismissals.
     pub duplicate_watch: Mutex<duplicates::DuplicateWatch>,
+    /// The people merges that can still be taken back (spec 4.3): before-images in memory only,
+    /// each bound to the store epoch it was made in. Always locked while holding (or after) the DB
+    /// guard, never the other way round.
+    pub people_undo: Mutex<people::merge::UndoShelf>,
+    /// The vCard file read for an import and not yet imported (spec 5.2): one parse in memory for
+    /// ten minutes, bound to the store epoch it was read under. Locked while holding (or after) the
+    /// DB guard, never the other way round.
+    pub people_import: Mutex<people::import::ImportHold>,
     /// Snapshot of the currently-running index rebuild, so the Documents tab (and the Settings
     /// rebuild modal) can resume showing progress after the user navigates away and back — the
     /// ingest sibling of `drive_sync`.
@@ -739,6 +748,8 @@ impl AppState {
             local_sync: Mutex::new(LocalFolderSyncState::default()),
             local_sync_cancel: AtomicBool::new(false),
             duplicate_watch: Mutex::new(duplicates::DuplicateWatch::default()),
+            people_undo: Mutex::new(people::merge::UndoShelf::default()),
+            people_import: Mutex::new(people::import::ImportHold::default()),
             ingest_job: Mutex::new(IngestJobState::default()),
             retag_job: Mutex::new(RetagJobState::default()),
             retag_busy: AtomicBool::new(false),
@@ -903,6 +914,7 @@ impl AppState {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // The same rule as `take_conn`: a new store never inherits another's notes.
             direct_providers::forget_all_seen();
+            self.clear_people_undo();
         }
         // The one choke point that heals fault state: every successful open path (retry,
         // unlock, adopt, repair, curtain take-over) lands here, so none can leave a stale
@@ -942,6 +954,22 @@ impl AppState {
         // The Local AI switch (D7), decided on this store's first open and then read: the loops
         // park on it and the executor's gate reads it, and neither can read the store itself.
         self.learn_local_ai_switch();
+        // Remove the people who have been in Trash for 30 days (E4). After unlock by construction:
+        // `conn()` refuses on a locked vault, so a store that is still shut is never touched.
+        self.purge_expired_people();
+    }
+
+    /// Purge the people trashed more than 30 days ago, keeping only a Google tombstone of ids
+    /// ([`people::purge_expired`]). Best-effort like every open-time step: a failure is logged
+    /// without a single contact value (the error is a database or fixed-words one) and never blocks
+    /// the open; the next open tries again. A no-op while the vault is locked.
+    fn purge_expired_people(&self) {
+        let Ok(conn) = self.conn() else { return };
+        match people::purge_on_open(&conn) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("people: purged {n} from Trash"),
+            Err(e) => eprintln!("people: Trash purge skipped ({e})"),
+        }
     }
 
     /// Hand the open store's Local AI switch to the runtime, writing D7's default down first if the
@@ -990,7 +1018,20 @@ impl AppState {
         // What failed calls learned about a direct provider's key (free, paid, a spent allowance)
         // belongs to the store it was learned in: a locked or replaced vault starts clean.
         direct_providers::forget_all_seen();
+        self.clear_people_undo();
         Ok(guard.take())
+    }
+
+    /// Forget every merge's before-image: they hold contact values of a store that is now closed.
+    /// Called under `db`'s guard, the same order every People command takes the two locks in.
+    fn clear_people_undo(&self) {
+        if let Ok(mut shelf) = self.people_undo.lock() {
+            shelf.clear();
+        }
+        // A held vCard preview is the same kind of thing: contact values of a store now closed.
+        if let Ok(mut held) = self.people_import.lock() {
+            held.clear();
+        }
     }
 
     /// Which store is open: changes with every [`AppState::open_session`] and
@@ -2019,6 +2060,41 @@ pub fn run() {
             commands::add_task_stack,
             commands::update_task_stack,
             commands::delete_task_stack,
+            commands::list_people,
+            commands::get_person,
+            commands::create_person,
+            commands::update_person,
+            commands::trash_people,
+            commands::restore_people,
+            commands::delete_people_now,
+            commands::star_people,
+            commands::list_labels,
+            commands::create_label,
+            commands::rename_label,
+            commands::delete_label,
+            commands::label_people,
+            commands::unlabel_people,
+            commands::link_person_project,
+            commands::unlink_person_project,
+            commands::people_duplicates_snapshot,
+            commands::merge_people_preview,
+            commands::merge_people,
+            commands::merge_identical_pairs,
+            commands::undo_merge_people,
+            commands::mark_people_distinct,
+            commands::restore_people_distinct,
+            commands::pick_vcard_and_preview,
+            commands::commit_vcard_import,
+            commands::discard_vcard_preview,
+            commands::export_people,
+            commands::search_people,
+            commands::list_timeline,
+            commands::add_interaction,
+            commands::update_interaction,
+            commands::delete_interaction,
+            commands::owed_meetings,
+            commands::event_guests,
+            commands::answer_meeting,
             commands::calendar_overview,
             commands::request_calendar_access,
             commands::set_calendar_selected,

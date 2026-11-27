@@ -229,6 +229,47 @@ pub(super) fn require_calendar_window(window: &tauri::Window) -> Result<()> {
     }
 }
 
+// --- people ---
+
+/// Whether a command called from the window labelled `label` may read the address book: the main
+/// window and the pop-out Calendar, whose meeting card looks people up and names guests. Like
+/// [`caller_may_write`] this is an allow-list, so the always-on-top briefing window and any window
+/// added later are refused until they are given a reason. Pure, so it's tested without a window.
+pub(super) fn people_window_ok(label: &str) -> bool {
+    label == crate::mods::MAIN_LABEL || label == crate::popout::CALENDAR_LABEL
+}
+
+/// [`people_window_ok`] as a command guard. Its own words: the calendar guard's wording would tell
+/// someone opening a person that "calendar changes" were the problem.
+pub(super) fn require_people_window(window: &tauri::Window) -> Result<()> {
+    if people_window_ok(window.label()) {
+        Ok(())
+    } else {
+        Err(Error::Other(
+            "People can only be opened from PM's main window or the pop-out Calendar.".into(),
+        ))
+    }
+}
+
+/// Whether the window labelled `label` is exactly the main window. Pure, like [`people_window_ok`].
+pub(super) fn main_window_ok(label: &str) -> bool {
+    label == crate::mods::MAIN_LABEL
+}
+
+/// [`main_window_ok`] as the people commands' guard: every command that changes the address book
+/// (and the label read that serves only the People tab) belongs to the main window, where the Undo
+/// strips and the confirmations are shown. People-named because its words are about the address
+/// book; another feature's main-window check says its own (see `mods::main_only_label`).
+pub(super) fn require_people_main_window(window: &tauri::Window) -> Result<()> {
+    if main_window_ok(window.label()) {
+        Ok(())
+    } else {
+        Err(Error::Other(
+            "The address book can only be used from PM's main window.".into(),
+        ))
+    }
+}
+
 // --- helpers ---
 // NOTE: there is deliberately no `iso_now(&AppState)` helper here. One existed and took
 // `state.conn()` internally, which self-deadlocked the non-reentrant DB mutex when called
@@ -287,6 +328,28 @@ mod tests {
             "",
         ] {
             assert!(!caller_may_write(label), "{label:?}");
+        }
+    }
+
+    /// Reading the address book is for the main window and the pop-out Calendar; changing it is for
+    /// the main window alone. Every other label, and near misses of both, is refused.
+    #[test]
+    fn people_windows_are_the_main_window_and_the_popout_calendar() {
+        assert!(people_window_ok("main"));
+        assert!(people_window_ok(crate::popout::CALENDAR_LABEL));
+        assert!(main_window_ok("main"));
+        assert!(!main_window_ok(crate::popout::CALENDAR_LABEL));
+        for label in [
+            crate::tray::BRIEFING_LABEL,
+            "Main",
+            "main ",
+            "Calendar",
+            "calendar ",
+            "calendar-2",
+            "",
+        ] {
+            assert!(!people_window_ok(label), "{label:?}");
+            assert!(!main_window_ok(label), "{label:?}");
         }
     }
 

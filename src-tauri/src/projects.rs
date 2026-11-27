@@ -534,7 +534,7 @@ pub fn set_metadata(
 ///
 /// The audit named four satellites; there are more, and the order is load-bearing because
 /// `foreign_keys` is ON (see `db::open`) and the FK children (`project_milestones`,
-/// `project_activity`, `project_activity_daily`) reference `projects(name)` `ON DELETE CASCADE` with
+/// `project_activity`, `project_activity_daily`, `person_projects`) reference `projects(name)` `ON DELETE CASCADE` with
 /// **no** `ON UPDATE`. A naive `UPDATE projects SET name` would orphan them; deleting the old row
 /// first would cascade-wipe them. So: create the destination row, move the children onto it, then
 /// drop the now-childless source.
@@ -570,6 +570,21 @@ pub fn rename_project_satellites(conn: &Connection, old: &str, new: &str) -> Res
     //    would quietly unlink every task from the renamed or merged project instead.
     conn.execute(
         "UPDATE tasks SET project_name = ?2 WHERE project_name = ?1",
+        params![old, new],
+    )?;
+    //    People too (v63). Its key is (person_id, project_name), so on a merge a person linked to
+    //    both projects would hit the primary key with a plain UPDATE and fail the whole merge: OR
+    //    IGNORE keeps the survivor's row, and the leftover old-name rows go with step 6's cascade
+    //    (the FK has no ON UPDATE, which is why this runs after step 1 and before step 6).
+    //    A link that changes name is a write to the person, so their updated_at moves too: a
+    //    merge's Undo (people/merge.rs) reads it to refuse an Undo over a link that has changed.
+    let linked: Vec<i64> = conn
+        .prepare("SELECT person_id FROM person_projects WHERE project_name = ?1")?
+        .query_map(params![old], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    crate::people::touch_people(conn, &linked)?;
+    conn.execute(
+        "UPDATE OR IGNORE person_projects SET project_name = ?2 WHERE project_name = ?1",
         params![old, new],
     )?;
     conn.execute(
@@ -1113,6 +1128,104 @@ mod tests {
             Some("Keeper"),
             "another project's task is untouched"
         );
+    }
+
+    /// A person row by plain SQL (keeps this test independent of the people module); returns its id. Invented names only.
+    fn person(conn: &Connection, ident: &str, name: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO people(uid, display_name) VALUES (?1, ?2)",
+            params![ident, name],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn linked_to(conn: &Connection, person_id: i64) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT project_name FROM person_projects WHERE person_id = ?1 ORDER BY 1")
+            .unwrap();
+        let rows = stmt
+            .query_map(params![person_id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// A rename re-keys the people link by name: the FK has no ON UPDATE, so without the step the
+    /// project row's delete would quietly unlink everyone.
+    #[test]
+    fn a_project_rename_carries_its_people() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.sqlite"), DB_KEY).unwrap();
+        touch(&conn, "Old").unwrap();
+        let ada = person(&conn, "00000000000000000000000000000a01", "Ada Example");
+        conn.execute(
+            "INSERT INTO person_projects(person_id, project_name) VALUES (?1, 'Old')",
+            params![ada],
+        )
+        .unwrap();
+
+        rename_project_satellites(&conn, "Old", "New").unwrap();
+
+        assert_eq!(linked_to(&conn, ada), vec!["New".to_string()]);
+    }
+
+    /// A merge UNIONS the links: one person is in both projects (a plain UPDATE would hit the primary
+    /// key and fail the whole merge), another only in the folded one.
+    #[test]
+    fn a_project_merge_unions_its_people() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.sqlite"), DB_KEY).unwrap();
+        touch(&conn, "Old").unwrap();
+        touch(&conn, "New").unwrap();
+        let both = person(&conn, "00000000000000000000000000000b01", "Bea Example");
+        let only_old = person(&conn, "00000000000000000000000000000b02", "Cal Example");
+        for (p, project) in [(both, "Old"), (both, "New"), (only_old, "Old")] {
+            conn.execute(
+                "INSERT INTO person_projects(person_id, project_name) VALUES (?1, ?2)",
+                params![p, project],
+            )
+            .unwrap();
+        }
+
+        rename_project_satellites(&conn, "Old", "New").unwrap();
+
+        assert_eq!(linked_to(&conn, both), vec!["New".to_string()]);
+        assert_eq!(linked_to(&conn, only_old), vec!["New".to_string()]);
+        let leftovers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM person_projects WHERE project_name = 'Old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0, "no old-name link survives the fold");
+    }
+
+    /// Deleting a project unlinks its people (the FK cascades) and leaves them in the address book.
+    #[test]
+    fn deleting_a_project_keeps_the_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("t.sqlite"), DB_KEY).unwrap();
+        touch(&conn, "Doomed").unwrap();
+        touch(&conn, "Keeper").unwrap();
+        let dee = person(&conn, "00000000000000000000000000000c01", "Dee Example");
+        for project in ["Doomed", "Keeper"] {
+            conn.execute(
+                "INSERT INTO person_projects(person_id, project_name) VALUES (?1, ?2)",
+                params![dee, project],
+            )
+            .unwrap();
+        }
+
+        delete_project_satellites(&conn, "Doomed").unwrap();
+
+        let people: i64 = conn
+            .query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(people, 1, "the person stays");
+        assert_eq!(linked_to(&conn, dee), vec!["Keeper".to_string()]);
     }
 
     /// The delete counterpart to the rename's satellite move. The load-bearing part is the flag GC:

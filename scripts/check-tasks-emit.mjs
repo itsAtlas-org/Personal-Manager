@@ -36,7 +36,7 @@ const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 const LITERAL_RE = escapeRegExp(LITERAL);
 
 /** Every `.rs` file under `dir` (repo-relative, `/`-separated). */
-function walk(root, dir) {
+export function walk(root, dir) {
   const out = [];
   const visit = (abs) => {
     for (const entry of readdirSync(abs, { withFileTypes: true })) {

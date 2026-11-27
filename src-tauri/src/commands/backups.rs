@@ -321,8 +321,8 @@ pub async fn restore_local_backup(
 /// [`crate::vault::migrate::delete_vault_artifacts`], so it errs towards "yes" at every step.
 ///
 /// `documents` alone used to answer this, which quietly equated "nothing indexed" with "nothing here".
-/// A vault can hold projects, milestones, flags, teachings, chats, connected calendars and connector
-/// accounts before a single file is imported, and all of it was invisible to that question.
+/// A vault can hold projects, milestones, flags, teachings, chats, contacts, connected calendars and
+/// connector accounts before a single file is imported, and all of it was invisible to that question.
 ///
 /// Three tables carry migration-seeded rows on EVERY vault, so they are matched by VALUE and never by
 /// "any row" — `settings` and `entities`/`entity_aliases` (migrations.rs `INSERT OR IGNORE` of the
@@ -345,6 +345,11 @@ fn db_holds_user_data(conn: &rusqlite::Connection) -> bool {
         "chat_sessions",
         "tasks",
         "task_stacks",
+        // The address book: a store holding only contacts is not pristine, or a restore's re-home
+        // could delete it. `interactions` stands alone too, since a timeline entry can outlive
+        // everyone it was about.
+        "people",
+        "interactions",
     ];
     for table in ANY_ROW {
         let q = format!("SELECT EXISTS(SELECT 1 FROM {table})");
@@ -1986,7 +1991,16 @@ mod tests {
             ),
             (
                 "entities beyond the seeded inbox",
-                "INSERT INTO entities(type, canonical_name) VALUES ('person', 'Ramit')",
+                "INSERT INTO entities(type, canonical_name) VALUES ('person', 'Tamsin')",
+            ),
+            (
+                "an address-book person",
+                "INSERT INTO people(uid, display_name) \
+                 VALUES ('00000000000000000000000000000001', 'Tamsin Example')",
+            ),
+            (
+                "a timeline entry",
+                "INSERT INTO interactions(kind, on_date) VALUES ('note', '2026-01-02')",
             ),
             (
                 "the pinboard, which lives only in settings",

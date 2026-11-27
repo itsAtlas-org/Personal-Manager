@@ -1748,7 +1748,7 @@ mod tests {
             crate::db::open(&db_path, &device_key),
             "table mods already exists",
         );
-        // The same for the newest migration: a keyed v61 store on which v62 cannot run (its markers
+        // The same for a later migration: a keyed v61 store on which v62 cannot run (its markers
         // read `documents`, which this store has lost), is reported as it is, never as a brick.
         let dir61 = tempfile::tempdir().unwrap();
         let db_path61 = dir61.path().join("pm.sqlite");

@@ -66,6 +66,8 @@ const ipc = vi.hoisted(() => ({
   respondToCalendarEvent: vi.fn(),
   getSeriesSummary: vi.fn(),
   eventFlags: vi.fn(),
+  eventGuests: vi.fn(),
+  getPerson: vi.fn(),
   openUrl: vi.fn(),
   requestCalendarAccess: vi.fn(),
   recurrencePresets: vi.fn(),
@@ -356,11 +358,16 @@ afterEach(() => {
  *  the rest of those reads, and the effects that rebind the keys to the calendars, are let finish
  *  too, since a key pressed before them would reach a handler with no calendars yet and open
  *  nothing (the source of an occasional failure here). */
-async function mount(Calendar?: typeof import("./CalendarView").CalendarView) {
+async function mount(
+  Calendar?: typeof import("./CalendarView").CalendarView,
+  props: { onOpenPerson?: (uid: string) => void } = {},
+) {
   const View = Calendar ?? (await import("./CalendarView")).CalendarView;
   const onOpenProject = vi.fn();
   const onOpenPinboard = vi.fn();
-  const view = render(<View onOpenProject={onOpenProject} onOpenPinboard={onOpenPinboard} />);
+  const view = render(
+    <View onOpenProject={onOpenProject} onOpenPinboard={onOpenPinboard} {...props} />,
+  );
   await screen.findByRole("button", { name: /Standup/ });
   await act(async () => {});
   return { onOpenProject, onOpenPinboard, unmount: view.unmount, View };
@@ -881,6 +888,33 @@ describe("CalendarView: guests", () => {
     organizer: false,
     self: false,
   } as const;
+
+  // A guest PM knows is a link to their record (spec 3.1): the main window opens it, the pop-out
+  // Calendar passes its own hand-off to the main window (CalendarWindow), and the details close.
+  it("a known guest in the details opens their record through onOpenPerson, and closes them", async () => {
+    rows = [row({ id: "e1", uid: "u1", summary: "Standup", attendees: [ann] })];
+    ipc.eventGuests.mockResolvedValue({
+      known: [{ id: 3, display_name: "Ann Able", email: "ann@x.org" }],
+      unknown: [],
+    });
+    ipc.getPerson.mockResolvedValue({ uid: "0123456789abcdef0123456789abcdef" });
+    const onOpenPerson = vi.fn();
+    await mount(undefined, { onOpenPerson });
+    fireEvent.click(screen.getByRole("button", { name: /Standup/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Ann Able" }));
+    await waitFor(() =>
+      expect(onOpenPerson).toHaveBeenCalledExactlyOnceWith("0123456789abcdef0123456789abcdef"),
+    );
+    expect(screen.queryByRole("dialog", { name: "Standup" })).toBeNull();
+  });
+
+  it("asks nothing about guests where the Calendar can't open a record", async () => {
+    rows = [row({ id: "e1", uid: "u1", summary: "Standup", attendees: [ann] })];
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: /Standup/ }));
+    await screen.findByRole("dialog", { name: "Standup" });
+    expect(ipc.eventGuests).not.toHaveBeenCalled();
+  });
 
   /** Click the Standup chip, then a button of its details. */
   async function fromPopover(button: "Edit" | "Delete") {
@@ -3275,10 +3309,18 @@ describe("CalendarView: the event's right-click menu", () => {
   });
 
   it("leaves Edit… and Delete… out where editing is off, as the popover does", async () => {
-    ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
-    await mount();
-    fireEvent.contextMenu(chip());
-    expect(labels()).toEqual(["Open details"]);
+    // Noon today, after the 07:00 Standup has ended: "Log who you met" is offered on any event
+    // that is over, editing or not, so the list depends on the clock unless it is pinned.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(`${today}T12:00:00`));
+    try {
+      ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
+      await mount();
+      fireEvent.contextMenu(chip());
+      expect(labels()).toEqual(["Open details", "Log who you met"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Open details opens the popover; Delete… opens the question and deletes nothing", async () => {

@@ -72,7 +72,17 @@ const shown = (p: NavPlacement, ctx: NavContext = STANDARD) =>
 
 // The hand-written sidebar this replaced, in its order, with its gates, then the Mods tab (spec
 // §1.13), which sits after Teach and before Dev.
-const BEFORE = ["focus", "chat", "calendar", "documents", "review", "teach", SPARE, "mods"];
+const BEFORE = [
+  "focus",
+  "chat",
+  "calendar",
+  "people",
+  "documents",
+  "review",
+  "teach",
+  SPARE,
+  "mods",
+];
 
 describe("resolveNav: the default", () => {
   it("is the sidebar as it was, for Standard and Power", () => {
@@ -82,7 +92,7 @@ describe("resolveNav: the default", () => {
 
   it("leaves the learning tools and the Map out on Minimal, as teachVisible/mapVisible did", () => {
     const r = resolveNav(WITH_SPARE, NONE, MINIMAL);
-    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "documents", "mods"]);
+    expect(ids(r.shown)).toEqual(["focus", "chat", "calendar", "people", "documents", "mods"]);
     expect(ids(r.dormant)).toEqual(["review", "teach", SPARE]);
     expect(r.hidden).toEqual([]);
   });
@@ -100,6 +110,7 @@ describe("resolveNav: placement", () => {
       "calendar",
       "focus",
       "chat",
+      "people",
       "review",
       "teach",
       SPARE,
@@ -109,7 +120,15 @@ describe("resolveNav: placement", () => {
 
   it("drops hidden entries from the sidebar but keeps them to offer", () => {
     const r = resolveNav(WITH_SPARE, { hidden: [SPARE, "chat"], pinned: [] }, STANDARD);
-    expect(ids(r.shown)).toEqual(["focus", "calendar", "documents", "review", "teach", "mods"]);
+    expect(ids(r.shown)).toEqual([
+      "focus",
+      "calendar",
+      "people",
+      "documents",
+      "review",
+      "teach",
+      "mods",
+    ]);
     expect(ids(r.hidden)).toEqual(["chat", SPARE]);
   });
 
@@ -287,6 +306,33 @@ describe("navigateTarget: what the main window does with the pop-out's link", ()
 
   it("reads the old `pinboard` view as the Pinboard's tab", () => {
     expect(navigateTarget("pinboard")).toEqual({ kind: "view", view: PINBOARD_VIEW });
+  });
+
+  it("opens a person by their people uid, and the People tab with no one named", () => {
+    const uid = "0123456789abcdef0123456789abcdef";
+    expect(navigateTarget("people", undefined, uid)).toEqual({ kind: "person", uid });
+    expect(navigateTarget("people")).toEqual({ kind: "view", view: "people" });
+    // A project on a people link is not read: only the person is.
+    expect(navigateTarget("people", "Atlas", uid)).toEqual({ kind: "person", uid });
+  });
+
+  it("refuses a person whose uid is not the shape of one, instead of opening the bare tab", () => {
+    for (const bad of [
+      "",
+      "abc",
+      "0123456789ABCDEF0123456789ABCDEF",
+      "0123456789abcdef0123456789abcdeg",
+      "0123456789abcdef0123456789abcdef0",
+      " 0123456789abcdef0123456789abcdef",
+      "../../etc/passwd",
+    ]) {
+      expect(navigateTarget("people", undefined, bad), bad).toBeNull();
+    }
+    // A person with any other view is not a link at all.
+    expect(navigateTarget("calendar", undefined, "0123456789abcdef0123456789abcdef")).toEqual({
+      kind: "view",
+      view: "calendar",
+    });
   });
 
   it("refuses a project with no name, a bad mod id, a path and any other view", () => {

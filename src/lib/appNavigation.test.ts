@@ -13,10 +13,10 @@ import appSource from "../App.tsx?raw";
 
 /** The body of the `main://navigate` handler: from its assignment to the first line that closes it. */
 function navigateHandler(): string {
-  const start = appSource.indexOf("navigateRef.current = (to, project) => {");
+  const start = appSource.indexOf("navigateRef.current = (to, project, person) => {");
   expect(
     start,
-    "the handler is no longer assigned as `navigateRef.current = (to, project) => {`",
+    "the handler is no longer assigned as `navigateRef.current = (to, project, person) => {`",
   ).toBeGreaterThan(-1);
   const end = appSource.indexOf("\n  };", start);
   expect(end).toBeGreaterThan(start);
@@ -26,18 +26,22 @@ function navigateHandler(): string {
 describe("App's handling of the pop-out Calendar's links", () => {
   it("opens only what navigateTarget returns", () => {
     const handler = navigateHandler();
-    expect(handler).toContain("navigateTarget(to, project)");
+    expect(handler).toContain("navigateTarget(to, project, person)");
     expect(handler).toContain("setView(target.view)");
     expect(handler).toContain("openProject(target.project)");
+    expect(handler).toContain("openPerson(target.uid)");
   });
 
-  it("never sets the view from the pop-out's own string", () => {
+  it("never sets the view, or opens a person, from the pop-out's own strings", () => {
     expect(navigateHandler()).not.toMatch(/setView\(\s*to\b/);
     expect(appSource).not.toMatch(/setView\(\s*to\b/);
+    expect(navigateHandler()).not.toMatch(/openPerson\(\s*person\b/);
   });
 
-  it("hands every event from the pop-out to that handler", () => {
-    expect(appSource).toContain("onMainNavigate((to) => navigateRef.current(to.view, to.project))");
+  it("hands every event from the pop-out to that handler, person included", () => {
+    expect(appSource).toContain(
+      "onMainNavigate((to) => navigateRef.current(to.view, to.project, to.person))",
+    );
   });
 
   it("opens the Pinboard's mod tab from a Calendar dot, and has no core `pinboard` view left", () => {

@@ -162,6 +162,10 @@ const DECORATIVE_FAINT: ReadonlySet<string> = new Set([
   // The single `disabled:text-faint` in IconButton's base — one entry, not one per variant,
   // because it wins over each VARIANT's `text-ink4` on specificity.
   "src/components/ui/IconButton.tsx ×1",
+  // A person's detail row: the move arrow at the end of its kind is `aria-disabled` (so it keeps
+  // focus after the last press), and Button styles only `:disabled`, so the row gives that inert
+  // arrow Button's own disabled look (`aria-disabled:text-faint`, and the same on hover).
+  "src/components/people/DetailRow.tsx ×2",
 ]);
 
 describe("`text-faint` is decorative, never informational text", () => {

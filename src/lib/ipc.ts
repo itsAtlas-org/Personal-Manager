@@ -49,6 +49,7 @@ import type {
   BackupSchedule,
   BackupState,
   CalendarAccount,
+  Attendee,
   CalendarEvent,
   CalendarOverview,
   ChatEvent,
@@ -134,6 +135,30 @@ import type {
   MilestoneStatus,
   ChecklistItem,
   ImportResult,
+  DupesReport,
+  EventGuests,
+  InteractionDraft,
+  MeetingAnswer,
+  MeetingAnswered,
+  OwedMeeting,
+  PersonRef,
+  TimelineCursor,
+  TimelinePage,
+  MergeChoices,
+  MergeDone,
+  PeopleExportDone,
+  PeopleExportScope,
+  PeopleFilter,
+  PeopleImportOptions,
+  PeopleImportPreview,
+  PeopleImportResult,
+  PeopleMergePreview,
+  PeopleSort,
+  Person,
+  PersonDraft,
+  PersonLabel,
+  PersonRow,
+  PersonSaved,
   Task,
   TaskInput,
   TaskLane,
@@ -1196,6 +1221,181 @@ export const deleteTaskStack = (id: number) => invoke<void>("delete_task_stack",
 export const onTasksChanged = (handler: () => void): Promise<UnlistenFn> =>
   listen("tasks://changed", () => handler());
 
+// --- People (Contacts, PR A) ---
+//
+// PM's own address book, one owner (`people/`). The People tab and the pop-out Calendar's meeting
+// card read through these wrappers and re-read on `onPeopleChanged`, which every write fires. A
+// read (`listPeople`, `getPerson`, `searchPeople`) or a meeting card's call (`owedMeetings`,
+// `eventGuests`, and `answerMeeting`, which writes) may come from the main window or the pop-out
+// Calendar; everything else is the main window's, and the backend refuses it elsewhere.
+
+/** The People list: one filter, an optional search, one sort. Trash shows only under "Trash". */
+export const listPeople = (filter: PeopleFilter, query: string | null, sort: PeopleSort) =>
+  invoke<PersonRow[]>("list_people", { filter, query, sort });
+
+/** One person with everything (also one in Trash). */
+export const getPerson = (id: number) => invoke<Person>("get_person", { id });
+
+/** Add a person. Resolves to their id. */
+export const createPerson = (draft: PersonDraft) => invoke<number>("create_person", { draft });
+
+/** Save the whole record. Refused ("changed somewhere else") when `baseUpdatedAt` is no longer the
+ *  record's `updated_at`. */
+export const updatePerson = (id: number, draft: PersonDraft, baseUpdatedAt: string) =>
+  invoke<PersonSaved>("update_person", { id, draft, baseUpdatedAt });
+
+/** Move people to Trash. `googleDelete` names Google sources to also delete at Google; empty until
+ *  the Google PR. Resolves to how many moved. */
+export const trashPeople = (ids: number[], googleDelete: number[] = []) =>
+  invoke<number>("trash_people", { ids, googleDelete });
+
+/** Bring people back from Trash. Resolves to how many came back. */
+export const restorePeople = (ids: number[]) => invoke<number>("restore_people", { ids });
+
+/** Delete people for good; only people already in Trash are deleted. Resolves to how many were. */
+export const deletePeopleNow = (ids: number[]) => invoke<number>("delete_people_now", { ids });
+
+/** Star or unstar people. Resolves to how many changed. */
+export const starPeople = (ids: number[], starred: boolean) =>
+  invoke<number>("star_people", { ids, starred });
+
+/** Every label and how many people (outside Trash) carry it. */
+export const listLabels = () => invoke<PersonLabel[]>("list_labels");
+
+/** Add a label. Resolves to its id. */
+export const createLabel = (name: string) => invoke<number>("create_label", { name });
+
+/** Rename a label. */
+export const renameLabel = (labelId: number, name: string) =>
+  invoke<void>("rename_label", { labelId, name });
+
+/** Delete a label; nobody is deleted with it. Resolves to how many people had it. */
+export const deleteLabel = (labelId: number) => invoke<number>("delete_label", { labelId });
+
+/** Put a label on people. Resolves to how many gained it. */
+export const labelPeople = (ids: number[], labelId: number) =>
+  invoke<number>("label_people", { ids, labelId });
+
+/** Take a label off people. Resolves to how many carried it. */
+export const unlabelPeople = (ids: number[], labelId: number) =>
+  invoke<number>("unlabel_people", { ids, labelId });
+
+/** Link a person to a project by the name typed. Resolves to the project's own spelling. */
+export const linkPersonProject = (id: number, project: string) =>
+  invoke<string>("link_person_project", { id, project });
+
+/** Unlink a person from a project. */
+export const unlinkPersonProject = (id: number, project: string) =>
+  invoke<void>("unlink_person_project", { id, project });
+
+/** Find people for Ctrl K and the pickers. Never returns anyone in Trash. */
+export const searchPeople = (query: string, limit: number) =>
+  invoke<PersonRow[]>("search_people", { query, limit });
+
+/** One page of a person's timeline, newest first. Pass the last page's `next` as `before` for the
+ *  following page; `limit` defaults to 20 and is capped at 100. Main window only. */
+export const listTimeline = (
+  personId: number,
+  before: TimelineCursor | null = null,
+  limit?: number,
+) => invoke<TimelinePage>("list_timeline", { personId, before, limit: limit ?? null });
+
+/** Log a meeting, call, message or note naming one or more people. Never changes the people's own
+ *  records, so an open editor still saves. Resolves to the entry's id. */
+export const addInteraction = (draft: InteractionDraft) =>
+  invoke<number>("add_interaction", { draft });
+
+/** Save an edit over an entry: kind, date, time, note and people (its meeting link stays). */
+export const updateInteraction = (id: number, draft: InteractionDraft) =>
+  invoke<void>("update_interaction", { id, draft });
+
+/** Delete an entry, for everyone it names. */
+export const deleteInteraction = (id: number) => invoke<void>("delete_interaction", { id });
+
+/** The meetings owed an answer now, newest first: recent, with other human guests, not yet
+ *  answered. Worked out on each call (nothing in PM fires when an event ends); the main window and
+ *  the pop-out Calendar may both ask. */
+export const owedMeetings = () => invoke<OwedMeeting[]>("owed_meetings");
+
+/** An event's guests sorted for the meeting card, the people PM knows and those it doesn't: what
+ *  "Log who you met" opens on a past event that isn't on the owed list. Takes the guests the
+ *  calendar showed (the user and rooms are left out); nothing is stored. Main window or the
+ *  pop-out Calendar. */
+export const eventGuests = (guests: Attendee[]) => invoke<EventGuests>("event_guests", { guests });
+
+/** Answer one meeting in a single step: log who was there (a guest PM doesn't know becomes a
+ *  person, anyone ticked from Trash comes back), skip it, or skip its whole series. Answering again
+ *  replaces an earlier skip. `uid` is empty for an event with no iCal id, which can only be logged;
+ *  `title` defaults to the mirrored event's. Main window or the pop-out Calendar. */
+export const answerMeeting = (
+  uid: string,
+  start: string,
+  people: PersonRef[],
+  answer: MeetingAnswer,
+  note?: string | null,
+  title?: string | null,
+) =>
+  invoke<MeetingAnswered>("answer_meeting", {
+    eventIcal: uid,
+    start,
+    people,
+    answer,
+    note: note ?? null,
+    title: title ?? null,
+  });
+
+/** The possible-duplicates snapshot: pairs with why they were flagged and what differs. Built off
+ *  the database guard, read on mount and again on `people://changed`. */
+export const peopleDuplicatesSnapshot = () => invoke<DupesReport>("people_duplicates_snapshot");
+
+/** What merging `from` into `into` would move, and which single-value fields differ. */
+export const mergePeoplePreview = (into: number, from: number) =>
+  invoke<PeopleMergePreview>("merge_people_preview", { into, from });
+
+/** Merge `from` into `into` (who keeps their id and record). `choices` answers each field that
+ *  differs; the value not chosen is dropped. Resolves with the Undo token, good for 30 seconds. */
+export const mergePeople = (into: number, from: number, choices: MergeChoices) =>
+  invoke<MergeDone>("merge_people", { into, from, choices });
+
+/** Merge every listed pair that loses nothing (the backend judges each again). One Undo for all. */
+export const mergeIdenticalPairs = (pairs: [number, number][]) =>
+  invoke<MergeDone>("merge_identical_pairs", { pairs });
+
+/** Take a merge back, if its Undo is still good. Resolves to how many people came back. */
+export const undoMergePeople = (token: string) => invoke<number>("undo_merge_people", { token });
+
+/** Say two people are not the same: the finder never offers the pair again. */
+export const markPeopleDistinct = (a: number, b: number) =>
+  invoke<void>("mark_people_distinct", { a, b });
+
+/** Offer the pairs marked "not the same person" again. Resolves to how many were hidden. */
+export const restorePeopleDistinct = () => invoke<number>("restore_people_distinct");
+
+/** Pick a `.vcf` file and read what is in it, writing nothing. The backend opens the picker (the
+ *  path never passes through the webview). Resolves to `null` when the picker is cancelled; refuses
+ *  in plain words for a file over 128 MB. The parse is held ten minutes under `preview_id`. */
+export const pickVcardAndPreview = () =>
+  invoke<PeopleImportPreview | null>("pick_vcard_and_preview");
+
+/** Import the file the last preview read, as one transaction. A stale preview (replaced, old, or
+ *  from another store) refuses in plain words and writes nothing. */
+export const commitVcardImport = (previewId: string, options: PeopleImportOptions) =>
+  invoke<PeopleImportResult>("commit_vcard_import", { previewId, options });
+
+/** Forget a preview whose dialog closed without importing, so the file's contacts don't stay in
+ *  memory for the rest of the ten minutes. Writes nothing; an id that is already gone is fine. */
+export const discardVcardPreview = (previewId: string) =>
+  invoke<void>("discard_vcard_preview", { previewId });
+
+/** Write people as a vCard file, and with `timeline` their timeline as a spreadsheet beside it. The
+ *  backend opens the save dialog. Resolves to `null` when it is cancelled. */
+export const exportPeople = (scope: PeopleExportScope, timeline: boolean) =>
+  invoke<PeopleExportDone | null>("export_people", { scope, timeline });
+
+/** Fire after any people write, from any surface. The People tab debounces its refetch. */
+export const onPeopleChanged = (handler: () => void): Promise<UnlistenFn> =>
+  listen("people://changed", () => handler());
+
 // --- Personal Assistant: Calendar connectors (multi-provider, read-only — cards 6A/6B) ---
 
 /** The whole calendar surface in one read: provider clients, connected accounts/subscriptions, and
@@ -1846,12 +2046,19 @@ export const destroyCalendarWindow = () => invoke<void>("destroy_calendar_window
 export interface MainNavigate {
   view: string;
   project?: string;
+  /** With `view: "people"`, a person's people `uid`. */
+  person?: string;
 }
 
-/** Show `to` in the main window and bring it forward: the pop-out's links to a project or the
- *  Pinboard's tab (`view: "mod:atlas.pinboard"`). The main window checks `view` (`navigateTarget`). */
+/** Show `to` in the main window and bring it forward: the pop-out's links to a project, the
+ *  Pinboard's tab (`view: "mod:atlas.pinboard"`) or a person (`view: "people"` with their `uid`).
+ *  The main window checks what it is sent (`navigateTarget`). */
 export const showInMainWindow = (to: MainNavigate) =>
-  invoke<void>("show_in_main_window", { view: to.view, project: to.project ?? null });
+  invoke<void>("show_in_main_window", {
+    view: to.view,
+    project: to.project ?? null,
+    person: to.person ?? null,
+  });
 
 /** Subscribe to `main://navigate` (popout.rs's `NAVIGATE_EVENT`), sent to the main window only. */
 export const onMainNavigate = (handler: (to: MainNavigate) => void): Promise<UnlistenFn> =>

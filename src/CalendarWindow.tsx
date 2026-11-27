@@ -32,6 +32,7 @@ import {
   vaultLockStatus,
   vaultStatus,
 } from "./lib/ipc";
+import { forgetAllDrafts } from "./lib/meetingDrafts";
 import { PINBOARD_VIEW } from "./lib/nav";
 import { followStoredPrefs, hydrateStoredPrefs } from "./lib/storedPrefs";
 import { subscribeUntilCleanup } from "./lib/subscribe";
@@ -79,6 +80,12 @@ export default function CalendarWindow() {
   // gate, where there is no store to read and nothing to refresh.
   useCalendarChangeCheck(gate === "open");
 
+  // This window keeps its own copy of what a "who did you meet?" card was given and not yet saved
+  // (names and a note): it goes whenever the store is closed behind a gate, as in the main window.
+  useEffect(() => {
+    if (gate !== "open") forgetAllDrafts();
+  }, [gate]);
+
   if (gate === "open")
     return (
       <main className="flex h-full min-h-0 flex-1 flex-col">
@@ -87,6 +94,8 @@ export default function CalendarWindow() {
           rosterInHeader
           onOpenProject={(project) => void showInMainWindow({ view: "project", project })}
           onOpenPinboard={() => void showInMainWindow({ view: PINBOARD_VIEW })}
+          // A name on the "Log who you met" card: the People tab is the main window's, so ask it.
+          onOpenPerson={(person) => void showInMainWindow({ view: "people", person })}
         />
       </main>
     );
