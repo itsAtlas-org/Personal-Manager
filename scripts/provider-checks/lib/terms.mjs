@@ -31,8 +31,10 @@ const ENTITIES = {
 /** Page text as one lower-case line of plain words, comparable with a phrase run through the same function. */
 export function normaliseText(raw) {
   let t = String(raw)
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    // End tags may carry spaces or junk before the ">" ("</script >"): match them too, so a script
+    // body never reads as page wording.
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, " ")
     .replace(/<[^>]*>/g, " ")
     .replace(/\{%[^%]*%\}/g, " ")
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");

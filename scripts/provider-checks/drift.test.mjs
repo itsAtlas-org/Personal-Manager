@@ -1061,6 +1061,9 @@ describe("terms and retention pages: phrase assertions", () => {
       'a bold link & "q" \'s',
     );
     assert.equal(normaliseText("<script>x()</script><p>Hi</p>"), "hi");
+    // End tags with a space or junk before ">", in any case, still end the block.
+    assert.equal(normaliseText('<SCRIPT type="m">a()</script ><p>Hi</p>'), "hi");
+    assert.equal(normaliseText("<style>p{}</STYLE\t foo><p>Hi</p>"), "hi");
     assert.equal(sentenceWith("one. two is here. three.", "is here"), "two is here.");
     assert.equal(sentenceWith("one.", "zzz"), null);
   });
