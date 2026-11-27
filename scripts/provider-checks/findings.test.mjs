@@ -159,4 +159,23 @@ describe("fingerprint", () => {
     const r2 = finding("request-refused", "openai", { step: "chat", http: 500 });
     assert.equal(fingerprint([r1]), fingerprint([r2]));
   });
+
+  it("the canary's listed value is part of the identity: a moved retirement date is a different problem", () => {
+    const d1 = finding("model-retirement-changed", "anthropic", {
+      model: "claude-fable-5-2",
+      listed: "2027-01-01",
+      catalogue: "none",
+    });
+    const d2 = finding("model-retirement-changed", "anthropic", {
+      model: "claude-fable-5-2",
+      listed: "2027-03-01",
+      catalogue: "none",
+    });
+    assert.notEqual(
+      fingerprint([d1]),
+      fingerprint([d2]),
+      "a vendor that moves the date again re-edits the issue",
+    );
+    assert.equal(fingerprint([d1]), fingerprint([d1]));
+  });
 });

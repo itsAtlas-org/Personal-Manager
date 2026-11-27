@@ -79,3 +79,112 @@ export function fakeGh(answers = () => "") {
 export function quiet() {
   return setSink(() => {});
 }
+
+/** A fake gh with a tiny issue tracker. `open` lists issues already open: { provider, body }. */
+export function tracker(open = [], closed = []) {
+  const issues = open.map((o, i) => ({
+    number: 100 + i,
+    state: "open",
+    labels: [
+      "provider-check",
+      `provider-check:${o.provider}`,
+      `provider-check:${o.kind ?? "canary"}`,
+    ],
+    body: o.body,
+  }));
+  // Issues Bobby closed by hand: `closed` is "not_planned" or "completed".
+  for (const c of closed)
+    issues.push({
+      number: 300 + issues.length,
+      state: "closed",
+      state_reason: c.reason,
+      labels: [
+        "provider-check",
+        `provider-check:${c.provider}`,
+        `provider-check:${c.kind ?? "canary"}`,
+      ],
+      body: c.body,
+    });
+  const gh = fakeGh((args, { input } = {}) => {
+    if (args[0] === "api") {
+      const q = new URL("https://x/" + args[1]).searchParams;
+      const labels = q.get("labels").split(",");
+      // Newest first, as GitHub's REST list is by default.
+      return JSON.stringify(
+        issues
+          .filter((i) => i.state === q.get("state") && labels.every((l) => i.labels.includes(l)))
+          .reverse(),
+      );
+    }
+    if (args[0] === "issue" && args[1] === "create") {
+      const labels = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
+      issues.push({ number: 200 + issues.length, state: "open", labels, body: input });
+      return "";
+    }
+    if (args[0] === "issue" && args[1] === "edit")
+      issues.find((i) => i.number === Number(args[2])).body = input;
+    if (args[0] === "issue" && args[1] === "close") {
+      const issue = issues.find((i) => i.number === Number(args[2]));
+      issue.state = "closed";
+      issue.state_reason = args[args.indexOf("--reason") + 1].replace("not planned", "not_planned");
+    }
+    return "";
+  });
+  gh.issues = issues;
+  return gh;
+}
+
+// ---- the keyless drift check's fixtures (fixtures/drift) ------------------------------------------
+// Real, raw, trimmed excerpts of the vendors' PUBLIC pages as fetched on 2026-11-27 with a plain curl and
+// the User-Agent `pm-provider-check`: whole lines cut out, nothing reworded. Each is a `.txt` so Prettier
+// leaves its tables alone. gemini-terms.html.txt is the page's own `<noscript><pre>` text with `[...]`
+// marking where whole paragraphs were left out (the markers are hand-made). openrouter-models.json keeps
+// only the catalogue's rows plus three others, and only id, canonical_slug, name, created, pricing and
+// expiration_date of each. The drifted and restructured copies the tests use are made in the tests from
+// these (see `drifted`), never committed, and each edit must find its text or the test fails.
+
+/** The page address -> fixture file the drift check reads (the same addresses as sources.json). */
+export const DRIFT_PAGES = {
+  "https://platform.claude.com/docs/en/about-claude/pricing.md": "drift/anthropic-pricing.md.txt",
+  "https://developers.openai.com/api/docs/pricing.md": "drift/openai-pricing.md.txt",
+  "https://aistudio.google.com/docs/pricing.md": "drift/gemini-pricing.md.txt",
+  "https://openrouter.ai/api/v1/models": "drift/openrouter-models.json",
+  "https://platform.claude.com/docs/en/manage-claude/api-and-data-retention.md":
+    "drift/anthropic-retention.md.txt",
+  "https://developers.openai.com/api/docs/guides/your-data.md": "drift/openai-data.md.txt",
+  "https://aistudio.google.com/docs/terms": "drift/gemini-terms.html.txt",
+};
+
+/** `text` with `from` replaced by `to`; throws if `from` is not there, so a fixture edit can never silently miss. */
+export function drifted(text, from, to) {
+  if (!String(text).includes(from)) throw new Error(`drifted: the fixture has no ${from}`);
+  // A function replacement, so a `$` in the new text (a price) is never read as a replacement pattern.
+  return String(text).replace(from, () => to);
+}
+
+/**
+ * A fake fetch for the drift check, by EXACT address. `pages` overrides a page's text (a string), its
+ * status (`{ status }`), its final address (`{ url }`) or makes the fetch fail (`"network"`), keyed by the
+ * address the check asks for. Every request goes to `calls`.
+ */
+export function driftFetch(pages = {}) {
+  const calls = [];
+  const fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    const o = pages[url];
+    if (o === "network") throw new TypeError("fetch failed");
+    const spec = typeof o === "string" ? { text: o } : (o ?? {});
+    const file = DRIFT_PAGES[url];
+    if (spec.text === undefined && !file)
+      return { status: 404, url, headers: new Headers(), text: async () => "" };
+    const text = spec.text ?? readFileSync(join(here, "fixtures", file), "utf8");
+    return {
+      status: spec.status ?? 200,
+      url: spec.url ?? url,
+      headers: new Headers(),
+      text: async () => text,
+    };
+  };
+  fetch.calls = calls;
+  return fetch;
+}

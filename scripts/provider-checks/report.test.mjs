@@ -9,61 +9,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { finding, makeResult, notice } from "./lib/findings.mjs";
 import { assertPublic, ddmmyyyy, issueBody, reportCanary, reportSelftest } from "./report.mjs";
-import { fakeGh } from "./testkit.mjs";
+import { fakeGh, tracker } from "./testkit.mjs";
 
 const REPO = "itsAtlas-org/Personal-Manager";
 const NOW = new Date(Date.UTC(2026, 10, 27, 5, 41));
 const x = (n) => "a1B2c3D4e5".repeat(Math.ceil(n / 10)).slice(0, n);
-
-/** A fake gh with a tiny issue tracker. `open` lists issues already open: { provider, body }. */
-function tracker(open = [], closed = []) {
-  const issues = open.map((o, i) => ({
-    number: 100 + i,
-    state: "open",
-    labels: [
-      "provider-check",
-      `provider-check:${o.provider}`,
-      `provider-check:${o.kind ?? "canary"}`,
-    ],
-    body: o.body,
-  }));
-  // Issues Bobby closed by hand: `closed` is "not_planned" or "completed".
-  for (const c of closed)
-    issues.push({
-      number: 300 + issues.length,
-      state: "closed",
-      state_reason: c.reason,
-      labels: ["provider-check", `provider-check:${c.provider}`, "provider-check:canary"],
-      body: c.body,
-    });
-  const gh = fakeGh((args, { input } = {}) => {
-    if (args[0] === "api") {
-      const q = new URL("https://x/" + args[1]).searchParams;
-      const labels = q.get("labels").split(",");
-      // Newest first, as GitHub's REST list is by default.
-      return JSON.stringify(
-        issues
-          .filter((i) => i.state === q.get("state") && labels.every((l) => i.labels.includes(l)))
-          .reverse(),
-      );
-    }
-    if (args[0] === "issue" && args[1] === "create") {
-      const labels = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
-      issues.push({ number: 200 + issues.length, state: "open", labels, body: input });
-      return "";
-    }
-    if (args[0] === "issue" && args[1] === "edit")
-      issues.find((i) => i.number === Number(args[2])).body = input;
-    if (args[0] === "issue" && args[1] === "close") {
-      const issue = issues.find((i) => i.number === Number(args[2]));
-      issue.state = "closed";
-      issue.state_reason = args[args.indexOf("--reason") + 1].replace("not planned", "not_planned");
-    }
-    return "";
-  });
-  gh.issues = issues;
-  return gh;
-}
 
 const mutating = (gh) =>
   gh.calls.filter(
@@ -160,6 +110,32 @@ describe("an ok leg", () => {
     );
     run(env({ RESULT_OPENAI: result("ok", { findings: [F("openai", "gpt-6-nova")] }) }), gh);
     assert.equal(gh.calls.filter((c) => c.args[0] === "issue" && c.args[1] === "create").length, 1);
+  });
+
+  it("a canary finding whose listed value MOVED after a not-planned close opens a new issue (4f reversed #1157 decision 13)", () => {
+    const retire = (listed) =>
+      finding("model-retirement-changed", "anthropic", {
+        model: "claude-fable-5-2",
+        listed,
+        catalogue: "none",
+      });
+    const closed = [
+      {
+        provider: "anthropic",
+        reason: "not_planned",
+        body: openBody("anthropic", [retire("2027-01-01")]),
+      },
+    ];
+    const same = tracker([], closed);
+    run(env({ RESULT_ANTHROPIC: result("ok", { findings: [retire("2027-01-01")] }) }), same);
+    assert.deepEqual(mutating(same), [], "the acknowledged date stays acknowledged");
+    const moved = tracker([], closed);
+    run(env({ RESULT_ANTHROPIC: result("ok", { findings: [retire("2027-03-01")] }) }), moved);
+    assert.equal(
+      moved.calls.filter((c) => c.args[0] === "issue" && c.args[1] === "create").length,
+      1,
+      "a moved date is news again",
+    );
   });
 
   it("a close as COMPLETED (the reporter's own) is not an acknowledgement: the finding opens again", () => {

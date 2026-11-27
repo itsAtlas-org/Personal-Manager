@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.207.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "PM's repository can now also check every week, by itself, that the prices and the data-use wording OpenAI, Google and Anthropic publish still match what PM expects, and say so when something does not. Nothing changes in the app.",
+    ],
+  },
+  {
     version: "3.206.0-alpha",
     date: "2026-11-27",
     highlights: [
