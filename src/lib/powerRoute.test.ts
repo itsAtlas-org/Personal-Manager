@@ -14,6 +14,7 @@ import {
   blockedReason,
   cloudNames,
   consentText,
+  costClause,
   directRetentionNote,
   powerGate,
   powerReadout,
@@ -33,6 +34,8 @@ const movable = (over: Partial<PowerRoleView> = {}): PowerRoleView => ({
   effective: "local_then_cloud",
   cloud_key: "present",
   cloud_provider: "openrouter",
+  // No tiers on OpenRouter or OpenAI: every field set, so a missing one can't hide behind `?.`.
+  route_terms: null,
   ...over,
 });
 
@@ -470,6 +473,8 @@ describe("powerSummary — one case per branch, first match wins", () => {
 describe("On battery with a cloud role on a provider of the person's own", () => {
   const onOpenAi = (over: Partial<PowerRoleView> = {}) =>
     movable({ cloud_provider: "openai", ...over });
+  const onGemini = (terms: "paid" | "free" | "blocked" | null, over: Partial<PowerRoleView> = {}) =>
+    movable({ cloud_provider: "gemini", route_terms: terms, ...over });
   const asking = (chat: PowerRoleView, background: PowerRoleView) =>
     power({ source: "battery", percent: 41, chat, background });
 
@@ -515,6 +520,86 @@ describe("On battery with a cloud role on a provider of the person's own", () =>
     expect(blockedReason("background", "no_key", p)).toBe(
       "Background work has no OpenAI key to use",
     );
+  });
+
+  it("says a role on a paused provider can't move, naming Google Gemini", () => {
+    const gemini = movable({
+      blocked: "paused",
+      cloud_provider: "gemini",
+      route_terms: "blocked",
+    });
+    const p = power({ chat: gemini, background: gemini });
+    expect(blockedReason("chat", "paused", p)).toBe(
+      "Chat is on Google Gemini, which is paused (PM only uses paid Google Gemini keys where you are)",
+    );
+    expect(blockedReason("background", "paused", p)).toBe(
+      "Background work is on Google Gemini, which is paused (PM only uses paid Google Gemini keys where you are)",
+    );
+  });
+
+  it("never says '30 days' for Gemini, and says what Google does by the key's terms", () => {
+    const paid = power({ chat: onGemini("paid") });
+    const free = power({ chat: onGemini("free") });
+    expect(directRetentionNote(paid)).toBe(
+      "Google Gemini logs requests for a limited time to look for abuse, and doesn't use them to improve its products.",
+    );
+    expect(directRetentionNote(free)).toBe(
+      "Google Gemini's free tier may train on requests, and people at Google may read them.",
+    );
+    // Unknown reads as free, here as everywhere.
+    expect(directRetentionNote(power({ chat: onGemini(null) }))).toMatch(/free tier may train/);
+    for (const p of [paid, free]) expect(directRetentionNote(p)).not.toMatch(/30 days/);
+  });
+
+  it("says each provider's own thing when the two roles are on two", () => {
+    const note = directRetentionNote(power({ chat: onOpenAi(), background: onGemini("free") }));
+    expect(note).toBe(
+      "OpenAI keeps requests for up to 30 days. Google Gemini's free tier may train on requests, and people at Google may read them.",
+    );
+    // "30 days" belongs to OpenAI's sentence alone.
+    expect(note?.match(/30 days/g)).toHaveLength(1);
+  });
+
+  it("asks about a paid Gemini role as billed, and about a free one as not billed", () => {
+    const paid = consentText(asking(onGemini("paid", { route: "needs_consent" }), movable()));
+    expect(paid).toContain("goes straight to Google Gemini, which isn't zero data retention");
+    expect(paid).toContain("billed to your Google Gemini key");
+    const free = consentText(asking(onGemini("free", { route: "needs_consent" }), movable()));
+    // A key PM only treats as free may really be paid (Unknown reads as free), so the question says
+    // both halves and never "Nothing is billed" flat.
+    expect(free).toContain("on a key PM treats as FREE (it is free, or PM couldn't tell)");
+    expect(free).toContain(
+      "If it is free, Google may train on it and people at Google may read it, nothing is billed",
+    );
+    expect(free).toContain("If it is really paid, it is charged at your cloud model's usual rates");
+    expect(free).not.toMatch(/billed to/);
+  });
+
+  it("never says billed for a free Gemini role when the roles are on two providers", () => {
+    const text = consentText(
+      asking(movable({ route: "needs_consent" }), onGemini("free", { route: "needs_consent" })),
+    );
+    expect(text).toContain("OpenRouter for Chat and Google Gemini for Background");
+    expect(text).toContain(
+      "What goes to Google Gemini is on a key PM treats as FREE (it is free, or PM couldn't tell). If it is free, Google may train on it and people at Google may read it, and nothing is billed there; if it is really paid, it is charged at the usual rates.",
+    );
+    expect(text).toContain("The rest is billed to each provider's key");
+  });
+
+  it("words the cost line by terms: billed for paid, not billed for free", () => {
+    expect(costClause(null)).toBe("is billed to your OpenRouter key");
+    expect(costClause(power())).toBe("is billed to your OpenRouter key");
+    expect(costClause(power({ chat: onGemini("paid") }))).toBe(
+      "is billed to your Google Gemini and OpenRouter key",
+    );
+    const all = costClause(power({ chat: onGemini("free"), background: onGemini("free") }));
+    expect(all).toBe(
+      "goes to your Google Gemini key, which PM treats as free: if it is, nothing is billed but Google may train on it, and a key that is really paid is charged at the usual rates",
+    );
+    expect(all).not.toMatch(/billed to/);
+    const mixed = costClause(power({ chat: onGemini("free") }));
+    expect(mixed).toMatch(/what goes to Google Gemini is on a key PM treats as free/);
+    expect(mixed).toMatch(/the rest is billed to your key/);
   });
 
   it("names the cloud, and its retention, in the cost line", () => {

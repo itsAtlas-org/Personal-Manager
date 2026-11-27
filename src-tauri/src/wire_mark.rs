@@ -147,6 +147,17 @@ mod tests {
             .expect("complete comes before stream_chat");
         assert!(complete.contains("cloud_openai::stream("));
         assert!(!complete.contains(".send()"));
+
+        // Your own Gemini key's one-shot completion is the same call into the stream. Its key check
+        // (the list and the probe) is a plain send outside this slice, for the same reason.
+        let gemini = include_str!("gemini_direct.rs");
+        let complete = gemini
+            .split("pub(crate) async fn complete(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) async fn stream_chat").next())
+            .expect("complete comes before stream_chat");
+        assert!(complete.contains("cloud_openai::stream("));
+        assert!(!complete.contains(".send()"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "pm"
-version = "3.199.2-alpha"
+version = "3.200.0-alpha"
 description = "PM — a local-first personal manager (Archivist + Personal Assistant)"
 authors = ["Bobby Yu"]
 edition = "2021"
@@ -115,6 +115,10 @@ open = "5"
 chrono = "0.4"
 chrono-tz = "0.10"
 rrule = { version = "0.14", features = ["exrule"] }
+# The OS time zone id (region.rs: where Google's free Gemini keys are refused). chrono's `clock`
+# feature already pulls this crate, so it is the same package and the same licence; naming it here
+# only makes the edge direct. It reads /etc/localtime on Linux and never the TZ variable or the network.
+iana-time-zone = "0.1"
 
 # Local-folder indexing (index-only connector). `file-id` reads a file's OS-stable
 # identity (NTFS FileId on Windows, inode on Unix) so a rename/move keeps the same

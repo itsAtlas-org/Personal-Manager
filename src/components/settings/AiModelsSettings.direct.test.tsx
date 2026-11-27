@@ -29,6 +29,8 @@ const SETTINGS = {
   background_provider: "openrouter",
   chat_cloud_model: null,
   background_cloud_model: null,
+  chat_route_terms: null,
+  background_route_terms: null,
 };
 
 vi.mock("../../lib/ipc", async (importOriginal) => ({
@@ -87,7 +89,7 @@ describe("the Your own keys section", () => {
     expect(await screen.findByText("Your own keys")).toBeTruthy();
     expect(
       screen.getByText(
-        "Use your own key from OpenAI instead of OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention.",
+        "Use your own key from OpenAI or Google instead of OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention, and a free Google key lets Google train on what you send.",
       ),
     ).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Use my own OpenAI key" });

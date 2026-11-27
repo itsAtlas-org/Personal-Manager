@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 use crate::llm_gateway::CloudProvider;
+use crate::openrouter::{Completion, Usage};
 
 /// The whole file.
 #[derive(Debug, Deserialize)]
@@ -49,7 +50,31 @@ pub(crate) struct ProviderSection {
     /// The model a role gets before the person picks one.
     pub default_chat: String,
     pub default_background: String,
+    /// The ordered catalogue ids the key check asks to tell a paid key from a free one: each has
+    /// `free_tier: false`, so a free key answers it with a limit-0 429 and a paid key with a reply.
+    /// Empty for a provider with no tiers.
+    #[serde(default)]
+    pub probe_models: Vec<String>,
     pub models: Vec<DirectModel>,
+}
+
+/// A price that takes effect on a date: all three NEW prices (a null cached price means none).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PriceChange {
+    /// The first UTC day it applies (YYYY-MM-DD).
+    pub from: String,
+    pub price_in: f64,
+    pub price_cached_in: Option<f64>,
+    pub price_out: f64,
+}
+
+/// What a model costs on a given day, USD per million tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Prices {
+    pub price_in: f64,
+    pub price_cached_in: Option<f64>,
+    pub price_out: f64,
 }
 
 /// What a request costs more once it is long: the provider bills the WHOLE request at the higher
@@ -96,9 +121,43 @@ pub(crate) struct DirectModel {
     pub retires_on: Option<String>,
     /// A line the picker shows under the name (null on every OpenAI row).
     pub note: Option<String>,
+    /// Whether the provider gives this model a free allowance: null where the provider has no such
+    /// thing (OpenAI), false for a model only a paid key can use, true where a free key can too.
+    #[serde(default)]
+    pub free_tier: Option<bool>,
+    /// Prices that change on a date the provider has announced, ascending by `from`. Empty for most.
+    #[serde(default)]
+    pub price_changes: Vec<PriceChange>,
 }
 
 impl DirectModel {
+    /// The prices that apply on `today` (a UTC date): the last announced change that has taken effect,
+    /// else the row's own. A string compare is right for YYYY-MM-DD. Google bills by Pacific date, so a
+    /// change lands up to a day off in UTC; the cost is an estimate and the Usage copy says so.
+    pub(crate) fn prices_on(&self, today: &str) -> Prices {
+        self.price_changes
+            .iter()
+            .rev()
+            .find(|c| c.from.as_str() <= today)
+            .map_or(
+                Prices {
+                    price_in: self.price_in,
+                    price_cached_in: self.price_cached_in,
+                    price_out: self.price_out,
+                },
+                |c| Prices {
+                    price_in: c.price_in,
+                    price_cached_in: c.price_cached_in,
+                    price_out: c.price_out,
+                },
+            )
+    }
+
+    /// The next announced price change after `today`, for the picker's tip.
+    pub(crate) fn next_change(&self, today: &str) -> Option<&PriceChange> {
+        self.price_changes.iter().find(|c| c.from.as_str() > today)
+    }
+
     /// Whether the model takes this effort level.
     pub(crate) fn offers(&self, level: &str) -> bool {
         self.effort_levels.iter().any(|l| l == level)
@@ -171,11 +230,100 @@ pub(crate) fn default_for(
     s.models.iter().find(|m| &m.id == id)
 }
 
+// ---- what a reply cost: provider-neutral arithmetic ------------------------------------------------
+
+/// Today in UTC, as YYYY-MM-DD, for the dated prices.
+pub(crate) fn utc_today() -> String {
+    chrono::Utc::now().date_naive().to_string()
+}
+
+/// Turn what the server reported into what PM logs. PURE over its inputs.
+///
+/// `Completion.model` is ALWAYS left as a catalogue id, never None and never a raw wire id: the
+/// catalogue row the served snapshot maps to, else the model that was asked for. About 25 callers log
+/// `completion.model.or(Some(plan.primary_model_id()))`, and on a local-then-cloud route that primary
+/// is the LOCAL model, so a None would book a direct provider's tokens and a computed price under the
+/// local model's name. A direct arm holds one model, so the requested one is the only honest
+/// fallback. The cost is worked out here too (a direct provider reports none). Tests pass a fixed
+/// `today`, never the real one.
+pub(crate) fn settle_on(
+    mut completion: Completion,
+    requested: &DirectModel,
+    today: &str,
+) -> Completion {
+    let served = completion.model.as_deref().and_then(served_model_id);
+    let priced = served.unwrap_or(requested);
+    completion.model = Some(priced.id.clone());
+    completion.usage.cost = cost_usd(priced, &completion.usage, today);
+    completion
+}
+
+/// The catalogue row a served model name stands for: an exact wire id, else the same with a leading
+/// `models/` (Google's native list names) or a trailing `-YYYY-MM-DD` snapshot date taken off. `None`
+/// for a model PM doesn't list.
+pub(crate) fn served_model_id(served_wire: &str) -> Option<&'static DirectModel> {
+    let served_wire = served_wire.strip_prefix("models/").unwrap_or(served_wire);
+    if let Some(m) = find_wire(served_wire) {
+        return Some(m);
+    }
+    // "-" + YYYY-MM-DD is 11 bytes. The name comes off the wire, so cut with `get`: a multi-byte
+    // character straddling the offset must be a miss, never a panic inside a billed stream.
+    if served_wire.len() > 11 {
+        let head = served_wire.get(..served_wire.len() - 11)?;
+        let tail = served_wire.get(served_wire.len() - 11..)?;
+        let date = tail.strip_prefix('-')?;
+        if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
+            return find_wire(head);
+        }
+    }
+    None
+}
+
+/// What a request cost on `today`, from the tokens the provider reported and PM's bundled prices
+/// (USD).
+///
+/// P is the prompt, C the part read from the cache, W the part written to it, O the completion
+/// (reasoning included; the reasoning count is never added again). The ordinary input is
+/// `max(0, P - C - W)`. Over the model's long-context line the WHOLE request is billed at the
+/// higher rates. `None` when no usage came back at all, so the row shows "-" and never a made-up $0.
+///
+/// The cache arithmetic assumes the prompt count INCLUDES the cached and written parts. For Gemini that
+/// is verified: build day (2026-11-26, step 7) sent one ~6.9K-token prompt twice and the second reply
+/// said `cached_tokens` 4861 inside `prompt_tokens` 6906, so charging the cached share at the cached
+/// price (or at the full input price when a row has none) never under-counts. For OpenAI it is how the
+/// Responses guide shows it and is strongly implied for chat completions, but it is unverified there
+/// (live test L4).
+pub(crate) fn cost_usd(m: &DirectModel, u: &Usage, today: &str) -> Option<f64> {
+    if u.prompt_tokens.is_none() && u.completion_tokens.is_none() {
+        return None;
+    }
+    let prices = m.prices_on(today);
+    let prompt = u.prompt_tokens.unwrap_or(0).max(0);
+    let cached = u.cached_tokens.unwrap_or(0).max(0);
+    let written = u.cache_write_tokens.unwrap_or(0).max(0);
+    let out = u.completion_tokens.unwrap_or(0).max(0);
+    let ordinary = (prompt - cached - written).max(0);
+
+    let lc = &m.long_context;
+    let long = prompt > lc.threshold;
+    let (in_m, cached_m, write_m, out_m) = if long {
+        (lc.in_mult, lc.cached_mult, lc.write_mult, lc.out_mult)
+    } else {
+        (1.0, 1.0, 1.0, 1.0)
+    };
+    let cached_price = prices.price_cached_in.unwrap_or(prices.price_in);
+    let total = ordinary as f64 * prices.price_in * in_m
+        + cached as f64 * cached_price * cached_m
+        + written as f64 * m.price_cache_write * write_m
+        + out as f64 * prices.price_out * out_m;
+    Some(total / 1_000_000.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+    const LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
     fn is_date(s: &str) -> bool {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
@@ -224,11 +372,51 @@ mod tests {
                     assert!(last.is_none_or(|l| at > l), "{} levels out of order", m.id);
                     last = Some(at);
                 }
-                assert!(
-                    !m.effort_levels.iter().any(|l| l == "minimal"),
-                    "{} lists minimal, which no GPT-6.x model takes",
-                    m.id
-                );
+                if s.provider == "openai" {
+                    assert!(
+                        !m.effort_levels.iter().any(|l| l == "minimal"),
+                        "{} lists minimal, which no GPT-6.x model takes",
+                        m.id
+                    );
+                    assert_eq!(m.free_tier, None, "{}: OpenAI has no free tier", m.id);
+                    assert!(m.price_changes.is_empty());
+                } else {
+                    assert!(
+                        m.free_tier.is_some(),
+                        "{} must say whether it has a free tier",
+                        m.id
+                    );
+                    // No Gemini row takes "none": it only exists on the 2.5 models PM doesn't list.
+                    assert!(!m.offers("none"), "{} lists none", m.id);
+                }
+                // Dated prices: strictly ascending real dates, sane numbers, cached no dearer.
+                let mut last: Option<&str> = None;
+                for c in &m.price_changes {
+                    assert!(is_date(&c.from), "{} has a bad change date", m.id);
+                    assert!(
+                        last.is_none_or(|l| c.from.as_str() > l),
+                        "{} changes out of order",
+                        m.id
+                    );
+                    last = Some(&c.from);
+                    for p in [c.price_in, c.price_out]
+                        .into_iter()
+                        .chain(c.price_cached_in)
+                    {
+                        assert!(
+                            p.is_finite() && p >= 0.0,
+                            "{} has a bad changed price",
+                            m.id
+                        );
+                    }
+                    if let Some(x) = c.price_cached_in {
+                        assert!(
+                            x <= c.price_in,
+                            "{} caches dearer than it reads after a change",
+                            m.id
+                        );
+                    }
+                }
                 if let Some(d) = &m.effort_default {
                     assert!(m.offers(d), "{} defaults to a level it lacks", m.id);
                 }
@@ -243,6 +431,163 @@ mod tests {
             }
             assert!(s.models.iter().any(|m| m.id == s.default_chat));
             assert!(s.models.iter().any(|m| m.id == s.default_background));
+            // A provider with tiers: the probe list, and defaults a FREE key can use. An untouched
+            // role on a paid-only model would 429 with limit 0 on a free key's first call.
+            if s.provider == "gemini" {
+                assert!(
+                    s.probe_models.len() >= 2,
+                    "a retirement must not leave the probe nothing"
+                );
+                for id in &s.probe_models {
+                    let m = s
+                        .models
+                        .iter()
+                        .find(|m| &m.id == id)
+                        .expect("a probe row exists");
+                    assert_eq!(
+                        m.free_tier,
+                        Some(false),
+                        "{id} must be paid-only to tell tiers apart"
+                    );
+                }
+                for id in [&s.default_chat, &s.default_background] {
+                    let m = s.models.iter().find(|m| &m.id == id).unwrap();
+                    assert_eq!(
+                        m.free_tier,
+                        Some(true),
+                        "{id} is a default, so a free key must reach it"
+                    );
+                }
+            } else {
+                assert!(s.probe_models.is_empty());
+            }
+        }
+        // Wires are global (`find_wire` is): no wire in two sections.
+        let mut wires = std::collections::HashSet::new();
+        for m in cat.providers.iter().flat_map(|s| s.models.iter()) {
+            assert!(
+                wires.insert(m.wire.clone()),
+                "{} is in two sections",
+                m.wire
+            );
+            // Deprecated or moving ids never ship: 2.5 retires and re-routes on 2026-12-01, and an
+            // alias moves under PM.
+            assert!(
+                !m.wire.starts_with("gemini-2.5-") && !m.wire.ends_with("-latest"),
+                "{}",
+                m.wire
+            );
+        }
+    }
+
+    /// Which levels each Gemini row takes is the wire contract: a level a model doesn't list is a
+    /// 400 in someone's chat. `minimal` exists on the two Flash-Lite rows only.
+    #[test]
+    fn gemini_levels_follow_each_models_native_set() {
+        let levels = |id: &str| find(id).unwrap().effort_levels.clone();
+        for id in [
+            "gemini/gemini-3.5-flash-lite",
+            "gemini/gemini-3.1-flash-lite",
+        ] {
+            assert_eq!(levels(id), ["minimal", "low", "medium", "high"], "{id}");
+        }
+        for id in [
+            "gemini/gemini-3.8-flash",
+            "gemini/gemini-3.1-pro-preview",
+            "gemini/gemini-4-carbon",
+            "gemini/gemini-4-argon",
+        ] {
+            assert_eq!(levels(id), ["low", "medium", "high"], "{id}");
+        }
+        for id in ["gemini/gemini-4-neon", "gemini/gemini-4-hydrogen"] {
+            assert_eq!(levels(id), ["low", "medium", "high", "xhigh"], "{id}");
+        }
+    }
+
+    #[test]
+    fn a_dated_price_applies_from_its_day_and_not_before() {
+        let carbon = find("gemini/gemini-4-carbon").unwrap();
+        let flash = find("gemini/gemini-3.8-flash").unwrap();
+        assert_eq!(carbon.prices_on("2026-11-30").price_in, 2.0);
+        assert_eq!(carbon.prices_on("2026-11-30").price_out, 10.0);
+        assert_eq!(carbon.prices_on("2026-12-01").price_in, 4.0);
+        assert_eq!(carbon.prices_on("2026-12-01").price_out, 20.0);
+        assert_eq!(carbon.prices_on("2026-12-01").price_cached_in, Some(0.2));
+        assert_eq!(flash.prices_on("2026-12-31").price_in, 0.75);
+        assert_eq!(flash.prices_on("2027-01-01").price_in, 1.5);
+        assert_eq!(flash.prices_on("2027-01-01").price_out, 7.5);
+        // A row with no change prices the same on every day.
+        let lite = find("gemini/gemini-3.1-flash-lite").unwrap();
+        assert_eq!(lite.prices_on("2020-01-01"), lite.prices_on("2099-01-01"));
+        assert_eq!(carbon.next_change("2026-11-30").unwrap().from, "2026-12-01");
+        assert!(carbon.next_change("2026-12-01").is_none());
+    }
+
+    fn usage(prompt: i64, completion: i64) -> Usage {
+        Usage {
+            prompt_tokens: Some(prompt),
+            completion_tokens: Some(completion),
+            ..Usage::default()
+        }
+    }
+
+    #[test]
+    fn the_cost_follows_the_price_on_the_day_and_the_long_context_line() {
+        let flash = find("gemini/gemini-3.8-flash").unwrap();
+        let one_m = usage(1_000_000, 1_000_000);
+        let near = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-9;
+        assert!(near(cost_usd(flash, &one_m, "2026-12-31"), 0.75 + 3.75));
+        assert!(near(cost_usd(flash, &one_m, "2027-01-01"), 1.5 + 7.5));
+        let carbon = find("gemini/gemini-4-carbon").unwrap();
+        assert!(near(cost_usd(carbon, &one_m, "2026-11-30"), 2.0 + 10.0));
+        assert!(near(cost_usd(carbon, &one_m, "2026-12-01"), 4.0 + 20.0));
+        // 3.1 Pro: a 250,000-token prompt is over its 200,000 line, so the WHOLE request is billed at
+        // 4 in and 18 out.
+        let pro = find("gemini/gemini-3.1-pro-preview").unwrap();
+        let long = usage(250_000, 1_000_000);
+        assert!(near(cost_usd(pro, &long, "2026-11-26"), 0.25 * 4.0 + 18.0));
+        let short = usage(200_000, 1_000_000);
+        assert!(near(cost_usd(pro, &short, "2026-11-26"), 0.2 * 2.0 + 12.0));
+        assert_eq!(cost_usd(pro, &Usage::default(), "2026-11-26"), None);
+    }
+
+    #[test]
+    fn a_served_name_maps_to_its_row_with_or_without_models_or_a_date() {
+        for served in ["gemini-3.8-flash", "models/gemini-3.8-flash"] {
+            assert_eq!(
+                served_model_id(served).unwrap().id,
+                "gemini/gemini-3.8-flash"
+            );
+        }
+        assert_eq!(
+            served_model_id("gpt-6.2-sol-2026-11-01").unwrap().id,
+            "openai/gpt-6.2-sol"
+        );
+        assert!(served_model_id("gemini-9").is_none());
+        // A multi-byte character at the cut point is a miss, never a panic.
+        assert!(served_model_id("gemini-3.8-flash-é-2026").is_none());
+    }
+
+    /// The model is ALWAYS a catalogue id, so a local-then-cloud plan never logs the local model's
+    /// name against a direct provider's tokens.
+    #[test]
+    fn settling_always_names_a_catalogue_model_and_prices_it_on_the_given_day() {
+        let flash = find("gemini/gemini-3.8-flash").unwrap();
+        let reply = |model: Option<&str>| Completion {
+            text: String::new(),
+            model: model.map(str::to_string),
+            usage: usage(1_000_000, 0),
+            truncated: false,
+        };
+        let c = settle_on(reply(Some("models/gemini-3.8-flash")), flash, "2026-12-31");
+        assert_eq!(c.model.as_deref(), Some("gemini/gemini-3.8-flash"));
+        assert!((c.usage.cost.unwrap() - 0.75).abs() < 1e-9);
+        let c = settle_on(reply(Some("gemini-3.8-flash")), flash, "2027-01-01");
+        assert!((c.usage.cost.unwrap() - 1.5).abs() < 1e-9);
+        // An unknown or missing served name falls back to the model that was asked for.
+        for served in [Some("mystery-1"), None] {
+            let c = settle_on(reply(served), flash, "2026-12-31");
+            assert_eq!(c.model.as_deref(), Some("gemini/gemini-3.8-flash"));
         }
     }
 

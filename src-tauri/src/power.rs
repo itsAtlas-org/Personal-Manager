@@ -213,7 +213,7 @@ impl serde::Serialize for Consent {
 
 /// The providers whose own consent is kept (the ones a role can be pointed at). A small FIXED list
 /// so the settings struct keeps its `Copy` derive; a provider PR adds one entry.
-const DIRECT_CONSENT_PROVIDERS: [CloudProvider; 1] = [CloudProvider::OpenAi];
+const DIRECT_CONSENT_PROVIDERS: [CloudProvider; 2] = [CloudProvider::OpenAi, CloudProvider::Gemini];
 
 /// On-battery consent per direct provider: which roles have said yes while on THAT provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1291,8 +1291,13 @@ mod tests {
             DirectConsent::from_setting(Some(r#"{"openai":"both"}"#)).get(oa),
             Consent::ALL
         );
+        // Gemini keeps its own consent now; Anthropic has no call yet and still reads nothing.
+        assert_eq!(
+            DirectConsent::from_setting(Some(r#"{"gemini":"both"}"#)).get(CloudProvider::Gemini),
+            Consent::ALL
+        );
         for junk in [
-            r#"{"gemini":"both"}"#,
+            r#"{"anthropic":"both"}"#,
             r#"{"openrouter":"both"}"#,
             r#"{"openai":"true"}"#,
             r#"{"openai":1}"#,
@@ -1309,6 +1314,8 @@ mod tests {
         // A provider outside the list never reads a yes, however it is asked.
         let all = DirectConsent::from_setting(Some(r#"{"openai":"both"}"#));
         assert_eq!(all.get(CloudProvider::OpenRouter), Consent::NONE);
+        assert_eq!(all.get(CloudProvider::Anthropic), Consent::NONE);
+        // A yes given for OpenAI does not cover a role moved to Gemini.
         assert_eq!(all.get(CloudProvider::Gemini), Consent::NONE);
     }
 
@@ -1326,8 +1333,22 @@ mod tests {
         let both = c.with(oa, PowerScope::Chat);
         assert_eq!(both.get(oa), Consent::ALL);
         assert_eq!(
-            DirectConsent::NONE.with(CloudProvider::Gemini, PowerScope::Both),
+            DirectConsent::NONE.with(CloudProvider::Anthropic, PowerScope::Both),
             DirectConsent::NONE
+        );
+        // Gemini's yes is its own entry, and "none" clears both.
+        let two = c.with(CloudProvider::Gemini, PowerScope::Chat);
+        assert_eq!(
+            two.as_setting().as_deref(),
+            Some(r#"{"gemini":"chat","openai":"background"}"#)
+        );
+        assert_eq!(
+            two.without(oa).get(CloudProvider::Gemini),
+            Consent::NONE.with(PowerScope::Chat)
+        );
+        assert_eq!(
+            two.without(oa).without(CloudProvider::Gemini).as_setting(),
+            None
         );
     }
 

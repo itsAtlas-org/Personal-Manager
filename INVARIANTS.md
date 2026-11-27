@@ -235,6 +235,14 @@ points a role at it is read through an allow-list and demoted to OpenRouter whil
 opted in; the On battery consent is kept per provider, so a yes about a zero-retention route never
 covers one that isn't; and a mod can never use it (`serves_a_mod` refuses every non-OpenRouter arm).
 
+A Gemini key follows Google's terms, which differ by tier: Google may train on what a FREE key sends,
+and does not on a paid one. A free Gemini key is refused in the UK, the EEA and Switzerland (PM's own
+rule, from Google's terms, enforced from the OS time zone and never from the network), the tier verdict
+is shown on the card, the chat chip, the sidebar footer, the role block and the On-battery question, and
+an unknown tier reads as free. A yes to the On-battery question is forgotten when a key PM knew as paid
+reads as free. The rule is a guard against mistakes, not a geofence, and it fails closed on a zone PM
+can't place.
+
 **Co-signers.** Any carve-out from that filter (today: router models, whose pins apply to whatever
 they resolve to, and a person's own provider key) is named in code with its reason. A silent
 carve-out is a privacy regression that looks like a catalogue bug.

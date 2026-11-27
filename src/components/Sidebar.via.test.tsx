@@ -100,6 +100,29 @@ describe("the model footer's route", () => {
     expect(screen.queryByText("OpenAI direct")).toBeNull();
   });
 
+  it("says a Gemini route's terms, with the due tint when it is free or paused", () => {
+    renderSidebar({
+      chatModel: "gemini/gemini-3.8-flash",
+      chatVia: "Gemini direct, paid",
+      chatViaTitle:
+        "Chat goes straight to Google Gemini with your own key, on Google's paid terms.",
+    });
+    const paid = screen.getByText("Gemini direct, paid");
+    expect(paid.className).toContain("text-ink4");
+    expect(paid.className).not.toContain("text-st-due");
+    expect(paid.getAttribute("title")).toBe(
+      "gemini/gemini-3.8-flash: Chat goes straight to Google Gemini with your own key, on Google's paid terms.",
+    );
+    cleanup();
+    renderSidebar({
+      chatModel: "gemini/gemini-3.8-flash",
+      chatVia: "Gemini paused",
+      chatViaTitle: "Chat is set to Google Gemini, but your key reads as free.",
+      chatViaDue: true,
+    });
+    expect(screen.getByText("Gemini paused").className).toContain("text-st-due");
+  });
+
   it("shows no auto-switch count for a direct role, which has no fallbacks", () => {
     renderSidebar({ chatVia: "OpenAI direct", chatFallbacks: 0 });
     expect(screen.queryByText(/^\+\d/)).toBeNull();

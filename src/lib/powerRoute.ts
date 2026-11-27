@@ -13,7 +13,7 @@
 // battery draining — the card stays awake while the server holds a model — so `REDUCES_POWER` is
 // the only way any of this copy says what the switch buys, and a test holds the rest of it to that.
 
-import { isDirect, providerName } from "./directProviders";
+import { directInfo, hasTiers, isDirect, providerName } from "./directProviders";
 import type { LocalRole } from "./localModelState";
 import type { LocalLlmStatus, PowerBlocked, PowerRoleView, PowerScope, PowerView } from "./types";
 
@@ -188,6 +188,12 @@ export function blockedReason(role: LocalRole, blocked: PowerBlocked, power: Pow
     }
     case "key_unreadable":
       return "PM can't read your saved keys right now";
+    case "paused": {
+      // A free Gemini key where PM only uses paid ones: the policy never moves a role onto a provider
+      // that would fail every call.
+      const provider = roleView(power, role).cloud_provider ?? "openrouter";
+      return `${name} is on ${providerName(provider)}, which is paused (PM only uses paid ${providerName(provider)} keys where you are)`;
+    }
   }
 }
 
@@ -374,15 +380,59 @@ export function consentText(power: PowerView): string {
     return `${head} to your OpenRouter cloud model ${tail} While it does, what you send leaves this machine and is billed to your OpenRouter key at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
   }
   const direct = distinct.filter(isDirect).map(providerName).join(" and ");
+  // A key on Google's free tier is not billed, and Google may train on what is sent: the question
+  // must say that and never "billed" for it (a paused one never gets here, `paused` blocks it).
+  const free = freeAsked(asked, power);
   if (distinct.length === 1) {
     const name = providerName(distinct[0]);
+    if (free.length > 0) {
+      return `${head} to your ${name} cloud model ${tail} While it does, what you send leaves this machine and goes straight to ${name} on a key PM treats as FREE (it is free, or PM couldn't tell). If it is free, Google may train on it and people at Google may read it, nothing is billed, and the daily limits are small. If it is really paid, it is charged at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
+    }
     return `${head} to your ${name} cloud model ${tail} While it does, what you send leaves this machine and goes straight to ${name}, which isn't zero data retention. It's billed to your ${name} key at your cloud model's usual rates. Until you answer, PM keeps using your local model.`;
   }
   // Two roles on two providers: say which is which, so a yes to one isn't read as a yes to both.
   const which = asked
     .map((r, i) => `${providerName(providers[i])} for ${ROLE_NAME[r].replace(" work", "")}`)
     .join(" and ");
-  return `${head} to your cloud models (${which}) ${tail} While it does, what you send leaves this machine, and what goes to ${direct} goes straight there, which isn't zero data retention. It's billed to each provider's key at your cloud models' usual rates. Until you answer, PM keeps using your local model.`;
+  const billing =
+    free.length > 0
+      ? `What goes to ${free.map(providerName).join(" and ")} is on a key PM treats as FREE (it is free, or PM couldn't tell). If it is free, Google may train on it and people at Google may read it, and nothing is billed there; if it is really paid, it is charged at the usual rates. The rest is billed to each provider's key at your cloud models' usual rates.`
+      : "It's billed to each provider's key at your cloud models' usual rates.";
+  return `${head} to your cloud models (${which}) ${tail} While it does, what you send leaves this machine, and what goes to ${direct} goes straight there, which isn't zero data retention. ${billing} Until you answer, PM keeps using your local model.`;
+}
+
+/** Whether a role's cloud leg is on a provider with tiers whose key reads as free. A missing word
+ *  reads as free (Unknown is free), and a paused one counts too: it can't be asked about, but it
+ *  must never read as billed. */
+function roleOnFree(power: PowerView, role: LocalRole): boolean {
+  const v = roleView(power, role);
+  const provider = v.cloud_provider ?? "openrouter";
+  return hasTiers(directInfo(provider)) && v.route_terms !== "paid";
+}
+
+/** The providers among `roles` that are on a free key, in order, once each. */
+function freeAsked(roles: readonly LocalRole[], power: PowerView): string[] {
+  const out: string[] = [];
+  for (const r of roles) {
+    const provider = roleView(power, r).cloud_provider ?? "openrouter";
+    if (roleOnFree(power, r) && !out.includes(provider)) out.push(provider);
+  }
+  return out;
+}
+
+/** What the On battery "Costs" line says about money. Everything on OpenRouter and OpenAI, and a
+ *  paid Gemini key, is billed to a key (the line it has always had); a free Gemini key is not billed
+ *  and says what Google does with it instead. */
+export function costClause(power: PowerView | null): string {
+  const names = cloudNames(power);
+  if (!power) return `is billed to your ${names} key`;
+  const free = freeAsked(ROLES, power);
+  if (free.length === 0) return `is billed to your ${names} key`;
+  const freeNames = free.map(providerName).join(" and ");
+  const allFree = ROLES.every((r) => roleOnFree(power, r));
+  return allFree
+    ? `goes to your ${names} key, which PM treats as free: if it is, nothing is billed but Google may train on it, and a key that is really paid is charged at the usual rates`
+    : `goes to your ${names} keys: what goes to ${freeNames} is on a key PM treats as free (if it is, nothing is billed but Google may train on it; if it is really paid, it is charged), and the rest is billed to your key`;
 }
 
 /** Who the cloud is, for the On battery copy: "OpenRouter", "OpenAI", or "OpenRouter and OpenAI"
@@ -410,7 +460,21 @@ export function directRetentionNote(power: PowerView | null): string | null {
     ),
   ];
   if (direct.length === 0) return null;
-  return `${direct.map(providerName).join(" and ")} keeps requests for up to 30 days.`;
+  // Each provider says its own thing: OpenAI's 30 days is OpenAI's figure, and Google gave none. A
+  // provider with tiers says it by the terms of the role on it, and a missing word reads as free.
+  const lines: string[] = [];
+  for (const provider of direct) {
+    const info = directInfo(provider);
+    const role = ROLES.find((r) => roleView(power, r).cloud_provider === provider);
+    const free = role !== undefined && roleOnFree(power, role);
+    const line = info
+      ? free
+        ? info.retention.free
+        : info.retention.paid
+      : `${providerName(provider)} keeps requests for a limited time.`;
+    if (!lines.includes(line)) lines.push(line);
+  }
+  return lines.join(" ");
 }
 
 /** The sidebar's "on battery" chip, spelled out. */

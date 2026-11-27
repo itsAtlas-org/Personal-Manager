@@ -96,6 +96,12 @@ pub struct Settings {
     /// primary while the role is on OpenRouter.
     pub chat_cloud_model: Option<String>,
     pub background_cloud_model: Option<String>,
+    /// On whose terms each role's route is, when its provider has tiers (Gemini): `paid`, `free` (an
+    /// unknown or unchecked key reads as free) or `blocked` (a free key where PM only uses paid ones,
+    /// so the role is paused). `None` for OpenRouter and OpenAI. The sidebar footer, the context meter
+    /// and the upgrade prompt read these, so none of them needs the provider hook.
+    pub chat_route_terms: Option<crate::direct_providers::RouteTerms>,
+    pub background_route_terms: Option<crate::direct_providers::RouteTerms>,
 }
 
 impl Settings {
@@ -121,6 +127,9 @@ impl Settings {
             background_provider: CloudProvider::OpenRouter.as_str().to_string(),
             chat_cloud_model: Some(DEFAULT_MODEL.to_string()),
             background_cloud_model: Some(DEFAULT_MODEL.to_string()),
+            // OpenRouter has no tiers.
+            chat_route_terms: None,
+            background_route_terms: None,
         }
     }
 }
@@ -146,12 +155,32 @@ fn role_cloud_primary(
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
+    // The two roles' providers are peeked under a short guard so the keys (keychain) and the region
+    // (the OS zone) can be read BEFORE the main guard. `tier_context` reads neither unless a role is on
+    // a provider with tiers, so a person on OpenRouter or OpenAI pays nothing for Gemini here.
+    let providers = {
+        let conn = state.conn()?;
+        crate::llm_gateway::RoleProviders::read(&conn)?
+    };
+    let (fps, region) = crate::direct_providers::tier_context(providers.chat, providers.background);
     let conn = state.conn()?;
     let chat_models = models_for(&conn, CHAT_MODELS_KEY)?;
     let background_models = models_for(&conn, BACKGROUND_MODELS_KEY)?;
     let (chat_provider, chat_cloud_model) = role_cloud_primary(&conn, Role::Chat, &chat_models)?;
     let (background_provider, background_cloud_model) =
         role_cloud_primary(&conn, Role::Background, &background_models)?;
+    let chat_route_terms = crate::direct_providers::route_terms_of(
+        &conn,
+        crate::llm_gateway::role_cloud_provider(&conn, Role::Chat)?,
+        &region,
+        &fps,
+    )?;
+    let background_route_terms = crate::direct_providers::route_terms_of(
+        &conn,
+        crate::llm_gateway::role_cloud_provider(&conn, Role::Background)?,
+        &region,
+        &fps,
+    )?;
     Ok(Settings {
         chat_models,
         background_models,
@@ -159,6 +188,8 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
         background_provider,
         chat_cloud_model,
         background_cloud_model,
+        chat_route_terms,
+        background_route_terms,
         chat_auto_switch: db::get_bool(&conn, CHAT_AUTO_SWITCH_KEY, false)?,
         background_auto_switch: db::get_bool(&conn, BACKGROUND_AUTO_SWITCH_KEY, false)?,
         help_mode: db::get_bool(&conn, "help_mode", false)?,
@@ -666,6 +697,62 @@ mod tests {
             (bp, bm)
         );
         assert_eq!(d.chat_provider, "openrouter");
+        // OpenRouter has no tiers, so a fresh vault reports no route terms for either role.
+        let uk = crate::region::region_of_on(Some("Europe/London"), false);
+        for role in [Role::Chat, Role::Background] {
+            let p = crate::llm_gateway::role_cloud_provider(&conn, role).unwrap();
+            assert_eq!(
+                crate::direct_providers::route_terms(&conn, p, &uk, None).unwrap(),
+                None
+            );
+        }
+        assert!(d.chat_route_terms.is_none() && d.background_route_terms.is_none());
+        let v = serde_json::to_value(&d).unwrap();
+        assert!(v["chat_route_terms"].is_null() && v["background_route_terms"].is_null());
+    }
+
+    /// A role on Gemini reports its terms (paid, free, or blocked where only paid keys are used) and
+    /// a role on OpenAI reports none: the sidebar footer and the meter read these two fields.
+    #[test]
+    fn a_gemini_role_reports_its_terms_from_the_verdict_and_the_region() {
+        use crate::direct_providers::{
+            key_fp, route_terms, store_key_check, KeyCheck, KeyOutcome, KeyTier, RouteTerms,
+        };
+        let _g = crate::direct_providers::INBOX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::direct_providers::forget_all_seen();
+        let (_dir, conn) = temp_db();
+        db::set_setting(&conn, "direct_gemini_enabled", "true").unwrap();
+        db::set_setting(&conn, "chat_cloud_provider", "gemini").unwrap();
+        let provider = crate::llm_gateway::role_cloud_provider(&conn, Role::Chat).unwrap();
+        assert_eq!(provider, CloudProvider::Gemini);
+        let fp = key_fp("key-a-aaaaaaaaaaaaaaaaaaaaaaaa");
+        let paid = KeyCheck {
+            tier: Some(KeyTier::Paid),
+            ..KeyCheck::of(KeyOutcome::Ok)
+        };
+        store_key_check(&conn, provider, &paid, &fp).unwrap();
+        let uk = crate::region::region_of_on(Some("Europe/London"), false);
+        let ny = crate::region::region_of_on(Some("America/New_York"), false);
+        assert_eq!(
+            route_terms(&conn, provider, &uk, Some(&fp)).unwrap(),
+            Some(RouteTerms::Paid)
+        );
+        let free = KeyCheck {
+            tier: Some(KeyTier::Free),
+            ..KeyCheck::of(KeyOutcome::Ok)
+        };
+        store_key_check(&conn, provider, &free, &fp).unwrap();
+        assert_eq!(
+            route_terms(&conn, provider, &ny, Some(&fp)).unwrap(),
+            Some(RouteTerms::Free)
+        );
+        assert_eq!(
+            route_terms(&conn, provider, &uk, Some(&fp)).unwrap(),
+            Some(RouteTerms::Blocked)
+        );
+        crate::direct_providers::forget_all_seen();
     }
 
     /// With a role on your own key, `get_settings` names THAT model as the cloud primary, not
@@ -727,6 +814,10 @@ mod tests {
             "direct_openai_enabled",
             "direct_openai_key_check",
             "direct_openai_shares_data",
+            "direct_gemini_enabled",
+            "direct_gemini_key_check",
+            "direct_gemini_chat_models",
+            "direct_gemini_background_models",
             "chat_cloud_provider",
             "background_cloud_provider",
             "local_llm_power_cloud_consent_direct",

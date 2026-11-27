@@ -577,7 +577,15 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-direct-keys": {
     title: "Your own keys",
-    body: "Use your own key from a provider, such as OpenAI, instead of going through OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention: OpenAI keeps them in abuse logs for up to 30 days, and doesn't train on them unless your project shares data. Keys are stored in your keychain and never leave PM's engine.",
+    body: "Use your own key from OpenAI or Google instead of going through OpenRouter. It's off until you turn it on. Requests to your own key are not zero data retention. OpenAI keeps them in abuse logs for up to 30 days and doesn't train on them unless your project shares data. A free Google Gemini key lets Google train on them and people at Google read them; a paid one doesn't, but Google still logs them for a limited time. Keys are stored in your keychain and never leave PM's engine.",
+  },
+  "settings-gemini-key": {
+    title: "Google Gemini API key",
+    body: "A key from aistudio.google.com/api-keys. PM checks it when you press Save and check. It asks Google which models the key can see, then tries up to four models that only paid keys can use and stops at the first clear answer, which is how it tells a free key from a paid one. On a paid key that test message costs a tiny fraction of a cent and isn't listed in Usage. A free key is refused in the UK, the EU, Iceland, Liechtenstein, Norway and Switzerland, where Google only allows paid keys. PM works out where you are from your computer's time zone, and it won't use a free key where it can't tell where you are, for example when the time zone is UTC. A key that Google rejects isn't saved.",
+  },
+  "settings-gemini-tier": {
+    title: "Free or paid key",
+    body: "Google treats a key as paid when its project has billing linked and prepay credit. On a free key, Google uses what you send to improve its products and people at Google may read it. On a paid key it doesn't, but it still logs requests for a limited time to look for abuse. If PM can't tell, it treats the key as free. If Google tells PM later that your project is free, PM updates this. On Linux PM reads the link /etc/localtime for your time zone; if it isn't set, PM can't place you and treats a free key as not allowed.",
   },
   "settings-openai-key": {
     title: "OpenAI API key",
@@ -585,7 +593,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-role-provider": {
     title: "Provider",
-    body: "Which provider answers this job. Chat and Background each choose their own. OpenRouter asks for zero data retention. A provider you've added yourself doesn't give you zero data retention unless you arrange it with them. Turn a provider off above and its jobs go back to OpenRouter.",
+    body: "Which provider answers this job. Chat and Background each choose their own. OpenRouter asks for zero data retention. A provider you've added yourself doesn't give you zero data retention unless you arrange it with them. A Gemini key that reads as free where PM only uses paid ones shows as paused here. Turn a provider off above and its jobs go back to OpenRouter.",
   },
   "settings-role-effort": {
     title: "Effort",
@@ -685,7 +693,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-usage-cost": {
     title: "Usage & cost",
-    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history. Calls to your own provider key are priced from the tokens it reports times PM's built-in list of that provider's prices.",
+    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history. Calls to your own provider key are priced from the tokens it reports times PM's built-in list of that provider's prices. A free Google Gemini key shows $0.00 on free-tier models.",
   },
   "settings-usage-by-mod": {
     title: "Spend by mod",

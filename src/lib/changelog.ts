@@ -24,6 +24,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.200.0-alpha",
+    date: "2026-11-26",
+    highlights: [
+      "You can now use your own Google Gemini key. It's off until you turn it on, under Settings > AI & Models > Your own keys.",
+      "PM checks whether your Gemini key is free or paid and tells you which on its card, on the chat chip and in the sidebar. A free key means Google may train on what you send, and people at Google may read it. A paid key doesn't, but isn't zero data retention either.",
+      "In the UK, the EU, Iceland, Liechtenstein, Norway and Switzerland, Google's terms allow only paid keys, so PM won't use a free one there. It works out where you are from your computer's time zone and says what it read. It also won't use a free key where it can't tell where you are, for example when the computer's time zone is UTC. If Google tells PM your project has gone back to the free tier, PM pauses Gemini there until it's paid again.",
+      "Gemini's price changes on 01-12-2026 and 01-01-2027 are already in PM's list, so Usage & cost stays right.",
+    ],
+  },
+  {
     version: "3.199.2-alpha",
     date: "2026-11-26",
     highlights: [

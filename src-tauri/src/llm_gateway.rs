@@ -331,15 +331,20 @@ pub enum PowerBlocked {
     NoKey,
     KeyUnreadable,
     LocalOnly,
+    /// The role's cloud provider is paused (a free Gemini key where PM only uses paid ones): moving
+    /// the role to it would make chat fail every call, so the policy keeps it local.
+    Paused,
 }
 
 /// Why this role can never be moved by the policy, or `None` if it can. The order is the copy's
 /// priority: a keyless "Local only" user gets the keyless copy, because adding a key is the step
-/// that comes first for them.
+/// that comes first for them. A paused provider comes last: a role that can't move for another
+/// reason keeps that reason.
 pub fn power_blocked(
     pref: ProviderPref,
     local_ready: bool,
     key: KeyPresence,
+    paused: bool,
 ) -> Option<PowerBlocked> {
     if pref == ProviderPref::Cloud {
         return Some(PowerBlocked::CloudRouting);
@@ -354,6 +359,9 @@ pub fn power_blocked(
     }
     if pref == ProviderPref::Local {
         return Some(PowerBlocked::LocalOnly);
+    }
+    if paused {
+        return Some(PowerBlocked::Paused);
     }
     None
 }
@@ -816,10 +824,9 @@ pub(crate) fn ping_status(app: &AppHandle) {
 #[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
     OpenRouter,
-    // No arm for these two yet (Gemini is the next PR, Anthropic the one after); the tests build them.
+    // No arm for Anthropic yet (the next PR); the tests build it.
     #[allow(dead_code)]
     Anthropic,
-    #[allow(dead_code)]
     Gemini,
     OpenAi,
 }
@@ -843,13 +850,14 @@ impl CloudProvider {
         self != CloudProvider::OpenRouter
     }
 
-    /// Parse a stored provider choice. An ALLOW-LIST of the providers whose call exists: only
-    /// "openai" is a direct provider today, and anything else (absent, junk, or a "gemini" stored by a
-    /// newer PM before this one can answer it) is OpenRouter, so a stored value can never name an
-    /// arm that can't be built. Each provider PR adds its arm here.
+    /// Parse a stored provider choice. An ALLOW-LIST of the providers whose call exists: "openai" and
+    /// "gemini" are the direct providers today, and anything else (absent, junk, or an "anthropic"
+    /// stored by a newer PM before this one can answer it) is OpenRouter, so a stored value can never
+    /// name an arm that can't be built. Each provider PR adds its arm here.
     pub fn from_setting(raw: Option<&str>) -> Self {
         match raw.map(str::trim) {
             Some("openai") => CloudProvider::OpenAi,
+            Some("gemini") => CloudProvider::Gemini,
             _ => CloudProvider::OpenRouter,
         }
     }
@@ -875,16 +883,22 @@ pub struct CloudArm {
     /// model's levels. `None` omits the field (the model's own default). OpenRouter arms are always
     /// `None`: its effort, if any, is the model's.
     pub effort: Option<String>,
+    /// On whose terms the key was when this arm was built, and only when the verdict was about THIS
+    /// key (see `cloud_arm`). `None` for OpenRouter and OpenAI, and for a Gemini key with no usable
+    /// verdict, which reads as free. A held plan is also judged by what calls learned since: see
+    /// `gemini_direct`.
+    pub tier: Option<crate::direct_providers::KeyTier>,
 }
 
 impl CloudArm {
-    /// An arm with no effort set, which is every arm but a direct one with a chosen level.
+    /// An arm with no effort or tier set, which is every arm but a direct one with a chosen level.
     pub fn new(provider: CloudProvider, key: Secret, models: Vec<String>) -> Self {
         Self {
             provider,
             key,
             models,
             effort: None,
+            tier: None,
         }
     }
 }
@@ -1034,6 +1048,10 @@ pub fn resolve(app: &AppHandle, role: Role) -> Result<Option<RoutePlan>> {
 
     let choice = {
         let conn = state.conn()?;
+        // Write what earlier calls learned about a key's tier BEFORE the consent is read: a paid key
+        // that a call just found free drops its On battery yes here, so this very plan can't still
+        // send under that yes. Cheap when nothing is pending (no key read, no DB write).
+        crate::direct_providers::apply_seen(&conn)?;
         let prefs = routing_prefs(&conn)?;
         resolve_provider(
             role,
@@ -1045,11 +1063,17 @@ pub fn resolve(app: &AppHandle, role: Role) -> Result<Option<RoutePlan>> {
     let plan = match choice {
         ProviderChoice::Cloud => cloud_arm(app, role)?.map(RoutePlan::Cloud),
         ProviderChoice::Local => local_arm(app, role)?.map(RoutePlan::LocalOnly),
-        ProviderChoice::LocalThenCloud | ProviderChoice::CloudForPower => hydrate_local_then_cloud(
-            choice == ProviderChoice::CloudForPower,
-            local_arm(app, role)?,
-            cloud_arm(app, role)?,
-        ),
+        ProviderChoice::LocalThenCloud | ProviderChoice::CloudForPower => {
+            let local = local_arm(app, role)?;
+            let cloud = cloud_arm(app, role)?;
+            // The policy never moves a role onto a paused provider (a free Gemini key where only paid
+            // ones are used): the status says it stays local, and the send seam would refuse it.
+            let power = choice == ProviderChoice::CloudForPower
+                && !cloud
+                    .as_ref()
+                    .is_some_and(crate::direct_providers::arm_paused);
+            hydrate_local_then_cloud(power, local, cloud)
+        }
         // No arm is hydrated at all, so not even a key is read: the role has nothing to answer it,
         // and the caller says so ([`no_provider_message_for`]) or skips.
         ProviderChoice::LocalAiOff => None,
@@ -1119,6 +1143,9 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
         let conn = state.conn()?;
         let provider = role_cloud_provider(&conn, role)?;
         let direct = if provider.is_direct() {
+            // What failed calls learned since the last resolve is written first, so this arm is built
+            // on the latest verdict. The guard is already held; nothing here awaits.
+            crate::direct_providers::apply_seen(&conn)?;
             Some(crate::direct_providers::arm_inputs(&conn, provider, role)?)
         } else {
             None
@@ -1129,11 +1156,20 @@ fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
         return Ok(None);
     };
     if let Some(inputs) = direct {
+        // A stored verdict counts only when it was stored beside THIS key: a verdict carried in a
+        // backup or a shared vault says nothing about a key typed on this device. Compared here, after
+        // the keychain read, so no second guard is needed.
+        let tier = crate::direct_providers::tier_for_key(
+            inputs.tier,
+            inputs.key_fp.as_deref(),
+            key.expose(),
+        );
         return Ok(Some(CloudArm {
             provider,
             key,
             models: inputs.models,
             effort: inputs.effort,
+            tier,
         }));
     }
     let (models_key, auto_key) = match role {
@@ -1505,6 +1541,9 @@ async fn cloud_complete_via(
         CloudProvider::OpenAi => {
             crate::openai_direct::complete(arm, messages, cache_prefix, max_tokens).await
         }
+        CloudProvider::Gemini => {
+            crate::gemini_direct::complete(arm, messages, cache_prefix, max_tokens).await
+        }
         other => Err(provider_not_available(other)),
     }
 }
@@ -1828,6 +1867,9 @@ where
         CloudProvider::OpenAi => {
             crate::openai_direct::stream_chat(arm, messages, cache_through, on_token).await
         }
+        CloudProvider::Gemini => {
+            crate::gemini_direct::stream_chat(arm, messages, cache_through, on_token).await
+        }
         other => Err(provider_not_available(other)),
     }
 }
@@ -1836,7 +1878,7 @@ where
 /// the old "No OpenRouter API key set", #297 PR3, changelog-noted). Neutral between the cloud and
 /// local paths so the keyless-onboarding direction (#295 PR7) reads right.
 pub fn no_provider_message() -> String {
-    "No AI provider is set up yet. Add an OpenRouter key or your own OpenAI key, or set up a local model in Settings > AI."
+    "No AI provider is set up yet. Add an OpenRouter key, your own OpenAI or Google Gemini key, or set up a local model in Settings > AI."
         .to_string()
 }
 
@@ -2165,6 +2207,7 @@ mod tests {
             ("cloud_complete_via(", 3),
             ("openrouter::complete(", 1),
             ("openai_direct::complete(", 1),
+            ("gemini_direct::complete(", 1),
             ("openai_compat::complete(", 1),
             ("cloud_complete(\n", 4),
             ("run_local_complete(app", 2),
@@ -2195,6 +2238,9 @@ mod tests {
         // Your own OpenAI key is reached by the same two dispatch functions and nowhere else.
         assert_eq!(sites("openai_direct::stream_chat("), 1);
         assert_eq!(sites("openai_direct::complete("), 1);
+        // And so is your own Gemini key.
+        assert_eq!(sites("gemini_direct::stream_chat("), 1);
+        assert_eq!(sites("gemini_direct::complete("), 1);
     }
 
     /// A route that names a provider whose call isn't built is stopped before any request is made,
@@ -2203,7 +2249,7 @@ mod tests {
     async fn a_provider_without_a_call_yet_is_refused_without_touching_the_network() {
         // OpenAi is not here: its call exists, and a catalogue refusal before the network is held by
         // `an_openai_arm_naming_a_model_not_in_the_catalogue_is_refused_before_the_network`.
-        for provider in [CloudProvider::Anthropic, CloudProvider::Gemini] {
+        for provider in [CloudProvider::Anthropic] {
             let arm = CloudArm {
                 provider,
                 ..cloud(&["m"])
@@ -2261,6 +2307,8 @@ mod tests {
             // getter only as a function pointer in its table (no call), and `openai_direct.rs` is
             // handed the key by the arm and never reads one.
             concat!("get_open", "ai_key("),
+            // Gemini's too; `gemini_direct.rs` gets the key from the arm and is NOT on the allow-list.
+            concat!("get_gem", "ini_key("),
         ];
         for file in files {
             let rel = file
@@ -2405,9 +2453,9 @@ mod tests {
             None,
             Some(""),
             Some("openrouter"),
-            Some("gemini"),
             Some("anthropic"),
             Some("OPENAI"),
+            Some("Gemini"),
             Some("x"),
         ] {
             assert_eq!(
@@ -2416,6 +2464,15 @@ mod tests {
                 "{raw:?}"
             );
         }
+        // Gemini is an arm now, on the same allow-list rule (exact words, trimmed).
+        assert_eq!(
+            CloudProvider::from_setting(Some("gemini")),
+            CloudProvider::Gemini
+        );
+        assert_eq!(
+            CloudProvider::from_setting(Some(" gemini ")),
+            CloudProvider::Gemini
+        );
         assert!(CloudProvider::OpenAi.is_direct() && !CloudProvider::OpenRouter.is_direct());
         assert_eq!(
             serde_json::to_value(CloudProvider::OpenAi).unwrap(),
@@ -2441,7 +2498,14 @@ mod tests {
             m.contains("Settings > AI & Models") && m.contains("OpenRouter"),
             "{m}"
         );
-        assert!(no_provider_message().contains("OpenAI key"));
+        // The sentence names every provider a person can reach with their own key, so a new row
+        // can't be forgotten in it.
+        let none = no_provider_message();
+        for d in crate::direct_providers::PROVIDERS {
+            let short = d.name.trim_start_matches("Google ");
+            assert!(none.contains(short), "{short}: {none}");
+        }
+        assert!(none.contains("OpenRouter"), "{none}");
     }
 
     fn arm() -> LocalArm {
@@ -3434,35 +3498,62 @@ mod tests {
         for local_ready in [true, false] {
             for key in [Present, Absent, Unreadable] {
                 assert_eq!(
-                    power_blocked(ProviderPref::Cloud, local_ready, key),
+                    power_blocked(ProviderPref::Cloud, local_ready, key, false),
                     Some(PowerBlocked::CloudRouting)
                 );
             }
         }
         assert_eq!(
-            power_blocked(ProviderPref::LocalThenCloud, false, Present),
+            power_blocked(ProviderPref::LocalThenCloud, false, Present, false),
             Some(PowerBlocked::NoLocalModel)
         );
         assert_eq!(
-            power_blocked(ProviderPref::LocalThenCloud, true, Absent),
+            power_blocked(ProviderPref::LocalThenCloud, true, Absent, false),
             Some(PowerBlocked::NoKey)
         );
         assert_eq!(
-            power_blocked(ProviderPref::LocalThenCloud, true, Unreadable),
+            power_blocked(ProviderPref::LocalThenCloud, true, Unreadable, false),
             Some(PowerBlocked::KeyUnreadable)
         );
         assert_eq!(
-            power_blocked(ProviderPref::Local, true, Present),
+            power_blocked(ProviderPref::Local, true, Present, false),
             Some(PowerBlocked::LocalOnly)
         );
         assert_eq!(
-            power_blocked(ProviderPref::Local, true, Absent),
+            power_blocked(ProviderPref::Local, true, Absent, false),
             Some(PowerBlocked::NoKey),
             "a keyless Local only user gets the keyless copy"
         );
         assert_eq!(
-            power_blocked(ProviderPref::LocalThenCloud, true, Present),
+            power_blocked(ProviderPref::LocalThenCloud, true, Present, false),
             None
+        );
+    }
+
+    /// A role whose cloud provider is paused is never one the policy can move (it would fail every
+    /// call), but a role that can't move for another reason keeps that reason.
+    #[test]
+    fn a_paused_provider_blocks_the_policy_after_every_other_reason() {
+        use KeyPresence::*;
+        assert_eq!(
+            power_blocked(ProviderPref::LocalThenCloud, true, Present, true),
+            Some(PowerBlocked::Paused)
+        );
+        assert_eq!(
+            power_blocked(ProviderPref::Cloud, true, Present, true),
+            Some(PowerBlocked::CloudRouting)
+        );
+        assert_eq!(
+            power_blocked(ProviderPref::LocalThenCloud, false, Present, true),
+            Some(PowerBlocked::NoLocalModel)
+        );
+        assert_eq!(
+            power_blocked(ProviderPref::LocalThenCloud, true, Absent, true),
+            Some(PowerBlocked::NoKey)
+        );
+        assert_eq!(
+            power_blocked(ProviderPref::Local, true, Present, true),
+            Some(PowerBlocked::LocalOnly)
         );
     }
 
@@ -3534,7 +3625,7 @@ mod tests {
                                         let status = power_route(
                                             role,
                                             &ctx,
-                                            power_blocked(pref, local_ready, key),
+                                            power_blocked(pref, local_ready, key, false),
                                         ) == PowerRoute::Cloud;
                                         let routed = resolve_provider(
                                             role,
@@ -3555,6 +3646,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The On battery policy never moves a role onto a provider the send seam would refuse: the
+    /// status says such a role stays local, so `resolve` must ask the same question of the cloud arm
+    /// it hydrated before it lets the policy substitute it.
+    #[test]
+    fn resolve_never_lets_the_policy_move_a_role_onto_a_paused_arm() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
+        assert!(
+            body.contains("choice == ProviderChoice::CloudForPower")
+                && body.contains("crate::direct_providers::arm_paused"),
+            "resolve must drop the power substitution for a paused cloud arm"
+        );
+    }
+
+    /// A free note a call left in memory must reach the stored row (and forget a paid-time On battery
+    /// yes) before `resolve` reads the consent, or one more plan would send under the stale yes.
+    #[test]
+    fn resolve_writes_learned_tiers_before_it_reads_the_consent() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
+        let seen = body
+            .find("crate::direct_providers::apply_seen(&conn)")
+            .expect("resolve must write learned tiers");
+        let consent = body.find("RuntimeContext::current(").unwrap();
+        assert!(
+            seen < consent,
+            "apply_seen must run before the consent is read"
+        );
     }
 
     #[test]
@@ -3774,6 +3903,7 @@ mod tests {
             (PowerBlocked::NoKey, "no_key"),
             (PowerBlocked::KeyUnreadable, "key_unreadable"),
             (PowerBlocked::LocalOnly, "local_only"),
+            (PowerBlocked::Paused, "paused"),
         ] {
             assert_eq!(json(serde_json::to_value(blocked).unwrap()), wire);
         }

@@ -4,9 +4,12 @@
 import { useState } from "react";
 
 import {
+  adoptRoles,
+  BACKGROUND_NOT_SET_UP,
   directInfo,
   eligibleProviders,
   providerOptionLabel,
+  providerView,
   roleName,
   wizardModelsLine,
 } from "../../lib/directProviders";
@@ -47,8 +50,14 @@ export function OnboardingDirectKey({
     setSaved(true);
     if (hasOpenRouterKey || !next) return;
     try {
+      // A paid key takes both roles. A key that reads as free takes CHAT only: pointing background
+      // at it would send documents to be trained on with no choice made (S8). A key that can't be
+      // picked at all (paused, out of credit) takes neither.
+      const take = adoptRoles(providerView(next, provider));
       for (const role of ROLES) {
-        if (next.roles[role].effective === "openrouter") await setRoleCloudProvider(role, provider);
+        if (take.includes(role) && next.roles[role].effective === "openrouter") {
+          await setRoleCloudProvider(role, provider);
+        }
       }
       await dp.reload();
     } catch (e) {
@@ -70,8 +79,8 @@ export function OnboardingDirectKey({
     <div className="mt-5 border-t border-border pt-4">
       <SectionLabel>Your own key (optional)</SectionLabel>
       <p className="mt-1 text-xs text-ink4">
-        Rather not use OpenRouter? Use your own OpenAI key. It's off unless you turn it on, and it
-        isn't zero data retention.
+        Rather not use OpenRouter? Use your own OpenAI or Google Gemini key. It's off unless you
+        turn it on, and it isn't zero data retention.
       </p>
       <div className="mt-3 space-y-3">
         {state.providers.map((view) => {
@@ -125,6 +134,10 @@ export function OnboardingDirectKey({
                 </p>
               ) : null;
             })}
+            {/* A free key took chat only, and nothing else answers background work yet. */}
+            {!hasOpenRouterKey && state.roles.background.effective === "openrouter" && (
+              <p className="text-xs text-st-due">{BACKGROUND_NOT_SET_UP}</p>
+            )}
           </div>
         )}
       </div>

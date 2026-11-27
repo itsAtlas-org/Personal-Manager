@@ -4,13 +4,20 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import {
+  dayMonthYear,
+  flippedLine,
   keyVerdict,
   movedLine,
-  offersRecheck,
+  notThereLine,
+  offersRecheckFor,
+  pausedText,
   recheckStores,
   recheckVerdict,
+  refusalText,
   roleName,
   storedVerdict,
+  termsFor,
+  tierBadge,
   type DirectProviderInfo,
 } from "../../lib/directProviders";
 import {
@@ -24,6 +31,7 @@ import type {
   DirectProvidersState,
   DirectProviderView,
   KeyCheckResult,
+  RegionRefusal,
   RoleName,
 } from "../../lib/types";
 import {
@@ -76,6 +84,11 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
   // command throws, such as "no key to check", still shows under the field.)
   const [again, setAgain] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // The region refusal on screen when a typed key is sent again. The refusal's own Check again is
+  // inside its callout, so the callout must stay mounted while the check runs: a focused button
+  // that unmounts drops focus to <body> (WebKitGTK), and its aria-disabled would never show.
+  // Cleared by the next result, an edit, or anything that ends the typed key's turn.
+  const [heldRefusal, setHeldRefusal] = useState<RegionRefusal | null>(null);
   const [moved, setMoved] = useState<string | null>(null);
   const [announce, setAnnounce] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -95,10 +108,29 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
 
   const hasKey = view.key === "present";
 
+  // A state that changes after a settings re-read (the card turns paused, or Google says the project
+  // is free) is announced by the same hidden status line when it goes from empty to set, because a
+  // failing chat reply would otherwise be the only signal (N4). Not on first render.
+  const flippedAt = view.key_check?.flipped_free_at ?? null;
+  const seen = useRef({ blocked: !!view.blocked, flipped: !!flippedAt });
+  useEffect(() => {
+    const was = seen.current;
+    const paused = `${name} is now paused.`;
+    const free = "Google says this key is on the free tier.";
+    if (view.blocked && !was.blocked) setAnnounce(paused);
+    else if (flippedAt && !was.flipped) setAnnounce(free);
+    // Cleared when the state ends, so the same words set again later are a change and are read.
+    else if (!view.blocked && !flippedAt && (was.blocked || was.flipped)) {
+      setAnnounce((a) => (a === paused || a === free ? "" : a));
+    }
+    seen.current = { blocked: !!view.blocked, flipped: !!flippedAt };
+  }, [view.blocked, flippedAt, name]);
+
   async function toggle(next: boolean) {
     onError?.(null);
     setResult(null);
     setRefusal(null);
+    setHeldRefusal(null);
     // The form unmounts when the card goes off but this state doesn't: without this, turning it back
     // on would bring back a half-typed or pasted key as dots.
     if (!next) setTyped("");
@@ -138,6 +170,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
     try {
       const r = await saveDirectKey(view.provider, key);
       setResult(r);
+      setHeldRefusal(!r.saved ? (r.refusal ?? null) : null);
       if (r.saved) {
         setTyped("");
         setMoved(null);
@@ -148,6 +181,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
     } catch (err) {
       // A refusal before any check (not turned on, a keychain that can't be written): its own words.
       setRefusal(String(err));
+      setHeldRefusal(null);
       setAnnounce("");
     } finally {
       setChecking(false);
@@ -160,6 +194,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
     if (checking) return;
     setChecking(true);
     setResult(null);
+    setHeldRefusal(null);
     setAgain(true);
     setRefusal(null);
     setAnnounce("Checking your key");
@@ -173,7 +208,9 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
       // <body>: put it on the key field instead.
       // Only an answer that was stored can end the button's turn: for trouble reaching the provider
       // the stored verdict stands and the button stays.
-      if (recheckStores(r.outcome) && !offersRecheck(r.outcome, r.note)) setFocusTick((t) => t + 1);
+      if (recheckStores(r.outcome) && !offersRecheckFor(info, r, r.tier, r.refusal)) {
+        setFocusTick((t) => t + 1);
+      }
     } catch (err) {
       setRefusal(String(err));
       setAnnounce("");
@@ -197,6 +234,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
       const moves = await clearDirectKey(view.provider);
       setResult(null);
       setRefusal(null);
+      setHeldRefusal(null);
       setTyped("");
       setMoved(movedLine(moves, orKey));
       await reload();
@@ -219,25 +257,49 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
   // What to say about the key. This session's check first; otherwise the stored one, which is shown
   // only beside a key that is really there.
   const session = result
-    ? (again ? recheckVerdict : keyVerdict)(result.outcome, result.listed.length, name, result.note)
+    ? (again ? recheckVerdict : keyVerdict)(
+        result.outcome,
+        result.listed.length,
+        name,
+        result.note,
+        {
+          info,
+          tier: result.tier,
+          refusal: again ? result.refusal : null,
+        },
+      )
     : null;
-  // While Check again is out, the old verdict is not shown: an answer identical to it would change
-  // nothing in the live region and be never announced.
-  const verdict =
-    checking && again
-      ? null
-      : session && result?.saved
-        ? session
-        : session
-          ? null
-          : storedVerdict(view, name);
-  const fieldError = refusal ?? (session && !result?.saved ? session.text : null);
+  // A typed key PM didn't keep because it is free where PM only uses paid ones: the callout below
+  // says it all, so the field carries no second, shorter error.
+  // While a typed key is being sent again the refusal that is on screen stays (held), so the button
+  // that was pressed is the same node, keeps focus, and shows aria-disabled.
+  const typedRefusal =
+    result && !result.saved
+      ? (result.refusal ?? null)
+      : checking && !again && !result
+        ? heldRefusal
+        : null;
+  // While any check is out, the old verdict is not shown: an answer identical to it (the same
+  // "Key works" over a saved key) would change nothing in the live region and never be announced.
+  const verdict = checking
+    ? null
+    : session && result?.saved
+      ? session
+      : session
+        ? null
+        : storedVerdict(view, name);
+  const fieldError = refusal ?? (session && !result?.saved && !typedRefusal ? session.text : null);
   // What the card shows now, from this session's check or the stored one.
   // A re-check that only failed to reach the provider stored nothing, so the stored verdict (and
   // its Check again button) still stand.
-  const current =
-    session && result?.saved && (!again || recheckStores(result.outcome)) ? result : view.key_check;
-  const canRecheck = hasKey && offersRecheck(current?.outcome, current?.note);
+  const fresh = session && result?.saved && (!again || recheckStores(result.outcome));
+  const current = fresh ? result : view.key_check;
+  // The tier and the pause the card is showing: this session's re-check once it has been read back,
+  // else the state's (which a 429 may have moved since).
+  const tier = fresh && again && result ? (result.tier ?? view.tier) : view.tier;
+  const canRecheck = hasKey && offersRecheckFor(info, current, tier, view.blocked);
+  const terms = termsFor(info, view);
+  const badge = tierBadge(info, view);
   const using = (["chat", "background"] as RoleName[]).filter(
     (r) => view.roles[r].uses_this_provider,
   );
@@ -269,10 +331,23 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
 
       {view.opted_in && (
         <>
-          <Callout tone="warning" body="ink" live={false} className="mt-3">
-            <p className="font-medium">{view.shares_data ? info.sharedHeadline : info.headline}</p>
+          {badge && (
+            // Real text with the glyph hidden from a screen reader: a bare span with an aria-label
+            // isn't reliably announced, and the verdict is never colour alone.
+            <p
+              data-help={info.tiers ? "settings-gemini-tier" : undefined}
+              className={`mt-3 flex items-center gap-1.5 text-xs font-medium ${
+                badge.tone === "ok" ? "text-st-track" : "text-st-due"
+              }`}
+            >
+              <span aria-hidden="true">{badge.glyph}</span>
+              <span>{badge.text}</span>
+            </p>
+          )}
+          <Callout tone={terms.tone} body="ink" live={false} className="mt-3">
+            <p className="font-medium">{terms.headline}</p>
             <ul className="mt-1 list-disc space-y-1 pl-4">
-              {info.points.map((p) => (
+              {terms.points.map((p) => (
                 <li key={p}>{p}</li>
               ))}
             </ul>
@@ -284,6 +359,18 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
             </Callout>
           )}
 
+          {view.blocked && (
+            <Callout tone="warning" body="ink" live={false} className="mt-3">
+              {pausedText(info, view.blocked, view.tier, flippedAt)}
+            </Callout>
+          )}
+
+          {!view.blocked && flippedAt && view.tier === "free" && (
+            <Callout tone="danger" body="ink" live={false} className="mt-3">
+              {flippedLine(flippedAt)}
+            </Callout>
+          )}
+
           <form onSubmit={(e) => void submit(e)} className="mt-3" noValidate>
             <Field label={info.keyLabel} description={info.keyDescription} error={fieldError}>
               {(cp) => (
@@ -292,13 +379,14 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
                   ref={inputRef}
                   type="password"
                   autoComplete="off"
-                  data-help="settings-openai-key"
+                  data-help={info.helpId}
                   value={typed}
                   onChange={(e) => {
                     setTyped(e.target.value);
                     // The next edit ends the last result's turn on screen.
                     setResult(null);
                     setRefusal(null);
+                    setHeldRefusal(null);
                   }}
                   placeholder={hasKey ? "•••••••• (saved, type to replace)" : info.keyHint}
                 />
@@ -348,6 +436,45 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
               )}
             </div>
             <div role="status" aria-live="polite" className="mt-2">
+              {typedRefusal && (
+                // Inside the one live region, so it is announced once and not by a second one.
+                <Callout tone="warning" body="ink" live={false}>
+                  <p className="font-medium">PM didn't save this key.</p>
+                  <p className="mt-1">{refusalText(typedRefusal)}</p>
+                  {notThereLine(typedRefusal) && (
+                    <p className="mt-1">{notThereLine(typedRefusal)}</p>
+                  )}
+                  <p className="mt-1 flex flex-wrap gap-x-3">
+                    <a
+                      href="https://aistudio.google.com/projects"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      Link billing in AI Studio →
+                    </a>
+                    <a
+                      href="https://aistudio.google.com/billing"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      Add prepay credit →
+                    </a>
+                  </p>
+                  {/* A submit, so Enter and a click do the same thing: the typed key is still in the
+                      field, and this is the same check as Save and check. */}
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    size="xs"
+                    className={`mt-2${checking ? " cursor-wait" : ""}`}
+                    aria-disabled={checking ? true : undefined}
+                  >
+                    Check again
+                  </Button>
+                </Callout>
+              )}
               {verdict &&
                 (verdict.tone !== "ok" ? (
                   <Callout tone="warning" body="ink" live={false}>
@@ -359,29 +486,38 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
             </div>
           </form>
 
-          <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-sm)] py-1 hover:bg-surface">
-            <input
-              id={sharesId}
-              type="checkbox"
-              checked={view.shares_data}
-              onChange={(e) => void setShares(e.target.checked)}
-              aria-describedby={`${sharesId}-note`}
-              className="mt-0.5 h-[max(1rem,var(--tap-min,24px))] w-[max(1rem,var(--tap-min,24px))] shrink-0"
-            />
-            <div className="text-sm leading-snug">
-              <label htmlFor={sharesId} className="cursor-pointer text-ink2">
-                {info.sharesDataOption.label}
-              </label>
-              <span id={`${sharesId}-note`} className="block text-xs text-ink4">
-                {info.sharesDataOption.note}
-              </span>
+          {info.sharesDataOption && (
+            <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-sm)] py-1 hover:bg-surface">
+              <input
+                id={sharesId}
+                type="checkbox"
+                checked={view.shares_data}
+                onChange={(e) => void setShares(e.target.checked)}
+                aria-describedby={`${sharesId}-note`}
+                className="mt-0.5 h-[max(1rem,var(--tap-min,24px))] w-[max(1rem,var(--tap-min,24px))] shrink-0"
+              />
+              <div className="text-sm leading-snug">
+                <label htmlFor={sharesId} className="cursor-pointer text-ink2">
+                  {info.sharesDataOption.label}
+                </label>
+                <span id={`${sharesId}-note`} className="block text-xs text-ink4">
+                  {info.sharesDataOption.note}
+                </span>
+              </div>
             </div>
-          </div>
+          )}
 
           <SectionInfo title={info.detailsTitle}>
             {info.details.map((d) => (
               <p key={d}>{d}</p>
             ))}
+            {info.tiers && view.terms_checked_on && (
+              <p>
+                These are Google&apos;s terms when this version of PM was built (checked{" "}
+                {dayMonthYear(view.terms_checked_on)}). They can change. Google&apos;s terms page is
+                the one to trust.
+              </p>
+            )}
           </SectionInfo>
         </>
       )}

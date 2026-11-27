@@ -68,6 +68,21 @@ describe("the context meter's naming", () => {
     );
   });
 
+  it("names Google Gemini after a model reached with a Gemini key", async () => {
+    m.chatContextStatus.mockResolvedValue(
+      status({
+        model: "gemini/gemini-3.8-flash",
+        context_window: 1_048_576,
+        provider: "gemini",
+      }),
+    );
+    render(<ContextMeter conversationId={1} refreshKey={0} onUpgrade={() => Promise.resolve()} />);
+    const button = await meter();
+    expect(button.getAttribute("title")).toBe(
+      "50% of gemini/gemini-3.8-flash on Google Gemini's context used",
+    );
+  });
+
   it("reads an older answer with no provider as OpenRouter", async () => {
     const old = status({}) as Partial<ContextStatus>;
     delete old.provider;

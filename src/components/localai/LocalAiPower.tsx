@@ -6,8 +6,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { keepLocalOnBattery, setLocalPowerPolicy } from "../../lib/ipc";
 import {
   blockedReason,
-  cloudNames,
   consentLine,
+  costClause,
   directRetentionNote,
   powerGate,
   powerOf,
@@ -118,6 +118,9 @@ export function LocalAiPower({
   const power = status ? powerOf(status) : null;
   // Set only when a role's cloud is a provider of the person's own, which keeps requests.
   const retention = directRetentionNote(power);
+  // The free-key aside in the fold is for someone who has a role on Gemini; nobody else reads it.
+  const geminiRole =
+    power?.chat.cloud_provider === "gemini" || power?.background.cloud_provider === "gemini";
   const ready = gate === "ready";
   // A machine PM found no battery on. Only a positive reading counts: no power readout yet is not
   // evidence of a desktop.
@@ -148,8 +151,7 @@ export function LocalAiPower({
         {/* Unfolded: what a choice saves and costs is the reason to make it, not prose. */}
         <p className="text-xs text-ink4">
           Saves: sending requests to your cloud model {REDUCES_POWER}. Costs: what you send leaves
-          this computer and is billed to your {cloudNames(power)} key, and PM asks you before the
-          first time.
+          this computer and {costClause(power)}, and PM asks you before the first time.
           {retention ? ` ${retention}` : ""} Needs: a cloud key, and a job set to Local, fall back
           to cloud.
         </p>
@@ -319,8 +321,9 @@ export function LocalAiPower({
           used for that role, on battery or not.
         </p>
         <p>
-          Requests sent to the cloud are billed to the key of the cloud provider that role uses, and
-          count towards Usage & cost under your cloud model.
+          Requests sent to the cloud are billed to the key of the cloud provider that role uses
+          {geminiRole && " (a Google Gemini key on the free tier isn't billed)"}, and count towards
+          Usage & cost under your cloud model.
         </p>
         <p>Desktops, and machines where PM can't read a battery, count as always plugged in.</p>
       </SectionInfo>
