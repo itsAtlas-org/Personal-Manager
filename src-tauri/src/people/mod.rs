@@ -101,6 +101,35 @@ pub const SOURCE_STATES: [&str; 6] = [
 pub const INTERACTION_KINDS: [&str; 4] = ["met", "call", "message", "note"];
 /// `meet_prompt_answers.answer`.
 pub const PROMPT_ANSWERS: [&str; 3] = ["logged", "skipped", "series_skipped"];
+/// `people.leap_day`: which day a 29 February birthday is marked on in years without one (E22).
+/// NULL means "not answered yet", which reads as the first of these.
+pub const LEAP_DAYS: [&str; 2] = ["feb28", "mar1"];
+
+/// The answer to "which day do we mark a 29 February birthday in other years?". The words on the
+/// wire and in the column are [`LEAP_DAYS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeapDay {
+    Feb28,
+    Mar1,
+}
+
+impl LeapDay {
+    /// The stored word.
+    pub fn word(self) -> &'static str {
+        match self {
+            LeapDay::Feb28 => LEAP_DAYS[0],
+            LeapDay::Mar1 => LEAP_DAYS[1],
+        }
+    }
+
+    /// The answer a stored or file word names; any other word is no answer.
+    pub fn from_word(word: &str) -> Option<LeapDay> {
+        [LeapDay::Feb28, LeapDay::Mar1]
+            .into_iter()
+            .find(|d| d.word() == word)
+    }
+}
 
 /// A card imported from a vCard file.
 pub const PROVIDER_VCARD: &str = "vcard";
@@ -236,6 +265,9 @@ pub struct PersonDraft {
     /// `YYYY-MM-DD`, or `--MM-DD` when the year is unknown.
     #[serde(rename = "birthday")]
     pub born_on: Option<String>,
+    /// For a 29 February birthday, the day to mark in other years (E22). Any other birthday, or
+    /// none, stores nothing here whatever is sent.
+    pub leap_day: Option<LeapDay>,
     pub met_where: String,
     /// `YYYY`, `YYYY-MM` or `YYYY-MM-DD`.
     pub met_on: Option<String>,
@@ -345,6 +377,9 @@ pub struct Person {
     pub name_suffix: String,
     #[serde(rename = "birthday")]
     pub born_on: Option<String>,
+    /// The answer to "which day in years without 29 February?"; only ever set with a 29 February
+    /// birthday (E22).
+    pub leap_day: Option<LeapDay>,
     pub met_where: String,
     pub met_on: Option<String>,
     pub notes: String,
@@ -398,6 +433,8 @@ pub struct PersonRow {
     /// round trip per person.
     #[serde(rename = "birthday")]
     pub born_on: Option<String>,
+    /// The 29 February answer, read with the birthday so the strip needs no second trip (E22).
+    pub leap_day: Option<LeapDay>,
 }
 
 impl std::fmt::Debug for PersonRow {
@@ -580,6 +617,7 @@ struct CleanDraft {
     display_name: String,
     name: NameParts,
     born_on: Option<String>,
+    leap_day: Option<LeapDay>,
     met_where: String,
     met_on: Option<String>,
     notes: String,
@@ -664,6 +702,8 @@ fn clean_draft(draft: &PersonDraft) -> Result<CleanDraft> {
         return Err(too_long("notes", notes.len(), NOTES_MAX, "bytes"));
     }
     let born_on = clean_date("birthday", &draft.born_on, partial_date::normalise_born_on)?;
+    // Kept only while it means something (E22): one rule, applied on every write path.
+    let leap_day = partial_date::kept_leap_day(born_on.as_deref(), draft.leap_day);
     // No "not in the future" rule: the spec has none, and the device clock and the user's zone can
     // both put a true date ahead of "today", which would then lock every later save of the person.
     let met_on = clean_date("date you met", &draft.met_on, partial_date::normalise_dated)?;
@@ -727,6 +767,7 @@ fn clean_draft(draft: &PersonDraft) -> Result<CleanDraft> {
         display_name,
         name,
         born_on,
+        leap_day,
         met_where,
         met_on,
         notes,
@@ -894,9 +935,9 @@ pub fn create_person_in(tx: &Connection, draft: &PersonDraft) -> Result<i64> {
     let stamp = now(tx)?;
     tx.execute(
         "INSERT INTO people(uid, display_name, given_name, middle_name, family_name, name_prefix, \
-                            name_suffix, birthday, met_where, met_on, notes, starred, \
+                            name_suffix, birthday, leap_day, met_where, met_on, notes, starred, \
                             created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         params![
             new_ident()?,
             display,
@@ -906,6 +947,7 @@ pub fn create_person_in(tx: &Connection, draft: &PersonDraft) -> Result<i64> {
             empty_to_none(&clean.name.prefix),
             empty_to_none(&clean.name.suffix),
             clean.born_on,
+            clean.leap_day.map(LeapDay::word),
             clean.met_where,
             clean.met_on,
             clean.notes,
@@ -1032,8 +1074,8 @@ pub fn update_person_in(
 
     tx.execute(
         "UPDATE people SET display_name = ?2, given_name = ?3, middle_name = ?4, family_name = ?5, \
-                           name_prefix = ?6, name_suffix = ?7, birthday = ?8, met_where = ?9, \
-                           met_on = ?10, notes = ?11, starred = ?12 \
+                           name_prefix = ?6, name_suffix = ?7, birthday = ?8, leap_day = ?9, \
+                           met_where = ?10, met_on = ?11, notes = ?12, starred = ?13 \
           WHERE id = ?1",
         params![
             id,
@@ -1044,6 +1086,7 @@ pub fn update_person_in(
             empty_to_none(&clean.name.prefix),
             empty_to_none(&clean.name.suffix),
             clean.born_on,
+            clean.leap_day.map(LeapDay::word),
             clean.met_where,
             clean.met_on,
             clean.notes,
@@ -1149,6 +1192,7 @@ pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
         Option<String>,
         String,
@@ -1161,8 +1205,8 @@ pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
     let row: Option<Row> = conn
         .query_row(
             "SELECT uid, display_name, given_name, middle_name, family_name, name_prefix, \
-                    name_suffix, birthday, met_where, met_on, notes, starred, merged_uids, \
-                    trashed_at, created_at, updated_at FROM people WHERE id = ?1",
+                    name_suffix, birthday, leap_day, met_where, met_on, notes, starred, \
+                    merged_uids, trashed_at, created_at, updated_at FROM people WHERE id = ?1",
             params![id],
             |r| {
                 Ok((
@@ -1182,6 +1226,7 @@ pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
                     r.get(13)?,
                     r.get(14)?,
                     r.get(15)?,
+                    r.get(16)?,
                 ))
             },
         )
@@ -1195,6 +1240,7 @@ pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
         prefix,
         suffix,
         born_on,
+        leap,
         met_where,
         met_on,
         notes,
@@ -1245,6 +1291,7 @@ pub(crate) fn get_person_core(conn: &Connection, id: i64) -> Result<Person> {
         name_prefix: prefix.unwrap_or_default(),
         name_suffix: suffix.unwrap_or_default(),
         born_on,
+        leap_day: leap.as_deref().and_then(LeapDay::from_word),
         met_where,
         met_on,
         notes,
@@ -1369,7 +1416,7 @@ fn query_rows(
                 {email}, {phone}, {company}, lm.last_met, \
                 (SELECT s.state FROM person_sources s \
                   WHERE s.person_id = p.id AND s.provider = 'google' ORDER BY s.id LIMIT 1), \
-                p.birthday \
+                p.birthday, p.leap_day \
            FROM people p \
            LEFT JOIN (SELECT ip.person_id AS pid, MAX(i.on_date) AS last_met \
                         FROM interaction_people ip JOIN interactions i ON i.id = ip.interaction_id \
@@ -1413,6 +1460,10 @@ fn query_rows(
                     google_state: r.get(11)?,
                     trashed_at: r.get(4)?,
                     born_on: r.get(12)?,
+                    leap_day: r
+                        .get::<_, Option<String>>(13)?
+                        .as_deref()
+                        .and_then(LeapDay::from_word),
                 },
             })
         })?

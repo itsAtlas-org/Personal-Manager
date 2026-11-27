@@ -65,6 +65,7 @@ const ADA_ROW: PersonRow = {
   google_state: null,
   trashed_at: null,
   birthday: null,
+  leap_day: null,
 };
 
 const entry = (over: Partial<TimelineEntry> = {}): TimelineEntry => ({

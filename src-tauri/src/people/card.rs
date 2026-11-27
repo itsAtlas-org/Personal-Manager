@@ -20,8 +20,8 @@ use serde_json::{Map, Value};
 
 use super::fold::{clean_multiline, clean_text, fold_key};
 use super::{
-    compose_display_name, partial_date, DetailDraft, NameParts, Person, PersonDraft, DETAILS_MAX,
-    DETAIL_KINDS, LABELS_PER_PERSON_MAX, NOTES_MAX, PARTS_MAX_BYTES, VALUE_MAX,
+    compose_display_name, partial_date, DetailDraft, LeapDay, NameParts, Person, PersonDraft,
+    DETAILS_MAX, DETAIL_KINDS, LABELS_PER_PERSON_MAX, NOTES_MAX, PARTS_MAX_BYTES, VALUE_MAX,
 };
 
 /// The longest id a card keeps for itself (a vCard `UID`). Longer is not an id any exporter writes.
@@ -62,6 +62,10 @@ pub struct Card {
     pub name_suffix: String,
     #[serde(default, rename = "birthday")]
     pub born_on: Option<String>,
+    /// Which day a 29 February birthday is marked on in other years (E22). PM's own fact: only
+    /// PM's own file export carries it (`X-PM-LEAP-DAY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leap_day: Option<LeapDay>,
     #[serde(default)]
     pub met_where: String,
     #[serde(default)]
@@ -99,6 +103,7 @@ impl Card {
             name_prefix: p.name_prefix.clone(),
             name_suffix: p.name_suffix.clone(),
             born_on: p.born_on.clone(),
+            leap_day: p.leap_day,
             met_where: p.met_where.clone(),
             met_on: p.met_on.clone(),
             notes: p.notes.clone(),
@@ -132,6 +137,7 @@ impl Card {
             name_prefix: self.name_prefix.clone(),
             name_suffix: self.name_suffix.clone(),
             born_on: self.born_on.clone(),
+            leap_day: self.leap_day,
             met_where: self.met_where.clone(),
             met_on: self.met_on.clone(),
             notes: self.notes.clone(),
@@ -158,6 +164,7 @@ impl Card {
             .born_on
             .as_deref()
             .and_then(partial_date::normalise_born_on);
+        self.leap_day = partial_date::kept_leap_day(self.born_on.as_deref(), self.leap_day);
         self.met_on = self
             .met_on
             .as_deref()

@@ -5,8 +5,8 @@
 // coming up, the sort the list is ordered by. No IPC, no clock of their own (callers hand in
 // `today`), so each is tested on its own.
 
-import { describeBirthday } from "./partialDate";
-import type { PeopleSort, PersonLabelRef, PersonRow } from "./types";
+import { birthdayIn, describeBirthday } from "./partialDate";
+import type { LeapDay, PeopleSort, PersonLabelRef, PersonRow } from "./types";
 
 /** Words for the person from a rejected write: the backend's refusals are fixed sentences (a
  *  string over IPC), so they are shown as they are; anything else gets a plain line, never the
@@ -154,8 +154,12 @@ export function dayAndMonth(born: Pick<BornOn, "month" | "day">): string {
 /** A birthday as a line: "Birthday 15 April" while the year is unknown, "Birthday 15-04-1990 (36)"
  *  once it is (DD-MM-YYYY, with the age as of `today`). The record words the value alone through
  *  `describeBirthday`, the one place the age is counted. */
-export function birthdayText(value: string | null | undefined, today: Date): string | null {
-  const text = describeBirthday(value, today);
+export function birthdayText(
+  value: string | null | undefined,
+  today: Date,
+  leap?: LeapDay | null,
+): string | null {
+  const text = describeBirthday(value, today, leap);
   return text === null ? null : `Birthday ${text}`;
 }
 
@@ -170,17 +174,23 @@ export interface UpcomingBirthday {
 
 const DAY_MS = 86_400_000;
 
-/** The days from `today` to the next time this birthday falls (0 is today), and the year it falls
- *  in. A 29 February in a common year is kept on 1 March, as UK law counts it. */
-function nextOccurrence(born: BornOn, today: Date): { inDays: number; year: number } {
+/** The days from `today` to the next time this birthday falls (0 is today), the year it falls in
+ *  and the day it falls on. A 29 February in a common year lands on the day its person chose (28
+ *  February until they say), via `birthdayIn`, which owns that rule. */
+function nextOccurrence(
+  born: BornOn,
+  leap: LeapDay | null,
+  today: Date,
+): { inDays: number; year: number; month: number; day: number } {
   const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
   for (const year of [today.getFullYear(), today.getFullYear() + 1]) {
-    const leapDay = born.month === 2 && born.day === 29 && !isLeap(year);
-    const at = Date.UTC(year, leapDay ? 2 : born.month - 1, leapDay ? 1 : born.day);
-    if (at >= todayUtc) return { inDays: Math.round((at - todayUtc) / DAY_MS), year };
+    const on = birthdayIn(born, leap, year);
+    if (!on) break;
+    const at = Date.UTC(year, on.month - 1, on.day);
+    if (at >= todayUtc) return { inDays: Math.round((at - todayUtc) / DAY_MS), year, ...on };
   }
-  // Unreachable: next year always has the day (or its 1 March stand-in).
-  return { inDays: 366, year: today.getFullYear() + 1 };
+  // Unreachable: next year always has the day (or its stand-in).
+  return { inDays: 366, year: today.getFullYear() + 1, month: born.month, day: born.day };
 }
 
 /** Who has a birthday in the next `days` days (today included), soonest first, then by name. Takes
@@ -195,11 +205,11 @@ export function upcomingBirthdays(
     if (row.trashed_at) continue;
     const born = parseBornOn(row.birthday);
     if (!born) continue;
-    const { inDays, year } = nextOccurrence(born, today);
+    const { inDays, year, month, day } = nextOccurrence(born, row.leap_day, today);
     if (inDays > days) continue;
     // A year ahead of this one (a typo, or a birth year of 2999) has no age to say.
     const turns = born.year === null || year - born.year <= 0 ? "" : `, turns ${year - born.year}`;
-    out.push({ row, inDays, text: `Birthday ${dayAndMonth(born)}${turns}` });
+    out.push({ row, inDays, text: `Birthday ${dayAndMonth({ month, day })}${turns}` });
   }
   return out.sort(
     (a, b) => a.inDays - b.inDays || a.row.display_name.localeCompare(b.row.display_name),

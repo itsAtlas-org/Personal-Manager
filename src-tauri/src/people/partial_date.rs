@@ -7,6 +7,11 @@
 //!
 //! A year-less 29 February is valid (someone born on it has a birthday every year): the day is
 //! checked against a leap year. Pure: no clock, no database.
+//!
+//! A 29 February birthday keeps one more fact, which day to mark in years without one
+//! ([`kept_leap_day`], [`born_on_in`]; spec E22).
+
+use super::LeapDay;
 
 /// One parsed date. At least a year, or a month and a day, is always present.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,6 +155,40 @@ pub fn normalise_born_on(text: &str) -> Option<String> {
         .map(|d| d.to_iso())
 }
 
+/// Whether a stored birthday is 29 February, with or without a year.
+pub fn is_leap_day_born_on(born_on: &str) -> bool {
+    PartialDate::parse(born_on).is_some_and(|d| d.month == Some(2) && d.day == Some(29))
+}
+
+/// The 29 February answer to store beside `born_on` (E22): the answer itself while the birthday is
+/// 29 February, nothing otherwise. Every write path runs its birthday and answer through this, so
+/// a changed or cleared date never leaves a stale answer behind.
+pub fn kept_leap_day(born_on: Option<&str>, answer: Option<LeapDay>) -> Option<LeapDay> {
+    answer.filter(|_| born_on.is_some_and(is_leap_day_born_on))
+}
+
+/// The civil date a birthday falls on in `year`, as month and day. A 29 February one lands on
+/// itself in a leap year, and in other years on the day the person chose: 28 February, or 1 March.
+/// Unanswered reads as 28 February. `None` when `born_on` is not a full day. The one owner of this
+/// rule on the Rust side; `partialDate.ts` holds its twin.
+pub fn born_on_in(born_on: &str, answer: Option<LeapDay>, year: u16) -> Option<PartialDate> {
+    let d = PartialDate::parse(born_on).filter(PartialDate::is_day)?;
+    let (month, day) = (d.month?, d.day?);
+    let (month, day) = if (month, day) == (2, 29) && days_in_month(year, 2) == 28 {
+        match answer {
+            Some(LeapDay::Mar1) => (3, 1),
+            _ => (2, 28),
+        }
+    } else {
+        (month, day)
+    };
+    Some(PartialDate {
+        year: Some(year),
+        month: Some(month),
+        day: Some(day),
+    })
+}
+
 /// A date that may be partial from the front (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`), as `met_on` and a
 /// detail's from and to dates are. A year-less day is not one of these.
 pub fn normalise_dated(text: &str) -> Option<String> {
@@ -203,6 +242,48 @@ mod tests {
         assert!(normalise_dated("--04-15").is_none());
         assert_eq!(normalise_dated("2001-04").as_deref(), Some("2001-04"));
         assert_eq!(normalise_any("--04-15").as_deref(), Some("--04-15"));
+    }
+
+    fn lands(born: &str, answer: Option<LeapDay>, year: u16) -> (u8, u8) {
+        let d = born_on_in(born, answer, year).unwrap();
+        assert_eq!(d.year, Some(year));
+        (d.month.unwrap(), d.day.unwrap())
+    }
+
+    #[test]
+    fn a_29_february_birthday_lands_on_the_chosen_day_in_common_years() {
+        for born in ["--02-29", "2000-02-29"] {
+            // A common year: the chosen day, and 28 February while unanswered.
+            assert_eq!(lands(born, Some(LeapDay::Feb28), 2027), (2, 28));
+            assert_eq!(lands(born, Some(LeapDay::Mar1), 2027), (3, 1));
+            assert_eq!(lands(born, None, 2027), (2, 28));
+            // A leap year: itself, whatever the answer.
+            for answer in [Some(LeapDay::Feb28), Some(LeapDay::Mar1), None] {
+                assert_eq!(lands(born, answer, 2028), (2, 29));
+            }
+            // A century year is common unless divisible by 400.
+            assert_eq!(lands(born, Some(LeapDay::Mar1), 2100), (3, 1));
+            assert_eq!(lands(born, Some(LeapDay::Mar1), 2400), (2, 29));
+        }
+    }
+
+    #[test]
+    fn any_other_birthday_ignores_the_answer_and_a_partial_date_has_no_day() {
+        assert_eq!(lands("--04-15", Some(LeapDay::Mar1), 2027), (4, 15));
+        assert_eq!(lands("1990-02-28", Some(LeapDay::Mar1), 2027), (2, 28));
+        assert!(born_on_in("1990-04", None, 2027).is_none());
+        assert!(born_on_in("not a date", None, 2027).is_none());
+    }
+
+    #[test]
+    fn the_answer_is_kept_only_for_a_29_february_birthday() {
+        let mar1 = Some(LeapDay::Mar1);
+        assert_eq!(kept_leap_day(Some("--02-29"), mar1), mar1);
+        assert_eq!(kept_leap_day(Some("2000-02-29"), mar1), mar1);
+        assert_eq!(kept_leap_day(Some("--03-01"), mar1), None);
+        assert_eq!(kept_leap_day(Some("2000-02-28"), mar1), None);
+        assert_eq!(kept_leap_day(None, mar1), None);
+        assert_eq!(kept_leap_day(Some("--02-29"), None), None);
     }
 
     #[test]

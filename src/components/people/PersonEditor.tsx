@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPerson, getPerson, updatePerson } from "../../lib/ipc";
+import { LeapDayChoice } from "./LeapDayChoice";
 import { PartialDateFields } from "./PartialDateFields";
 import { DetailRow } from "./DetailRow";
 import { errorWords } from "../../lib/people";
@@ -23,6 +24,7 @@ import {
   modelFromPerson,
   modelToDraft,
   moveRow,
+  readsLeapDay,
   rowsOfSection,
   sameModel,
   validateModel,
@@ -293,8 +295,16 @@ export function PersonEditor({ person, section, onClose, onSaved }: Props) {
             name="Birthday"
             fields={model.born}
             error={shown.born}
-            onChange={(born) => patch({ born })}
+            // Changing the date away from 29 February hides the question and forgets the answer.
+            onChange={(born) => patch({ born, ...(readsLeapDay(born) ? {} : { leap: null }) })}
           />
+          {readsLeapDay(model.born) && (
+            <LeapDayChoice
+              value={model.leap}
+              error={shown.leap}
+              onChange={(leap) => patch({ leap })}
+            />
+          )}
         </div>
         {rowsFor("dates")}
         {adders("dates")}

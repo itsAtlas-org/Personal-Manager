@@ -23,7 +23,7 @@ import {
   visibleLabels,
   writePeopleSort,
 } from "./people";
-import type { PersonRow } from "./types";
+import type { LeapDay, PersonRow } from "./types";
 
 function row(id: number, name: string, birthday: string | null, over: Partial<PersonRow> = {}) {
   return {
@@ -38,6 +38,7 @@ function row(id: number, name: string, birthday: string | null, over: Partial<Pe
     google_state: null,
     trashed_at: null,
     birthday,
+    leap_day: null,
     ...over,
   } satisfies PersonRow;
 }
@@ -175,16 +176,36 @@ describe("upcomingBirthdays", () => {
     expect(list.map((u) => u.text)).toEqual(["Birthday 15 April"]);
   });
 
-  it("holds a 29 February on 1 March in a common year and on the day in a leap one", () => {
-    const common = upcomingBirthdays([row(1, "Jo", "--02-29")], new Date(2027, 1, 20));
-    expect(common.map((u) => u.inDays)).toEqual([9]); // 1 March 2027
-    const leap = upcomingBirthdays([row(1, "Jo", "--02-29")], new Date(2028, 1, 20));
-    expect(leap.map((u) => u.inDays)).toEqual([9]); // 29 February 2028
-    // After 1 March in a common year it is a year off.
-    expect(upcomingBirthdays([row(1, "Jo", "--02-29")], new Date(2027, 2, 2))).toEqual([]);
+  it("marks a 29 February on the day its person chose in a common year, and on itself in a leap one", () => {
+    const jo = (leap: LeapDay | null) => row(1, "Jo", "--02-29", { leap_day: leap });
+    const days = (leap: LeapDay | null, on: Date) =>
+      upcomingBirthdays([jo(leap)], on).map((u) => u.inDays);
+    // 2027 is a common year. Someone who has not answered is marked on 28 February.
+    expect(days(null, new Date(2027, 1, 20))).toEqual([8]);
+    expect(days("feb28", new Date(2027, 1, 20))).toEqual([8]);
+    expect(days("mar1", new Date(2027, 1, 20))).toEqual([9]);
+    // On the day itself.
+    expect(days(null, new Date(2027, 1, 28))).toEqual([0]);
+    expect(days("mar1", new Date(2027, 1, 28))).toEqual([1]);
+    expect(days("mar1", new Date(2027, 2, 1))).toEqual([0]);
+    // A day later the 28 February birthday is a year off, and the strip shows nothing.
+    expect(days(null, new Date(2027, 2, 1))).toEqual([]);
+    expect(days("mar1", new Date(2027, 2, 2))).toEqual([]);
+    // In a leap year all three land on 29 February.
+    for (const leap of [null, "feb28", "mar1"] as const) {
+      expect(days(leap, new Date(2028, 1, 20))).toEqual([9]);
+    }
+  });
+
+  it("words the day it falls on and the age it brings, per the choice", () => {
+    const born = (leap: LeapDay | null) => row(1, "Jo", "2000-02-29", { leap_day: leap });
+    const on = new Date(2027, 1, 28);
+    expect(upcomingBirthdays([born(null)], on)[0].text).toBe("Birthday 28 February, turns 27");
+    expect(upcomingBirthdays([born("feb28")], on)[0].text).toBe("Birthday 28 February, turns 27");
+    expect(upcomingBirthdays([born("mar1")], on)[0].text).toBe("Birthday 1 March, turns 27");
     // Across the year turn from a leap year's 29 February.
-    expect(upcomingBirthdays([row(1, "Jo", "2000-02-29")], new Date(2026, 1, 10))[0].text).toBe(
-      "Birthday 29 February, turns 26",
+    expect(upcomingBirthdays([born("mar1")], new Date(2026, 1, 10))[0].text).toBe(
+      "Birthday 1 March, turns 26",
     );
   });
 

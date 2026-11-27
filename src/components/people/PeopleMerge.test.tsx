@@ -67,6 +67,7 @@ function row(id: number, name: string): PersonRow {
     google_state: null,
     trashed_at: null,
     birthday: null,
+    leap_day: null,
   };
 }
 
@@ -82,6 +83,7 @@ function card(r: PersonRow, over: Partial<DupeCard> = {}): DupeCard {
     uid: r.uid,
     display_name: r.display_name,
     birthday: null,
+    leap_day: null,
     met_where: "",
     met_on: null,
     note: "",
@@ -488,6 +490,34 @@ describe("the merge dialog", () => {
     expect(within(dialog).queryByRole("group", { name: "Name" })).toBeNull();
     expect(within(dialog).getByText("“02-02-1991 (35)” is dropped.")).toBeTruthy();
     expect(within(dialog).getByRole("radio", { name: /^first note/ })).toBeTruthy();
+  });
+
+  it("shows a 29 February birthday with the day each would be marked on", async () => {
+    // Same birthday, different answers: the choice is the birthday's.
+    ipc.mergePeoplePreview.mockResolvedValue({
+      details: 1,
+      details_dropped: 0,
+      labels: 0,
+      timeline: 0,
+      projects: 0,
+      sources: 0,
+      differs: { name: false, birthday: true, met: false, notes: false },
+      lossless: false,
+    });
+    const stock = ipc.getPerson.getMockImplementation()!;
+    ipc.getPerson.mockImplementation(async (id: number) => ({
+      ...(await stock(id)),
+      birthday: "--02-29",
+      leap_day: id % 2 === 0 ? "mar1" : "feb28",
+    }));
+    const dialog = await openDialog();
+    const birthday = within(within(dialog).getByRole("group", { name: "Birthday" }));
+    expect(
+      birthday.getByRole("radio", { name: /^29 February, marked on 28 February in other years/ }),
+    ).toBeTruthy();
+    expect(
+      birthday.getByRole("radio", { name: /^29 February, marked on 1 March in other years/ }),
+    ).toBeTruthy();
   });
 
   it("sends the choices, with Keep both for the notes, and offers Undo", async () => {

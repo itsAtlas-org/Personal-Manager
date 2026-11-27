@@ -37,6 +37,7 @@ use super::card::{Card, CardDetail};
 use super::dupes::{phone_group, phones_match, DupeInput};
 use super::fold::{digits_key, email_key, value_key};
 use super::merge::{plan_details, DetailFacts, Fate};
+use super::partial_date;
 use super::sources::{merged_ident_owners, person_for_own_ident, person_for_source};
 use super::vcard::{network_of_url, VcfParse, Warning, FILE_CAP};
 use super::{
@@ -562,6 +563,7 @@ fn apply_card(tx: &Connection, id: i64, card: &Card) -> Result<Applied> {
         name_prefix: person.name_prefix.clone(),
         name_suffix: person.name_suffix.clone(),
         born_on: person.born_on.clone(),
+        leap_day: person.leap_day,
         met_where: person.met_where.clone(),
         met_on: person.met_on.clone(),
         notes: person.notes.clone(),
@@ -602,9 +604,19 @@ fn apply_card(tx: &Connection, id: i64, card: &Card) -> Result<Applied> {
     match (&draft.born_on, &card.born_on) {
         (None, Some(theirs)) => {
             draft.born_on = Some(theirs.clone());
+            draft.leap_day = card.leap_day;
             changed = true;
         }
         (Some(have), Some(theirs)) if !same_born_on(have, theirs) => kept.push("birthday"),
+        // The same birthday: an answer PM doesn't hold yet fills in (the save drops it again
+        // unless the birthday is 29 February).
+        (Some(_), Some(_)) if draft.leap_day.is_none() && card.leap_day.is_some() => {
+            let filled = partial_date::kept_leap_day(draft.born_on.as_deref(), card.leap_day);
+            if filled.is_some() {
+                draft.leap_day = filled;
+                changed = true;
+            }
+        }
         _ => {}
     }
 

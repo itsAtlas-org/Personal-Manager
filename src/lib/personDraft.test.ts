@@ -51,6 +51,7 @@ function person(details: PersonDetail[] = [], over: Partial<Person> = {}): Perso
     name_prefix: "",
     name_suffix: "",
     birthday: "--04-15",
+    leap_day: null,
     met_where: "A climbing wall",
     met_on: "2019-03",
     notes: "Likes tea.",

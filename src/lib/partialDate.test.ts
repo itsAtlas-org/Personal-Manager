@@ -7,9 +7,12 @@
 import { describe, expect, it } from "vitest";
 import {
   ageOn,
+  birthdayIn,
   describeBirthday,
+  describeBirthdayChoice,
   fieldsFromIso,
   formatPartial,
+  isLeapDayBirthday,
   isoFromFields,
   parsePartial,
   toDisplay,
@@ -109,6 +112,59 @@ describe("ages and birthdays", () => {
     expect(describeBirthday("1990-04", today)).toBeNull();
     expect(describeBirthday("1990", today)).toBeNull();
     expect(describeBirthday("1991-02-29", today)).toBeNull();
+  });
+});
+
+describe("a 29 February birthday in other years (E22)", () => {
+  const born = parsePartial("2000-02-29")!;
+  const dayIn = (leap: "feb28" | "mar1" | null, year: number) => birthdayIn(born, leap, year);
+
+  it("lands on the chosen day in a common year, and on itself in a leap one", () => {
+    // The same table as Rust's `a_29_february_birthday_lands_on_the_chosen_day_in_common_years`.
+    expect(dayIn("feb28", 2027)).toEqual({ month: 2, day: 28 });
+    expect(dayIn("mar1", 2027)).toEqual({ month: 3, day: 1 });
+    expect(dayIn(null, 2027)).toEqual({ month: 2, day: 28 });
+    for (const leap of ["feb28", "mar1", null] as const) {
+      expect(dayIn(leap, 2028)).toEqual({ month: 2, day: 29 });
+    }
+    // 1900 is not a leap year (divisible by 100, not 400); 2000 is.
+    expect(dayIn("mar1", 1900)).toEqual({ month: 3, day: 1 });
+    expect(dayIn("mar1", 2000)).toEqual({ month: 2, day: 29 });
+  });
+
+  it("leaves every other birthday alone, whatever answer is passed", () => {
+    expect(birthdayIn(parsePartial("--04-15")!, "mar1", 2027)).toEqual({ month: 4, day: 15 });
+    expect(birthdayIn(parsePartial("1990")!, null, 2027)).toBeNull();
+  });
+
+  it("turns a leapling a year older on the chosen day", () => {
+    const eve = new Date(2027, 1, 27);
+    const feb28 = new Date(2027, 1, 28);
+    const mar1 = new Date(2027, 2, 1);
+    expect(ageOn(born, eve, "feb28")).toBe(26);
+    expect(ageOn(born, feb28, "feb28")).toBe(27);
+    expect(ageOn(born, feb28, null)).toBe(27);
+    expect(ageOn(born, feb28, "mar1")).toBe(26);
+    expect(ageOn(born, mar1, "mar1")).toBe(27);
+    expect(describeBirthday("2000-02-29", feb28, "mar1")).toBe("29-02-2000 (26)");
+    expect(describeBirthday("2000-02-29", mar1, "mar1")).toBe("29-02-2000 (27)");
+  });
+
+  it("says which birthdays are 29 February", () => {
+    expect(isLeapDayBirthday("--02-29")).toBe(true);
+    expect(isLeapDayBirthday("2000-02-29")).toBe(true);
+    expect(isLeapDayBirthday("1990-02-28")).toBe(false);
+    expect(isLeapDayBirthday("--03-01")).toBe(false);
+    expect(isLeapDayBirthday(null)).toBe(false);
+  });
+
+  it("shows the answer beside a merge's birthday, only for a 29 February one", () => {
+    const today = new Date(2026, 10, 26);
+    expect(describeBirthdayChoice("--02-29", today, "mar1")).toBe(
+      "29 February, marked on 1 March in other years",
+    );
+    expect(describeBirthdayChoice("--02-29", today, null)).toBe("29 February");
+    expect(describeBirthdayChoice("--04-15", today, "mar1")).toBe("15 April");
   });
 });
 

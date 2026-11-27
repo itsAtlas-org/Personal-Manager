@@ -340,6 +340,9 @@ pub fn write_card(out: &mut String, card: &Card) {
     if let Some(on) = &card.met_on {
         w.line(None, "X-PM-MET-ON", "", on);
     }
+    if let Some(day) = card.leap_day {
+        w.line(None, "X-PM-LEAP-DAY", "", day.word());
+    }
     w.line(None, "END", "", "VCARD");
     *out = w.out;
 }

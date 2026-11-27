@@ -1944,6 +1944,8 @@ const MIGRATIONS: &[&str] = &[
         name_prefix   TEXT,                          -- "Dr."
         name_suffix   TEXT,
         birthday      TEXT,                          -- 'YYYY-MM-DD', or '--MM-DD' when the year is unknown
+        leap_day      TEXT,                          -- people::LEAP_DAYS, only for a 29 February birthday: 'feb28' |
+                                                     -- 'mar1', NULL = not answered (E22; PM only)
         met_where     TEXT NOT NULL DEFAULT '',      -- where you met (PM only)
         met_on        TEXT,                          -- 'YYYY', 'YYYY-MM' or 'YYYY-MM-DD'
         notes         TEXT NOT NULL DEFAULT '',      -- plain text

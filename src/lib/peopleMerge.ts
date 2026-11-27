@@ -7,7 +7,7 @@
 // own (callers hand in `today`), so each is tested alone. The rules themselves (what differs, what a
 // merge would lose) live in Rust (`people::merge`): this file only words and arranges them.
 
-import { describeBirthday, formatPartial } from "./partialDate";
+import { describeBirthdayChoice, formatPartial } from "./partialDate";
 import type {
   DupeCard,
   DupePair,
@@ -141,7 +141,7 @@ function detailTexts(card: DupeCard, kind: string): string[] {
  *  note always appear (they are what a merge asks about). */
 export function cardRows(a: DupeCard, b: DupeCard, today: Date): CardRow[] {
   const born = (c: DupeCard) => {
-    const text = describeBirthday(c.birthday, today);
+    const text = describeBirthdayChoice(c.birthday, today, c.leap_day);
     return text ? [text] : [];
   };
   const note = (c: DupeCard) => (c.note.trim() ? [c.note.trim()] : []);

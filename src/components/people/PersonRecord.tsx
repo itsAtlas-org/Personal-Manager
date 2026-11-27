@@ -19,10 +19,16 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { copyViaHost } from "../../lib/contextMenu";
 import { useRememberedFold } from "../../lib/foldPrefs";
 import { formatDate } from "../../lib/format";
-import { getPerson } from "../../lib/ipc";
+import { getPerson, updatePerson } from "../../lib/ipc";
 import { openLink } from "../../lib/linkFailure";
-import { formatPartial, describeBirthday } from "../../lib/partialDate";
+import {
+  formatPartial,
+  describeBirthday,
+  isLeapDayBirthday,
+  LEAP_DAY_WORDS,
+} from "../../lib/partialDate";
 import { personCircleBackground, personInitials } from "../../lib/people";
+import { isChangedElsewhere, modelFromPerson, modelToDraft } from "../../lib/personDraft";
 import {
   copiedWords,
   detailsOfKinds,
@@ -37,7 +43,7 @@ import {
   sourceLine,
   type SectionId,
 } from "../../lib/personRecord";
-import type { Person, PersonDetail, PersonLabel, PersonRow } from "../../lib/types";
+import type { LeapDay, Person, PersonDetail, PersonLabel, PersonRow } from "../../lib/types";
 import { Button, Callout, Collapsible, Popover, Skeleton } from "../ui";
 import { LabelPicker } from "./LabelPicker";
 import { PersonProjects } from "./PersonProjects";
@@ -337,7 +343,22 @@ function Sections({
 }) {
   const has = (id: SectionId) => sectionHasContent(person, id);
   const offers = emptySections(person);
-  const birthday = describeBirthday(person.birthday, today);
+  const birthday = describeBirthday(person.birthday, today, person.leap_day);
+  const leapling = isLeapDayBirthday(person.birthday);
+
+  // Answering the question unmounts the button that has focus, which would drop it to the page: once
+  // the re-read brings the answer, focus moves to the line that replaced the question. Only when
+  // focus really did fall to the page, so a click elsewhere in the meantime is not undone.
+  const answerAt = useRef<HTMLLIElement>(null);
+  const refocusAnswer = useRef(false);
+  useEffect(() => {
+    if (!refocusAnswer.current || person.leap_day === null) return;
+    refocusAnswer.current = false;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    answerAt.current?.focus();
+  }, [person.leap_day]);
+
   return (
     <>
       {has("contact") && (
@@ -374,6 +395,27 @@ function Sections({
         <RecordSection id="dates">
           <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
             {birthday !== null && <Pair name="Birthday" value={birthday} />}
+            {leapling && person.leap_day !== null && (
+              <li
+                ref={answerAt}
+                tabIndex={-1}
+                className="flex items-baseline gap-2 text-sm outline-none"
+              >
+                <span className="w-24 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1 break-words text-ink2">
+                  {`In years without 29 February, marked on ${LEAP_DAY_WORDS[person.leap_day]}.`}
+                </span>
+              </li>
+            )}
+            {leapling && person.leap_day === null && !trashed && (
+              <LeapDayQuestion
+                person={person}
+                run={run}
+                onAnswered={() => {
+                  refocusAnswer.current = true;
+                }}
+              />
+            )}
             {detailsOfKinds(person, SECTION_KINDS.dates).map((d) => (
               <Pair key={d.id} name={d.label || "Date"} value={formatPartial(d.value)} />
             ))}
@@ -495,6 +537,59 @@ function SourcesSection({ person }: { person: Person }) {
         ))}
       </ul>
     </RecordSection>
+  );
+}
+
+/** A person who arrived with a 29 February birthday and no answer (a file, a merge of two
+ *  unanswered people, a sync) is asked here, with two buttons (E22). One click saves it through
+ *  `updatePerson` on the record as it was read (`base_updated_at`); if the record moved since, it
+ *  says so and the re-read brings the latest, rather than saving over it. Until answered, PM marks
+ *  the day on 28 February and says nothing else. */
+function LeapDayQuestion({
+  person,
+  run,
+  onAnswered,
+}: {
+  person: Person;
+  run: Props["run"];
+  onAnswered: () => void;
+}) {
+  const [moved, setMoved] = useState(false);
+  async function choose(leap: LeapDay) {
+    setMoved(false);
+    await run(async () => {
+      try {
+        await updatePerson(
+          person.id,
+          modelToDraft({ ...modelFromPerson(person), leap }),
+          person.updated_at,
+        );
+        onAnswered();
+      } catch (err) {
+        // The record moved under the question: say so in place of the tab's general line. The
+        // re-read that follows every write shows their latest, and the question again if it stands.
+        if (!isChangedElsewhere(err)) throw err;
+        setMoved(true);
+      }
+    });
+  }
+  return (
+    <li className="flex flex-col gap-1.5 text-sm">
+      <p className="text-ink2">Born on 29 February. Which day should PM mark in other years?</p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" size="xs" onClick={() => void choose("feb28")}>
+          28 February
+        </Button>
+        <Button variant="secondary" size="xs" onClick={() => void choose("mar1")}>
+          1 March
+        </Button>
+      </div>
+      {moved && (
+        <p role="status" className="text-xs text-ink3">
+          They were changed somewhere else, so their latest details are showing. Choose again.
+        </p>
+      )}
+    </li>
   );
 }
 

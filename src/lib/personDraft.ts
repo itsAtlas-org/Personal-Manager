@@ -14,13 +14,28 @@
 
 import {
   fieldsFromIso,
+  isLeapDayBirthday,
   isoFromFields,
   NO_DATE,
   type DateFields,
   type DateMode,
 } from "./partialDate";
 import { SECTION_KINDS, type SectionId } from "./personRecord";
-import type { Person, PersonDetailDraft, PersonDetailKind, PersonDraft } from "./types";
+import type { LeapDay, Person, PersonDetailDraft, PersonDetailKind, PersonDraft } from "./types";
+
+/** Said under the birthday when it is 29 February and the choice is still open. */
+export const LEAP_DAY_NEEDED = "Choose which day to mark the birthday in other years.";
+
+/** Whether the birthday fields read day 29 and month 2, which is when the editor asks which day to
+ *  mark in other years (E22). Reads the typed text, not a parsed date: the question appears the
+ *  moment the two fields say so, before a year is typed. */
+export function readsLeapDay(fields: DateFields): boolean {
+  const day = fields.day.trim();
+  const month = fields.month.trim();
+  return (
+    /^[0-9]+$/.test(day) && /^[0-9]+$/.test(month) && Number(day) === 29 && Number(month) === 2
+  );
+}
 
 // --- the caps (mirror `people::VALUE_MAX`, `NOTES_MAX`, `DETAILS_MAX`) --------------------------------
 
@@ -78,6 +93,9 @@ export interface EditorModel {
   family: string;
   suffix: string;
   born: DateFields;
+  /** The day to mark a 29 February birthday in other years; null until chosen, and always null
+   *  while the birthday fields don't read 29 February. */
+  leap: LeapDay | null;
   metWhere: string;
   met: DateFields;
   notes: string;
@@ -128,6 +146,7 @@ export function modelFromPerson(person: Person | null): EditorModel {
       family: "",
       suffix: "",
       born: { ...NO_DATE },
+      leap: null,
       metWhere: "",
       met: { ...NO_DATE },
       notes: "",
@@ -149,6 +168,7 @@ export function modelFromPerson(person: Person | null): EditorModel {
     family: person.family_name,
     suffix: person.name_suffix,
     born: fieldsFromIso(person.birthday),
+    leap: isLeapDayBirthday(person.birthday) ? person.leap_day : null,
     metWhere: person.met_where,
     met: fieldsFromIso(person.met_on),
     notes: person.notes,
@@ -211,6 +231,10 @@ export function validateModel(model: EditorModel): Problems {
 
   const born = isoFromFields(model.born, "born");
   if (born.error) out.born = born.error;
+  // A 29 February birthday must say which day to mark in other years, so the strip and the age
+  // never guess (E22). Only asked while the fields read 29 February; a date that fails above
+  // says that first.
+  else if (readsLeapDay(model.born) && model.leap === null) out.leap = LEAP_DAY_NEEDED;
   const met = isoFromFields(model.met, "dated");
   if (met.error) out.met = met.error;
 
@@ -322,6 +346,7 @@ function draftOf(r: EditorRow): PersonDetailDraft {
  *  them (the backend numbers each kind's rows from 0 in that order). Call after `validateModel`
  *  came back empty. */
 export function modelToDraft(model: EditorModel): PersonDraft {
+  const birthday = isoFromFields(model.born, "born").iso;
   return {
     display_name: model.display.trim(),
     given_name: model.given,
@@ -329,7 +354,8 @@ export function modelToDraft(model: EditorModel): PersonDraft {
     family_name: model.family,
     name_prefix: model.prefix,
     name_suffix: model.suffix,
-    birthday: isoFromFields(model.born, "born").iso,
+    birthday,
+    leap_day: isLeapDayBirthday(birthday) ? model.leap : null,
     met_where: model.metWhere,
     met_on: isoFromFields(model.met, "dated").iso,
     notes: model.notes,

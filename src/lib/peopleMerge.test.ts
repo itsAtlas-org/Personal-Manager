@@ -30,6 +30,7 @@ function card(id: number, over: Partial<DupeCard> = {}): DupeCard {
     uid: String(id).padStart(32, "0"),
     display_name: `Person ${id}`,
     birthday: null,
+    leap_day: null,
     met_where: "",
     met_on: null,
     note: "",

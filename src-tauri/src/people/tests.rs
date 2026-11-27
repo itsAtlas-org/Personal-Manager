@@ -440,6 +440,90 @@ fn the_list_rows_carry_the_birthday_for_the_upcoming_strip() {
     assert_eq!(born, vec![Some("--04-15"), None]);
 }
 
+/// A 29 February person with an answer, saved through the ordinary write paths.
+pub(super) fn leapling(conn: &Connection, born: &str, answer: Option<LeapDay>) -> i64 {
+    let mut d = draft("Leap", "Day");
+    d.born_on = Some(born.into());
+    d.leap_day = answer;
+    create_person(conn, &d).unwrap()
+}
+
+pub(super) fn stored_leap(conn: &Connection, id: i64) -> Option<String> {
+    conn.query_row("SELECT leap_day FROM people WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_leap_day_choice_is_kept_only_for_29_february() {
+    let (_d, conn) = store();
+    // Set it on a year-less 29 February.
+    let id = leapling(&conn, "--02-29", Some(LeapDay::Mar1));
+    assert_eq!(stored_leap(&conn, id).as_deref(), Some("mar1"));
+    let p = get_person(&conn, id).unwrap();
+    assert_eq!(p.leap_day, Some(LeapDay::Mar1));
+    let rows = list_people(&conn, ListFilter::All, None, ListSort::First).unwrap();
+    assert_eq!(
+        rows[0].leap_day,
+        Some(LeapDay::Mar1),
+        "the list row carries it"
+    );
+
+    // A year on the same day keeps it, and the new answer replaces the old.
+    let mut edit = draft("Leap", "Day");
+    edit.born_on = Some("2000-02-29".into());
+    edit.leap_day = Some(LeapDay::Feb28);
+    let saved = update_person(&conn, id, &edit, &p.updated_at).unwrap();
+    assert_eq!(stored_leap(&conn, id).as_deref(), Some("feb28"));
+
+    // Back to a year-less 29 February: the answer sent along is kept.
+    edit.born_on = Some("--02-29".into());
+    let saved = update_person(&conn, id, &edit, &saved.updated_at).unwrap();
+    assert_eq!(stored_leap(&conn, id).as_deref(), Some("feb28"));
+
+    // Another date: NULL, though the draft still sends an answer.
+    edit.born_on = Some("--03-01".into());
+    edit.leap_day = Some(LeapDay::Mar1);
+    let saved = update_person(&conn, id, &edit, &saved.updated_at).unwrap();
+    assert_eq!(stored_leap(&conn, id), None);
+    assert_eq!(get_person(&conn, id).unwrap().leap_day, None);
+
+    // Back to 29 February with an answer, then no birthday at all.
+    edit.born_on = Some("--02-29".into());
+    let saved = update_person(&conn, id, &edit, &saved.updated_at).unwrap();
+    assert_eq!(stored_leap(&conn, id).as_deref(), Some("mar1"));
+    edit.born_on = None;
+    update_person(&conn, id, &edit, &saved.updated_at).unwrap();
+    assert_eq!(stored_leap(&conn, id), None);
+
+    // A new person with an answer and no 29 February never stores one.
+    let mut d = draft("Other", "Day");
+    d.born_on = Some("--04-15".into());
+    d.leap_day = Some(LeapDay::Feb28);
+    let other = create_person(&conn, &d).unwrap();
+    assert_eq!(stored_leap(&conn, other), None);
+    d.born_on = None;
+    let none = create_person(&conn, &d).unwrap();
+    assert_eq!(stored_leap(&conn, none), None);
+
+    // Left unanswered, it stays NULL: "not answered yet".
+    let blank = leapling(&conn, "--02-29", None);
+    assert_eq!(stored_leap(&conn, blank), None);
+}
+
+#[test]
+fn the_leap_day_words_are_the_wire_words() {
+    assert_eq!(LEAP_DAYS, ["feb28", "mar1"]);
+    for (day, word) in [(LeapDay::Feb28, "feb28"), (LeapDay::Mar1, "mar1")] {
+        assert_eq!(day.word(), word);
+        assert_eq!(LeapDay::from_word(word), Some(day));
+        assert_eq!(serde_json::to_value(day).unwrap(), json!(word));
+    }
+    assert_eq!(LeapDay::from_word("feb29"), None);
+    assert_eq!(LeapDay::from_word(""), None);
+}
+
 #[test]
 fn a_year_less_29_february_is_valid() {
     let (_d, conn) = store();

@@ -18,7 +18,7 @@ use super::import::{
     ImportResult, STALE, TOO_BIG,
 };
 use super::merge::MergeChoices;
-use super::tests::{add_meeting, count, detail, draft, person, store, text};
+use super::tests::{add_meeting, count, detail, draft, leapling, person, store, stored_leap, text};
 use super::vcard::parse_vcf;
 use super::*;
 
@@ -185,6 +185,97 @@ fn a_year_less_birthday_is_written_without_a_year_and_reads_back() {
         let parsed = parse_vcf(vcf.as_bytes());
         assert!(parsed.cards[0] == card_of(&conn, id));
         assert_eq!(parsed.cards[0].born_on.as_deref(), Some(born));
+    }
+}
+
+/// A one-card file, CRLF, as another app (or a hand-edited PM export) might write it.
+fn card_file(lines: &[&str]) -> String {
+    let mut out = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Leap Example\r\n");
+    for l in lines {
+        out.push_str(l);
+        out.push_str("\r\n");
+    }
+    out.push_str("END:VCARD\r\n");
+    out
+}
+
+#[test]
+fn a_vcard_round_trip_keeps_the_leap_day() {
+    for (born, answer, word) in [
+        ("--02-29", LeapDay::Mar1, "mar1"),
+        ("2000-02-29", LeapDay::Feb28, "feb28"),
+    ] {
+        let (_dir, conn) = store();
+        let id = leapling(&conn, born, Some(answer));
+        let vcf = export_vcf(&conn, &ExportScope::Ids(vec![id]));
+        assert!(
+            vcf.contains(&format!("X-PM-LEAP-DAY:{word}\r\n")),
+            "the answer was not written"
+        );
+        let parsed = parse_vcf(vcf.as_bytes());
+        assert_eq!(parsed.cards[0].leap_day, Some(answer));
+        assert!(parsed.cards[0] == card_of(&conn, id));
+        // Into another store: the same birthday and the same answer.
+        let (_dir2, other) = store();
+        let result = import_text(&other, &vcf, &plain());
+        assert_eq!(result.added, 1);
+        let p = get_person(&other, result.touched[0]).unwrap();
+        assert_eq!(p.born_on.as_deref(), Some(born));
+        assert_eq!(p.leap_day, Some(answer));
+    }
+
+    // An unanswered person writes nothing, and reads back unanswered.
+    let (_dir, conn) = store();
+    let id = leapling(&conn, "--02-29", None);
+    let vcf = export_vcf(&conn, &ExportScope::Ids(vec![id]));
+    assert!(!vcf.contains("X-PM-LEAP-DAY"));
+    assert_eq!(parse_vcf(vcf.as_bytes()).cards[0].leap_day, None);
+}
+
+#[test]
+fn a_leap_day_in_a_file_counts_only_on_a_29_february_birthday() {
+    // On a 15 March birthday, on no birthday, or with a word PM doesn't know: ignored.
+    for lines in [
+        vec!["BDAY:--03-15", "X-PM-LEAP-DAY:mar1"],
+        vec!["X-PM-LEAP-DAY:feb28"],
+        vec!["BDAY:--02-29", "X-PM-LEAP-DAY:feb29"],
+        vec!["BDAY:--02-29", "X-PM-LEAP-DAY:"],
+        vec!["BDAY:--02-29", "X-PM-LEAP-DAY:MAR1"],
+    ] {
+        let file = card_file(&lines);
+        let parsed = parse_vcf(file.as_bytes());
+        assert_eq!(parsed.cards.len(), 1);
+        assert_eq!(parsed.cards[0].leap_day, None, "{lines:?}");
+        // And an import stores none.
+        let (_dir, conn) = store();
+        let result = import_text(&conn, &file, &plain());
+        assert_eq!(stored_leap(&conn, result.touched[0]), None, "{lines:?}");
+    }
+    // The word on a 29 February birthday is read, with surrounding space ignored.
+    let file = card_file(&["BDAY:--02-29", "X-PM-LEAP-DAY: mar1 "]);
+    assert_eq!(
+        parse_vcf(file.as_bytes()).cards[0].leap_day,
+        Some(LeapDay::Mar1)
+    );
+    // The file does not report its own X-PM word as an unknown property.
+    assert!(parse_vcf(file.as_bytes()).ignored.is_empty());
+}
+
+#[test]
+fn a_reimport_fills_an_answer_pm_does_not_hold_and_never_overwrites_one() {
+    let (_dir, conn) = store();
+    let unanswered = leapling(&conn, "--02-29", None);
+    let answered = leapling(&conn, "--02-29", Some(LeapDay::Feb28));
+    // Same people by their own ids, as a file exported from this store would carry them.
+    for (id, file_word, expect) in [
+        (unanswered, "mar1", Some(LeapDay::Mar1)),
+        (answered, "mar1", Some(LeapDay::Feb28)),
+    ] {
+        let ident = get_person(&conn, id).unwrap().ident;
+        let uid = format!("UID:{ident}");
+        let file = card_file(&["BDAY:--02-29", &format!("X-PM-LEAP-DAY:{file_word}"), &uid]);
+        import_text(&conn, &file, &plain());
+        assert_eq!(get_person(&conn, id).unwrap().leap_day, expect);
     }
 }
 

@@ -42,7 +42,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "people-editor": {
     title: "Adding and editing a person",
-    body: "Fill in what you know: names, emails, phone numbers, addresses, links and socials, work and school, a birthday, where you met, and your own custom fields. Each value has a label, and you can pick one of the suggestions or choose Other label and write your own. Use the arrows to put values in order: the first of each kind is their main one. Dates are three small boxes, day, month and year, and a birthday's year is optional. Nothing is saved until you press Save. If this person changed somewhere else while you were editing, PM keeps what you typed, says so, and lets you load their latest details instead.",
+    body: "Fill in what you know: names, emails, phone numbers, addresses, links and socials, work and school, a birthday, where you met, and your own custom fields. Each value has a label, and you can pick one of the suggestions or choose Other label and write your own. Use the arrows to put values in order: the first of each kind is their main one. Dates are three small boxes, day, month and year, and a birthday's year is optional. For a birthday on 29 February PM asks which day to mark it on in other years, 28 February or 1 March, because people born that day differ; until you say, PM uses 28 February. Nothing is saved until you press Save. If this person changed somewhere else while you were editing, PM keeps what you typed, says so, and lets you load their latest details instead.",
   },
   "people-labels": {
     title: "Labels",

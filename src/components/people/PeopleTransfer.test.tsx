@@ -96,6 +96,7 @@ function row(id: number, name: string, over: Partial<PersonRow> = {}): PersonRow
     google_state: null,
     trashed_at: null,
     birthday: null,
+    leap_day: null,
     ...over,
   };
 }

@@ -345,6 +345,7 @@ describe("CommandPalette", () => {
       google_state: null,
       trashed_at: null,
       birthday: null,
+      leap_day: null,
     });
     const found = [1, 2, 3, 4, 5, 6, 7, 8].map((i) =>
       person(i, `Sam Example ${i}`, i === 1 ? "Example Ltd" : null),
@@ -402,6 +403,7 @@ describe("CommandPalette", () => {
         google_state: null,
         trashed_at: null,
         birthday: null,
+        leap_day: null,
       } satisfies PersonRow,
     ]);
     const onOpenPerson = vi.fn();

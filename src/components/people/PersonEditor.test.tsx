@@ -59,6 +59,7 @@ function ada(over: Partial<Person> = {}): Person {
     name_prefix: "",
     name_suffix: "",
     birthday: null,
+    leap_day: null,
     met_where: "",
     met_on: null,
     notes: "Keep me.",
@@ -284,6 +285,68 @@ describe("dates are three small fields", () => {
     expect((screen.getByLabelText("Birthday day") as HTMLInputElement).value).toBe("29");
     expect((screen.getByLabelText("Birthday month") as HTMLInputElement).value).toBe("02");
     expect((screen.getByLabelText("Birthday year") as HTMLInputElement).value).toBe("");
+  });
+});
+
+describe("a 29 February birthday asks which day to mark in other years", () => {
+  const ASK = "In years without 29 February, mark it on";
+  const NEEDED = "Choose which day to mark the birthday in other years.";
+
+  it("shows the choice only while the fields read 29 February, neither picked", async () => {
+    await open(ada());
+    expect(screen.queryByText(ASK)).toBeNull();
+    type("Birthday day", "29");
+    expect(screen.queryByText(ASK)).toBeNull();
+    type("Birthday month", "2");
+    expect(screen.getByText(ASK)).toBeTruthy();
+    expect((screen.getByRole("radio", { name: "28 February" }) as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect((screen.getByRole("radio", { name: "1 March" }) as HTMLInputElement).checked).toBe(
+      false,
+    );
+    type("Birthday month", "03");
+    expect(screen.queryByText(ASK)).toBeNull();
+  });
+
+  it("refuses to save until one is picked, then sends it", async () => {
+    await open(ada());
+    type("Birthday day", "29");
+    type("Birthday month", "02");
+    await save();
+    expect(screen.getByText(NEEDED)).toBeTruthy();
+    expect(ipc.updatePerson).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("radio", { name: "1 March" }));
+    await save();
+    expect(sentDraft().birthday).toBe("--02-29");
+    expect(sentDraft().leap_day).toBe("mar1");
+  });
+
+  it("forgets the choice when the date changes away, and sends none", async () => {
+    await open(ada());
+    type("Birthday day", "29");
+    type("Birthday month", "02");
+    fireEvent.click(screen.getByRole("radio", { name: "28 February" }));
+    type("Birthday day", "28");
+    expect(screen.queryByText(ASK)).toBeNull();
+    // Back to 29 February: asked again, with nothing picked.
+    type("Birthday day", "29");
+    expect((screen.getByRole("radio", { name: "28 February" }) as HTMLInputElement).checked).toBe(
+      false,
+    );
+    type("Birthday day", "28");
+    await save();
+    expect(sentDraft().birthday).toBe("--02-28");
+    expect(sentDraft().leap_day).toBeNull();
+  });
+
+  it("opens a stored answer already picked", async () => {
+    await open(ada({ birthday: "2000-02-29", leap_day: "feb28" }));
+    expect((screen.getByRole("radio", { name: "28 February" }) as HTMLInputElement).checked).toBe(
+      true,
+    );
+    await save();
+    expect(sentDraft().leap_day).toBe("feb28");
   });
 });
 

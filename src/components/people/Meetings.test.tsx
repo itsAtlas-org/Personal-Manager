@@ -58,6 +58,7 @@ const row = (id: number, name: string): PersonRow => ({
   google_state: null,
   trashed_at: null,
   birthday: null,
+  leap_day: null,
 });
 
 function wrap(node: React.ReactNode) {

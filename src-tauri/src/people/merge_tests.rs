@@ -13,7 +13,9 @@ use super::dupes::{self, DupesReport, Reason, GROUP_MAX, PAIRS_MAX};
 use super::merge::{
     self, MergeChoices, NotesChoice, Side, UndoShelf, UndoStep, NO_LONGER, UNDO_HOLD,
 };
-use super::tests::{add_meeting, add_source, count, detail, draft, person, store, text};
+use super::tests::{
+    add_meeting, add_source, count, detail, draft, leapling, person, store, stored_leap, text,
+};
 use super::*;
 
 fn with(given: &str, family: &str, details: Vec<DetailDraft>) -> PersonDraft {
@@ -613,6 +615,106 @@ fn a_merge_asks_only_where_a_field_differs_and_the_other_is_dropped() {
     assert_eq!(kept.met_where, "the fair");
     assert_eq!(kept.notes, "first\n\nsecond");
     assert_eq!(kept.folded_idents.len(), 1, "the folded uid is recorded");
+}
+
+#[test]
+fn a_merge_keeps_the_leap_day_of_the_kept_birthday() {
+    let kept = |conn: &Connection, id: i64| {
+        let p = get_person(conn, id).unwrap();
+        (p.born_on, p.leap_day)
+    };
+    let pick = |side: Side| MergeChoices {
+        born_on: Some(side),
+        ..Default::default()
+    };
+
+    // Both answered, differently: the answer is part of the birthday's choice, so it is asked.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "--02-29", Some(LeapDay::Feb28));
+    let b = leapling(&conn, "--02-29", Some(LeapDay::Mar1));
+    assert!(merge::preview(&conn, a, b).unwrap().differs.born_on);
+    assert!(merge::merge_people(&conn, a, b, &MergeChoices::default()).is_err());
+    assert!(get_person(&conn, b).is_ok(), "nothing is dropped unasked");
+    merge::merge_people(&conn, a, b, &pick(Side::Folded)).unwrap();
+    assert_eq!(
+        kept(&conn, a),
+        (Some("--02-29".into()), Some(LeapDay::Mar1))
+    );
+    assert_eq!(stored_leap(&conn, a).as_deref(), Some("mar1"));
+
+    // The survivor's answer, when the survivor's is picked.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "--02-29", Some(LeapDay::Feb28));
+    let b = leapling(&conn, "--02-29", Some(LeapDay::Mar1));
+    merge::merge_people(&conn, a, b, &pick(Side::Survivor)).unwrap();
+    assert_eq!(kept(&conn, a).1, Some(LeapDay::Feb28));
+
+    // Only one answered, same birthday: nothing differs, and the answer is kept either way round.
+    for (a_answer, b_answer) in [(Some(LeapDay::Mar1), None), (None, Some(LeapDay::Mar1))] {
+        let (_d, conn) = store();
+        let a = leapling(&conn, "--02-29", a_answer);
+        let b = leapling(&conn, "--02-29", b_answer);
+        assert!(!merge::preview(&conn, a, b).unwrap().differs.born_on);
+        merge_ab(&conn, a, b);
+        assert_eq!(kept(&conn, a).1, Some(LeapDay::Mar1));
+    }
+
+    // One side has no birthday: the other's birthday and answer fill it.
+    let (_d, conn) = store();
+    let a = person(&conn, "Leap", "Day");
+    let b = leapling(&conn, "2000-02-29", Some(LeapDay::Mar1));
+    merge_ab(&conn, a, b);
+    assert_eq!(
+        kept(&conn, a),
+        (Some("2000-02-29".into()), Some(LeapDay::Mar1))
+    );
+
+    // Neither answered: still not answered.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "--02-29", None);
+    let b = leapling(&conn, "--02-29", None);
+    merge_ab(&conn, a, b);
+    assert_eq!(kept(&conn, a), (Some("--02-29".into()), None));
+
+    // Different birthdays: the answer goes with the one kept, and a kept date that isn't 29
+    // February leaves no answer behind.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "2000-02-29", Some(LeapDay::Mar1));
+    let mut other = draft("Leap", "Day");
+    other.born_on = Some("--03-04".into());
+    let b = create_person(&conn, &other).unwrap();
+    merge::merge_people(&conn, a, b, &pick(Side::Folded)).unwrap();
+    assert_eq!(kept(&conn, a), (Some("--03-04".into()), None));
+    let (_d, conn) = store();
+    let a = leapling(&conn, "2000-02-29", Some(LeapDay::Mar1));
+    let b = create_person(&conn, &other).unwrap();
+    merge::merge_people(&conn, a, b, &pick(Side::Survivor)).unwrap();
+    assert_eq!(
+        kept(&conn, a),
+        (Some("2000-02-29".into()), Some(LeapDay::Mar1))
+    );
+
+    // Two 29 February birthdays that differ only in the year: the kept one has no answer, so the
+    // other's is not lost.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "2000-02-29", None);
+    let b = leapling(&conn, "--02-29", Some(LeapDay::Feb28));
+    merge::merge_people(&conn, a, b, &pick(Side::Survivor)).unwrap();
+    assert_eq!(
+        kept(&conn, a),
+        (Some("2000-02-29".into()), Some(LeapDay::Feb28))
+    );
+
+    // Undo puts the answers back as they were.
+    let (_d, conn) = store();
+    let a = leapling(&conn, "--02-29", Some(LeapDay::Feb28));
+    let b = leapling(&conn, "--02-29", Some(LeapDay::Mar1));
+    let step = merge::merge_people(&conn, a, b, &pick(Side::Folded))
+        .unwrap()
+        .1;
+    assert_eq!(merge::undo_steps(&conn, &[step]).unwrap(), 1);
+    assert_eq!(stored_leap(&conn, a).as_deref(), Some("feb28"));
+    assert_eq!(stored_leap(&conn, b).as_deref(), Some("mar1"));
 }
 
 #[test]

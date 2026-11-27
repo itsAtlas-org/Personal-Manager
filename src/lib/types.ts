@@ -3572,6 +3572,10 @@ export interface SweepPlan {
 // Field names are the wire names, not the Rust ones: a person's `uid` is `people::Person::ident`
 // and a birthday is `born_on`, renamed in serde so CodeQL's name heuristics stay quiet.
 
+/** Which day a 29 February birthday is marked on in years without one. Mirrors `people::LEAP_DAYS`;
+ *  null on a person means "not answered yet", which reads as 28 February. */
+export type LeapDay = "feb28" | "mar1";
+
 /** What a detail is. Mirrors `people::DETAIL_KINDS`. */
 export type PersonDetailKind =
   | "email"
@@ -3643,6 +3647,8 @@ export interface Person {
   name_suffix: string;
   /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
   birthday: string | null;
+  /** For a 29 February birthday, the day to mark in other years; null until answered. */
+  leap_day: LeapDay | null;
   met_where: string;
   /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. */
   met_on: string | null;
@@ -3681,6 +3687,8 @@ export interface PersonRow {
   trashed_at: string | null;
   /** `YYYY-MM-DD`, or `--MM-DD` when the year is unknown. */
   birthday: string | null;
+  /** The 29 February answer, so the strip needs no second trip. */
+  leap_day: LeapDay | null;
 }
 
 /** One detail to save (`people::DetailDraft`). A detail that carries its `id` is updated in
@@ -3707,6 +3715,8 @@ export interface PersonDraft {
   name_prefix: string;
   name_suffix: string;
   birthday: string | null;
+  /** Only kept with a 29 February birthday: any other birthday stores nothing here. */
+  leap_day: LeapDay | null;
   met_where: string;
   met_on: string | null;
   notes: string;
@@ -3881,6 +3891,7 @@ export interface DupeCard {
   uid: string;
   display_name: string;
   birthday: string | null;
+  leap_day: LeapDay | null;
   met_where: string;
   met_on: string | null;
   /** The start of the note, or "A long note". */

@@ -12,6 +12,7 @@ import type { Person, PersonDetail, PersonLabel, PersonRow } from "../../lib/typ
 
 const ipc = vi.hoisted(() => ({
   getPerson: vi.fn(),
+  updatePerson: vi.fn(),
   listProjects: vi.fn(),
   linkPersonProject: vi.fn(),
   unlinkPersonProject: vi.fn(),
@@ -53,6 +54,7 @@ const row: PersonRow = {
   google_state: null,
   trashed_at: null,
   birthday: null,
+  leap_day: null,
 };
 
 const LABELS: PersonLabel[] = [
@@ -87,6 +89,7 @@ function bare(over: Partial<Person> = {}): Person {
     name_prefix: "",
     name_suffix: "",
     birthday: null,
+    leap_day: null,
     met_where: "",
     met_on: null,
     notes: "",
@@ -349,6 +352,81 @@ describe("dates", () => {
   it("counts the age down by one before the birthday has come this year", async () => {
     await show(bare({ birthday: "1990-12-25" }));
     expect(within(region("Dates")!).getByText("25-12-1990 (35)")).toBeTruthy();
+  });
+
+  it("asks a 29 February birthday with no answer which day to mark, and saves the click", async () => {
+    ipc.updatePerson.mockResolvedValue({ id: 1, display_name: "Ada Example", updated_at: "x" });
+    await show(bare({ birthday: "--02-29" }));
+    const dates = region("Dates")!;
+    expect(
+      within(dates).getByText("Born on 29 February. Which day should PM mark in other years?"),
+    ).toBeTruthy();
+    fireEvent.click(within(dates).getByRole("button", { name: "1 March" }));
+    await act(async () => {});
+    expect(ipc.updatePerson).toHaveBeenCalledTimes(1);
+    const [id, draft, base] = ipc.updatePerson.mock.calls[0];
+    expect(id).toBe(1);
+    expect(base).toBe("2026-11-20T10:00:00Z");
+    expect(draft.birthday).toBe("--02-29");
+    expect(draft.leap_day).toBe("mar1");
+    // The whole record goes, not just the answer.
+    expect(draft.display_name).toBe("Ada Example");
+  });
+
+  it("moves focus to the answer line once the question is answered", async () => {
+    ipc.updatePerson.mockResolvedValue({ id: 1, display_name: "Ada Example", updated_at: "x" });
+    const asked = bare({ birthday: "--02-29" });
+    ipc.getPerson.mockResolvedValue(asked);
+    const ui = (version: number) => (
+      <ThemeProvider>
+        <PersonRecord
+          row={{ ...row, display_name: asked.display_name }}
+          version={version}
+          labels={LABELS}
+          {...handlers}
+        />
+      </ThemeProvider>
+    );
+    const { rerender } = render(ui(0));
+    await act(async () => {});
+    const button = screen.getByRole("button", { name: "1 March" });
+    button.focus();
+    fireEvent.click(button);
+    await act(async () => {});
+    ipc.getPerson.mockResolvedValue({ ...asked, leap_day: "mar1" });
+    rerender(ui(1));
+    await act(async () => {});
+    const line = screen.getByText("In years without 29 February, marked on 1 March.");
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(line.closest("li"));
+  });
+
+  it("says the answer instead once there is one, and does not ask again", async () => {
+    await show(bare({ birthday: "--02-29", leap_day: "feb28" }));
+    const dates = region("Dates")!;
+    expect(within(dates).queryByText(/Which day should PM mark/)).toBeNull();
+    expect(
+      within(dates).getByText("In years without 29 February, marked on 28 February."),
+    ).toBeTruthy();
+  });
+
+  it("does not ask about any other birthday, or about someone in Trash", async () => {
+    await show(bare({ birthday: "--04-15" }));
+    expect(screen.queryByText(/Which day should PM mark/)).toBeNull();
+    cleanup();
+    await show(bare({ birthday: "--02-29", trashed_at: "2026-11-25T10:00:00Z" }));
+    expect(screen.queryByText(/Which day should PM mark/)).toBeNull();
+  });
+
+  it("says so when the record changed since it was read, and keeps asking", async () => {
+    ipc.updatePerson.mockRejectedValue(
+      "This person was changed somewhere else since you opened them. Close and reopen them to see the latest.",
+    );
+    await show(bare({ birthday: "--02-29" }));
+    fireEvent.click(screen.getByRole("button", { name: "28 February" }));
+    await act(async () => {});
+    expect(screen.getByText(/They were changed somewhere else/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "1 March" })).toBeTruthy();
   });
 
   it("shows another date and when you met, in the house format", async () => {

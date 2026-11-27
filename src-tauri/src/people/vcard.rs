@@ -782,6 +782,7 @@ fn is_mapped(name: &str) -> bool {
             | "X-GOOGLE-LABEL"
             | "X-PM-MET-WHERE"
             | "X-PM-MET-ON"
+            | "X-PM-LEAP-DAY"
             | "X-PM-LOCATION"
             | "X-PM-SCHOOL"
             | "X-PM-FORMER-NAME"
@@ -1634,6 +1635,10 @@ fn build_card(props: &[Prop], warnings: &mut BTreeMap<Warning, usize>) -> Built 
             }
             "X-PM-MET-WHERE" => card.met_where = value.to_string(),
             "X-PM-MET-ON" => card.met_on = Some(value.to_string()),
+            // Any other word is no answer; `Card::finish` drops it unless the BDAY is 29 February.
+            "X-PM-LEAP-DAY" => {
+                card.leap_day = super::LeapDay::from_word(value.trim());
+            }
             "X-PM-LOCATION" if !value.is_empty() => {
                 found.push(Found {
                     detail: CardDetail {

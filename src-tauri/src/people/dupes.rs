@@ -90,6 +90,8 @@ pub struct DupeCard {
     pub display_name: String,
     #[serde(rename = "birthday")]
     pub born_on: Option<String>,
+    /// The 29 February answer, shown with the birthday (E22).
+    pub leap_day: Option<super::LeapDay>,
     pub met_where: String,
     pub met_on: Option<String>,
     /// The start of the note, or a word for a long one.
@@ -260,6 +262,7 @@ fn card_of(p: &Facts) -> DupeCard {
         ident: p.ident.clone(),
         display_name: p.display_name.clone(),
         born_on: p.born_on.clone(),
+        leap_day: p.leap_day,
         met_where: p.met_where.clone(),
         met_on: p.met_on.clone(),
         note: if p.notes_are_fingerprint() {

@@ -14,7 +14,7 @@ import { useEffect, useId, useState } from "react";
 import { getPerson, mergePeople, mergePeoplePreview } from "../../lib/ipc";
 import { errorWords } from "../../lib/people";
 import { differingFields, mergeBody, mergeExtrasLine } from "../../lib/peopleMerge";
-import { describeBirthday, formatPartial } from "../../lib/partialDate";
+import { describeBirthdayChoice, formatPartial } from "../../lib/partialDate";
 import type {
   MergeChoices,
   MergeDone,
@@ -57,7 +57,7 @@ function valueOf(field: Field, p: Person, today: Date): string {
     case "name":
       return nameText(p);
     case "birthday":
-      return describeBirthday(p.birthday, today) ?? p.birthday ?? "nothing";
+      return describeBirthdayChoice(p.birthday, today, p.leap_day) ?? p.birthday ?? "nothing";
     case "met":
       return metText(p);
     case "notes":

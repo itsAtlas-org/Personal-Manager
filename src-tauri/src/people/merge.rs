@@ -34,10 +34,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::fold::fold_key;
+use super::partial_date;
 use super::sources::parse_ident_list;
 use super::{
     empty_to_none, in_tx, new_ident, no_such_person, now, refuse, rekey_person,
-    require_transaction, touch_people, DETAILS_MAX, LABELS_PER_PERSON_MAX, NOTES_MAX,
+    require_transaction, touch_people, LeapDay, DETAILS_MAX, LABELS_PER_PERSON_MAX, NOTES_MAX,
 };
 use crate::error::{Error, Result};
 
@@ -82,6 +83,7 @@ pub(crate) struct Facts {
     pub prefix: String,
     pub suffix: String,
     pub born_on: Option<String>,
+    pub leap_day: Option<LeapDay>,
     pub met_where: String,
     pub met_on: Option<String>,
     /// The note, or (a scan only, past [`BIG_NOTE_BYTES`]) a fingerprint that starts with a NUL,
@@ -124,7 +126,7 @@ fn load_where(
     let mut stmt = conn.prepare(&format!(
         "SELECT p.id, p.uid, p.display_name, p.given_name, p.middle_name, p.family_name, \
                 p.name_prefix, p.name_suffix, p.birthday, p.met_where, p.met_on, p.notes, \
-                p.starred, p.created_at, p.trashed_at IS NOT NULL \
+                p.starred, p.created_at, p.trashed_at IS NOT NULL, p.leap_day \
            FROM people p WHERE {filter} ORDER BY p.id"
     ))?;
     let mut people: Vec<Facts> = Vec::new();
@@ -147,6 +149,10 @@ fn load_where(
             starred: r.get(12)?,
             created_at: r.get(13)?,
             trashed: r.get(14)?,
+            leap_day: r
+                .get::<_, Option<String>>(15)?
+                .as_deref()
+                .and_then(LeapDay::from_word),
             details: Vec::new(),
         });
     }
@@ -231,7 +237,10 @@ pub(crate) fn differences(a: &Facts, b: &Facts) -> Differs {
             || both_differ(&a.family, &b.family)
             || both_differ(&a.prefix, &b.prefix)
             || both_differ(&a.suffix, &b.suffix),
-        born_on: both_differ_opt(&a.born_on, &b.born_on),
+        // The 29 February answer is part of the birthday: two answers that disagree are a
+        // choice to make even when the birthdays read the same (E22).
+        born_on: both_differ_opt(&a.born_on, &b.born_on)
+            || matches!((a.leap_day, b.leap_day), (Some(x), Some(y)) if x != y),
         met: both_differ(&a.met_where, &b.met_where) || both_differ_opt(&a.met_on, &b.met_on),
         notes: both_differ(a.notes.trim(), b.notes.trim()),
     }
@@ -646,6 +655,7 @@ struct Plan {
     from: Facts,
     name: [String; 6],
     born_on: Option<String>,
+    leap_day: Option<LeapDay>,
     met_where: String,
     met_on: Option<String>,
     notes: String,
@@ -704,16 +714,21 @@ fn plan(conn: &Connection, into: i64, from: i64, choices: &MergeChoices) -> Resu
         std::array::from_fn(|i| either(&na[i], &nb[i]))
     };
 
-    let born_on = if diff.born_on {
+    // The 29 February answer travels with the kept birthday; a kept 29 February with no answer
+    // takes the other side's, so an answer is never dropped for want of asking (E22).
+    let (born_on, leap_day) = if diff.born_on {
         need(choices.born_on.is_some(), "birthday")?;
-        pick(
-            choices.born_on.unwrap_or(Side::Survivor),
-            a.born_on.clone(),
-            b.born_on.clone(),
-        )
+        let side = choices.born_on.unwrap_or(Side::Survivor);
+        let born = pick(side, a.born_on.clone(), b.born_on.clone());
+        let leap = pick(side, a.leap_day, b.leap_day).or(pick(side, b.leap_day, a.leap_day));
+        (born, leap)
     } else {
-        a.born_on.clone().or_else(|| b.born_on.clone())
+        (
+            a.born_on.clone().or_else(|| b.born_on.clone()),
+            a.leap_day.or(b.leap_day),
+        )
     };
+    let leap_day = partial_date::kept_leap_day(born_on.as_deref(), leap_day);
 
     let (met_where, met_on) = if diff.met {
         need(choices.met.is_some(), "place and date you met")?;
@@ -785,6 +800,7 @@ fn plan(conn: &Connection, into: i64, from: i64, choices: &MergeChoices) -> Resu
     Ok(Plan {
         name,
         born_on,
+        leap_day,
         met_where,
         met_on,
         notes,
@@ -1007,14 +1023,14 @@ fn apply(tx: &Connection, plan: Plan) -> Result<UndoStep> {
     }
 
     // The survivor's row: the kept values, the folded uids, the earlier start. The 29 February
-    // answer (E22, a later slice) travels with the birthday that is kept, so that slice adds its
-    // column to this UPDATE beside `birthday`; Undo already carries it (its images are `SELECT *`).
+    // answer (E22) travels with the birthday that is kept; Undo carries it (its images are
+    // `SELECT *`).
     let [display, prefix, given, middle, family, suffix] = &plan.name;
     tx.execute(
         "UPDATE people SET display_name = ?2, name_prefix = ?3, given_name = ?4, middle_name = ?5, \
                            family_name = ?6, name_suffix = ?7, birthday = ?8, met_where = ?9, \
                            met_on = ?10, notes = ?11, starred = ?12, created_at = ?13, \
-                           merged_uids = ?14 \
+                           merged_uids = ?14, leap_day = ?15 \
           WHERE id = ?1",
         params![
             into,
@@ -1030,7 +1046,8 @@ fn apply(tx: &Connection, plan: Plan) -> Result<UndoStep> {
             plan.notes,
             plan.starred,
             plan.created_at,
-            serde_json::to_string(&plan.folded_idents).map_err(|_| refuse("internal error"))?
+            serde_json::to_string(&plan.folded_idents).map_err(|_| refuse("internal error"))?,
+            plan.leap_day.map(LeapDay::word)
         ],
     )?;
 

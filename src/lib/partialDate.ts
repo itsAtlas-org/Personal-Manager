@@ -11,6 +11,8 @@
 // input, which WebKitGTK doesn't draw. `DateFields` is what those three hold as typed text, and
 // `isoFromFields` turns them into a stored value or says in plain words why it can't.
 
+import type { LeapDay } from "./types";
+
 /** One parsed date. At least a year, or a month and a day, is always present. */
 export interface PartialDate {
   year: number | null;
@@ -113,25 +115,69 @@ export function formatPartial(iso: string | null | undefined): string {
   return toDisplay(d);
 }
 
+/** Whether a stored birthday is 29 February, with or without a year (Rust's `is_leap_day_born_on`). */
+export function isLeapDayBirthday(iso: string | null | undefined): boolean {
+  const d = parsePartial(iso);
+  return d !== null && d.month === 2 && d.day === 29;
+}
+
+/** The civil day a birthday falls on in `year`, as month and day. A 29 February one lands on itself
+ *  in a leap year and otherwise on the day the person chose, 28 February or 1 March; unanswered
+ *  reads as 28 February (E22). The one owner of this rule on this side: the strip and the age both
+ *  ask here. Rust's `born_on_in` is its twin. Null for a date with no day. */
+export function birthdayIn(
+  d: PartialDate,
+  leap: LeapDay | null | undefined,
+  year: number,
+): { month: number; day: number } | null {
+  if (d.month === null || d.day === null) return null;
+  if (d.month === 2 && d.day === 29 && !isLeap(year))
+    return leap === "mar1" ? { month: 3, day: 1 } : { month: 2, day: 28 };
+  return { month: d.month, day: d.day };
+}
+
 /** The age on `today` of someone born on `d`, or null with no year or day to count from, or when the
- *  year is still ahead (a typo has no age to say). */
-export function ageOn(d: PartialDate, today: Date): number | null {
-  if (d.year === null || d.month === null || d.day === null) return null;
+ *  year is still ahead (a typo has no age to say). A leapling turns a year older on the day their
+ *  `leap` answer marks in a common year. */
+export function ageOn(d: PartialDate, today: Date, leap?: LeapDay | null): number | null {
+  if (d.year === null) return null;
+  const on = birthdayIn(d, leap, today.getFullYear());
+  if (on === null) return null;
   const m = today.getMonth() + 1;
-  const hadIt = m > d.month || (m === d.month && today.getDate() >= d.day);
+  const hadIt = m > on.month || (m === on.month && today.getDate() >= on.day);
   const age = today.getFullYear() - d.year - (hadIt ? 0 : 1);
   return age >= 0 ? age : null;
 }
 
 /** A birthday as the record words it: "15 April" while the year is unknown, "15-04-1990 (36)" once it
- *  is (always with the year, never dropped, and with the age as of `today`). Null for a value that
- *  isn't a stored birthday. */
-export function describeBirthday(iso: string | null | undefined, today: Date): string | null {
+ *  is (always with the year, never dropped, and with the age as of `today`, which follows a 29
+ *  February birthday's `leap` answer). Null for a value that isn't a stored birthday. */
+export function describeBirthday(
+  iso: string | null | undefined,
+  today: Date,
+  leap?: LeapDay | null,
+): string | null {
   const d = parsePartial(iso);
   if (!d || d.month === null || d.day === null) return null;
   if (d.year === null) return toDisplay(d);
-  const age = ageOn(d, today);
+  const age = ageOn(d, today, leap);
   return `${toDisplay(d)}${age === null ? "" : ` (${age})`}`;
+}
+
+/** The words for each answer, as the buttons and the lines say them. */
+export const LEAP_DAY_WORDS: Record<LeapDay, string> = { feb28: "28 February", mar1: "1 March" };
+
+/** A birthday as `describeBirthday` words it, and for a 29 February one the answer beside it
+ *  ("29 February, marked on 1 March in other years"): what a merge shows so the choice between two
+ *  birthdays includes the day each would be marked on (E22). */
+export function describeBirthdayChoice(
+  iso: string | null | undefined,
+  today: Date,
+  leap?: LeapDay | null,
+): string | null {
+  const text = describeBirthday(iso, today, leap);
+  if (text === null || !leap || !isLeapDayBirthday(iso)) return text;
+  return `${text}, marked on ${LEAP_DAY_WORDS[leap]} in other years`;
 }
 
 // --- the three fields ------------------------------------------------------------------------------
