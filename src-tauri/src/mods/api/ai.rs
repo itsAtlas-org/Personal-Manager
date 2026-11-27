@@ -439,10 +439,20 @@ pub(super) async fn run<H: Host>(
         host.model()
             .complete(&plan, &request.messages, request.max_tokens, &booking.wire)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
                 // What a provider said can echo the prompt, so none of it is logged or sent on.
                 eprintln!("mods: an ai.complete model call failed");
-                ModError::model_call_failed()
+                // The person's daily limit paused the provider before anything was sent: say so in
+                // the money code's fixed words, never the limit's own sentence (it names today's
+                // spend). The booking comes back through the wire mark like any call that never left.
+                let paused = e
+                    .provider_failure()
+                    .is_some_and(|f| f.class == crate::error::FailureClass::LimitReached);
+                if paused {
+                    ModError::ai_provider_paused()
+                } else {
+                    ModError::model_call_failed()
+                }
             })
     })
     .await;

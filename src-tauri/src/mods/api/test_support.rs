@@ -489,6 +489,9 @@ pub enum Answer {
     HangBeforeWire,
     /// The request could not connect (offline): it was announced, and failed before a connection.
     ConnectFail,
+    /// The person's daily spending limit paused the provider: refused before anything was sent,
+    /// with the limit's own sentence (today's spend and the limit in dollars) that a mod must not see.
+    LimitReached,
 }
 
 impl Answer {
@@ -686,7 +689,10 @@ impl ModelEdge for FakeModel {
     ) -> crate::error::Result<LlmOutcome> {
         // A request goes out unless the script says it was stopped first.
         let answer = self.answer.lock().unwrap().clone();
-        if !matches!(answer, Answer::FailBeforeWire | Answer::HangBeforeWire) {
+        if !matches!(
+            answer,
+            Answer::FailBeforeWire | Answer::HangBeforeWire | Answer::LimitReached
+        ) {
             wire.sending();
         }
         self.sent.lock().unwrap().push(Sent {
@@ -747,6 +753,16 @@ impl ModelEdge for FakeModel {
                     "PROVIDER-TEXT error sending request".into(),
                 ))
             }
+            Answer::LimitReached => Err(crate::error::Error::Provider(Box::new(
+                crate::error::ProviderFailure {
+                    class: crate::error::FailureClass::LimitReached,
+                    billing: crate::error::Billing::NeverLeft,
+                    provider: crate::llm_gateway::CloudProvider::OpenRouter,
+                    model: None,
+                    message: "PROVIDER-TEXT OpenRouter is paused: $5.12 of your $5.00 limit."
+                        .into(),
+                },
+            ))),
             Answer::Hang | Answer::HangBeforeWire => std::future::pending().await,
         }
     }
