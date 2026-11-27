@@ -607,8 +607,20 @@ describe("sources", () => {
     });
     await show(person);
     const sources = within(region("Sources")!);
-    expect(sources.getByText(/^Imported from a file on 12-11/)).toBeTruthy();
-    expect(sources.getByText(/^Linked from another address book on 13-11/)).toBeTruthy();
+    // The day is the one the machine's zone sees (09:00 UTC is the day before west of UTC-9), as
+    // the record shows it: DD-MM of the stored instant, read locally.
+    const day = (iso: string) => {
+      const at = new Date(iso);
+      return `${String(at.getDate()).padStart(2, "0")}-${String(at.getMonth() + 1).padStart(2, "0")}`;
+    };
+    expect(
+      sources.getByText(new RegExp(`^Imported from a file on ${day("2026-11-12T09:00:00Z")}`)),
+    ).toBeTruthy();
+    expect(
+      sources.getByText(
+        new RegExp(`^Linked from another address book on ${day("2026-11-13T09:00:00Z")}`),
+      ),
+    ).toBeTruthy();
     expect(sources.queryByText(/Google/)).toBeNull();
     expect(sources.queryByText(/someone@example.com/)).toBeNull();
   });

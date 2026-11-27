@@ -3309,10 +3309,18 @@ describe("CalendarView: the event's right-click menu", () => {
   });
 
   it("leaves Edit… and Delete… out where editing is off, as the popover does", async () => {
-    ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
-    await mount();
-    fireEvent.contextMenu(chip());
-    expect(labels()).toEqual(["Open details"]);
+    // Noon today, after the 07:00 Standup has ended: "Log who you met" is offered on any event
+    // that is over, editing or not, so the list depends on the clock unless it is pinned.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(`${today}T12:00:00`));
+    try {
+      ipc.calendarOverview.mockResolvedValue({ ...overview, editing: { [ME]: "off" } });
+      await mount();
+      fireEvent.contextMenu(chip());
+      expect(labels()).toEqual(["Open details", "Log who you met"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Open details opens the popover; Delete… opens the question and deletes nothing", async () => {
