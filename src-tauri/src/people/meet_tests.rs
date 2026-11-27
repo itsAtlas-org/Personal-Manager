@@ -14,12 +14,13 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use super::meet::{
-    answer_meeting, owed_meetings_at, MeetingAnswer, MeetingAnswered, NewGuest, OwedMeeting,
-    PersonRef,
+    answer_meeting, event_guests, owed_meetings_at, MeetingAnswer, MeetingAnswered, NewGuest,
+    OwedMeeting, PersonRef,
 };
 use super::tests::{count, detail, draft, person, store, text};
 use super::timeline::list_timeline;
 use super::*;
+use crate::calendar::Attendee;
 
 fn pinned() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 26, 12, 0, 0).unwrap()
@@ -655,6 +656,49 @@ fn ticking_a_new_guest_whose_address_is_in_trash_restores_that_person_instead() 
     assert_eq!((done.created, done.restored), (0, 1));
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM people"), 1);
     assert!(get_person(&conn, tess).unwrap().trashed_at.is_none());
+}
+
+#[test]
+fn an_events_guests_are_sorted_the_way_the_owed_list_sorts_them() {
+    let (_d, conn) = store();
+    calendars(&conn);
+    let mut d = draft("Ann", "Able");
+    d.details = vec![detail("email", "Ann@Example.com")];
+    let ann = create_person(&conn, &d).unwrap();
+    let mut d = draft("Tess", "Trashed");
+    d.details = vec![detail("email", "tess@example.com")];
+    let tess = create_person(&conn, &d).unwrap();
+    trash_people(&conn, &[tess], &[]).unwrap();
+    let list: Vec<Attendee> = serde_json::from_value(json!([
+        guest("Ann A.", "ANN@example.com"),
+        guest("Ann again", "ann@example.com"),
+        guest("Newt Nobody", "newt@example.com"),
+        guest("Tess T.", "tess@example.com"),
+        guest("Room", "r@resource.calendar.google.com"),
+        // The user, by their own address (no `self` flag, as an Outlook invite has none) and by it.
+        guest("Me", "ME@example.com"),
+        google_me("accepted"),
+        json!({ "name": "No Address" }),
+    ]))
+    .unwrap();
+    let got = event_guests(&conn, &list).unwrap();
+    assert_eq!(got.known.len(), 1);
+    assert_eq!(
+        (got.known[0].id, got.known[0].email.as_str()),
+        (ann, "ANN@example.com")
+    );
+    let unknown: Vec<(&str, Option<i64>)> = got
+        .unknown
+        .iter()
+        .map(|g| (g.email.as_str(), g.trashed_id))
+        .collect();
+    assert_eq!(
+        unknown,
+        [("newt@example.com", None), ("tess@example.com", Some(tess))]
+    );
+    // An event with no guests is a card with nobody on it, which "Someone else…" fills.
+    let none = event_guests(&conn, &[]).unwrap();
+    assert!(none.known.is_empty() && none.unknown.is_empty());
 }
 
 // --- answering --------------------------------------------------------------------------------------

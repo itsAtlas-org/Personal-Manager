@@ -55,6 +55,11 @@ pub struct Navigate {
     /// With `view: "project"`, which one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// With `view: "people"`, which person: their people `uid`. The main window opens the People tab
+    /// at them, and only when it is the shape of one (`navigateTarget`); one that names nobody
+    /// opens the tab with nothing selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
 }
 
 /// Whether PM may show its calendar in a window of its own right now: never while the app lock is
@@ -123,6 +128,7 @@ mod tests {
         let to = Navigate {
             view: "project".into(),
             project: Some("Atlas".into()),
+            person: None,
         };
         assert_eq!(
             serde_json::to_value(&to).unwrap(),
@@ -131,10 +137,35 @@ mod tests {
         let to = Navigate {
             view: "mod:atlas.pinboard".into(),
             project: None,
+            person: None,
         };
         assert_eq!(
             serde_json::to_value(&to).unwrap(),
             serde_json::json!({ "view": "mod:atlas.pinboard" })
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_person_carries_their_people_uid_and_nothing_else() {
+        let ident = "0123456789abcdef0123456789abcdef";
+        let to = Navigate {
+            view: "people".into(),
+            project: None,
+            person: Some(ident.into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&to).unwrap(),
+            serde_json::json!({ "view": "people", "person": ident })
+        );
+        // The People tab alone names nobody.
+        let to = Navigate {
+            view: "people".into(),
+            project: None,
+            person: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&to).unwrap(),
+            serde_json::json!({ "view": "people" })
         );
     }
 }

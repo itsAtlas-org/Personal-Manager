@@ -56,8 +56,11 @@ interface Props {
   onToggleLabel: (labelId: number, on: boolean) => void;
   onNewLabel: () => void;
   onOpenProject?: (project: string) => void;
-  /** The timeline joins here (slice 7), under Projects, so it needs no change to this file. */
-  timeline?: ReactNode;
+  /** The Timeline section, under Projects, drawn from the full record. When it is given it carries
+   *  the "Last met" line, so the header leaves it out rather than say it twice. */
+  timeline?: (person: Person, today: Date) => ReactNode;
+  /** "Log a meeting": open the entry dialog for this person. Without it the button is not drawn. */
+  onLogMeeting?: () => void;
 }
 
 /** A person from `getPerson`, or null when what came back isn't one. */
@@ -91,6 +94,7 @@ export function PersonRecord({
   onNewLabel,
   onOpenProject,
   timeline,
+  onLogMeeting,
 }: Props) {
   const [person, setPerson] = useState<Person | null>(null);
   const [failed, setFailed] = useState(false);
@@ -153,7 +157,7 @@ export function PersonRecord({
           </span>
           <div className="min-w-0 flex-1">
             <h2 className="break-words font-head text-lg font-semibold text-ink">{name}</h2>
-            {person && <NameLines person={person} today={today} />}
+            {person && <NameLines person={person} today={today} lastMet={!timeline} />}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {!trashed && (
@@ -165,6 +169,11 @@ export function PersonRecord({
                 onClick={() => onStar(!starred)}
               >
                 {starred ? "★" : "☆"}
+              </Button>
+            )}
+            {person && !trashed && onLogMeeting && (
+              <Button variant="secondary" size="xs" onClick={onLogMeeting}>
+                Log a meeting
               </Button>
             )}
             {person && !trashed && (
@@ -235,7 +244,7 @@ export function PersonRecord({
             onEdit={onEdit}
             onOpenProject={onOpenProject}
           />
-          {timeline}
+          {timeline?.(person, today)}
           <SourcesSection person={person} />
         </>
       ) : failed ? (
@@ -257,7 +266,16 @@ export function PersonRecord({
 }
 
 /** Other names, the name in parts when it differs, and when you last met. */
-function NameLines({ person, today }: { person: Person; today: Date }) {
+function NameLines({
+  person,
+  today,
+  lastMet,
+}: {
+  person: Person;
+  today: Date;
+  /** Say when you last met: not when the Timeline section does. */
+  lastMet: boolean;
+}) {
   const parts = [
     person.name_prefix,
     person.given_name,
@@ -274,7 +292,7 @@ function NameLines({ person, today }: { person: Person; today: Date }) {
       {parts !== "" && parts !== person.display_name && <p className="break-words">{parts}</p>}
       {nicknames.length > 0 && <p className="break-words">Also known as {nicknames.join(", ")}</p>}
       {former.length > 0 && <p className="break-words">Formerly {former.join(", ")}</p>}
-      <p>{lastMetLine(person.last_met, today)}</p>
+      {lastMet && <p>{lastMetLine(person.last_met, today)}</p>}
     </div>
   );
 }

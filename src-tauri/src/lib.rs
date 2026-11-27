@@ -2095,6 +2095,7 @@ pub fn run() {
             commands::update_interaction,
             commands::delete_interaction,
             commands::owed_meetings,
+            commands::event_guests,
             commands::answer_meeting,
             commands::calendar_overview,
             commands::request_calendar_access,

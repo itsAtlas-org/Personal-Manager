@@ -89,3 +89,35 @@ describe("the meeting wrappers", () => {
     });
   });
 });
+
+describe("the card's other wrappers", () => {
+  it("send an event's guests as they came, for the backend to sort", async () => {
+    const guests = [
+      {
+        name: "Ann A.",
+        email: "ann@example.com",
+        response: "accepted",
+        optional: false,
+        organizer: false,
+        self: false,
+      },
+    ];
+    await ipc.eventGuests(guests);
+    expect(invokeMock).toHaveBeenCalledWith("event_guests", { guests });
+  });
+
+  it("carry a person to the main window beside the view, and null where there is none", async () => {
+    await ipc.showInMainWindow({ view: "people", person: "0123456789abcdef0123456789abcdef" });
+    expect(invokeMock).toHaveBeenLastCalledWith("show_in_main_window", {
+      view: "people",
+      project: null,
+      person: "0123456789abcdef0123456789abcdef",
+    });
+    await ipc.showInMainWindow({ view: "project", project: "Atlas" });
+    expect(invokeMock).toHaveBeenLastCalledWith("show_in_main_window", {
+      view: "project",
+      project: "Atlas",
+      person: null,
+    });
+  });
+});

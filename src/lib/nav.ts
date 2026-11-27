@@ -501,16 +501,32 @@ export function renamedNavId(id: string, core: ReadonlySet<string> = CORE_IDS): 
 export const PINBOARD_VIEW: ModView = "mod:atlas.pinboard";
 
 /** Where a "show this in the main window" request lands. */
-export type NavigateTarget = { kind: "project"; project: string } | { kind: "view"; view: View };
+export type NavigateTarget =
+  | { kind: "project"; project: string }
+  | { kind: "view"; view: View }
+  | { kind: "person"; uid: string };
+
+/** A person's people `uid`: 32 lowercase hex characters (`people::new_ident`). */
+const PERSON_UID = /^[0-9a-f]{32}$/;
 
 /** What the main window does with a request from the pop-out Calendar (`main://navigate`), or null
  *  to ignore it. The pop-out is a second webview, and the Rust relay passes its `view` through as a
  *  plain string, so the main window decides what it accepts: the Calendar, a project that was
  *  named, or a mod's tab by a well-formed id (a mod that isn't there lands on Focus, `isReachable`).
- *  The old `pinboard` view means the Pinboard's tab now. Anything else is refused, never guessed at. */
-export function navigateTarget(view: string, project?: string): NavigateTarget | null {
+ *  The old `pinboard` view means the Pinboard's tab now. `people` is the People tab, at a person
+ *  when it comes with a `person` of the people-uid shape; a malformed one is refused rather than
+ *  trimmed to the bare tab. Anything else is refused, never guessed at. */
+export function navigateTarget(
+  view: string,
+  project?: string,
+  person?: string,
+): NavigateTarget | null {
   if (view === "project") {
     return project ? { kind: "project", project } : null;
+  }
+  if (view === "people") {
+    if (person === undefined) return { kind: "view", view };
+    return PERSON_UID.test(person) ? { kind: "person", uid: person } : null;
   }
   if (view === "calendar") return { kind: "view", view };
   if (view === "pinboard") return { kind: "view", view: PINBOARD_VIEW };

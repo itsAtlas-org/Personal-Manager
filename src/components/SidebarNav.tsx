@@ -3,7 +3,8 @@
 
 // The sidebar's tab list, drawn from lib/nav: the entries, their order and which ones show all come
 // from there, so this file only says how a tab LOOKS. Two tabs carry something extra: Chats has its
-// "+ New" beside it, and Review its count of documents waiting.
+// "+ New" beside it, Review its count of documents waiting, and People its count of meetings
+// waiting for a "who did you meet?" answer.
 //
 // Right-click a tab for Pin / Unpin, Hide, and a Show for each tab that isn't there; Focus can't be
 // hidden, so there is always a tab to right-click. One handler on the list, not one per tab: the tab
@@ -19,11 +20,13 @@ interface Props {
   view: View;
   onNavigate: (view: View) => void;
   reviewCount: number;
+  /** Meetings waiting for a "who did you meet?" answer: the count on the People row. */
+  peopleCount?: number;
   /** Start a new GLOBAL conversation (see Sidebar's `onNew`). */
   onNew: () => void;
 }
 
-export function SidebarNav({ view, onNavigate, reviewCount, onNew }: Props) {
+export function SidebarNav({ view, onNavigate, reviewCount, peopleCount, onNew }: Props) {
   const { entries, placement, ctx, resolved } = useNav();
 
   function onMenu(e: ReactMouseEvent) {
@@ -49,6 +52,8 @@ export function SidebarNav({ view, onNavigate, reviewCount, onNew }: Props) {
             trailing={
               entry.id === "review" ? (
                 <CountBadge count={reviewCount} />
+              ) : entry.id === "people" ? (
+                <CountBadge count={peopleCount} />
               ) : entry.source === "mod" ? (
                 // A mod chose its own tab's name, so PM marks the row: a mod can't pass its tab
                 // off as one of PM's by calling it "Settings".

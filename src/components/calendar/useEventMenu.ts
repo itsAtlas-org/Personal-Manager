@@ -28,6 +28,7 @@ import {
   taskIdOfEvent,
 } from "../../kit/lib/calendar-layout";
 import { changeTaskStatus } from "../../lib/ipc";
+import { eventIsPast } from "../../lib/meetings";
 import { openLink } from "../../lib/linkFailure";
 import { runMutation } from "../../lib/runMutation";
 import type { Calendar, CalendarEvent, Milestone, Task, TaskStatus } from "../../lib/types";
@@ -49,6 +50,9 @@ export interface EventMenuDeps {
   /** What a click on a task chip does. */
   editTask: (task: Task) => void;
   setTaskStatus: (task: Task, next: TaskStatus) => void;
+  /** Open "Log who you met" on a synced event. Offered only for one that is over, as the popover's
+   *  button is; absent where the calendar can't log (nothing then draws the item). */
+  logMeeting?: (ev: CalendarEvent) => void;
   onOpenProject?: (project: string) => void;
   onOpenPinboard?: () => void;
   /** Quick create is open: a click on any event goes back to its box, so the menu offers only that. */
@@ -116,6 +120,7 @@ export function eventMenu(
     : undefined;
   const project = milestone?.project_name;
   const openProject = deps.onOpenProject;
+  const logMeeting = deps.logMeeting;
   const link = ev.html_link;
   const call = ev.conference_url;
   return {
@@ -125,6 +130,9 @@ export function eventMenu(
       { label: "Open details", onSelect: () => deps.openDetails(ev, anchor()) },
       ...(ed.canEdit ? [{ label: "Edit…", onSelect: ed.onEdit }] : []),
       ...(ed.canDuplicate ? [{ label: "Duplicate", onSelect: ed.onDuplicate }] : []),
+      ...(logMeeting && eventIsPast(ev, new Date())
+        ? [{ label: "Log who you met", onSelect: () => logMeeting(ev) }]
+        : []),
       { kind: "separator" },
       ...(link
         ? [

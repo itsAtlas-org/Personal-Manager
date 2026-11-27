@@ -56,6 +56,7 @@ import { responseLabel, type Reply } from "../../../lib/calendarEdit/guests";
 import { linkTarget, parseDescription } from "../../../lib/calendarEdit/descriptionHtml";
 import { eventFlags, openUrl } from "../../../lib/ipc";
 import { dismissLinkFailure } from "../../../lib/linkFailure";
+import { eventIsPast } from "../../../lib/meetings";
 import { useRestoreFocus } from "../../../lib/useRestoreFocus";
 import { useDepth } from "../../../theme";
 import { eventColour } from "../../../theme/eventPalette";
@@ -82,6 +83,9 @@ interface Props {
   /** What PM may do to the event (#884). Passed only by CalendarView; without it the popover is
    *  read-only, as FocusUpcoming shows it. */
   editing?: PopoverEditing;
+  /** "Log who you met" (spec 6.3): opens the meeting card for this occurrence. Offered for an event
+   *  that is over, any event (guests or none); without it (Focus › Upcoming) there is no button. */
+  onLogMeeting?: () => void;
   /** Filled with a way to close the panel from outside it (CalendarView's Ctrl+Z), handing focus
    *  back as Escape does. */
   closeRef?: MutableRefObject<(() => void) | null>;
@@ -239,6 +243,7 @@ export function CalendarEventPopover({
   onClose,
   onOpenProject,
   editing,
+  onLogMeeting,
   closeRef,
   describeSeries,
 }: Props) {
@@ -627,6 +632,20 @@ export function CalendarEventPopover({
             onClick={() => onOpenProject(milestone.project_name)}
           >
             Open in Project
+          </Button>
+        )}
+        {onLogMeeting && eventIsPast(event, new Date()) && (
+          <Button
+            variant="secondary"
+            size="sm"
+            data-help="people-meet"
+            onClick={() => {
+              // Focus back to the event's chip first, for the card that opens next to return it there.
+              restoreFocus();
+              onLogMeeting();
+            }}
+          >
+            Log who you met
           </Button>
         )}
         {/* Duplicate first of the event's own actions, taking the row's push to the right from

@@ -27,6 +27,7 @@ function handlers() {
     askDeleteNow: vi.fn(),
     merge: vi.fn(),
     exportThem: vi.fn(),
+    logMeeting: vi.fn(),
   };
 }
 
@@ -54,6 +55,7 @@ describe("personMenuItems", () => {
       "Edit…",
       "Star",
       "Merge with…",
+      "Log a meeting…",
       "—",
       "Label: Family",
       "Label: Climbing",
@@ -91,6 +93,15 @@ describe("personMenuItems", () => {
     expect(h.trash).toHaveBeenCalledOnce();
     expect(h.restore).not.toHaveBeenCalled();
     expect(h.askDeleteNow).not.toHaveBeenCalled();
+  });
+
+  it("offers Log a meeting… for one person, calling the tab's handler, and not in Trash or for a selection", () => {
+    const h = handlers();
+    pick(personMenuItems(state(), h), "Log a meeting…").onSelect();
+    expect(h.logMeeting).toHaveBeenCalledOnce();
+    expect(names(personMenuItems(state({ count: 2 }), h))).not.toContain("Log a meeting…");
+    expect(names(personMenuItems(state({ count: 3 }), h))).not.toContain("Log a meeting…");
+    expect(names(personMenuItems(state({ trashed: true }), h))).not.toContain("Log a meeting…");
   });
 
   it("says Unstar for someone already starred", () => {
@@ -154,6 +165,7 @@ describe("personMenuItems", () => {
       "Edit…",
       "Star",
       "Merge with…",
+      "Log a meeting…",
       "—",
       "New label…",
       "—",

@@ -49,6 +49,7 @@ import type {
   BackupSchedule,
   BackupState,
   CalendarAccount,
+  Attendee,
   CalendarEvent,
   CalendarOverview,
   ChatEvent,
@@ -135,6 +136,7 @@ import type {
   ChecklistItem,
   ImportResult,
   DupesReport,
+  EventGuests,
   InteractionDraft,
   MeetingAnswer,
   MeetingAnswered,
@@ -1314,6 +1316,12 @@ export const deleteInteraction = (id: number) => invoke<void>("delete_interactio
  *  the pop-out Calendar may both ask. */
 export const owedMeetings = () => invoke<OwedMeeting[]>("owed_meetings");
 
+/** An event's guests sorted for the meeting card, the people PM knows and those it doesn't: what
+ *  "Log who you met" opens on a past event that isn't on the owed list. Takes the guests the
+ *  calendar showed (the user and rooms are left out); nothing is stored. Main window or the
+ *  pop-out Calendar. */
+export const eventGuests = (guests: Attendee[]) => invoke<EventGuests>("event_guests", { guests });
+
 /** Answer one meeting in a single step: log who was there (a guest PM doesn't know becomes a
  *  person, anyone ticked from Trash comes back), skip it, or skip its whole series. Answering again
  *  replaces an earlier skip. `uid` is empty for an event with no iCal id, which can only be logged;
@@ -2032,12 +2040,19 @@ export const destroyCalendarWindow = () => invoke<void>("destroy_calendar_window
 export interface MainNavigate {
   view: string;
   project?: string;
+  /** With `view: "people"`, a person's people `uid`. */
+  person?: string;
 }
 
-/** Show `to` in the main window and bring it forward: the pop-out's links to a project or the
- *  Pinboard's tab (`view: "mod:atlas.pinboard"`). The main window checks `view` (`navigateTarget`). */
+/** Show `to` in the main window and bring it forward: the pop-out's links to a project, the
+ *  Pinboard's tab (`view: "mod:atlas.pinboard"`) or a person (`view: "people"` with their `uid`).
+ *  The main window checks what it is sent (`navigateTarget`). */
 export const showInMainWindow = (to: MainNavigate) =>
-  invoke<void>("show_in_main_window", { view: to.view, project: to.project ?? null });
+  invoke<void>("show_in_main_window", {
+    view: to.view,
+    project: to.project ?? null,
+    person: to.person ?? null,
+  });
 
 /** Subscribe to `main://navigate` (popout.rs's `NAVIGATE_EVENT`), sent to the main window only. */
 export const onMainNavigate = (handler: (to: MainNavigate) => void): Promise<UnlistenFn> =>

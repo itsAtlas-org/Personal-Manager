@@ -20,10 +20,23 @@ pub async fn open_calendar_window(app: AppHandle) -> Result<()> {
 
 /// Show one of the main window's views and bring it forward: the pop-out Calendar's links to a
 /// project or to the Pinboard's tab. `view` is an app view's name or a mod's tab (`"mod:<id>"`), and
-/// the main window checks it (`navigateTarget`); `project` goes with `"project"`.
+/// the main window checks it (`navigateTarget`); `project` goes with `"project"`, and `person` (a
+/// person's people `uid`) with `"people"`.
 #[tauri::command]
-pub fn show_in_main_window(app: AppHandle, view: String, project: Option<String>) -> Result<()> {
-    popout::show_in_main(&app, Navigate { view, project })
+pub fn show_in_main_window(
+    app: AppHandle,
+    view: String,
+    project: Option<String>,
+    person: Option<String>,
+) -> Result<()> {
+    popout::show_in_main(
+        &app,
+        Navigate {
+            view,
+            project,
+            person,
+        },
+    )
 }
 
 /// Destroy the pop-out Calendar before "Remove PM data" clears the webview store, for the reason

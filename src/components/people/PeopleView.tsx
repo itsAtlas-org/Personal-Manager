@@ -4,8 +4,10 @@
 // The People tab (Contacts, PR A): a header with the search box and "+ Add person", filters and the
 // list on the left, the person's record on the right. It holds the list, selecting several, Trash and
 // its Undo, the record with its editor, label management (a deleted label can be undone) and the
-// links to projects, merging, and the vCard import and export dialogs; the timeline comes in a later
-// slice, joining the pieces below as one more entry.
+// links to projects, merging, the vCard import and export dialogs, and the timeline: the entry dialog
+// (log, edit) and the question before an entry is deleted live here, beside the other dialogs. The
+// meetings owed an answer come in as a prop (App reads them once for the strip, the badge and this
+// list) and "Review" hands them back to App, which owns the one meeting dialog.
 //
 // The tab router unmounts a view on every tab switch, so this holds no truth of its own: the list is
 // re-read on mount, on a filter, search or sort change, and on `people://changed` (`usePeopleData`).
@@ -17,7 +19,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { openContextMenu, wantsAppMenu } from "../../lib/contextMenu";
 import {
+  addInteraction,
   createLabel,
+  deleteInteraction,
   deleteLabel,
   deletePeopleNow,
   getPerson,
@@ -31,6 +35,7 @@ import {
   trashPeople,
   undoMergePeople,
   unlabelPeople,
+  updateInteraction,
 } from "../../lib/ipc";
 import {
   errorWords,
@@ -50,16 +55,22 @@ import {
 } from "../../lib/peopleTransfer";
 import { personMenuItems, personMenuLabel } from "../../lib/personMenu";
 import type { SectionId } from "../../lib/personRecord";
+import { editEntryDraft, kindNoun, newEntryDraft } from "../../lib/timeline";
 import type {
   MergeDone,
+  OwedMeeting,
   PeopleFilter,
   PeopleSort,
   Person,
   PersonLabel,
   PersonRow,
+  TimelineEntry,
 } from "../../lib/types";
 import { Button, Callout, ConfirmDialog, Input, Select, Skeleton } from "../ui";
 import { DuplicatePeoplePanel } from "./DuplicatePeoplePanel";
+import { EntryDialog } from "./EntryDialog";
+import { OwedList } from "./OwedList";
+import { PersonTimeline } from "./PersonTimeline";
 import { ExportPeopleDialog } from "./ExportPeopleDialog";
 import { ImportVcardDialog } from "./ImportVcardDialog";
 import { LabelNameDialog, LabelPicker } from "./LabelPicker";
@@ -89,6 +100,12 @@ interface Props {
   onRevealTaken?: () => void;
   /** Open a project (a record's project chips). Without it the chips are plain text. */
   onOpenProject?: (project: string) => void;
+  /** The meetings waiting for an answer: listed at the top of the All view. */
+  owed?: readonly OwedMeeting[];
+  /** Open the meeting dialog on these meetings (App owns it). */
+  onReviewMeetings?: (meetings: OwedMeeting[]) => void;
+  /** The user's IANA zone, so a new entry's "today" is theirs. */
+  zone?: string | null;
 }
 
 const EMPTY_WORDS: Record<string, string> = {
@@ -98,7 +115,14 @@ const EMPTY_WORDS: Record<string, string> = {
   Label: "Nobody has this label yet.",
 };
 
-export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
+export function PeopleView({
+  reveal,
+  onRevealTaken,
+  onOpenProject,
+  owed = [],
+  onReviewMeetings,
+  zone,
+}: Props) {
   const [filter, setFilter] = useState<PeopleFilter>("All");
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
@@ -131,6 +155,15 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
   // it covers, fixed when it opens so a list that moves underneath can't change what it writes).
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState<ExportChoice[] | null>(null);
+  // The entry dialog (a new one, or an edit of `entry`) and the question before one is deleted.
+  const [logging, setLogging] = useState<{ person: PersonRow; entry: TimelineEntry | null } | null>(
+    null,
+  );
+  const [deletingEntry, setDeletingEntry] = useState<{
+    person: PersonRow;
+    entry: TimelineEntry;
+  } | null>(null);
+  const [entryBusy, setEntryBusy] = useState(false);
   // Moves after every write of this tab's own, so the open record reads again even in a build
   // where the change notice is slow; the notice itself moves `data.changes`.
   const [bump, setBump] = useState(0);
@@ -473,6 +506,32 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
     }
   }
 
+  // --- the timeline ------------------------------------------------------------------------------------------
+  /** Log or change an entry for the person the dialog was opened on. Throws what the backend refuses
+   *  with, which the dialog says in words and stays open for; the list and the record read again
+   *  whether it worked or not, so neither shows a guess. */
+  async function saveEntry(
+    person: PersonRow,
+    entry: TimelineEntry | null,
+    v: Parameters<typeof newEntryDraft>[1],
+  ) {
+    try {
+      if (entry) await updateInteraction(entry.id, editEntryDraft(entry, person.id, v));
+      else await addInteraction(newEntryDraft([person.id], v));
+    } finally {
+      reload();
+      setBump((n) => n + 1);
+    }
+  }
+
+  async function confirmDeleteEntry() {
+    if (!deletingEntry) return;
+    setEntryBusy(true);
+    await run(() => deleteInteraction(deletingEntry.entry.id));
+    setEntryBusy(false);
+    setDeletingEntry(null);
+  }
+
   // --- selecting ---------------------------------------------------------------------------------------------
   function extendTo(id: number, from: number | null) {
     const span = idsBetween(rows, from, id);
@@ -554,6 +613,11 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
             else setPicking(row);
           },
           exportThem: () => setExporting([selectionExportChoice(ids)]),
+          logMeeting: () => {
+            anchor.current = row.id;
+            setActiveId(row.id);
+            setLogging({ person: row, entry: null });
+          },
         },
       ),
       { withFallback: true },
@@ -817,9 +881,18 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
                 ))}
               </div>
             ) : rows.length === 0 && !data.failed ? (
-              <p className="px-4 py-8 text-center text-sm text-ink3">{emptyWords}</p>
+              <>
+                {/* A new user has no people and every guest unknown: the likeliest owed meetings. */}
+                {filter === "All" && !searching && onReviewMeetings && (
+                  <OwedList meetings={owed} onReview={onReviewMeetings} />
+                )}
+                <p className="px-4 py-8 text-center text-sm text-ink3">{emptyWords}</p>
+              </>
             ) : (
               <>
+                {filter === "All" && !searching && onReviewMeetings && (
+                  <OwedList meetings={owed} onReview={onReviewMeetings} />
+                )}
                 <BirthdayStrip
                   birthdays={birthdays}
                   onOpen={(row) => {
@@ -856,6 +929,17 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
               onToggleLabel={(labelId, on) => toggleLabel([active.id], labelId, on)}
               onNewLabel={() => setLabelling([active.id])}
               onOpenProject={onOpenProject}
+              onLogMeeting={() => setLogging({ person: active, entry: null })}
+              timeline={(person, today) => (
+                <PersonTimeline
+                  person={person}
+                  trashed={person.trashed_at !== null}
+                  today={today}
+                  onLog={() => setLogging({ person: active, entry: null })}
+                  onEdit={(entry) => setLogging({ person: active, entry })}
+                  onDelete={(entry) => setDeletingEntry({ person: active, entry })}
+                />
+              )}
             />
           ) : (
             <NoPersonPane />
@@ -927,6 +1011,42 @@ export function PeopleView({ reveal, onRevealTaken, onOpenProject }: Props) {
         />
       )}
       {exporting && <ExportPeopleDialog choices={exporting} onClose={() => setExporting(null)} />}
+      {logging && (
+        <EntryDialog
+          title={
+            logging.entry
+              ? `Change this ${kindNoun(logging.entry.kind)}`
+              : `Log something with ${logging.person.display_name}`
+          }
+          initial={
+            logging.entry
+              ? {
+                  kind: logging.entry.kind,
+                  on_date: logging.entry.on_date,
+                  note: logging.entry.note,
+                }
+              : undefined
+          }
+          zone={zone}
+          save={(v) => saveEntry(logging.person, logging.entry, v)}
+          onClose={() => setLogging(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={deletingEntry !== null}
+        title="Delete this entry?"
+        confirmLabel="Delete entry"
+        danger
+        busy={entryBusy}
+        initialFocus="cancel"
+        helpId="people-timeline"
+        onConfirm={() => void confirmDeleteEntry()}
+        onClose={() => setDeletingEntry(null)}
+      >
+        <p className="mt-2 text-sm text-ink2">
+          It is taken off the timeline of everyone it names. This can't be undone.
+        </p>
+      </ConfirmDialog>
       {editor && (
         <PersonEditor
           person={editor.person}

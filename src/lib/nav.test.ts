@@ -308,6 +308,33 @@ describe("navigateTarget: what the main window does with the pop-out's link", ()
     expect(navigateTarget("pinboard")).toEqual({ kind: "view", view: PINBOARD_VIEW });
   });
 
+  it("opens a person by their people uid, and the People tab with no one named", () => {
+    const uid = "0123456789abcdef0123456789abcdef";
+    expect(navigateTarget("people", undefined, uid)).toEqual({ kind: "person", uid });
+    expect(navigateTarget("people")).toEqual({ kind: "view", view: "people" });
+    // A project on a people link is not read: only the person is.
+    expect(navigateTarget("people", "Atlas", uid)).toEqual({ kind: "person", uid });
+  });
+
+  it("refuses a person whose uid is not the shape of one, instead of opening the bare tab", () => {
+    for (const bad of [
+      "",
+      "abc",
+      "0123456789ABCDEF0123456789ABCDEF",
+      "0123456789abcdef0123456789abcdeg",
+      "0123456789abcdef0123456789abcdef0",
+      " 0123456789abcdef0123456789abcdef",
+      "../../etc/passwd",
+    ]) {
+      expect(navigateTarget("people", undefined, bad), bad).toBeNull();
+    }
+    // A person with any other view is not a link at all.
+    expect(navigateTarget("calendar", undefined, "0123456789abcdef0123456789abcdef")).toEqual({
+      kind: "view",
+      view: "calendar",
+    });
+  });
+
   it("refuses a project with no name, a bad mod id, a path and any other view", () => {
     expect(navigateTarget("project")).toBeNull();
     expect(navigateTarget("project", "")).toBeNull();

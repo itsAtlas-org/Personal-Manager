@@ -215,6 +215,28 @@ struct Guest {
     email: String,
 }
 
+/// Add the other human guests of one copy of an event to `into`, once per address (the same meeting
+/// on two calendars names the same people), cleaned and clipped.
+fn add_guests(
+    into: &mut Vec<Guest>,
+    keys: &mut HashSet<String>,
+    list: &[Attendee],
+    mine: &HashSet<String>,
+) {
+    for a in list.iter().filter(|a| is_other_human(a, mine)) {
+        let email = clip(&clean_text(address_of(a).unwrap_or_default()), VALUE_MAX);
+        if keys.insert(email_key(&email)) {
+            into.push(Guest {
+                name: clip(
+                    &clean_text(a.name.as_deref().unwrap_or_default()),
+                    VALUE_MAX,
+                ),
+                email,
+            });
+        }
+    }
+}
+
 /// What PM knows of an address: the live person it belongs to, or the one in Trash.
 struct Match {
     live: Option<(i64, String)>,
@@ -268,6 +290,29 @@ fn split_guests(
         }
     }
     Ok((known, unknown))
+}
+
+/// An event's guests sorted for the meeting card: the people PM knows and the ones it doesn't.
+#[derive(Clone, Serialize)]
+pub struct EventGuests {
+    pub known: Vec<KnownGuest>,
+    pub unknown: Vec<UnknownGuest>,
+}
+
+/// The most guests of one event the card looks up (the most an entry can name).
+const EVENT_GUESTS_MAX: usize = ENTRY_PEOPLE_MAX;
+
+/// Sort the guests of one event, as the calendar shows them, for the card "Log who you met" opens
+/// on any past event (one that is not on the owed list: answered, skipped, older than 14 days, or
+/// with no guest PM could ask about). The user, a room and anyone without an address are left out,
+/// as they are on the owed list; the answer is the same shape, so one card serves both.
+pub fn event_guests(conn: &Connection, list: &[Attendee]) -> Result<EventGuests> {
+    let mine = my_addresses(conn)?;
+    let mut guests = Vec::new();
+    add_guests(&mut guests, &mut HashSet::new(), list, &mine);
+    guests.truncate(EVENT_GUESTS_MAX);
+    let (known, unknown) = split_guests(conn, &guests)?;
+    Ok(EventGuests { known, unknown })
 }
 
 // --- what is owed -----------------------------------------------------------------------------------
@@ -363,18 +408,7 @@ pub fn owed_meetings_at(
             o.named = true;
             o.all_declined &= me.response.as_deref() == Some("declined");
         }
-        for a in list.iter().filter(|a| is_other_human(a, &mine)) {
-            let email = clip(&clean_text(address_of(a).unwrap_or_default()), VALUE_MAX);
-            if o.guest_keys.insert(email_key(&email)) {
-                o.guests.push(Guest {
-                    name: clip(
-                        &clean_text(a.name.as_deref().unwrap_or_default()),
-                        VALUE_MAX,
-                    ),
-                    email,
-                });
-            }
-        }
+        add_guests(&mut o.guests, &mut o.guest_keys, &list, &mine);
     }
     drop(rows);
     drop(stmt);

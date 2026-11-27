@@ -20,6 +20,9 @@ import { SignInStrip } from "./components/SignInStrip";
 import { ConversationTitle } from "./components/ConversationTitle";
 import { CommandPalette } from "./components/CommandPalette";
 import { PeopleView } from "./components/people/PeopleView";
+import { MeetingDialog } from "./components/people/MeetingDialog";
+import { MeetStrip } from "./components/people/MeetStrip";
+import { useOwedMeetings } from "./components/people/useOwedMeetings";
 import { Composer } from "./components/Composer";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { ContextMeter } from "./components/ContextMeter";
@@ -124,6 +127,7 @@ import {
 import type {
   CalendarEvent,
   Conversation,
+  OwedMeeting,
   Settings,
   SharedVaultAd,
   SyncEvent,
@@ -227,6 +231,13 @@ export default function App() {
    *  once; cleared as it's taken, like the Calendar's. A uid that names nobody opens the tab with
    *  nothing selected. */
   const [peopleReveal, setPeopleReveal] = useState<{ uid: string; nonce: number } | null>(null);
+  // The meetings owed a "who did you meet?" answer: one read for the strip, the People row's badge
+  // and the top of the People tab. Only once the store is open past every gate; re-read whenever
+  // the open tab changes (PM works it out when it looks), on a calendar sync and on a people change.
+  const storeOpen = !loading && !vaultNeedsUnlock && !vault?.fault && vaultLock?.active !== false;
+  const owedMeetings = useOwedMeetings(storeOpen, view);
+  /** The meetings the dialog is showing, when it is open (Review on the strip, or on the People tab). */
+  const [meetingDialog, setMeetingDialog] = useState<OwedMeeting[] | null>(null);
 
   function openPerson(uid: string) {
     setPeopleReveal({ uid, nonce: Date.now() });
@@ -830,15 +841,18 @@ export default function App() {
   // The pop-out Calendar's links to a project or the Pinboard's tab land here (popout.rs
   // `show_in_main`). Through a ref, so the subscription is made once and always calls the current
   // `openProject`. What it accepts is `navigateTarget`'s say: the pop-out is another webview.
-  const navigateRef = useRef<(view: string, project?: string) => void>(() => {});
-  navigateRef.current = (to, project) => {
-    const target = navigateTarget(to, project);
+  const navigateRef = useRef<(view: string, project?: string, person?: string) => void>(() => {});
+  navigateRef.current = (to, project, person) => {
+    const target = navigateTarget(to, project, person);
     if (target?.kind === "project") openProject(target.project);
+    else if (target?.kind === "person") openPerson(target.uid);
     else if (target?.kind === "view") setView(target.view);
   };
   useEffect(
     () =>
-      subscribeUntilCleanup(() => onMainNavigate((to) => navigateRef.current(to.view, to.project))),
+      subscribeUntilCleanup(() =>
+        onMainNavigate((to) => navigateRef.current(to.view, to.project, to.person)),
+      ),
     [],
   );
 
@@ -1168,6 +1182,15 @@ export default function App() {
             {/* The one-time On battery question (#432). App-wide, because the moment it matters is
                 whatever tab is open when the battery runs low; renders nothing until it is asked. */}
             <PowerConsentStrip status={localAi} />
+            {/* "Who did you meet?" after meetings with guests (spec 6.3). Not inside Settings: it can
+                wait until that closes. Non-modal and never focused, like the strip above. */}
+            {!showSettings && (
+              <MeetStrip
+                owed={owedMeetings.meetings}
+                zone={settings?.time_zone}
+                onReview={() => setMeetingDialog(owedMeetings.meetings)}
+              />
+            )}
             {/* A browser sign-in in progress, with its link for another browser. Settings shows it
                 itself while open, as its scrim covers this; renders nothing otherwise. */}
             {!showSettings && <SignInStrip />}
@@ -1201,6 +1224,7 @@ export default function App() {
                   conversations={inProject ? projectChat.conversations : conversations}
                   activeId={inProject ? projectChat.convId : activeId}
                   reviewCount={reviewCount}
+                  peopleCount={owedMeetings.meetings.length}
                   betterFit={betterFit}
                   sheetsNudge={sheetsNudge}
                   onSelect={
@@ -1290,6 +1314,7 @@ export default function App() {
                       onPopOut={() => void openCalendarWindow().catch(() => {})}
                       reveal={calendarReveal}
                       onRevealTaken={() => setCalendarReveal(null)}
+                      onOpenPerson={openPerson}
                     />
                   </main>
                 ) : view === "people" ? (
@@ -1299,6 +1324,9 @@ export default function App() {
                       reveal={peopleReveal}
                       onRevealTaken={() => setPeopleReveal(null)}
                       onOpenProject={openProject}
+                      owed={owedMeetings.meetings}
+                      onReviewMeetings={setMeetingDialog}
+                      zone={settings?.time_zone}
                     />
                   </main>
                 ) : view === "documents" ? (
@@ -1460,6 +1488,18 @@ export default function App() {
               {/* WhatsNew renders its own Modal (scrim + centering, kept below the title bar), so it
                 needs no extra wrapper scrim here — that only double-darkened the content. */}
               {showWhatsNew && <WhatsNew onClose={closeWhatsNew} currentVersion={appVersion} />}
+
+              {meetingDialog && (
+                <MeetingDialog
+                  meetings={meetingDialog}
+                  onClose={() => setMeetingDialog(null)}
+                  onAnswered={owedMeetings.reload}
+                  onOpenPerson={(uid) => {
+                    setMeetingDialog(null);
+                    openPerson(uid);
+                  }}
+                />
+              )}
 
               {showPalette && (
                 <CommandPalette

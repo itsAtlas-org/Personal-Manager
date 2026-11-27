@@ -11,7 +11,8 @@
 //! command starts with `set_` (the Settings "Saved" tick). Not model-path code (E13): no model
 //! path may name this module.
 //!
-//! The tiers: a read, and the meeting card's two commands (`owed_meetings`, `answer_meeting`),
+//! The tiers: a read, and the meeting card's three commands (`owed_meetings`, `event_guests`,
+//! `answer_meeting`),
 //! may come from the main window or the pop-out Calendar, where an event's "Log who you met" opens
 //! the same card; everything else is the main window's. A table in the tests pins every command's
 //! tier.
@@ -21,11 +22,12 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 
 use crate::blocking::spawn_blocking_result;
+use crate::calendar::Attendee;
 use crate::error::{Error, Result};
 use crate::people::dupes::DupesReport;
 use crate::people::export::{ExportDone, ExportScope};
 use crate::people::import::{ImportOptions, ImportPreview, ImportResult};
-use crate::people::meet::{MeetingAnswer, MeetingAnswered, OwedMeeting, PersonRef};
+use crate::people::meet::{EventGuests, MeetingAnswer, MeetingAnswered, OwedMeeting, PersonRef};
 use crate::people::merge::{MergeChoices, MergeDone, MergePreview};
 use crate::people::timeline::{InteractionDraft, TimelineCursor, TimelinePage};
 use crate::people::{
@@ -665,6 +667,20 @@ pub fn owed_meetings(
     people::meet::owed_meetings(&conn)
 }
 
+/// An event's guests sorted for the meeting card (the people PM knows, and those it doesn't): what
+/// "Log who you met" opens on a past event that is not on the owed list. The guests are the ones the
+/// calendar already showed the caller; nothing is stored or announced.
+#[tauri::command]
+pub fn event_guests(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    guests: Vec<Attendee>,
+) -> Result<EventGuests> {
+    require_people_window(&window)?;
+    let conn = state.conn()?;
+    people::meet::event_guests(&conn, &guests)
+}
+
 /// Answer one meeting in a single step: log who was there (guests PM doesn't know become people,
 /// anyone ticked from Trash comes back), skip it, or skip its whole series. Answering again
 /// replaces an earlier skip. `event_ical` is empty for an event with no iCal id, which can only be
@@ -747,6 +763,7 @@ mod tests {
         ("update_interaction", Tier::Main),
         ("delete_interaction", Tier::Main),
         ("owed_meetings", Tier::Read),
+        ("event_guests", Tier::Read),
         ("answer_meeting", Tier::Read),
     ];
 

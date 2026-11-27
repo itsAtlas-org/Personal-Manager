@@ -3810,6 +3810,12 @@ export interface OwedMeeting {
   unknown: OwedUnknownGuest[];
 }
 
+/** An event's guests sorted for the card (`people::meet::EventGuests`). */
+export interface EventGuests {
+  known: OwedKnownGuest[];
+  unknown: OwedUnknownGuest[];
+}
+
 /** Who a card ticked: someone in People (also one in Trash, who is brought back) or a new guest. */
 export type PersonRef = { id: number } | { new: { name: string; email: string } };
 

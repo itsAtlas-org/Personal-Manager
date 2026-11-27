@@ -189,6 +189,39 @@ describe("a synced event's menu", () => {
     pick(menu(ev(), d), "Open project Garden");
     expect(d.onOpenProject).toHaveBeenCalledWith("Garden");
   });
+
+  describe("Log who you met", () => {
+    const over = { start: "2020-03-02T10:00:00Z", end: "2020-03-02T11:00:00Z" };
+    const later = { start: "2099-03-02T10:00:00Z", end: "2099-03-02T11:00:00Z" };
+
+    it("is offered on a past event with or without guests, after Duplicate, and calls the card", () => {
+      const logMeeting = vi.fn();
+      const e = ev({ ...over, attendees: [] });
+      const m = menu(e, deps({ logMeeting }));
+      expect(labels(m)).toEqual([
+        "Open details",
+        "Edit…",
+        "Duplicate",
+        "Log who you met",
+        "-",
+        "Delete…",
+      ]);
+      pick(m, "Log who you met");
+      expect(logMeeting).toHaveBeenCalledWith(e);
+    });
+
+    it("is left out for an event that has not happened yet, and where nothing can log", () => {
+      expect(labels(menu(ev(later), deps({ logMeeting: vi.fn() })))).not.toContain(
+        "Log who you met",
+      );
+      expect(labels(menu(ev(over), deps()))).not.toContain("Log who you met");
+    });
+
+    it("is not offered while quick create is open: the menu keeps to the way back", () => {
+      const m = menu(ev(over), deps({ logMeeting: vi.fn(), quickOpen: true }));
+      expect(labels(m)).toEqual(["Open details"]);
+    });
+  });
 });
 
 describe("the overlays' menus", () => {

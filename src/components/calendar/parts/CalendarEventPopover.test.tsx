@@ -1388,3 +1388,37 @@ describe("CalendarEventPopover: asking for edit access", () => {
     expect(upcoming.getByRole("dialog").hasAttribute("data-help")).toBe(false);
   });
 });
+
+describe("Log who you met", () => {
+  const past = { start: "2020-03-02T10:00:00Z", end: "2020-03-02T11:00:00Z" };
+  const future = { start: "2099-03-02T10:00:00Z", end: "2099-03-02T11:00:00Z" };
+  const popover = (over: Partial<CalendarEvent>, onLogMeeting?: () => void) =>
+    render(
+      <CalendarEventPopover
+        event={calendarEvent(over)}
+        anchor={rect(100)}
+        calendar={null}
+        color="#000"
+        milestone={null}
+        onClose={() => {}}
+        onLogMeeting={onLogMeeting}
+      />,
+    );
+
+  it("offers the card on an event that is over, with guests or without", () => {
+    const onLogMeeting = vi.fn();
+    const view = popover({ ...past, attendees: [] }, onLogMeeting);
+    fireEvent.click(view.getByRole("button", { name: "Log who you met" }));
+    expect(onLogMeeting).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer it on an event that has not happened yet", () => {
+    const view = popover(future, vi.fn());
+    expect(view.queryByRole("button", { name: "Log who you met" })).toBeNull();
+  });
+
+  it("does not offer it where the calendar can't log (Focus › Upcoming passes no handler)", () => {
+    const view = popover(past);
+    expect(view.queryByRole("button", { name: "Log who you met" })).toBeNull();
+  });
+});

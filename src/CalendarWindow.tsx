@@ -87,6 +87,8 @@ export default function CalendarWindow() {
           rosterInHeader
           onOpenProject={(project) => void showInMainWindow({ view: "project", project })}
           onOpenPinboard={() => void showInMainWindow({ view: PINBOARD_VIEW })}
+          // A name on the "Log who you met" card: the People tab is the main window's, so ask it.
+          onOpenPerson={(person) => void showInMainWindow({ view: "people", person })}
         />
       </main>
     );

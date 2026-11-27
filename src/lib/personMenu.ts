@@ -16,7 +16,8 @@
 // Merge sits beside Star: "Merge with…" on one person (it asks who with), "Merge these two…" on a
 // selection of exactly two (the dialog opens at once); both end in an ellipsis because a dialog
 // follows, and a merge has an Undo strip, so neither asks again. A selection of three or more has
-// no merge. Log a meeting joins in the slice that builds it, one entry.
+// no merge. "Log a meeting…" repeats the record's button, so it is for one person, and ends in an
+// ellipsis because the entry dialog follows.
 
 import type { MenuItem } from "../kit/lib/contextMenu";
 
@@ -40,6 +41,8 @@ export interface PersonMenuHandlers {
   merge: () => void;
   /** Open the export dialog for the people the menu acts on (the selection bar's Export…). */
   exportThem: () => void;
+  /** Log a meeting with this person (the record's own "Log a meeting"). */
+  logMeeting: () => void;
 }
 
 export interface PersonMenuState {
@@ -90,6 +93,7 @@ export function personMenuItems(s: PersonMenuState, h: PersonMenuHandlers): Menu
       onSelect: () => h.star(!s.allStarred),
     },
     ...merge,
+    ...(s.count === 1 ? [{ label: "Log a meeting…", onSelect: h.logMeeting } as MenuItem] : []),
     ...(s.canExport ? [{ label: "Export…", onSelect: h.exportThem } as MenuItem] : []),
     { kind: "separator" },
     ...s.labels.map((l): MenuItem => ({

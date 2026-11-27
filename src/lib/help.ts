@@ -64,6 +64,14 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Exporting people",
     body: "Export writes people to a vCard file (.vcf) you can open in any address book or phone. Use it from the header for everyone, from a label for that label's people, or from the selection bar for the people you ticked. PM asks where to save the file; it never writes anywhere else. Tick Include the timeline to also get a spreadsheet file, people-timeline.csv, with one row for each person and each time you met. People in Trash are left out. A file exported from PM and imported again adds nobody twice.",
   },
+  "people-timeline": {
+    title: "A person's timeline",
+    body: "The Timeline section keeps what happened with this person, newest first: a meeting, a call, a message or a note, each with its day and an optional note. At the top it says when you last met, or that you haven't yet. Press + Log, or Log a meeting in the record or its right-click menu, to add one: pick what happened, type the day (today to begin with) and add a note. Edit changes an entry, and Delete asks first, then takes it off everyone it names. A meeting PM asked you about shows the event it came from. Show earlier entries reads further back. Someone in Trash has a timeline you can read but not change.",
+  },
+  "people-meet": {
+    title: "Who did you meet?",
+    body: "After a meeting with guests, PM asks who you met so it can remember for you. A strip at the top says how many are waiting, and the People tab lists them too, with a count beside People in the sidebar. Review opens one card for each meeting: guests already in People are ticked, guests PM doesn't know sit under Not in People yet, unticked, and ticking one adds them. Someone else lets you pick anyone from People, and a note is optional. Save logs the meeting, Skip stops PM asking about that meeting, Don't ask about this series silences a repeating meeting, and Skip all skips every card. Not now hides the strip until tomorrow or until another meeting is waiting. Log who you met on any past event, in its details or its right-click menu, opens the same card, even for an event with no guests.",
+  },
   "people-trash": {
     title: "People in Trash",
     body: "Moving someone to Trash keeps everything about them for 30 days, then PM deletes them for good. Right after you move someone, a note at the bottom of the window has an Undo, and Ctrl+Z (Cmd+Z on a Mac) presses it when you aren't typing in a box. In the Trash filter, Restore brings people back with their labels and details. Delete now removes them for good after asking, and that can't be undone.",

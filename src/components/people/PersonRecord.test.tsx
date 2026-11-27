@@ -275,12 +275,27 @@ describe("the sections", () => {
     expect(handlers.onEdit).toHaveBeenCalledWith(person);
   });
 
-  it("draws nothing for the timeline until a later slice hands it in", async () => {
+  it("draws the timeline only when the tab hands one in, and then leaves 'Last met' to it", async () => {
     await show(full());
     expect(region("Timeline")).toBeNull();
+    expect(screen.getByText(/^Last met 12-11/)).toBeTruthy();
     cleanup();
-    await show(full(), { timeline: <section aria-label="Timeline">Meetings</section> });
+    await show(full(), {
+      timeline: () => <section aria-label="Timeline">Meetings</section>,
+    });
     expect(region("Timeline")).toBeTruthy();
+    // Said once, in the section, not again in the header.
+    expect(screen.queryByText(/^Last met 12-11/)).toBeNull();
+  });
+
+  it("offers Log a meeting beside Edit only when the tab can open the entry dialog", async () => {
+    await show(full());
+    expect(screen.queryByRole("button", { name: "Log a meeting" })).toBeNull();
+    cleanup();
+    const onLogMeeting = vi.fn();
+    await show(full(), { onLogMeeting });
+    fireEvent.click(screen.getByRole("button", { name: "Log a meeting" }));
+    expect(onLogMeeting).toHaveBeenCalledOnce();
   });
 
   it("folds a section and remembers it on this device", async () => {

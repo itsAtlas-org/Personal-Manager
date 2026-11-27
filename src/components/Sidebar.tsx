@@ -187,6 +187,8 @@ interface Props {
   conversations: Conversation[];
   activeId: number | null;
   reviewCount: number;
+  /** Meetings waiting for a "who did you meet?" answer (the badge on the People row). */
+  peopleCount?: number;
   onSelect: (id: number) => void;
   /** Delete a conversation for good (card 7G) — the parent owns the mutation + list refresh. */
   onDelete: (id: number) => void;
@@ -247,6 +249,7 @@ export function Sidebar({
   conversations,
   activeId,
   reviewCount,
+  peopleCount,
   onSelect,
   onDelete,
   onMove,
@@ -439,7 +442,13 @@ export function Sidebar({
           this shrink below its content so the scrollbar appears; the app-wide axis normaliser
           (installed once in App) covers wheel behaviour, so nothing is wired per-surface here. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
-        <SidebarNav view={view} onNavigate={onNavigate} reviewCount={reviewCount} onNew={onNew} />
+        <SidebarNav
+          view={view}
+          onNavigate={onNavigate}
+          reviewCount={reviewCount}
+          peopleCount={peopleCount}
+          onNew={onNew}
+        />
 
         <div className="px-2">
           {/* The Chats tab shows two sections — your projects, and the chats that belong to no

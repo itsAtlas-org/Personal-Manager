@@ -85,6 +85,21 @@ describe("SidebarNav", () => {
     expect(screen.getByRole("button", { name: /Review/ }).textContent).toContain("3");
   });
 
+  it("counts the meetings waiting for an answer on the People row, and only there", () => {
+    renderNav({ peopleCount: 4, reviewCount: 2 });
+    expect(screen.getByRole("button", { name: /People/ }).textContent).toBe("People4");
+    expect(screen.getByRole("button", { name: /Review/ }).textContent).toBe("Review2");
+    expect(screen.getByRole("button", { name: "Calendar" }).textContent).toBe("Calendar");
+  });
+
+  it("shows no badge on People with nothing waiting", () => {
+    renderNav({ peopleCount: 0 });
+    expect(screen.getByRole("button", { name: "People" }).textContent).toBe("People");
+    cleanup();
+    renderNav();
+    expect(screen.getByRole("button", { name: "People" }).textContent).toBe("People");
+  });
+
   it("navigates to a tab's own view", () => {
     const onNavigate = vi.fn();
     renderNav({ onNavigate });
