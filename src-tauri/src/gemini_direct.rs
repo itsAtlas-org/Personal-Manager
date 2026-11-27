@@ -32,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::llm_gateway::{CloudArm, CloudProvider};
 use crate::openrouter::{ChatMessage, Completion, Usage};
 use crate::region::{self, Basis, Region};
+use crate::usage_keys;
 
 /// The chat-completions URL. A const, so the key can only ever go to this host.
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
@@ -262,13 +263,25 @@ fn usage_from(v: &Value) -> Usage {
     let mut u = cloud_openai::parse_usage(v);
     match (u.prompt_tokens, v["usage"]["total_tokens"].as_i64()) {
         (Some(p), Some(t)) => {
-            u.completion_tokens = Some(u.completion_tokens.unwrap_or(0).max(t - p));
+            let reported = u.completion_tokens.unwrap_or(0);
+            u.completion_tokens = Some(reported.max(t - p));
+            // What the reply spent thinking is what the total holds beyond the output Google
+            // counted. It is information only: the cost above already prices the whole `t - p`.
+            // When Google starts counting thoughts in `completion_tokens` this is 0, and a figure
+            // it reports itself (read by the parser) stands.
+            let hidden = t - p - reported;
+            if hidden > 0 {
+                u.thinking_tokens = Some(hidden);
+            }
         }
         // A total with no prompt count can't be split into input and output, and the input would be
         // priced as nothing and look exact: show it as partial, like a prompt with no total.
         (Some(_), None) | (None, Some(_)) => u.output_partial = true,
         _ => {}
     }
+    // A token type PM has no price for (audio, a tool, a key Google has just added) is said, not
+    // priced: the cost above stays what PM could work out and the row reads "at least".
+    u.cost_note = usage_keys::note_for(CloudProvider::Gemini, &v["usage"]);
     u
 }
 
@@ -2081,6 +2094,45 @@ mod tests {
             (u.prompt_tokens, u.completion_tokens, u.output_partial),
             (None, None, false)
         );
+    }
+
+    /// The hidden thinking is the total beyond the output Google counted: total 120, prompt 20,
+    /// completion 30 means 70 thinking, and the billable output is the whole 100. The cost is the
+    /// same with or without the figure, because thinking is priced inside the output already. A
+    /// reply that counts thoughts in `completion_tokens` has none hidden, and a non-text prompt
+    /// (audio here) is noted without touching the cost.
+    #[test]
+    fn hidden_thinking_is_the_total_beyond_the_output_and_never_changes_the_cost() {
+        use crate::openrouter::CostNote;
+        let u = usage_from(
+            &json!({"usage":{"prompt_tokens":20,"completion_tokens":30,"total_tokens":120}}),
+        );
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.thinking_tokens),
+            (Some(20), Some(100), Some(70))
+        );
+        assert_eq!(u.cost_note, None);
+        let flash = gem("gemini-3.8-flash");
+        let today = "2026-11-26";
+        let with = direct_models::cost_usd(flash, &u, today).unwrap();
+        let mut without = u;
+        without.thinking_tokens = None;
+        assert_eq!(direct_models::cost_usd(flash, &without, today), Some(with));
+        assert!((with - (20.0 * 0.75 + 100.0 * 3.75) / 1_000_000.0).abs() < 1e-12);
+        // Thoughts already inside the output: nothing hidden, so nothing reported.
+        let counted = usage_from(
+            &json!({"usage":{"prompt_tokens":20,"completion_tokens":100,"total_tokens":120}}),
+        );
+        assert_eq!(counted.thinking_tokens, None);
+        // Audio in the prompt: a note, the same cost.
+        let audio = usage_from(&json!({"usage":{"prompt_tokens":20,"completion_tokens":30,
+            "total_tokens":120,"prompt_tokens_details":{"audio_tokens":8}}}));
+        assert_eq!(audio.cost_note, Some(CostNote::AudioTokens));
+        assert_eq!(direct_models::cost_usd(flash, &audio, today), Some(with));
+        // A key Google has just added is a new kind of token.
+        let new_key = usage_from(&json!({"usage":{"prompt_tokens":20,"completion_tokens":30,
+            "total_tokens":120,"hologram_tokens":3}}));
+        assert_eq!(new_key.cost_note, Some(CostNote::NewTokenType));
     }
 
     #[test]

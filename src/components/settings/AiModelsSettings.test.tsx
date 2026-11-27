@@ -11,11 +11,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { costSummary, setOpenRouterKey, setOpenRouterBackgroundKey } = vi.hoisted(() => ({
-  costSummary: vi.fn(),
-  setOpenRouterKey: vi.fn(),
-  setOpenRouterBackgroundKey: vi.fn(),
-}));
+const { costSummary, setOpenRouterKey, setOpenRouterBackgroundKey, getLocalAiSwitch } = vi.hoisted(
+  () => ({
+    costSummary: vi.fn(),
+    setOpenRouterKey: vi.fn(),
+    setOpenRouterBackgroundKey: vi.fn(),
+    getLocalAiSwitch: vi.fn(),
+  }),
+);
 
 const SETTINGS = {
   chat_models: [],
@@ -39,7 +42,7 @@ vi.mock("../../lib/ipc", async (importOriginal) => ({
   hasOpenRouterBackgroundKey: () => Promise.resolve(false),
   getSettings: () => Promise.resolve(SETTINGS),
   settingsDefaults: () => Promise.resolve(SETTINGS),
-  getLocalAiSwitch: () => Promise.reject(new Error("not in this test")),
+  getLocalAiSwitch: () => getLocalAiSwitch(),
   setOpenRouterKey: (key: string) => setOpenRouterKey(key),
   setOpenRouterBackgroundKey: (key: string) => setOpenRouterBackgroundKey(key),
 }));
@@ -52,8 +55,23 @@ vi.mock("../../kit/theme", async (importOriginal) => ({
 
 import { AiModelsSettings } from "./AiModelsSettings";
 
+/** An empty Usage payload in the shape the backend sends (types.ts `CostSummary`). */
+const EMPTY_SUMMARY = {
+  last_30d: [],
+  all_time: [],
+  by_mod: [],
+  total_30d_usd: 0,
+  total_all_time_usd: 0,
+  total_30d_partial: false,
+  total_all_time_partial: false,
+  unpriced_30d: 0,
+  partial_reasons: [],
+  pricing_updated_at: null,
+};
+
 beforeEach(() => {
   costSummary.mockReturnValue(new Promise(() => {}));
+  getLocalAiSwitch.mockRejectedValue(new Error("not in this test"));
   setOpenRouterKey.mockResolvedValue(undefined);
   setOpenRouterBackgroundKey.mockResolvedValue(undefined);
 });
@@ -106,12 +124,8 @@ describe("the cost summary on AI & Models", () => {
 
 describe("the by-mod table", () => {
   const summary = (by_mod: unknown[]) => ({
-    last_30d: [],
-    all_time: [],
+    ...EMPTY_SUMMARY,
     by_mod,
-    total_30d_usd: 0,
-    total_all_time_usd: 0,
-    pricing_updated_at: null,
   });
   const row = (extra: Record<string, unknown>) => ({
     mod_id: "acme.tool",
@@ -120,6 +134,7 @@ describe("the by-mod table", () => {
     completion_tokens: 300,
     request_count: 4,
     cost_usd: 0.1234,
+    partial: false,
     ...extra,
   });
 
@@ -135,7 +150,7 @@ describe("the by-mod table", () => {
       summary([
         row({}),
         row({ mod_id: "gone.mod", name: null, request_count: 2, cost_usd: 0.5 }),
-        row({ mod_id: "free.mod", name: "Free", cost_usd: null }),
+        row({ mod_id: "free.mod", name: "Free", cost_usd: null, partial: true }),
       ]),
     );
     render(<AiModelsSettings />);
@@ -169,5 +184,184 @@ describe("the by-mod table", () => {
     const heading = await screen.findByText("By mod (all time)");
     expect(heading.parentElement!.textContent).toContain("Mods together: $0.50");
     expect(heading.parentElement!.textContent).not.toContain("at least");
+  });
+
+  it("says 'at least' on a mod whose own line leaves something out, and not on a local-only mod", async () => {
+    costSummary.mockResolvedValue(
+      summary([
+        row({ mod_id: "floor.mod", name: "Floor", cost_usd: 0.1, partial: true }),
+        row({ mod_id: "local.mod", name: "Local", cost_usd: null, partial: false }),
+      ]),
+    );
+    render(<AiModelsSettings />);
+    const heading = await screen.findByText("By mod (all time)");
+    const table = heading.parentElement!;
+    const floorRow = within(table).getByText("Floor").closest("tr")!;
+    expect(within(floorRow).getByText("at least $0.10")).toBeTruthy();
+    const localRow = within(table).getByText("Local").closest("tr")!;
+    expect(within(localRow).queryByText(/at least/)).toBeNull();
+    // A dash would read as "couldn't be priced"; a local-only mod cost nothing.
+    expect(within(localRow).getByText("No cost")).toBeTruthy();
+    // The same mods, summed: a floor because one line is.
+    expect(table.textContent).toContain("Mods together: at least $0.10");
+  });
+});
+
+describe("the Usage tab's honest figures", () => {
+  const line = (extra: Record<string, unknown>) => ({
+    model: "anthropic/claude-sonnet-5-5",
+    prompt_tokens: 12000,
+    completion_tokens: 3000,
+    request_count: 5,
+    cost_usd: 0.12,
+    served: "anthropic",
+    cached_tokens: 0,
+    thinking_tokens: 0,
+    refused_requests: 0,
+    unpriced_requests: 0,
+    partial: false,
+    ...extra,
+  });
+  const summary = (lines: unknown[], extra: Record<string, unknown> = {}) => ({
+    ...EMPTY_SUMMARY,
+    last_30d: lines,
+    all_time: lines,
+    total_30d_usd: 0.12,
+    total_all_time_usd: 0.12,
+    ...extra,
+  });
+  const tableRow = async (model: string) => {
+    const cell = await screen.findByText(model, { exact: false });
+    return cell.closest("tr")!;
+  };
+
+  it("names the road each line took, and says so for a row from before PM recorded it", async () => {
+    costSummary.mockResolvedValue(
+      summary([
+        line({ model: "or/model", served: "openrouter" }),
+        line({ model: "openai/gpt-x", served: "openai" }),
+        line({ model: "gemini/g", served: "gemini" }),
+        line({ model: "anthropic/c", served: "anthropic" }),
+        line({ model: "gemma", served: "local", cost_usd: null }),
+        line({ model: "old/model", served: null }),
+      ]),
+    );
+    render(<AiModelsSettings />);
+    expect(within(await tableRow("or/model")).getByText("OpenRouter")).toBeTruthy();
+    expect(within(await tableRow("openai/gpt-x")).getByText("Your OpenAI key")).toBeTruthy();
+    expect(within(await tableRow("gemini/g")).getByText("Your Gemini key")).toBeTruthy();
+    expect(within(await tableRow("anthropic/c")).getByText("Your Anthropic key")).toBeTruthy();
+    const local = await tableRow("gemma");
+    expect(within(local).getByText("This computer")).toBeTruthy();
+    expect(within(local).getByText("No cost")).toBeTruthy();
+    expect(within(await tableRow("old/model")).getByText("Before PM recorded this")).toBeTruthy();
+  });
+
+  it("shows what the cache and the thinking did, and the refusals, under a model", async () => {
+    costSummary.mockResolvedValue(
+      summary([
+        line({ model: "busy/m", cached_tokens: 1234, thinking_tokens: 3400, refused_requests: 2 }),
+        line({ model: "quiet/m" }),
+      ]),
+    );
+    render(<AiModelsSettings />);
+    expect(
+      within(await tableRow("busy/m")).getByText("Cached 1.2k, thinking 3.4k, 2 refused"),
+    ).toBeTruthy();
+    expect(within(await tableRow("quiet/m")).queryByText(/cached|thinking|refused/i)).toBeNull();
+  });
+
+  it("puts 'at least' on a floor, the count of calls it couldn't price, and why", async () => {
+    costSummary.mockResolvedValue(
+      summary([line({ model: "half/m", cost_usd: 0.12, partial: true, unpriced_requests: 3 })], {
+        total_30d_partial: true,
+        total_all_time_partial: true,
+        unpriced_30d: 3,
+      }),
+    );
+    render(<AiModelsSettings />);
+    await screen.findByText("3 calls in the last 30 days couldn't be priced in full");
+    expect(screen.getAllByText("at least $0.12").length).toBeGreaterThanOrEqual(3);
+    // The explanation sits behind "Why?" and says what the provider's own page is for.
+    fireEvent.click(screen.getByText("Why?"));
+    expect(screen.getByText(/Your provider's own usage page has the exact figure\./)).toBeTruthy();
+    // It names only what the code produces: no token count, priced in part, a token PM can't price.
+    expect(screen.queryByText(/cancelled/)).toBeNull();
+    expect(screen.getByText(/came back with no token count/)).toBeTruthy();
+  });
+
+  it("still explains an all-time 'at least' when no call in the last 30 days is unpriced", async () => {
+    costSummary.mockResolvedValue(
+      summary([line({ model: "old/m", cost_usd: 0.12, partial: true, unpriced_requests: 2 })], {
+        total_all_time_partial: true,
+        unpriced_30d: 0,
+      }),
+    );
+    render(<AiModelsSettings />);
+    await tableRow("old/m");
+    expect(screen.getAllByText("at least $0.12").length).toBeGreaterThanOrEqual(1);
+    // No 30-day count to print, but the reader still gets the way to the reason.
+    expect(screen.queryByText(/in the last 30 days couldn't be priced/)).toBeNull();
+    expect(screen.getByText("Why?")).toBeTruthy();
+  });
+
+  it("says nothing about unpriced calls when there are none, and an exact total has no 'at least'", async () => {
+    costSummary.mockResolvedValue(summary([line({ model: "exact/m" })]));
+    render(<AiModelsSettings />);
+    await tableRow("exact/m");
+    expect(screen.queryByText(/couldn't be priced/)).toBeNull();
+    // No figure says "at least" (the folded method text mentions the words, so match a figure).
+    expect(screen.queryAllByText(/^at least \$/)).toHaveLength(0);
+    expect(screen.queryByText("Why?")).toBeNull();
+    // No token type is named either: nothing in `partial_reasons`, no warning.
+    expect(screen.queryByText(/PM can't price/)).toBeNull();
+  });
+
+  it("warns by name for each token type PM can't price, and for none when there is none", async () => {
+    costSummary.mockResolvedValue(
+      summary([line({ model: "typed/m", partial: true, unpriced_requests: 4 })], {
+        total_30d_partial: true,
+        unpriced_30d: 4,
+        partial_reasons: [
+          { slug: "audio_tokens", replies: 3 },
+          { slug: "server_tool_use", replies: 1 },
+          { slug: "new_token_type", replies: 2 },
+          // A slug this build can't word is never printed.
+          { slug: "<b>evil</b>", replies: 9 },
+        ],
+      }),
+    );
+    render(<AiModelsSettings />);
+    await screen.findByText(
+      "PM can't price audio tokens on 3 replies in the last 30 days, so these figures say 'at least'.",
+    );
+    expect(
+      screen.getByText(
+        "PM can't price tool use on 1 reply in the last 30 days, so these figures say 'at least'.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "PM can't price a new kind of token the provider started reporting on 2 replies in the last 30 days, so these figures say 'at least'.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/evil/)).toBeNull();
+  });
+
+  it("says models on this computer are listed and cost nothing, when Local AI is on", async () => {
+    getLocalAiSwitch.mockResolvedValue({
+      on: true,
+      chat_needs_model: false,
+      background_needs_model: false,
+      server_saved: false,
+    });
+    costSummary.mockResolvedValue(
+      summary([line({ model: "gemma", served: "local", cost_usd: null })]),
+    );
+    render(<AiModelsSettings />);
+    await screen.findByText(
+      "Models on this computer are listed with their request count. They don't cost anything.",
+    );
+    expect(screen.queryByText(/aren't counted here/)).toBeNull();
   });
 });

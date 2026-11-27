@@ -459,6 +459,101 @@ fn bobbys_real_thinking_stream_skips_the_empty_thinking_block() {
     assert_eq!(c.usage.prompt_tokens, Some(45));
 }
 
+/// The recorded thinking stream reports `output_tokens_details.thinking_tokens` 32 inside its 36
+/// output tokens. It is carried as information; the cost is the same as for the same counts with no
+/// thinking figure, because thinking is priced inside the output.
+#[test]
+fn the_recorded_thinking_stream_carries_its_thinking_tokens_and_the_same_cost() {
+    let (c, _) = ok(SONNET, STREAM_SONNET_THINKING);
+    assert_eq!(c.usage.thinking_tokens, Some(32));
+    assert_eq!(
+        c.usage.cost_note, None,
+        "a real reply names no unpriced type"
+    );
+    let mut plain = c.usage;
+    plain.thinking_tokens = None;
+    let with = settle(c, row(SONNET)).usage.cost;
+    let without = settle(
+        Completion {
+            text: String::new(),
+            model: None,
+            usage: plain,
+            truncated: false,
+        },
+        row(SONNET),
+    )
+    .usage
+    .cost;
+    assert!(with.is_some());
+    assert_eq!(with, without);
+    // And the plain Haiku stream reports none beyond a zero.
+    let (h, _) = ok(HAIKU, STREAM_HAIKU);
+    assert_eq!(h.usage.thinking_tokens, Some(0));
+    assert_eq!(h.usage.cost_note, None);
+}
+
+/// A token type PM has no price for, in either usage object, is NAMED and the cost PM can work out
+/// is left exactly as it was: a server tool, a key Anthropic has just invented, and (already a dash
+/// through `output_partial`) a one-hour cache write.
+#[test]
+fn an_unpriced_token_type_is_noted_and_the_cost_is_unchanged() {
+    let stream = |start_usage: Value, end_usage: Value| {
+        start("claude-sonnet-5-5", start_usage)
+            + &text_block(0, &["x"])
+            + &finish_with("end_turn", end_usage)
+    };
+    let plain = json!({"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50});
+    let (base, _) = ok(
+        SONNET,
+        &stream(json!({"input_tokens":100,"output_tokens":1}), plain.clone()),
+    );
+    let want = settle(base, row(SONNET)).usage.cost;
+    assert!(want.is_some());
+    let with = |extra: Value| {
+        let mut u = plain.clone();
+        for (k, v) in extra.as_object().unwrap() {
+            u[k] = v.clone();
+        }
+        u
+    };
+    for (extra, note) in [
+        (
+            json!({"server_tool_use":{"web_search_requests":2}}),
+            CostNote::ServerToolUse,
+        ),
+        (json!({"batch_tokens":7}), CostNote::NewTokenType),
+    ] {
+        let (c, _) = ok(
+            SONNET,
+            &stream(
+                json!({"input_tokens":100,"output_tokens":1}),
+                with(extra.clone()),
+            ),
+        );
+        assert_eq!(c.usage.cost_note, Some(note), "{extra}");
+        assert_eq!(settle(c, row(SONNET)).usage.cost, want, "{extra}");
+    }
+    // The type may show up in `message_start` alone: a later event does not erase it.
+    let (c, _) = ok(
+        SONNET,
+        &stream(
+            json!({"input_tokens":100,"output_tokens":1,"server_tool_use":{"web_fetch_requests":1}}),
+            plain.clone(),
+        ),
+    );
+    assert_eq!(c.usage.cost_note, Some(CostNote::ServerToolUse));
+    // One-hour writes: noted AND already a dash, as before.
+    let (c, _) = ok(
+        SONNET,
+        &stream(
+            json!({"input_tokens":100,"output_tokens":1}),
+            with(json!({"cache_creation":{"ephemeral_1h_input_tokens":40}})),
+        ),
+    );
+    assert_eq!(c.usage.cost_note, Some(CostNote::PartialUsage));
+    assert_eq!(settle(c, row(SONNET)).usage.cost, None);
+}
+
 /// A canned stream with a cache hit: the prompt is the TOTAL input (uncached + written + read), and
 /// the cost is the Sonnet formula over it.
 #[test]

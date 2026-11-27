@@ -291,6 +291,9 @@ pub(crate) fn parse_usage(value: &serde_json::Value) -> Usage {
         cache_write_tokens: value["usage"]["prompt_tokens_details"]["cache_write_tokens"].as_i64(),
         output_partial: false,
         refused: false,
+        // Thinking is already inside `completion_tokens` and priced there; this only says how much.
+        thinking_tokens: value["usage"]["completion_tokens_details"]["reasoning_tokens"].as_i64(),
+        cost_note: None,
     }
 }
 

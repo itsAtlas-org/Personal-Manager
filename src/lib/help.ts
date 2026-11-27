@@ -745,11 +745,15 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-usage-cost": {
     title: "Usage & cost",
-    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history. Calls to your own provider key are priced from the tokens it reports times PM's built-in list of that provider's prices. A free Google Gemini key shows $0.00 on free-tier models.",
+    body: "What you've spent on model calls, priced from OpenRouter's public rates (refreshed about once a day once an OpenRouter key is saved; without one, only when you press 'Refresh prices'). Shows last-30-days and all-time totals; expand 'How this is calculated' for the method and a per-model spend ranking. 'Refresh prices' re-pulls the latest rates. Costs are computed from token counts at read time, so a price change re-prices your history. Calls to your own provider key are priced from the tokens it reports times PM's built-in list of that provider's prices. A free Google Gemini key shows $0.00 on free-tier models. A figure that says 'at least' leaves out calls PM couldn't price (ones that came back with no token count, ones PM can only price in part, or ones that used a kind of token PM doesn't know how to price); the line under the total counts the last 30 days' calls and names the token type. Your provider's own usage page has the exact figure.",
+  },
+  "settings-usage-via": {
+    title: "Which road a call took",
+    body: "'Via' says where each call went: OpenRouter, one of your own keys (OpenAI, Gemini or Anthropic), or a model on this computer. The same model name reached by two roads is two lines, because they are priced differently. Calls from before PM recorded this say 'Before PM recorded this'; PM doesn't guess from the model name. Under a model, 'Cached' is input the provider read from its cache at a lower price, 'thinking' is output spent thinking (billed as output, already in the cost), and 'refused' counts replies the provider's safety system stopped (PM can see this only for Anthropic). Models on this computer cost nothing.",
   },
   "settings-usage-by-mod": {
     title: "Spend by mod",
-    body: "What each mod's AI requests have used, all time, from the same log as the table above (a mod's requests are in that table too). A mod you have uninstalled keeps its history under 'removed mod'. A dash means nothing it used could be priced yet; the total then says 'at least'. A mod's monthly limit, in the Mods tab, is counted from its own ledger and can differ a little from this log.",
+    body: "What each mod's AI requests have used, all time, from the same log as the table above (a mod's requests are in that table too). A mod you have uninstalled keeps its history under 'removed mod'. A dash means nothing it used could be priced yet, and 'No cost' means it only used models on this computer; any figure that leaves something out says 'at least', and so does the total. A mod's monthly limit, in the Mods tab, is counted from its own ledger and can differ a little from this log.",
   },
   "settings-mods-notice": {
     title: "Mods notice",

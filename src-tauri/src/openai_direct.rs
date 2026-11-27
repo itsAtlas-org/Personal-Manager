@@ -27,10 +27,9 @@ use crate::cloud_openai::{self, redact_detail, Flavour};
 use crate::direct_models::{self, DirectModel};
 use crate::direct_providers::{KeyCheck, KeyNote, KeyOutcome};
 use crate::error::{Error, Result};
-use crate::llm_gateway::CloudArm;
-#[cfg(test)]
-use crate::openrouter::Usage;
-use crate::openrouter::{ChatMessage, Completion};
+use crate::llm_gateway::{CloudArm, CloudProvider};
+use crate::openrouter::{ChatMessage, Completion, Usage};
+use crate::usage_keys;
 
 /// The chat-completions URL. A const, so the key can only ever go to this host.
 const ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
@@ -49,8 +48,17 @@ pub(crate) const FLAVOUR: Flavour = Flavour {
     patient: true,
     stream_error: Some(stream_error),
     stop_error: Some(stop_error),
-    usage: None,
+    usage: Some(usage_from),
 };
+
+/// OpenAI's usage as the shared parser reads it, plus the token types PM has no price for (audio,
+/// predicted output, a key OpenAI has just added). PM prices what it can and the note says the
+/// rest is missing; the cost is not touched.
+fn usage_from(v: &Value) -> Usage {
+    let mut u = cloud_openai::parse_usage(v);
+    u.cost_note = usage_keys::note_for(CloudProvider::OpenAi, &v["usage"]);
+    u
+}
 
 /// The fields only OpenAI's body carries: the model (by its WIRE id) and `store: false`. The effort
 /// is the role's, which a const flavour can't see, so [`chat_body`] adds it after.
@@ -152,7 +160,14 @@ pub(crate) async fn stream_chat<F: FnMut(&str)>(
 /// Turn what the server reported into what PM logs: the shared arithmetic in [`direct_models`], priced
 /// on today's UTC date. Kept under this name so OpenAI's own tests and callers keep their path.
 pub(crate) fn settle(completion: Completion, requested: &DirectModel) -> Completion {
-    direct_models::settle_on(completion, requested, &direct_models::utc_today())
+    let mut settled = direct_models::settle_on(completion, requested, &direct_models::utc_today());
+    // An exact-looking cost needs BOTH sides: a reply that counted one side only would price the
+    // missing side as 0, a confident under-count. No cost shows as a dash (and `cost_note_for` notes
+    // it), the same rule Anthropic's and Gemini's settle apply.
+    if settled.usage.prompt_tokens.is_none() || settled.usage.completion_tokens.is_none() {
+        settled.usage.cost = None;
+    }
+    settled
 }
 
 /// The catalogue row a served model name stands for ([`direct_models::served_model_id`]). Only
@@ -816,6 +831,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_counted_one_side_only_is_not_priced_as_exact() {
+        let one_side = Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: None,
+            ..Usage::default()
+        };
+        let c = settle(completion(Some("gpt-6.2-sol"), one_side), sol());
+        assert_eq!(c.usage.cost, None, "a missing side would price as 0");
+        // Both sides still price.
+        let both = settle(completion(Some("gpt-6.2-sol"), usage(1000, 100)), sol());
+        assert!(both.usage.cost.is_some());
+    }
+
+    #[test]
     fn a_dated_snapshot_settles_to_its_catalogue_id() {
         let c = settle(
             completion(Some("gpt-6.2-sol-2026-11-01"), usage(1, 1)),
@@ -1332,6 +1361,70 @@ mod tests {
             "the dated snapshot maps"
         );
         assert!(settled.usage.cost.is_some_and(|x| x > 0.0));
+    }
+
+    /// What a final usage chunk says about thinking and about token types PM can't price. The
+    /// reasoning count is read (information: it is inside `completion_tokens` already). An audio
+    /// count, a predicted-output count and a key OpenAI has just invented each set a note and leave
+    /// the cost EXACTLY as PM worked it out for the same plain counts.
+    #[tokio::test]
+    async fn thinking_is_read_and_unpriced_token_types_are_noted_without_changing_the_cost() {
+        use crate::openrouter::CostNote;
+        let chunk = |details: &str| -> &'static str {
+            Box::leak(
+                format!(
+                    "data: {{\"model\":\"gpt-6.2-sol\",\"choices\":[{{\"delta\":{{\"content\":\"Hi\"}},\"finish_reason\":\"stop\"}}]}}\n\n\
+                     data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":1000,\"completion_tokens\":500,{details}}}}}\n\n\
+                     data: [DONE]\n\n"
+                )
+                .into_boxed_str(),
+            )
+        };
+        let plain = settle(run(chunk("\"total_tokens\":1500")).await.unwrap(), sol());
+        assert_eq!(
+            (plain.usage.thinking_tokens, plain.usage.cost_note),
+            (None, None)
+        );
+        let want = plain.usage.cost;
+        assert!(want.is_some_and(|c| c > 0.0));
+
+        let thinking = settle(
+            run(chunk(
+                "\"completion_tokens_details\":{\"reasoning_tokens\":320,\"audio_tokens\":0}",
+            ))
+            .await
+            .unwrap(),
+            sol(),
+        );
+        assert_eq!(thinking.usage.thinking_tokens, Some(320));
+        assert_eq!(thinking.usage.cost_note, None, "a zero count is not a gap");
+        assert_eq!(thinking.usage.cost, want, "thinking is never priced twice");
+
+        for (details, note) in [
+            (
+                "\"prompt_tokens_details\":{\"audio_tokens\":12}",
+                CostNote::AudioTokens,
+            ),
+            (
+                "\"completion_tokens_details\":{\"accepted_prediction_tokens\":9}",
+                CostNote::PredictionTokens,
+            ),
+            (
+                "\"completion_tokens_details\":{\"hologram_tokens\":4}",
+                CostNote::NewTokenType,
+            ),
+            // A 12-hour cache write keeps its cost like the cases above (the write is priced at the one
+            // write rate), but its note is a gap, not a token type, so the Usage tab has to read the
+            // note itself, never a missing cost, to say "at least".
+            (
+                "\"prompt_tokens_details\":{\"cache_write_tokens_details\":{\"ttl_12h_tokens\":100}}",
+                CostNote::PartialUsage,
+            ),
+        ] {
+            let c = settle(run(chunk(details)).await.unwrap(), sol());
+            assert_eq!(c.usage.cost_note, Some(note), "{details}");
+            assert_eq!(c.usage.cost, want, "PM prices what it can: {details}");
+        }
     }
 
     #[tokio::test]

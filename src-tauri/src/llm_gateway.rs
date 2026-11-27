@@ -672,15 +672,21 @@ pub struct CallMeta {
     /// local model was displaced. `None` on a plain success (cloud-preferred, or local succeeded).
     pub fallback: Option<FallbackReason>,
     pub displaced_local_model: Option<String>,
+    /// WHICH company answered, when the answer was cloud: the arm's provider, set by the `cloud*`
+    /// constructors from the arm that actually ran. `None` for a local answer. It is what
+    /// `usage_log.served_provider` records, because a direct id and an OpenRouter id can look alike
+    /// and the row could not be told apart by its model name.
+    pub cloud_provider: Option<CloudProvider>,
 }
 
 impl CallMeta {
-    fn cloud(latency: std::time::Duration) -> Self {
+    fn cloud(latency: std::time::Duration, provider: CloudProvider) -> Self {
         Self {
             provider: Provider::Cloud,
             latency_ms: latency.as_millis() as u64,
             fallback: None,
             displaced_local_model: None,
+            cloud_provider: Some(provider),
         }
     }
 
@@ -690,11 +696,13 @@ impl CallMeta {
             latency_ms: latency.as_millis() as u64,
             fallback: None,
             displaced_local_model: None,
+            cloud_provider: None,
         }
     }
 
     fn cloud_fallback(
         latency: std::time::Duration,
+        provider: CloudProvider,
         reason: FallbackReason,
         displaced_local_model: String,
     ) -> Self {
@@ -703,6 +711,7 @@ impl CallMeta {
             latency_ms: latency.as_millis() as u64,
             fallback: Some(reason),
             displaced_local_model: Some(displaced_local_model),
+            cloud_provider: Some(provider),
         }
     }
 
@@ -1305,7 +1314,7 @@ pub async fn complete_capped(
             let completion = cloud_complete_via(arm, messages, cache_prefix, max_tokens).await?;
             Ok(LlmOutcome {
                 completion,
-                meta: CallMeta::cloud(start.elapsed()),
+                meta: CallMeta::cloud(start.elapsed(), arm.provider),
             })
         }
         RoutePlan::LocalOnly(local) => {
@@ -1327,6 +1336,7 @@ pub async fn complete_capped(
                 completion,
                 meta: CallMeta::cloud_fallback(
                     start.elapsed(),
+                    cloud.provider,
                     FallbackReason::PowerPolicy,
                     displaced_local_model.clone(),
                 ),
@@ -1545,7 +1555,7 @@ async fn cloud_complete(
     let completion = cloud_complete_via(cloud, messages, false, max_tokens).await?;
     Ok(LlmOutcome {
         completion,
-        meta: CallMeta::cloud_fallback(start.elapsed(), reason, displaced),
+        meta: CallMeta::cloud_fallback(start.elapsed(), cloud.provider, reason, displaced),
     })
 }
 
@@ -1611,7 +1621,7 @@ where
                 cloud_stream_via(arm, messages, cache_through, answers_only(&mut on_delta)).await?;
             Ok(LlmOutcome {
                 completion,
-                meta: CallMeta::cloud(start.elapsed()),
+                meta: CallMeta::cloud(start.elapsed(), arm.provider),
             })
         }
         RoutePlan::LocalOnly(local) => {
@@ -1650,6 +1660,7 @@ where
                 completion,
                 meta: CallMeta::cloud_fallback(
                     start.elapsed(),
+                    cloud.provider,
                     FallbackReason::PowerPolicy,
                     displaced_local_model.clone(),
                 ),
@@ -1864,7 +1875,7 @@ where
         cloud_stream_via(cloud, messages, cache_through, answers_only(&mut on_delta)).await?;
     Ok(LlmOutcome {
         completion,
-        meta: CallMeta::cloud_fallback(start.elapsed(), reason, displaced),
+        meta: CallMeta::cloud_fallback(start.elapsed(), cloud.provider, reason, displaced),
     })
 }
 
@@ -3982,6 +3993,7 @@ mod tests {
     fn r13_a_power_route_is_never_a_failure() {
         let meta = CallMeta::cloud_fallback(
             std::time::Duration::from_millis(5),
+            CloudProvider::OpenRouter,
             FallbackReason::PowerPolicy,
             "gemma".into(),
         );
@@ -3993,6 +4005,7 @@ mod tests {
 
         let failed = CallMeta::cloud_fallback(
             std::time::Duration::from_millis(5),
+            CloudProvider::OpenRouter,
             FallbackReason::HardFailure(LocalFailKind::Timeout),
             "gemma".into(),
         );

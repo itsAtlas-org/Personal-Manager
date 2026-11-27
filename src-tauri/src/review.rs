@@ -730,6 +730,7 @@ mod tests {
             latency_ms: 5,
             fallback: None,
             displaced_local_model: None,
+            cloud_provider: Some(crate::llm_gateway::CloudProvider::Anthropic),
         };
         let refused = openrouter::Completion {
             text: String::new(),

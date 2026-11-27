@@ -59,6 +59,10 @@ const SUMMARY = {
   by_mod: [],
   total_30d_usd: 0,
   total_all_time_usd: 0,
+  total_30d_partial: false,
+  total_all_time_partial: false,
+  unpriced_30d: 0,
+  partial_reasons: [],
   pricing_updated_at: null,
 };
 

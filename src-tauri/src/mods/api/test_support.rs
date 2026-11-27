@@ -735,6 +735,7 @@ impl ModelEdge for FakeModel {
                     latency_ms: 5,
                     fallback: None,
                     displaced_local_model: None,
+                    cloud_provider: None,
                 },
             }),
             Answer::Fail | Answer::FailBeforeWire => Err(crate::error::Error::Other(

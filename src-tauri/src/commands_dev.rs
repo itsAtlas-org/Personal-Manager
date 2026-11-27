@@ -222,6 +222,14 @@ const TABLES: &[Table] = &[
             // v60: the mod a row's spend was for (NULL for PM's own calls). A mod id is public (it
             // names a published mod, or a developer's own test folder), not personal text.
             plain("mod_id"),
+            // v64: which company answered, the cache and thinking counts, the outcome and the
+            // cost note. Counts and fixed slugs only: no vendor text is ever stored in them.
+            plain("served_provider"),
+            plain("cached_tokens"),
+            plain("cache_write_tokens"),
+            plain("thinking_tokens"),
+            plain("outcome"),
+            plain("cost_note"),
         ],
     },
     Table {

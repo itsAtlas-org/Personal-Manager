@@ -42,7 +42,8 @@ use crate::direct_models::{self, names_mythos, DirectModel};
 use crate::direct_providers::{self, KeyCheck, KeyNote, KeyOutcome};
 use crate::error::{Error, Result};
 use crate::llm_gateway::{CloudArm, CloudProvider, Role};
-use crate::openrouter::{drain_lines, ChatMessage, Completion, Usage};
+use crate::openrouter::{drain_lines, ChatMessage, Completion, CostNote, Usage};
+use crate::usage_keys;
 
 /// The messages URL. A const, so the key can only ever go to this host.
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
@@ -554,6 +555,9 @@ struct Counters {
     /// ephemeral_1h_input_tokens`), which is already inside `creation`. Only its being non-zero
     /// matters: see `finish`.
     long_write: Option<i64>,
+    /// `output_tokens_details.thinking_tokens`: the part of `output` spent thinking. Already inside
+    /// `output` and priced there, so it is only ever reported, never added.
+    thinking: Option<i64>,
 }
 
 impl Counters {
@@ -564,6 +568,20 @@ impl Counters {
             read: usage["cache_read_input_tokens"].as_i64(),
             output: usage["output_tokens"].as_i64(),
             long_write: usage["cache_creation"]["ephemeral_1h_input_tokens"].as_i64(),
+            thinking: usage["output_tokens_details"]["thinking_tokens"].as_i64(),
+        }
+    }
+
+    /// Field by field, the larger value wins: every counter is cumulative, so the newest is the
+    /// biggest, and a `0` placeholder in a later event must never lower a figure.
+    fn merged(self, other: Counters) -> Counters {
+        Counters {
+            input: larger(self.input, other.input),
+            creation: larger(self.creation, other.creation),
+            read: larger(self.read, other.read),
+            output: larger(self.output, other.output),
+            long_write: larger(self.long_write, other.long_write),
+            thinking: larger(self.thinking, other.thinking),
         }
     }
 }
@@ -594,6 +612,9 @@ struct Turn {
     /// never feed the reply.
     not_text: HashSet<u64>,
     ended: bool,
+    /// The most telling token type PM has no price for, seen in either usage object
+    /// (`usage_keys`). Only the note is kept, never a key's name.
+    unpriced: Option<CostNote>,
 }
 
 impl Turn {
@@ -608,6 +629,7 @@ impl Turn {
             stop: None,
             not_text: HashSet::new(),
             ended: false,
+            unpriced: None,
         }
     }
 
@@ -633,14 +655,8 @@ impl Turn {
                 if self.served.is_none() {
                     self.served = event["message"]["model"].as_str().map(str::to_string);
                 }
-                let c = Counters::of(&event["message"]["usage"]);
-                self.start = Counters {
-                    input: larger(self.start.input, c.input),
-                    creation: larger(self.start.creation, c.creation),
-                    read: larger(self.start.read, c.read),
-                    output: larger(self.start.output, c.output),
-                    long_write: larger(self.start.long_write, c.long_write),
-                };
+                self.start = self.start.merged(Counters::of(&event["message"]["usage"]));
+                self.note_unpriced(&event["message"]["usage"]);
                 Ok(None)
             }
             "content_block_start" => {
@@ -672,14 +688,8 @@ impl Turn {
                 if let Some(reason) = event["delta"]["stop_reason"].as_str() {
                     self.stop = Some(reason.to_string());
                 }
-                let c = Counters::of(&event["usage"]);
-                self.delta = Counters {
-                    input: larger(self.delta.input, c.input),
-                    creation: larger(self.delta.creation, c.creation),
-                    read: larger(self.delta.read, c.read),
-                    output: larger(self.delta.output, c.output),
-                    long_write: larger(self.delta.long_write, c.long_write),
-                };
+                self.delta = self.delta.merged(Counters::of(&event["usage"]));
+                self.note_unpriced(&event["usage"]);
                 Ok(None)
             }
             "message_stop" => {
@@ -703,6 +713,15 @@ impl Turn {
             // `ping` and anything else.
             _ => Ok(None),
         }
+    }
+
+    /// Remember a token type PM can't price if this usage object names one. The counters are
+    /// cumulative, so a type seen in any event counts for the reply.
+    fn note_unpriced(&mut self, usage: &Value) {
+        self.unpriced = usage_keys::worse(
+            self.unpriced,
+            usage_keys::note_for(CloudProvider::Anthropic, usage),
+        );
     }
 
     fn push(&mut self, text: &str) -> Result<Option<String>> {
@@ -735,8 +754,12 @@ impl Turn {
         let read = larger(self.start.read, self.delta.read);
         let output = self.delta.output;
         let long_write = larger(self.start.long_write, self.delta.long_write);
+        let thinking = larger(self.start.thinking, self.delta.thinking);
         let any = [input, creation, read, output].iter().any(Option::is_some);
-        let mut usage = Usage::default();
+        let mut usage = Usage {
+            cost_note: self.unpriced,
+            ..Usage::default()
+        };
         if any {
             // TOTAL input, the meaning OpenAI's `prompt_tokens` has: `input_tokens` alone is only the
             // uncached part. Thinking is already inside `output_tokens`. Every cache write is priced
@@ -753,6 +776,7 @@ impl Turn {
             // lifetime and reports one-hour writes, a price worked out here would under-count, so the
             // cost is left unknown instead (`settle` reads the flag as a dash).
             usage.output_partial = long_write.is_some_and(|n| n > 0);
+            usage.thinking_tokens = thinking;
         }
         let stop = self.stop.as_deref();
         if stop == Some("refusal") {
