@@ -80,7 +80,9 @@ function server({
   const f = fakeFetch((url, init) => {
     const u = new URL(url);
     const body = init.body ? JSON.parse(init.body) : null;
-    if (u.hostname.endsWith("githubusercontent.com")) {
+    // The exact host the fake OIDC URL above names, never a suffix match (the same rule leg.mjs
+    // applies to the real request).
+    if (u.hostname === "pipelines.actions.githubusercontent.com") {
       jwtCalls += 1;
       return { body: { value: JWT + jwtCalls } };
     }
