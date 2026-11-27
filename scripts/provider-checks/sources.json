@@ -1,0 +1,13 @@
+{
+  "about": "Where the weekly provider checks send requests, in one small file because vendors move their URLs (Google's docs moved hosts while this was researched). The canary sends a credential ONLY to a host named in `api_hosts`; leg.mjs refuses any other. The weekly drift check (a later change) adds its page URLs here.",
+  "api_hosts": {
+    "openai": "https://api.openai.com",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "anthropic": "https://api.anthropic.com"
+  },
+  "anthropic": {
+    "version": "2026-10-21",
+    "token_path": "/v1/oauth/token",
+    "oidc_audience": "https://api.anthropic.com"
+  }
+}

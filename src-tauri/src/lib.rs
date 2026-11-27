@@ -9,6 +9,9 @@ mod backup;
 // A scripted loopback server for the direct providers' wire tests (test-only).
 #[cfg(test)]
 mod direct_test_support;
+// The request bodies the weekly provider canary sends, pinned against PM's real builders (test-only).
+#[cfg(test)]
+mod golden_request_bodies;
 // "A model that fits your machine better is available" (#437): the pure, conservative decision about
 // whether any curated model is worth interrupting the user about, given what they already run.
 mod better_fit;

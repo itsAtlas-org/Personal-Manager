@@ -161,7 +161,11 @@ for (const f of tracked) {
 const COLLECTED = [
   { re: /^src\/.+\.test\.tsx?$/, by: "vitest (src/**/*.test.{ts,tsx})" },
   { re: /^mods\/.+\.test\.tsx?$/, by: "vitest (mods/**/*.test.{ts,tsx})" },
-  { re: /^scripts\/.+\.test\.mjs$/, by: "vitest (scripts/**/*.test.mjs)" },
+  { re: /^scripts\/(?!provider-checks\/).+\.test\.mjs$/, by: "vitest (scripts/**/*.test.mjs)" },
+  {
+    re: /^scripts\/provider-checks\/.+\.test\.mjs$/,
+    by: "just provider-checks-offline (node --test, excluded from vitest)",
+  },
   { re: /^sidecar\/test_.+\.py$/, by: "just sidecar-test" },
 ];
 for (const f of tracked) {

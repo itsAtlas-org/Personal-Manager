@@ -1,0 +1,21 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "OK.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1795711033,
+  "id": "fixture",
+  "model": "gemini-3.1-flash-lite",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 5,
+    "total_tokens": 7
+  }
+}

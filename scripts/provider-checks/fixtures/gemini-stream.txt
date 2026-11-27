@@ -1,0 +1,5 @@
+data: {"choices":[{"delta":{"content":"18 pounds","role":"assistant"},"index":0}],"created":1795711149,"id":"fixture","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":3,"prompt_tokens":32,"total_tokens":150}}
+
+data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop","index":0}],"created":1795711149,"id":"fixture","model":"gemini-3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":3,"prompt_tokens":32,"total_tokens":150}}
+
+data: [DONE]

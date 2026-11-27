@@ -1,0 +1,24 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "OK.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1795711156,
+  "id": "fixture",
+  "model": "gemini-3.8-flash",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 6906,
+    "prompt_tokens_details": {
+      "cached_tokens": 4861
+    },
+    "total_tokens": 6908
+  }
+}

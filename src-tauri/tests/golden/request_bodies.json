@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "about": "The request bodies PM's real builders make for one fixed tiny prompt. Written and verified by the Rust test request_bodies_match_the_canary_golden (openai_direct, gemini_direct, anthropic_direct_tests); the weekly provider canary (scripts/provider-checks) sends them with its own prompt in place of the two markers. Change a body PM sends and that test fails until this file says the same. max-token limits are the canary's small ones, not the model maximum PM sends in production. No key is, or may ever be, in this file.",
+  "markers": { "system": "<<SYSTEM>>", "user": "<<USER>>" },
+  "providers": {
+    "openai": {
+      "wire_model": "gpt-6-luna",
+      "cases": {
+        "stream": {
+          "body": {
+            "model": "gpt-6-luna",
+            "messages": [
+              { "role": "system", "content": "<<SYSTEM>>" },
+              { "role": "user", "content": "<<USER>>" }
+            ],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "max_completion_tokens": 64,
+            "store": false,
+            "reasoning_effort": "none"
+          }
+        },
+        "plain": {
+          "body": {
+            "model": "gpt-6-luna",
+            "messages": [
+              { "role": "system", "content": "<<SYSTEM>>" },
+              { "role": "user", "content": "<<USER>>" }
+            ],
+            "stream": false,
+            "max_completion_tokens": 64,
+            "store": false,
+            "reasoning_effort": "none"
+          }
+        },
+        "key_check": {
+          "body": {
+            "model": "gpt-6-luna",
+            "messages": [{ "role": "user", "content": "Reply with OK." }],
+            "max_completion_tokens": 16,
+            "store": false,
+            "reasoning_effort": "none"
+          }
+        }
+      }
+    },
+    "gemini": {
+      "wire_model": "gemini-3.5-flash-lite",
+      "cases": {
+        "stream": {
+          "body": {
+            "model": "gemini-3.5-flash-lite",
+            "messages": [
+              { "role": "system", "content": "<<SYSTEM>>" },
+              { "role": "user", "content": "<<USER>>" }
+            ],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "max_tokens": 256,
+            "reasoning_effort": "minimal"
+          }
+        },
+        "plain": {
+          "body": {
+            "model": "gemini-3.5-flash-lite",
+            "messages": [
+              { "role": "system", "content": "<<SYSTEM>>" },
+              { "role": "user", "content": "<<USER>>" }
+            ],
+            "stream": false,
+            "max_tokens": 256,
+            "reasoning_effort": "minimal"
+          }
+        },
+        "tier_probe": {
+          "body": {
+            "contents": [{ "parts": [{ "text": "ok" }] }],
+            "generationConfig": { "maxOutputTokens": 1 }
+          }
+        }
+      }
+    },
+    "anthropic": {
+      "wire_model": "claude-haiku-5-5",
+      "cases": {
+        "stream": {
+          "body": {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "<<USER>>" }],
+            "stream": true,
+            "system": [
+              {
+                "type": "text",
+                "text": "<<SYSTEM>>",
+                "cache_control": { "type": "ephemeral" }
+              }
+            ],
+            "output_config": { "effort": "low" },
+            "thinking": { "type": "disabled" }
+          }
+        },
+        "plain": {
+          "body": {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "<<USER>>" }],
+            "system": [{ "type": "text", "text": "<<SYSTEM>>" }],
+            "output_config": { "effort": "low" },
+            "thinking": { "type": "disabled" }
+          }
+        },
+        "key_check": {
+          "body": {
+            "model": "claude-haiku-5-5",
+            "max_tokens": 32,
+            "messages": [{ "role": "user", "content": "Reply with OK." }],
+            "output_config": { "effort": "low" }
+          }
+        }
+      }
+    }
+  }
+}

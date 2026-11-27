@@ -402,6 +402,8 @@ jobs:
         run: just people-emit
       - name: scripts/ stays zero-dependency (allowlisted exceptions only)
         run: just script-deps
+      - name: Provider canary scripts (offline suite)
+        run: just provider-checks-offline
       - name: Every workflow `uses:` is SHA-pinned
         run: just action-pins
       - name: The sidecar dependency locks are current, pinned and hashed

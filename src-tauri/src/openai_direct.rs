@@ -673,6 +673,39 @@ mod tests {
 
     // ---- the body --------------------------------------------------------------------------
 
+    /// The weekly provider canary sends these bodies (tests/golden/request_bodies.json), so they are
+    /// built here by the real builders and compared byte for byte: a change to what PM sends fails
+    /// this test until the file is updated. Luna is the canary's model (the cheapest in the catalogue).
+    #[test]
+    fn request_bodies_match_the_canary_golden() {
+        use crate::golden_request_bodies::{assert_matches, SYSTEM, USER};
+        let say = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: SYSTEM.into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: USER.into(),
+            },
+        ];
+        let m = luna();
+        let effort = Some("none").filter(|e| m.offers(e));
+        assert_eq!(
+            effort,
+            Some("none"),
+            "the canary's effort is one Luna offers"
+        );
+        assert_matches(
+            "openai",
+            &[
+                ("stream", chat_body(m, effort, &say, true, Some(0), 64)),
+                ("plain", chat_body(m, effort, &say, false, None, 64)),
+                ("key_check", probe_body(m)),
+            ],
+        );
+    }
+
     #[test]
     fn the_streamed_body_is_exactly_what_pm_means_to_send() {
         let body = chat_body(sol(), None, &msgs(), true, Some(0), 128_000);

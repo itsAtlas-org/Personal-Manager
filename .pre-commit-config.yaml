@@ -124,6 +124,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: provider-checks-offline
+        name: provider canary scripts (offline suite)
+        entry: just provider-checks-offline
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: action-pins
         name: every workflow `uses:` is SHA-pinned
         entry: just action-pins
