@@ -301,6 +301,17 @@ impl ModError {
         Self::new(Code::ModelCallFailed, "The AI model didn't answer.")
     }
 
+    /// The person's own daily spending limit has paused the provider the call would use. The money
+    /// code a mod already handles for its own cap ("no AI spend right now"), with a sentence of its
+    /// own: no provider and no figure, because the limit's own sentence carries today's spend and
+    /// the limit, which a mod must not learn.
+    pub fn ai_provider_paused() -> Self {
+        Self::new(
+            Code::AiCapReached,
+            "PM's daily AI spending limit has paused AI calls for now.",
+        )
+    }
+
     pub fn host_not_allowed() -> Self {
         Self::new(
             Code::HostNotAllowed,

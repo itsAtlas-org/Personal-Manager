@@ -1086,6 +1086,8 @@ pub(crate) fn power_view_with(
         Option<crate::direct_providers::RouteTerms>,
         Option<crate::direct_providers::RouteTerms>,
     ),
+    // Whether each role's provider is paused by the person's daily limit (chat, background).
+    limited: (bool, bool),
 ) -> PowerView {
     let ctx = llm_gateway::RuntimeContext::from_parts(snap, settings, keep_local);
     let role = |role: Role, bound: Option<&str>, key: KeyPresence| {
@@ -1097,10 +1099,15 @@ pub(crate) fn power_view_with(
             Role::Chat => terms.0,
             Role::Background => terms.1,
         };
-        // A role on a paused provider (a free Gemini key where only paid ones are used) is never one
-        // the policy can move: it would fail every call.
+        let limit_reached = match role {
+            Role::Chat => limited.0,
+            Role::Background => limited.1,
+        };
+        // A role on a paused provider (a free Gemini key where only paid ones are used, or one the
+        // daily limit has paused) is never one the policy can move: it would fail every call.
         let paused = route_terms == Some(crate::direct_providers::RouteTerms::Blocked);
-        let blocked = llm_gateway::power_blocked(pref, local_ready, key, paused);
+        let blocked =
+            llm_gateway::power_blocked_with_limit(pref, local_ready, key, paused, limit_reached);
         let route = match llm_gateway::power_route(role, &ctx, blocked) {
             // Plugged back in, with the latch still waiting out its minute: there is nothing left to
             // ask about. The question says "you're on battery" and offers the cloud "until you plug
@@ -1178,6 +1185,7 @@ pub(crate) fn power_view(
         chat_key,
         background_key,
         (None, None),
+        (false, false),
     )
 }
 
@@ -1235,7 +1243,16 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
         crate::direct_providers::tier_context(providers.chat, providers.background)
     };
     // One connection for every setting this needs, dropped before the first await.
-    let (base_url, configured, chat_bound, background_bound, prefs, power_settings, route_terms) = {
+    let (
+        base_url,
+        configured,
+        chat_bound,
+        background_bound,
+        prefs,
+        power_settings,
+        route_terms,
+        limited,
+    ) = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
         let base_url = db::get_setting(&conn, LOCAL_BASE_URL_KEY)?;
@@ -1267,6 +1284,13 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
                 &tier_fps,
             )?,
         );
+        // Whether each role's provider is paused by the person's daily limit, read on this guard
+        // (the check takes a connection, never the guard).
+        let now = chrono::Utc::now();
+        let limited = (
+            crate::daily_limit::check(&conn, power_settings.providers.chat, now).is_err(),
+            crate::daily_limit::check(&conn, power_settings.providers.background, now).is_err(),
+        );
         (
             base_url,
             configured,
@@ -1275,6 +1299,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
             prefs,
             power_settings,
             route_terms,
+            limited,
         )
     };
     if !configured {
@@ -1310,6 +1335,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
                 llm_gateway::key_presence(&app, Role::Chat),
                 llm_gateway::key_presence(&app, Role::Background),
                 route_terms,
+                limited,
             ),
         });
     }
@@ -1328,6 +1354,7 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
         llm_gateway::key_presence(&app, Role::Chat),
         llm_gateway::key_presence(&app, Role::Background),
         route_terms,
+        limited,
     );
 
     let (in_cooldown, cooldown_remaining_s) = {
@@ -4547,6 +4574,7 @@ mod tests {
                 KeyPresence::Present,
                 KeyPresence::Present,
                 terms,
+                (false, false),
             )
         };
         let paused = view((Some(RouteTerms::Blocked), None));
@@ -4564,6 +4592,40 @@ mod tests {
         assert_eq!(v["route_terms"], "blocked");
     }
 
+    /// A daily limit on ONE role's provider blocks that role and not the other: `limited` is
+    /// (chat, background), and swapping the pair would pause the wrong role's route.
+    #[test]
+    fn a_daily_limit_blocks_only_the_role_whose_provider_it_paused() {
+        let view = |limited| {
+            power_view_with(
+                &low_battery(),
+                &policy(true),
+                false,
+                &both(ProviderPref::LocalThenCloud),
+                true,
+                Some("gemma3:4b"),
+                Some("qwen3:8b"),
+                KeyPresence::Present,
+                KeyPresence::Present,
+                (None, None),
+                limited,
+            )
+        };
+        let chat = view((true, false));
+        assert_eq!(chat.chat.blocked, Some(PowerBlocked::LimitReached));
+        assert_ne!(chat.chat.route, PowerRoute::Cloud, "chat stays local");
+        assert_eq!(chat.background.blocked, None);
+        assert_eq!(chat.background.route, PowerRoute::Cloud);
+        let background = view((false, true));
+        assert_eq!(background.chat.blocked, None);
+        assert_eq!(background.chat.route, PowerRoute::Cloud);
+        assert_eq!(
+            background.background.blocked,
+            Some(PowerBlocked::LimitReached)
+        );
+        assert_ne!(background.background.route, PowerRoute::Cloud);
+    }
+
     /// The status builder reads the region and the fingerprints BEFORE its guard and hands the terms to
     /// the policy: a source scan, because the pure function can't prove the caller passes them.
     #[test]
@@ -4574,7 +4636,8 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("\n}\n").next())
             .expect("power_view_with");
-        assert!(view.contains("power_blocked(pref, local_ready, key, paused)"));
+        assert!(view
+            .contains("power_blocked_with_limit(pref, local_ready, key, paused, limit_reached)"));
         let status = src
             .split("pub async fn local_llm_status(")
             .nth(1)
@@ -4587,7 +4650,7 @@ mod tests {
             .find("tier_context(")
             .expect("fingerprints and region are read");
         let main_guard_at = status
-            .find("let (base_url,")
+            .find("// One connection for every setting this needs")
             .expect("the main settings block");
         assert!(ctx_at < main_guard_at, "both before the main guard");
         assert!(
@@ -4604,6 +4667,10 @@ mod tests {
             assert!(
                 call.contains("route_terms"),
                 "a call without the terms: {call}"
+            );
+            assert!(
+                call.contains("limited"),
+                "a call without the daily-limit pause: {call}"
             );
         }
     }

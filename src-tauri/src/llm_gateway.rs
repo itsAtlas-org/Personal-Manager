@@ -334,17 +334,34 @@ pub enum PowerBlocked {
     /// The role's cloud provider is paused (a free Gemini key where PM only uses paid ones): moving
     /// the role to it would make chat fail every call, so the policy keeps it local.
     Paused,
+    /// The role's cloud provider is paused by the person's daily limit: the send seam would refuse
+    /// every call, so the policy keeps the role local (and the limit lifts at midnight, or when it is
+    /// raised).
+    LimitReached,
 }
 
-/// Why this role can never be moved by the policy, or `None` if it can. The order is the copy's
-/// priority: a keyless "Local only" user gets the keyless copy, because adding a key is the step
-/// that comes first for them. A paused provider comes last: a role that can't move for another
-/// reason keeps that reason.
+/// [`power_blocked_with_limit`] for a provider with no limit in play: the shape every test written
+/// before the daily limit uses, so none of them has to say "not limited" fourteen times.
+#[cfg(test)]
 pub fn power_blocked(
     pref: ProviderPref,
     local_ready: bool,
     key: KeyPresence,
     paused: bool,
+) -> Option<PowerBlocked> {
+    power_blocked_with_limit(pref, local_ready, key, paused, false)
+}
+
+/// Why this role can never be moved by the policy, or `None` if it can. The order is the copy's
+/// priority: a keyless "Local only" user gets the keyless copy, because adding a key is the step
+/// that comes first for them. A paused provider comes last, the region's pause before the person's
+/// own limit: a role that can't move for another reason keeps that reason.
+pub fn power_blocked_with_limit(
+    pref: ProviderPref,
+    local_ready: bool,
+    key: KeyPresence,
+    paused: bool,
+    limit_reached: bool,
 ) -> Option<PowerBlocked> {
     if pref == ProviderPref::Cloud {
         return Some(PowerBlocked::CloudRouting);
@@ -362,6 +379,9 @@ pub fn power_blocked(
     }
     if paused {
         return Some(PowerBlocked::Paused);
+    }
+    if limit_reached {
+        return Some(PowerBlocked::LimitReached);
     }
     None
 }
@@ -1109,10 +1129,17 @@ pub fn resolve(app: &AppHandle, role: Role) -> Result<Option<RoutePlan>> {
             let cloud = cloud_arm(app, role)?;
             // The policy never moves a role onto a paused provider (a free Gemini key where only paid
             // ones are used): the status says it stays local, and the send seam would refuse it.
+            //
+            // Nor onto one the person's daily limit has paused: the send seam would refuse it, so the
+            // role would fail every call on battery instead of staying on the local model. No guard
+            // is held here (the block above has closed), which the limit's read needs.
             let power = choice == ProviderChoice::CloudForPower
                 && !cloud
                     .as_ref()
-                    .is_some_and(crate::direct_providers::arm_paused);
+                    .is_some_and(crate::direct_providers::arm_paused)
+                && !cloud
+                    .as_ref()
+                    .is_some_and(|c| crate::daily_limit::is_paused(app, c.provider));
             hydrate_local_then_cloud(power, local, cloud)
         }
         // No arm is hydrated at all, so not even a key is read: the role has nothing to answer it,
@@ -1564,12 +1591,18 @@ async fn cloud_complete(
 /// (`max_tokens`) is handed to the provider's call or to nothing. Each provider's call announces its
 /// own paid request on the call's wire mark (`wire_mark::send`); a provider without one yet must not
 /// be added here until it does.
+///
+/// The person's daily limit is asked FIRST (see [`crate::daily_limit`]): a provider paused by it is
+/// refused here, before a body is built, so a request that never left costs nothing and a mod's
+/// booking is given back. A paused request is not moved to another company's key by this function or
+/// anything above it.
 async fn cloud_complete_via(
     arm: &CloudArm,
     messages: &[ChatMessage],
     cache_prefix: bool,
     max_tokens: Option<u32>,
 ) -> Result<Completion> {
+    crate::daily_limit::gate(arm.provider)?;
     match arm.provider {
         CloudProvider::OpenRouter => {
             openrouter::complete(
@@ -1880,7 +1913,8 @@ where
 }
 
 /// The streaming twin of [`cloud_complete_via`]: every cloud leg of [`stream_chat`] picks its
-/// provider here. The chat stream names no bound on the answer, so nothing here does either.
+/// provider here. The chat stream names no bound on the answer, so nothing here does either. It asks
+/// the person's daily limit first, exactly as [`cloud_complete_via`] does.
 async fn cloud_stream_via<F>(
     arm: &CloudArm,
     messages: &[ChatMessage],
@@ -1890,6 +1924,7 @@ async fn cloud_stream_via<F>(
 where
     F: FnMut(&str),
 {
+    crate::daily_limit::gate(arm.provider)?;
     match arm.provider {
         CloudProvider::OpenRouter => {
             openrouter::stream_chat(
@@ -2310,6 +2345,188 @@ mod tests {
             assert!(e.to_string().contains("Anthropic"), "{e}");
         }
         assert_eq!(CloudProvider::OpenRouter.as_str(), "openrouter");
+    }
+
+    /// A provider the person's daily limit has paused is refused by BOTH cloud dispatch functions
+    /// before anything is built or sent, for each of the four providers: the error is the typed one
+    /// with `NeverLeft`, the sentence says it is paused, the limit was asked once per function, and
+    /// the call's wire mark shows nothing left (so a mod's booking is given back). Nothing reaches the
+    /// network: a function that skipped the check would fall through to a real request or to the
+    /// catalogue's refusal, neither of which is this error.
+    #[tokio::test]
+    async fn a_limit_paused_provider_is_refused_by_both_cloud_functions_before_anything_is_sent() {
+        use crate::error::{Billing, FailureClass};
+        for provider in [
+            CloudProvider::OpenRouter,
+            CloudProvider::OpenAi,
+            CloudProvider::Gemini,
+            CloudProvider::Anthropic,
+        ] {
+            let asked = std::rc::Rc::new(std::cell::Cell::new(0u32));
+            let counter = std::rc::Rc::clone(&asked);
+            let _gate = crate::daily_limit::test_gate(move |p| {
+                counter.set(counter.get() + 1);
+                Err(crate::daily_limit::test_refusal(p))
+            });
+            let arm = CloudArm {
+                provider,
+                ..cloud(&["some/model"])
+            };
+            let mark = crate::wire_mark::WireMark::new();
+            let (complete, stream) = mark
+                .scope(async {
+                    (
+                        cloud_complete_via(&arm, &msgs(1), false, Some(10))
+                            .await
+                            .err(),
+                        cloud_stream_via(&arm, &msgs(1), None, |_| {}).await.err(),
+                    )
+                })
+                .await;
+            for e in [complete, stream] {
+                let e = e.expect("refused");
+                let f = e.provider_failure().expect("the typed error");
+                assert_eq!(f.class, FailureClass::LimitReached, "{provider:?}");
+                assert_eq!(f.billing, Billing::NeverLeft, "{provider:?}");
+                assert_eq!(f.provider, provider);
+                assert!(e.to_string().contains("is paused"), "{e}");
+            }
+            assert_eq!(asked.get(), 2, "{provider:?}: once per function");
+            assert!(
+                !mark.may_have_reached_the_wire(),
+                "{provider:?}: a refusal before send leaves the mark at never left"
+            );
+        }
+    }
+
+    /// The check is the FIRST thing both dispatch functions do: before the provider match builds a
+    /// request and before anything is awaited. A scan, because the behaviour test above cannot tell
+    /// "first" from "somewhere before the send".
+    #[test]
+    fn both_cloud_dispatch_functions_ask_the_daily_limit_before_anything_else() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        for sig in [
+            "async fn cloud_complete_via(",
+            "async fn cloud_stream_via<F>(",
+        ] {
+            let body = live.split(sig).nth(1).unwrap_or_else(|| panic!("{sig}"));
+            let head = body.split("match arm.provider").next().unwrap();
+            let ask = head
+                .find("crate::daily_limit::gate(arm.provider)?;")
+                .unwrap_or_else(|| panic!("{sig} never asks the daily limit"));
+            assert!(
+                !head[..ask].contains(&format!(".{}", "await")),
+                "{sig} awaits before it asks the limit"
+            );
+        }
+    }
+
+    /// The limit's read takes the database guard itself, so (like `key_presence`) it must never be
+    /// called with the guard held: the dispatch functions and `resolve` are its only callers, `resolve`
+    /// asks only after the block that took its guard has closed, and the one caller that already holds
+    /// a connection (the On battery status) hands it the connection, never the guard.
+    #[test]
+    fn the_limits_own_read_is_never_called_with_the_guard_held() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let needles = [
+            concat!("daily_limit::", "gate("),
+            concat!("daily_limit::", "is_paused("),
+        ];
+        for file in files {
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "llm_gateway.rs" || rel == "daily_limit.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            for needle in needles {
+                assert!(
+                    !text.contains(needle),
+                    "{rel} calls {needle}: it takes the guard itself, so only the gateway may ask"
+                );
+            }
+        }
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
+        let closed = body
+            .find("let plan = match choice")
+            .expect("the guard block has closed by the time the arms are built");
+        let asked = body
+            .find(needles[1])
+            .expect("resolve asks the limit before it lets the policy move a role");
+        assert!(closed < asked, "resolve asks the limit with its guard held");
+    }
+
+    /// The On battery reasons, in the order the copy needs them: a role that cannot move for another
+    /// reason keeps that reason, the region's pause wins over the person's own limit, and a role whose
+    /// provider the limit has paused is never one the policy moves.
+    #[test]
+    fn a_limit_reached_provider_is_one_the_policy_never_moves_a_role_onto() {
+        use KeyPresence::*;
+        let blocked = |pref, ready, key, paused, limited| {
+            power_blocked_with_limit(pref, ready, key, paused, limited)
+        };
+        let both = ProviderPref::LocalThenCloud;
+        assert_eq!(
+            blocked(both, true, Present, false, true),
+            Some(PowerBlocked::LimitReached)
+        );
+        assert_eq!(blocked(both, true, Present, false, false), None);
+        // The region's pause, then the other reasons, all come before the limit.
+        assert_eq!(
+            blocked(both, true, Present, true, true),
+            Some(PowerBlocked::Paused)
+        );
+        assert_eq!(
+            blocked(both, true, Absent, false, true),
+            Some(PowerBlocked::NoKey)
+        );
+        assert_eq!(
+            blocked(both, false, Present, false, true),
+            Some(PowerBlocked::NoLocalModel)
+        );
+        assert_eq!(
+            blocked(ProviderPref::Cloud, true, Present, false, true),
+            Some(PowerBlocked::CloudRouting)
+        );
+        assert_eq!(
+            serde_json::to_value(PowerBlocked::LimitReached).unwrap(),
+            "limit_reached"
+        );
+        // And a role the policy cannot move is not routed to the cloud, however low the battery.
+        let ctx = RuntimeContext {
+            battery_low: true,
+            scope: PowerScope::Both,
+            consent: Consent::ALL,
+            keep_local: false,
+            ..RuntimeContext::default()
+        };
+        assert_eq!(
+            power_route(Role::Chat, &ctx, blocked(both, true, Present, false, true)),
+            PowerRoute::Unchanged
+        );
     }
 
     /// Whether the app can reach a cloud provider is asked in one place. No module outside the
@@ -3761,6 +3978,11 @@ mod tests {
                 && body.contains("crate::direct_providers::arm_paused"),
             "resolve must drop the power substitution for a paused cloud arm"
         );
+        // And for one the person's daily limit has paused: the send seam refuses it too.
+        assert!(
+            body.contains("crate::daily_limit::is_paused(app, c.provider)"),
+            "resolve must drop the power substitution for a limit-paused cloud arm"
+        );
     }
 
     /// A free note a call left in memory must reach the stored row (and forget a paid-time On battery
@@ -4032,6 +4254,7 @@ mod tests {
             (PowerBlocked::KeyUnreadable, "key_unreadable"),
             (PowerBlocked::LocalOnly, "local_only"),
             (PowerBlocked::Paused, "paused"),
+            (PowerBlocked::LimitReached, "limit_reached"),
         ] {
             assert_eq!(json(serde_json::to_value(blocked).unwrap()), wire);
         }

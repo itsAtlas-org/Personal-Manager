@@ -3,7 +3,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { dayMonthYear, isDirect, roleDefaultEffort, roleModel } from "../../lib/directProviders";
+import { msUntilResume, todayLine } from "../../lib/dailyLimit";
+import {
+  dayMonthYear,
+  directInfo,
+  isDirect,
+  roleDefaultEffort,
+  roleModel,
+} from "../../lib/directProviders";
 import { formatWhen } from "../../lib/format";
 import {
   costSummary,
@@ -12,6 +19,7 @@ import {
   hasOpenRouterBackgroundKey,
   hasOpenRouterKey,
   importAiMemory,
+  openrouterLimitState,
   refreshPricing,
   setBackgroundAutoSwitch,
   setBackgroundModels,
@@ -24,7 +32,7 @@ import {
   settingsDefaults,
 } from "../../lib/ipc";
 import { useDirectProviders } from "../../lib/useDirectProviders";
-import type { CostSummary, RoleName, Settings } from "../../lib/types";
+import type { CostSummary, LimitView, RoleName, Settings } from "../../lib/types";
 import {
   atLeast,
   detailLine,
@@ -46,6 +54,7 @@ import {
   useFieldA11y,
   VisuallyHidden,
 } from "../ui";
+import { DailyLimitControl } from "./DailyLimitControl";
 import { DirectProviders } from "./DirectProviders";
 import { RoleBlock } from "./RoleBlock";
 import { TabResetSection } from "./ResetControls";
@@ -116,6 +125,9 @@ export function AiModelsSettings({
   const [defaults, setDefaults] = useState<Settings | null>(null);
   const [cost, setCost] = useState<CostSummary | null>(null);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
+  // OpenRouter's daily limit, read from Rust (it has no card of its own; the three direct providers'
+  // ride in the own-keys state). null until it answers, or if it can't: then no control is drawn.
+  const [orLimit, setOrLimit] = useState<LimitView | null>(null);
   // Whether Review asks the model to suggest a project/tags/importance per item. A per-device frontend
   // gate (localStorage), shared with the Review tab's "Turn on AI" banner — off by default.
   const [reviewAi, setReviewAi] = useState(readReviewAiEnabled);
@@ -187,6 +199,26 @@ export function AiModelsSettings({
       .catch(() => {});
   }, []);
   useEffect(loadCost, [loadCost]);
+
+  // OpenRouter's limit state: read on opening and after every write to it. A read that fails leaves
+  // the control out rather than showing an invented "off".
+  const loadOrLimit = useCallback(async () => {
+    try {
+      setOrLimit(await openrouterLimitState());
+    } catch {
+      /* the control just isn't drawn */
+    }
+  }, []);
+  useEffect(() => {
+    void loadOrLimit();
+  }, [loadOrLimit]);
+  // A pause lifts at midnight on its own: an open page reads it again then (as the own-key cards do).
+  useEffect(() => {
+    const wait = msUntilResume([orLimit], Date.now());
+    if (wait == null) return;
+    const t = setTimeout(() => void loadOrLimit(), wait);
+    return () => clearTimeout(t);
+  }, [orLimit, loadOrLimit]);
 
   // The green "Saved" confirmations fade a couple of seconds after a key is stored.
   useEffect(() => {
@@ -365,6 +397,13 @@ export function AiModelsSettings({
     isDirect(dp.state.roles.chat.effective) &&
     isDirect(dp.state.roles.background.effective);
   const catalogueDate = dp.state?.providers[0]?.catalogue_checked_on ?? null;
+  // One "Today: $1.20 of $5.00" line per provider whose limit is on, OpenRouter first.
+  const todayLines = [
+    orLimit ? todayLine("OpenRouter", orLimit) : null,
+    ...(dp.state?.providers ?? []).map((p) =>
+      todayLine(directInfo(p.provider)?.name ?? p.provider, p.limit),
+    ),
+  ].filter((l): l is string => l !== null);
   // Gemini's cost copy is only worth reading by someone who has turned it on or kept a key.
   const geminiInUse =
     dp.state?.providers.find(
@@ -450,6 +489,18 @@ export function AiModelsSettings({
         </p>
       </SectionInfo>
 
+      {/* The limit lives beside the key it brakes. Drawn for a person who uses OpenRouter, or who
+          already has a limit on it (a restore can bring one onto a machine with no key yet). */}
+      {orLimit && (keyAlreadySet || bgKeyAlreadySet || orLimit.limit_usd != null) && (
+        <DailyLimitControl
+          provider="openrouter"
+          name="OpenRouter"
+          limit={orLimit}
+          onChanged={loadOrLimit}
+          onError={setError}
+        />
+      )}
+
       <DirectProviders dp={dp} orKey={orKey} onError={setError} />
 
       <div
@@ -481,6 +532,7 @@ export function AiModelsSettings({
             onAutoSwitchChange: changeChatAuto,
             onReset: chatRoleIsDefault ? undefined : resetChatRole,
           }}
+          openRouterUsable={orKey.chat && !orLimit?.reached}
           onError={setError}
         />
         <RoleBlock
@@ -497,6 +549,7 @@ export function AiModelsSettings({
             onAutoSwitchChange: changeBackgroundAuto,
             onReset: backgroundRoleIsDefault ? undefined : resetBackgroundRole,
           }}
+          openRouterUsable={orKey.background && !orLimit?.reached}
           onError={setError}
         />
         {/* A pointer, deliberately not a mirror: the local controls keep one home, in the Local AI
@@ -661,6 +714,19 @@ export function AiModelsSettings({
               </div>
             </div>
           </div>
+          {/* A read-out of each limit that is on: today against it. The control lives with the key it
+              brakes; this only reads. "At least" appears only when some of today's calls had no
+              price (the same count the totals use). */}
+          {todayLines.length > 0 && (
+            <ul
+              className="mt-2 space-y-0.5 text-xs text-ink3"
+              aria-label="Today against your daily limits"
+            >
+              {todayLines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
           {/* Status, so it is never folded: how many calls the 30-day figure leaves out, and the
               named token types PM can't price. The "Why?" beside it is the explanation. */}
           {/* The count covers the last 30 days only; the "Why?" shows whenever either total says "at
@@ -875,7 +941,8 @@ export function AiModelsSettings({
           <>
             Restores the chat and background models and their auto-switch, sends both roles back to
             OpenRouter, and turns Review filing suggestions back off. Your saved API keys, and which
-            providers you&apos;ve turned on, aren&apos;t affected.
+            providers you&apos;ve turned on, aren&apos;t affected. Nor are your daily limits: they
+            only ever hold spending back, so a reset leaves them as they are.
           </>
         }
       />

@@ -1141,6 +1141,10 @@ pub(crate) struct DirectProviderView {
     /// Set when the provider is on, its key is here, the verdict reads as free and this computer is
     /// somewhere PM only uses paid keys. The webview never computes this: Rust read the region.
     pub blocked: Option<RegionRefusal>,
+    /// The person's daily spend limit for this provider and where today stands against it. A
+    /// SIBLING of `blocked`, not a second value of it: a region pause has a place and a refusal to
+    /// show, a spend pause has an amount and a time it lifts, and a card can be in both.
+    pub limit: crate::daily_limit::LimitView,
     pub catalogue_checked_on: String,
     pub terms_checked_on: String,
     pub roles: DirectRolesView,
@@ -1236,6 +1240,12 @@ pub(crate) fn build_state(
             shares_data: shares_data(conn, d.provider)?,
             tier,
             blocked,
+            // A key proven free costs nothing, so there is nothing for a limit to count.
+            limit: crate::daily_limit::view_now(
+                conn,
+                d.provider,
+                present && tier == Some(KeyTier::Free),
+            ),
             catalogue_checked_on: direct_models::checked_on().to_string(),
             terms_checked_on: section.terms_checked_on.clone(),
             roles: DirectRolesView {

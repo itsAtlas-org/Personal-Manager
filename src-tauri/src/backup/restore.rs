@@ -569,6 +569,12 @@ mod tests {
                 [],
             )
             .unwrap();
+            // A person's daily spend limit, which a `.pmbackup` carries like any other setting.
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES ('daily_limit_anthropic_usd', '7.5')",
+                [],
+            )
+            .unwrap();
             if document {
                 conn.execute(
                     "INSERT INTO documents(vault_path, title, content_hash) \
@@ -780,6 +786,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(objects, 4, "the index and Contacts' tables are all there");
+    }
+
+    /// A daily spend limit is a `settings` row, so it travels in a backup and a restore keeps it: the
+    /// restored store reads the same limit through the one reader the gateway uses, and the brake is
+    /// still on after a restore onto a new machine.
+    #[test]
+    fn a_daily_limit_survives_a_backup_and_restore() {
+        let root = tempfile::tempdir().unwrap();
+        let (inputs, key_hex) = vault_at_version(root.path(), 62);
+        let archive = root.path().join("limit.pmbackup");
+        let cancel = AtomicBool::new(false);
+        pack(inputs, &archive, "pw", |_, _| {}, &cancel).unwrap();
+        let target = root.path().join("restored");
+        restore(&archive, "pw", &target, |_, _| {}, &cancel).unwrap();
+        let conn = db::open_unmigrated(&target.join("pm.sqlite"), &key_hex).unwrap();
+        assert_eq!(
+            crate::daily_limit::read_setting(&conn, crate::llm_gateway::CloudProvider::Anthropic)
+                .unwrap(),
+            crate::daily_limit::Setting::On(7.5)
+        );
+        assert_eq!(
+            crate::daily_limit::read_setting(&conn, crate::llm_gateway::CloudProvider::OpenRouter)
+                .unwrap(),
+            crate::daily_limit::Setting::Off
+        );
     }
 
     /// Pack a store at `version` (optionally holding a board), restore it, and report the schema

@@ -50,6 +50,10 @@ interface Props {
     onAutoSwitchChange: (on: boolean) => void;
     onReset?: () => void;
   };
+  /** False when OpenRouter can't take the role right now (no key for it, or its own daily limit has
+   *  paused it): the paused-provider line then stops without a button that would lead nowhere.
+   *  Unset means usable, as before. */
+  openRouterUsable?: boolean;
   onError: (message: string | null) => void;
 }
 
@@ -78,6 +82,7 @@ export function RoleBlock({
   dp,
   routing,
   openRouter,
+  openRouterUsable = true,
   onError,
 }: Props) {
   const [announce, setAnnounce] = useState("");
@@ -167,7 +172,12 @@ export function RoleBlock({
 
   const direct = view !== undefined && directInfo(view.provider) !== null;
   const storedView = state && isDirect(stored) ? providerView(state, stored) : undefined;
-  const issueCtx = { id: stored, blocked: storedView?.blocked, tier: storedView?.tier };
+  const issueCtx = {
+    id: stored,
+    blocked: storedView?.blocked,
+    tier: storedView?.tier,
+    limit: storedView?.limit,
+  };
   const useOpenRouter = (
     <Button
       type="button"
@@ -183,12 +193,17 @@ export function RoleBlock({
   // region. An empty balance gets the way out only where the provider can't be picked with one.
   const emptyNotOffered = issue === "no_credit" && directInfo(stored)?.noCredit.offered === false;
   const statusIssue =
-    issue === "blocked" || issue === "no_credit" ? (
+    issue === "blocked" || issue === "limit_reached" || issue === "no_credit" ? (
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-st-due">
           {roleIssueLine(issue, role, providerName(stored), issueCtx)}
         </span>
-        {(issue === "blocked" || emptyNotOffered) && useOpenRouter}
+        {/* Another company is the person's click, never PM's move: a limit stops, and this is the way
+            out it offers. */}
+        {(issue === "blocked" ||
+          (issue === "limit_reached" && openRouterUsable) ||
+          emptyNotOffered) &&
+          useOpenRouter}
       </div>
     ) : null;
   const model = view ? roleModel(view, role) : undefined;
@@ -227,7 +242,7 @@ export function RoleBlock({
       )}
 
       {/* A paused role says so above; "goes straight to Google" would contradict it. */}
-      {direct && view && issue !== "blocked" && (
+      {direct && view && issue !== "blocked" && issue !== "limit_reached" && (
         <p className="text-xs text-ink4">{routeNote(role, providerName(view.provider), routing)}</p>
       )}
 

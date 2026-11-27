@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { msUntilResume } from "./dailyLimit";
 import { directProvidersState } from "./ipc";
 import type { DirectProvidersState } from "./types";
 
@@ -46,6 +47,19 @@ export function useDirectProviders(enabled = true): UseDirectProviders {
       alive.current = false;
     };
   }, [reload, enabled]);
+
+  // A daily-limit pause lifts at midnight with nothing else changing, so read again then: the chip
+  // and the card would otherwise keep saying "Paused for today" into the next day.
+  useEffect(() => {
+    if (!enabled || !state) return;
+    const wait = msUntilResume(
+      state.providers.map((p) => p.limit),
+      Date.now(),
+    );
+    if (wait == null) return;
+    const t = setTimeout(() => void reload(), wait);
+    return () => clearTimeout(t);
+  }, [state, enabled, reload]);
 
   return { state, error, reload };
 }

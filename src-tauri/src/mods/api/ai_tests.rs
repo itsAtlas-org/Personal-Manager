@@ -892,6 +892,39 @@ async fn a_call_that_never_reached_the_wire_is_released_not_charged() {
     }
 }
 
+/// The person's daily limit pausing the provider tells the mod the money code in PM's fixed words,
+/// never the limit's own sentence (it names today's spend and the limit), and the booking comes back
+/// whole: nothing was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daily_limit_pause_is_the_money_code_with_no_figures_and_releases_the_booking() {
+    for plan in [PlanSpec::Cloud(CLOUD), PlanSpec::LocalThenCloud(CLOUD)] {
+        let (host, s) = setup();
+        set_cap(&host, Some(1.0));
+        host.model().set_plan(plan);
+        host.model().set_answer(Answer::LimitReached);
+        let e = error(call(&host, &s, ask("hi", 100)).await);
+        assert_eq!(e, ModError::ai_provider_paused(), "{plan:?}");
+        assert_eq!(e.code, ModError::ai_cap_reached().code, "{plan:?}");
+        assert!(
+            !e.message.contains("PROVIDER")
+                && !e.message.chars().any(|c| c.is_ascii_digit() || c == '$'),
+            "{e}"
+        );
+        assert_eq!(ledger(&host), (Some(1.0), 0.0), "{plan:?}: nothing spent");
+        assert!(close(booked(&host), 0.0), "{plan:?}: released");
+        assert!(usage(&host).is_empty());
+    }
+    // Any other failure keeps the plain sentence: only the limit's class changes the words.
+    let (host, s) = setup();
+    set_cap(&host, Some(1.0));
+    host.model().set_plan(PlanSpec::Cloud(CLOUD));
+    host.model().set_answer(Answer::FailBeforeWire);
+    assert_eq!(
+        error(call(&host, &s, ask("hi", 100)).await),
+        ModError::model_call_failed()
+    );
+}
+
 /// A leg that may have left still counts, however the call then ends: a failure after the request
 /// went out, and a deadline with the request in flight (the opposite of the test above, so the
 /// release can never become "free on every error").

@@ -1439,7 +1439,11 @@ export default function App() {
                             onUpgrade={handleUpgrade}
                           />
                           <ProviderChip status={localAi} />
-                          <DirectRouteChip settings={settings} localAi={localAi} />
+                          <DirectRouteChip
+                            settings={settings}
+                            localAi={localAi}
+                            busy={chat.sending}
+                          />
                           <ThinkingToggle status={localAi} />
                         </div>
                       }

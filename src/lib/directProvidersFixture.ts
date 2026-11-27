@@ -6,7 +6,29 @@
 // Four OpenAI rows with the levels and prices the bundled catalogue carries; the numbers only need to
 // be plausible and stable here, since the sentences under test word what they are handed.
 
-import type { DirectModelView, DirectProvidersState, DirectProviderView, Settings } from "./types";
+import type {
+  DirectModelView,
+  DirectProvidersState,
+  DirectProviderView,
+  LimitView,
+  Settings,
+} from "./types";
+
+/** A daily limit that is off: what every provider reads until the person turns one on. Override any
+ *  part (`limitView({ limit_usd: 5, spent_today_usd: 5.12, reached: true })`). */
+export function limitView(over: Partial<LimitView> = {}): LimitView {
+  return {
+    limit_usd: null,
+    spent_today_usd: 0,
+    unpriced_today: 0,
+    reached: false,
+    unreadable: false,
+    resumes_at: "2026-11-28T00:00:00+00:00",
+    free_key: false,
+    suggested_usd: 5,
+    ...over,
+  };
+}
 
 export const SOL: DirectModelView = {
   id: "openai/gpt-6.2-sol",
@@ -68,6 +90,7 @@ export function openaiView(over: Partial<DirectProviderView> = {}): DirectProvid
     // OpenAI has no tiers: no verdict on terms and nothing blocked.
     tier: null,
     blocked: null,
+    limit: limitView(),
     catalogue_checked_on: "2026-11-26",
     terms_checked_on: "2026-11-26",
     roles: {
@@ -145,6 +168,7 @@ export function geminiView(over: Partial<DirectProviderView> = {}): DirectProvid
     shares_data: false,
     tier: "paid",
     blocked: null,
+    limit: limitView(),
     catalogue_checked_on: "2026-11-26",
     terms_checked_on: "2026-11-26",
     roles: {
@@ -232,6 +256,7 @@ export function anthropicView(over: Partial<DirectProviderView> = {}): DirectPro
     shares_data: false,
     tier: null,
     blocked: null,
+    limit: limitView(),
     catalogue_checked_on: "2026-11-26",
     terms_checked_on: "2026-11-26",
     roles: {

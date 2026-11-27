@@ -44,6 +44,9 @@ mod components;
 mod connector_sync;
 mod context_budget;
 mod cost;
+// The daily spend limit a person sets per provider, and the one check both cloud dispatch functions
+// make before anything is sent.
+mod daily_limit;
 mod db;
 // The providers a person can reach with their own key (opt-in, off by default), the table each
 // one is a row of, and the bundled list of the models PM offers on them with their prices.
@@ -1466,6 +1469,9 @@ pub fn run() {
             // that same entry, with the navigation guard, the init scripts and the download refusal.
             // The mod runtime goes in before the window too: its guard and the scheme handler ask it.
             // So do the mod API's call limits, which every `mod_call` reaches.
+            // The daily limit's check is made inside the cloud dispatch functions, which hold an arm
+            // and no app: this is how they reach the store.
+            daily_limit::install(handle.clone());
             app.manage(mods::EngineState::start_for(handle));
             app.manage(mods::start_runtime(handle));
             app.manage(mods::api::Calls::default());
@@ -1878,6 +1884,10 @@ pub fn run() {
             // check, the per-role provider and its model and effort.
             commands::direct_providers_state,
             commands::set_direct_opt_in,
+            // The daily spend limit per provider: set or clear it, and read OpenRouter's (the three
+            // direct providers' ride in `direct_providers_state`).
+            commands::set_daily_limit,
+            commands::openrouter_limit_state,
             commands::save_direct_key,
             commands::recheck_direct_key,
             commands::clear_direct_key,

@@ -3,6 +3,7 @@
 
 import { useEffect } from "react";
 
+import { pausedLine } from "../lib/dailyLimit";
 import {
   directInfo,
   hasTiers,
@@ -30,23 +31,36 @@ import { useDirectProviders } from "../lib/useDirectProviders";
 export function DirectRouteChip({
   settings,
   localAi,
+  busy = false,
 }: {
   settings: Settings | null;
   localAi: LocalLlmStatus | null;
+  /** A chat reply is on its way. The chip reads provider state again when this goes back to false: a
+   *  reply that crossed the daily limit paused the provider without any Settings change. */
+  busy?: boolean;
 }) {
   const provider = settings?.chat_provider ?? "openrouter";
   if (!isDirect(provider) || localAi?.chat_local_model) return null;
-  return <Chip provider={provider} settings={settings} />;
+  return <Chip provider={provider} settings={settings} busy={busy} />;
 }
 
 // Split out so the read below only happens while the chip is on screen.
-function Chip({ provider, settings }: { provider: string; settings: Settings | null }) {
+function Chip({
+  provider,
+  settings,
+  busy,
+}: {
+  provider: string;
+  settings: Settings | null;
+  busy: boolean;
+}) {
   const dp = useDirectProviders();
-  // Settings closing re-reads `settings`; the key and the tick-box may have moved with it.
+  // Settings closing re-reads `settings`; the key and the tick-box may have moved with it. So does a
+  // finished send: the reply that reached the daily limit changes nothing else the page sees.
   const { reload } = dp;
   useEffect(() => {
-    void reload();
-  }, [settings, reload]);
+    if (!busy) void reload();
+  }, [settings, busy, reload]);
   const info = directInfo(provider);
   const view = dp.state ? providerView(dp.state, provider) : undefined;
   // Nothing to say until PM knows whether the key is there: a flash of "no key" would be a lie.
@@ -61,24 +75,32 @@ function Chip({ provider, settings }: { provider: string; settings: Settings | n
   const tiered = hasTiers(info);
   const terms = tiered ? routeTermsOf(settings?.chat_route_terms ?? viewTerms(view)) : null;
   const paused = !noKey && !unreadable && terms === "blocked";
-  const broken = noKey || unreadable || noCredit || paused;
+  // The person's own daily limit: a pause that ends by itself at midnight.
+  const limited = !noKey && !unreadable && view.limit.reached;
+  const broken = noKey || unreadable || noCredit || paused || limited;
   const free = !broken && terms === "free";
   const label = unreadable
     ? `${info.name}: key unreadable`
     : noKey
       ? `${info.name}: no key`
-      : noCredit
-        ? `${info.name}: no credit`
-        : routeLabel(info, terms, view.shares_data);
+      : limited
+        ? view.limit.unreadable
+          ? `${info.name}: Paused`
+          : `${info.name}: Paused for today`
+        : noCredit
+          ? `${info.name}: no credit`
+          : routeLabel(info, terms, view.shares_data);
   const title = unreadable
     ? `Chat is set to ${info.name}, but PM can't read your key right now. Chat can't answer until it can. Check Settings > AI & Models.`
     : noKey
       ? `Chat is set to ${info.name}, but there's no key to use. Chat can't answer until you fix this. Change it in Settings > AI & Models.`
-      : noCredit
-        ? `Your ${info.name} account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.`
-        : tiered
-          ? routeTitle(info, "chat", terms, view.blocked)
-          : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
+      : limited
+        ? `${pausedLine(view.limit, info.name)} Change it in Settings > AI & Models.`
+        : noCredit
+          ? `Your ${info.name} account is out of credit or at a spend limit, so chat won't answer until you add credit or raise the limit. Then press Check again in Settings > AI & Models.`
+          : tiered
+            ? routeTitle(info, "chat", terms, view.blocked)
+            : `Chat goes straight to ${info.name} with your own key. It isn't zero data retention. Change it in Settings > AI & Models.`;
   // The due tint is for a route to look at: a key that can't answer, or one on free terms.
   const token = broken || free ? "--st-due" : "--ink3";
   return (

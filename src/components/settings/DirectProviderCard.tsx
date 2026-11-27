@@ -45,6 +45,7 @@ import {
   Toggle,
   VisuallyHidden,
 } from "../ui";
+import { DailyLimitControl } from "./DailyLimitControl";
 
 interface Props {
   info: DirectProviderInfo;
@@ -485,6 +486,15 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
                 ))}
             </div>
           </form>
+
+          {/* The limit lives beside the provider it brakes. Its pause line stands inside it. */}
+          <DailyLimitControl
+            provider={view.provider}
+            name={name}
+            limit={view.limit}
+            onChanged={reload}
+            onError={onError}
+          />
 
           {info.sharesDataOption && (
             <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-sm)] py-1 hover:bg-surface">

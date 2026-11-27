@@ -112,6 +112,43 @@ pub fn set_direct_opt_in(app: AppHandle, provider: String, enabled: bool) -> Res
     Ok(direct_providers::moves_to_openrouter(d.provider, &moved))
 }
 
+/// Set, or with `None` clear, a provider's daily spend limit (OpenRouter included). Copied from
+/// [`set_direct_opt_in`]: written only here, never by the webview's own settings door, and refused
+/// when the amount isn't above zero (turn it off with `None`, never with 0). A new limit lifts a
+/// pause that the old one had set, at once.
+#[tauri::command]
+pub fn set_daily_limit(app: AppHandle, provider: String, usd: Option<f64>) -> Result<()> {
+    // Exact words only: an unknown provider must not fall through to OpenRouter's limit.
+    let p = match provider.trim() {
+        "openrouter" => CloudProvider::OpenRouter,
+        "openai" => CloudProvider::OpenAi,
+        "gemini" => CloudProvider::Gemini,
+        "anthropic" => CloudProvider::Anthropic,
+        _ => return Err(Error::Other("unknown provider".into())),
+    };
+    {
+        let state = app.state::<AppState>();
+        let conn = state.conn()?;
+        crate::daily_limit::write(&conn, p, usd)?;
+    }
+    // The On battery status judges a role on a provider the limit just paused or freed afresh.
+    llm_gateway::ping_status(&app);
+    Ok(())
+}
+
+/// OpenRouter's daily limit as the key block shows it. OpenRouter has no card of its own, so its
+/// state rides here; the three direct providers' ride in [`direct_providers_state`].
+#[tauri::command]
+pub fn openrouter_limit_state(app: AppHandle) -> Result<crate::daily_limit::LimitView> {
+    let state = app.state::<AppState>();
+    let conn = state.conn()?;
+    Ok(crate::daily_limit::view_now(
+        &conn,
+        CloudProvider::OpenRouter,
+        false,
+    ))
+}
+
 /// Check a pasted key and keep it only if the provider accepts it. A key that isn't the shape of a
 /// key is never sent; a rejected, region-blocked or unreachable result is never stored (a mistyped
 /// key is never kept). A restricted key is kept: it can't list models but may still chat.

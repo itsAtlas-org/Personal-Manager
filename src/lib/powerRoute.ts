@@ -194,6 +194,13 @@ export function blockedReason(role: LocalRole, blocked: PowerBlocked, power: Pow
       const provider = roleView(power, role).cloud_provider ?? "openrouter";
       return `${name} is on ${providerName(provider)}, which is paused (PM only uses paid ${providerName(provider)} keys where you are)`;
     }
+    case "limit_reached": {
+      // The person's own daily limit: the policy never moves a role onto a provider the send seam
+      // would refuse. No "for today": a limit PM can't read also lands here, and that one does not
+      // lift at midnight (the settings card carries the exact words).
+      const provider = roleView(power, role).cloud_provider ?? "openrouter";
+      return `${name} is on ${providerName(provider)}, which your daily limit has paused`;
+    }
   }
 }
 

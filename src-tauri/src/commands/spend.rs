@@ -473,10 +473,50 @@ fn total_is_partial(rows: &[ModelSpend]) -> bool {
 /// from the cache; ordered by request count desc. Rows with a NULL model are excluded.
 fn spend_rows(conn: &Connection, last_30d: bool) -> Result<Vec<ModelSpend>> {
     let window = if last_30d {
-        "AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days')"
+        Window::Last30Days
     } else {
-        ""
+        Window::All
     };
+    spend_rows_in(conn, window, None)
+}
+
+/// Which `usage_log` rows a spend read covers.
+#[derive(Clone, Copy)]
+pub(crate) enum Window<'a> {
+    All,
+    Last30Days,
+    /// From this instant on, given in SQLite's `YYYY-MM-DD HH:MM:SS` UTC form (what
+    /// `clock::day_start_utc_in` returns). The stored `created_at` is `YYYY-MM-DDTHH:MM:SS.fffZ`, and
+    /// `'T'` sorts after `' '`, so the two are NEVER compared as they stand: the bound goes through
+    /// the same `strftime` that wrote the column. Compared raw, every row from UTC midnight up to the
+    /// person's own midnight would count as "today" in a zone east of UTC.
+    Since(&'a str),
+}
+
+/// [`spend_rows`] over a window, optionally for one company's rows only (`served_provider`, so an
+/// OpenRouter row and a direct one with a look-alike id never count as each other's). The daily limit
+/// reads its day's spend through this, so the Usage tab and a limit price a row the same way.
+fn spend_rows_in(
+    conn: &Connection,
+    window: Window<'_>,
+    provider: Option<&str>,
+) -> Result<Vec<ModelSpend>> {
+    let mut binds: Vec<String> = Vec::new();
+    let mut window_sql = match window {
+        Window::All => String::new(),
+        Window::Last30Days => {
+            "AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days')".to_string()
+        }
+        Window::Since(from) => {
+            binds.push(from.to_string());
+            "AND u.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', ?)".to_string()
+        }
+    };
+    if let Some(p) = provider {
+        binds.push(p.to_string());
+        window_sql.push_str(" AND u.served_provider = ?");
+    }
+    let window = window_sql;
     // Split the token sums by whether the row carried OpenRouter's reported cost, so cost is
     // computed ROW-ADDITIVELY: real reported spend (`SUM(cost_usd)` over the rows that have it) plus
     // a tokens × cached-price estimate for ONLY the rows that don't. The earlier all-or-nothing rule
@@ -529,7 +569,7 @@ fn spend_rows(conn: &Connection, last_30d: bool) -> Result<Vec<ModelSpend>> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt
-        .query_map([], |r| {
+        .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
             let prompt_tokens: i64 = r.get(1)?;
             let completion_tokens: i64 = r.get(2)?;
             let request_count: i64 = r.get(3)?;
@@ -745,6 +785,24 @@ fn spend_by_mod(conn: &Connection) -> Result<Vec<ModAiSpend>> {
             .then_with(|| a.mod_id.cmp(&b.mod_id))
     });
     Ok(by_mod)
+}
+
+/// What one company's calls cost since an instant, and how many of them PM could not price.
+pub(crate) struct Spent {
+    pub usd: f64,
+    /// Calls with no figure to add (nothing reported, nothing to price them by): they count as zero
+    /// in `usd`, so a non-zero count means the sum is a floor.
+    pub unpriced: i64,
+}
+
+/// What `provider`'s calls cost since `since` (`YYYY-MM-DD HH:MM:SS` UTC), through the same code as
+/// the Usage tab so a limit and the page can never disagree about a day.
+pub(crate) fn spent_since(conn: &Connection, since: &str, provider: &str) -> Result<Spent> {
+    let rows = spend_rows_in(conn, Window::Since(since), Some(provider))?;
+    Ok(Spent {
+        usd: rows.iter().filter_map(|r| r.cost_usd).sum(),
+        unpriced: rows.iter().map(|r| r.unpriced_requests).sum(),
+    })
 }
 
 /// Total spend across rows: `Some(0)` with no usage, `None` when there's usage but no

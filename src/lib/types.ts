@@ -184,10 +184,33 @@ export interface DirectProviderView {
   /** Set when the provider is on, its key is here, the verdict reads free and this computer is where
    *  PM only uses paid keys. The UI never computes this: Rust read the region. */
   blocked?: RegionRefusal | null;
+  /** The person's daily spend limit for this provider and where today stands against it. A sibling
+   *  of `blocked`: Rust works out the day, the spend and whether the limit is reached. */
+  limit: LimitView;
   catalogue_checked_on: string;
   terms_checked_on: string;
   roles: { chat: DirectRoleView; background: DirectRoleView };
   models: DirectModelView[];
+}
+/** A provider's daily spend limit as the card, the chip and the Usage read-out show it
+ *  (daily_limit.rs LimitView). Never computed in the page. */
+export interface LimitView {
+  /** The limit in dollars, or null while it is off. */
+  limit_usd: number | null;
+  /** What PM has logged today. Zero while the limit is off: nothing is read then. */
+  spent_today_usd: number;
+  /** Calls today PM could not price: the figure is a floor when this is above zero. */
+  unpriced_today: number;
+  /** Paused for today. Also true when the limit is on but PM could not read it. */
+  reached: boolean;
+  /** The pause is because PM could not read the limit or today's usage, not because it was reached. */
+  unreadable: boolean;
+  /** When the pause lifts by itself: the next midnight in the person's zone (UTC, RFC 3339). */
+  resumes_at: string;
+  /** A key proven free (a free Gemini key): nothing to limit. */
+  free_key: boolean;
+  /** What the field starts from when the limit is turned on. */
+  suggested_usd: number;
 }
 /** `stored` and `effective` differ when a stored direct provider was demoted at read. */
 export interface RoleProviderView {
@@ -3354,7 +3377,13 @@ export type PowerRoute = "unchanged" | "needs_consent" | "kept_local" | "cloud";
 /** Why the policy can never move a role, in the order the copy prefers (llm_gateway.rs
  *  PowerBlocked). */
 export type PowerBlocked =
-  "cloud_routing" | "no_local_model" | "no_key" | "key_unreadable" | "local_only" | "paused";
+  | "cloud_routing"
+  | "no_local_model"
+  | "no_key"
+  | "key_unreadable"
+  | "local_only"
+  | "paused"
+  | "limit_reached";
 
 /** One role's half of the On battery answer (local_ai.rs PowerRoleView). */
 export interface PowerRoleView {
