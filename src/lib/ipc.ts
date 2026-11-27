@@ -80,11 +80,15 @@ import type {
   DuplicateReport,
   DriveStatus,
   DriveSyncState,
+  ContactsAccount,
+  ContactsMode,
   EditingStatus,
   Entity,
   Flag,
   FocusRoute,
+  ForgotContactsLinks,
   GoogleDisconnect,
+  LinkedContacts,
   IcsFeedInfo,
   ImageData,
   Importance,
@@ -1448,6 +1452,48 @@ export const enableCalendarEditing = (email: string) =>
  *  Google. Main window only. */
 export const setCalendarEditingPaused = (email: string, paused: boolean) =>
   invoke<EditingStatus>("set_calendar_editing_paused", { email, paused });
+
+// Google Contacts accounts. Every command is the main window's, and the ones that sign in or out are
+// the vault owner's. The sign-in links nobody's contacts yet: the sync is a later slice.
+
+/** The accounts Contacts knows: signed in, restored without a sign-in ("Reconnect"), or only kept
+ *  links ("Not syncing"), each with its mode and whether PM may send for it. No network. */
+export const contactsGoogleStatus = () => invoke<ContactsAccount[]>("contacts_google_status");
+
+/** Link a Google account for Contacts, in the chosen mode — opens the browser for Google's consent
+ *  (reading only). `email` is the account being reconnected, so signing in as another is refused;
+ *  leave it off for a first link. `clientId` and `clientSecret` sign in through the account's own
+ *  Cloud project (Advanced Protection). A read-only link turns sending off. */
+export const linkGoogleContacts = (
+  mode: ContactsMode,
+  email?: string,
+  clientId?: string,
+  clientSecret?: string,
+) => invoke<LinkedContacts>("link_google_contacts", { email, mode, clientId, clientSecret });
+
+/** Ask for the sending consent: Google's "see, edit, download and permanently delete your contacts"
+ *  screen, for a Keep in sync account. Resolves to the account; `sending` stays `"off"` when the
+ *  "edit" box was left unticked. */
+export const askContactsSendingConsent = (email: string) =>
+  invoke<ContactsAccount>("ask_contacts_sending_consent", { email });
+
+/** Switch sending off (`paused`) or back on for an account that has it turned on, without asking
+ *  Google. */
+export const pauseContactsSending = (email: string, paused: boolean) =>
+  invoke<ContactsAccount>("pause_contacts_sending", { email, paused });
+
+/** Switch a Keep in sync account to Copy once: the sign-in is let go, every link stays. */
+export const switchContactsToCopyOnce = (email: string) =>
+  invoke<GoogleDisconnect>("switch_contacts_to_copy_once", { email });
+
+/** Stop syncing an account: the sign-in is let go and every link stays ("Not syncing"). */
+export const stopContactsSyncing = (email: string) =>
+  invoke<GoogleDisconnect>("stop_contacts_syncing", { email });
+
+/** Forget this account's links: stops syncing, then deletes which Google contact each person is.
+ *  No person is touched. */
+export const forgetContactsLinks = (email: string) =>
+  invoke<ForgotContactsLinks>("forget_contacts_links", { email });
 
 /** Connect an Outlook / Microsoft 365 calendar account (Graph OAuth) — opens the browser. */
 export const connectOutlookCalendar = () => invoke<CalendarAccount>("connect_outlook_calendar");

@@ -1857,6 +1857,49 @@ mod tests {
         assert_eq!((google, microsoft), (2, 2));
     }
 
+    /// Remove PM data finds a linked Contacts account the way it finds every other: from its
+    /// connector row, through `token_key_for`, with no list of keys to edit. Its token is a Google
+    /// one, so it is revoked with the rest.
+    #[test]
+    fn a_contacts_sign_in_is_wiped_through_the_token_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(
+            &dir.path().join("pm.sqlite"),
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
+        crate::contacts_accounts::upsert_source(&conn, "Me@Example.com").unwrap();
+        let accounts = enumerate_oauth_accounts(&conn).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0].token_key,
+            "google_oauth_token_contacts::me@example.com"
+        );
+        assert_eq!(
+            accounts[0].token_key,
+            crate::contacts_accounts::token_key("me@example.com")
+        );
+        assert!(accounts[0].provider == Provider::Google);
+        // The same address under Calendar is a second, different key: both are wiped.
+        let both = conn_with_accounts(&[
+            ("google", "contacts", "me@example.com"),
+            ("google", "calendar", "me@example.com"),
+        ]);
+        let mut keys: Vec<String> = enumerate_oauth_accounts(&both)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.token_key)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "google_oauth_token_calendar::me@example.com".to_string(),
+                "google_oauth_token_contacts::me@example.com".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn skips_rows_with_no_email() {
         // An empty account_email never yields a dangling `prefix::` key (filtered in SQL).

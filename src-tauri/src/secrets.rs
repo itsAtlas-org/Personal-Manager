@@ -88,6 +88,11 @@ pub const GOOGLE_TOKEN_DRIVE_PREFIX: &str = "google_oauth_token_drive::";
 /// `<prefix><that-account-email>` lazily on the first calendar overview/sync (the email is learned
 /// from the account's primary calendar), then never written again.
 pub const GOOGLE_TOKEN_CALENDAR_PREFIX: &str = "google_oauth_token_calendar::";
+/// Per-account Google Contacts token key prefix (`<prefix><email>`), one blob per linked account.
+/// A separate service from Calendar's and Drive's, not a widened token of theirs: a Contacts link
+/// states its own scopes, and disconnecting one never disturbs another. Keychain identity, so this
+/// string is a one-way door (a table test pins it).
+pub const GOOGLE_TOKEN_CONTACTS_PREFIX: &str = "google_oauth_token_contacts::";
 /// Subscribed .ics feed URLs (the no-OAuth calendar path). These are secret bearer
 /// links, so the whole JSON list lives in the keychain, not the DB.
 const CALENDAR_ICS_FEEDS: &str = "calendar_ics_feeds";
@@ -846,6 +851,7 @@ pub fn token_key_for(provider: &str, service: &str, email: &str) -> Option<Strin
     let prefix = match (provider, service) {
         ("google", "drive") => GOOGLE_TOKEN_DRIVE_PREFIX,
         ("google", "calendar") => GOOGLE_TOKEN_CALENDAR_PREFIX,
+        ("google", "contacts") => GOOGLE_TOKEN_CONTACTS_PREFIX,
         ("microsoft", "onedrive") => MICROSOFT_TOKEN_ONEDRIVE_PREFIX,
         ("microsoft", "calendar") => MICROSOFT_TOKEN_CALENDAR_PREFIX,
         _ => return None,
@@ -1147,6 +1153,27 @@ mod tests {
             FIXED_KEYS.len(),
             "with nothing connected the wipe list is exactly the fixed keys"
         );
+    }
+
+    /// A linked Contacts account's token key comes from the one mapping, so the wipe, the disconnects
+    /// and the connectors can't spell it two ways.
+    #[test]
+    fn a_contacts_token_has_its_own_key() {
+        let key = token_key_for("google", "contacts", "me@example.com").unwrap();
+        assert_eq!(key, "google_oauth_token_contacts::me@example.com");
+        assert_ne!(
+            Some(key.clone()),
+            token_key_for("google", "calendar", "me@example.com")
+        );
+        assert_ne!(
+            Some(key.clone()),
+            token_key_for("google", "drive", "me@example.com")
+        );
+        assert_eq!(
+            token_key_for("microsoft", "contacts", "me@example.com"),
+            None
+        );
+        // That the wipe takes it is pinned in wipe::tests, through the connector row.
     }
 
     #[test]

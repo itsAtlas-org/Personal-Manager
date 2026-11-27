@@ -54,13 +54,19 @@ pub enum EditingStatus {
 
 /// An account's editing status from the stored choice and its calendar token's granted scopes.
 pub fn status(choice: Option<Choice>, token_scope: Option<&str>) -> EditingStatus {
+    status_with(choice, token_scope, google::CALENDAR_EVENTS_SCOPE)
+}
+
+/// [`status`] for any write scope: the three-condition rule Contacts' sending copies, with its own.
+pub(crate) fn status_with(
+    choice: Option<Choice>,
+    token_scope: Option<&str>,
+    write_scope: &str,
+) -> EditingStatus {
     match choice {
         None => EditingStatus::Off,
         Some(Choice::Paused) => EditingStatus::Paused,
-        Some(Choice::On)
-            if token_scope
-                .is_some_and(|s| google::scope_set_has(s, google::CALENDAR_EVENTS_SCOPE)) =>
-        {
+        Some(Choice::On) if token_scope.is_some_and(|s| google::scope_set_has(s, write_scope)) => {
             EditingStatus::On
         }
         Some(Choice::On) => EditingStatus::NeedsConsent,
@@ -89,17 +95,35 @@ pub fn classify_consent(
     granted: &str,
     signed_in_as: Option<&str>,
 ) -> ConsentVerdict {
-    let Some(signed_in_as) =
-        signed_in_as.filter(|_| google::scope_set_has(granted, google::CALENDAR_SCOPE))
+    classify(
+        Some(expected),
+        granted,
+        signed_in_as,
+        google::CALENDAR_SCOPE,
+        google::CALENDAR_EVENTS_SCOPE,
+    )
+}
+
+/// [`classify_consent`] for any pair of read and write scopes, and for a sign-in that expects no
+/// particular account yet (`expected` is `None`: a first link, where whoever signs in is the account).
+/// Contacts' consents copy the calendar's rule through this one body.
+pub(crate) fn classify(
+    expected: Option<&str>,
+    granted: &str,
+    signed_in_as: Option<&str>,
+    read_scope: &str,
+    write_scope: &str,
+) -> ConsentVerdict {
+    let Some(signed_in_as) = signed_in_as.filter(|_| google::scope_set_has(granted, read_scope))
     else {
         return ConsentVerdict::ReadonlyMissing;
     };
-    if account_key(expected) != account_key(signed_in_as) {
+    if expected.is_some_and(|e| account_key(e) != account_key(signed_in_as)) {
         return ConsentVerdict::WrongAccount {
             signed_in_as: signed_in_as.to_string(),
         };
     }
-    if google::scope_set_has(granted, google::CALENDAR_EVENTS_SCOPE) {
+    if google::scope_set_has(granted, write_scope) {
         ConsentVerdict::Enabled
     } else {
         ConsentVerdict::WriteDeclined
@@ -107,17 +131,49 @@ pub fn classify_consent(
 }
 
 /// Calendar accounts are stored lowercased; the setting follows suit so either spelling finds it.
-fn account_key(email: &str) -> String {
+/// Contacts' per-account settings key theirs the same way.
+pub(crate) fn account_key(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// A per-account map stored as one JSON object under `key` (`{ "<lowercased email>": value }`), the
+/// shape of [`SETTINGS_KEY`] and of Contacts' per-account settings. A value PM can't read reads as
+/// none for every account rather than guessing which ones it meant.
+pub(crate) fn read_account_map<T: serde::de::DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+) -> Result<BTreeMap<String, T>> {
+    let Some(raw) = crate::db::get_setting(conn, key)? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+/// Store (or with `None`, clear) one account's entry in the map under `key`. Clearing the last one
+/// removes the key rather than leaving `{}` behind.
+pub(crate) fn write_account_entry<T: Serialize + serde::de::DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+    email: &str,
+    value: Option<T>,
+) -> Result<()> {
+    let mut all: BTreeMap<String, T> = read_account_map(conn, key)?;
+    match value {
+        Some(v) => all.insert(account_key(email), v),
+        None => all.remove(&account_key(email)),
+    };
+    if all.is_empty() {
+        return crate::db::delete_setting(conn, key);
+    }
+    let json =
+        serde_json::to_string(&all).map_err(|e| crate::error::Error::Other(e.to_string()))?;
+    crate::db::set_setting(conn, key, &json)
 }
 
 /// Every stored choice. A value PM can't read turns editing off for every account rather than
 /// guessing which ones it meant.
 pub fn choices(conn: &Connection) -> Result<BTreeMap<String, Choice>> {
-    let Some(raw) = crate::db::get_setting(conn, SETTINGS_KEY)? else {
-        return Ok(BTreeMap::new());
-    };
-    Ok(serde_json::from_str(&raw).unwrap_or_default())
+    read_account_map(conn, SETTINGS_KEY)
 }
 
 /// The stored choice for one account.
@@ -133,17 +189,7 @@ pub fn lookup(choices: &BTreeMap<String, Choice>, email: &str) -> Option<Choice>
 
 /// Store (or with `None`, clear) one account's choice. Clearing the last one removes the key.
 pub fn set_choice(conn: &Connection, email: &str, choice: Option<Choice>) -> Result<()> {
-    let mut all = choices(conn)?;
-    match choice {
-        Some(c) => all.insert(account_key(email), c),
-        None => all.remove(&account_key(email)),
-    };
-    if all.is_empty() {
-        return crate::db::delete_setting(conn, SETTINGS_KEY);
-    }
-    let json =
-        serde_json::to_string(&all).map_err(|e| crate::error::Error::Other(e.to_string()))?;
-    crate::db::set_setting(conn, SETTINGS_KEY, &json)
+    write_account_entry(conn, SETTINGS_KEY, email, choice)
 }
 
 /// Forget every account's choice (the Google sign-in was cleared, so every Google account went).
@@ -160,38 +206,48 @@ pub fn clear_all(conn: &Connection) -> Result<()> {
 /// covers changing events.
 pub const WRITE_GRANTED_KEY: &str = "calendar_write_granted";
 
-fn granted(conn: &Connection) -> Result<std::collections::BTreeSet<String>> {
-    let Some(raw) = crate::db::get_setting(conn, WRITE_GRANTED_KEY)? else {
+/// The accounts listed in the JSON list under `key` (a set of lowercased emails). Unreadable reads as
+/// none. Shared with Contacts' own grant record.
+pub(crate) fn read_account_set(
+    conn: &Connection,
+    key: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    let Some(raw) = crate::db::get_setting(conn, key)? else {
         return Ok(Default::default());
     };
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
-fn store_granted(conn: &Connection, all: &std::collections::BTreeSet<String>) -> Result<()> {
+/// Store the set under `key`; an empty one removes the key.
+pub(crate) fn write_account_set(
+    conn: &Connection,
+    key: &str,
+    all: &std::collections::BTreeSet<String>,
+) -> Result<()> {
     if all.is_empty() {
-        return crate::db::delete_setting(conn, WRITE_GRANTED_KEY);
+        return crate::db::delete_setting(conn, key);
     }
     let json = serde_json::to_string(all).map_err(|e| crate::error::Error::Other(e.to_string()))?;
-    crate::db::set_setting(conn, WRITE_GRANTED_KEY, &json)
+    crate::db::set_setting(conn, key, &json)
 }
 
 /// Whether `email`'s account granted PM the calendar write scope and PM hasn't revoked it since.
 pub fn write_granted(conn: &Connection, email: &str) -> Result<bool> {
-    Ok(granted(conn)?.contains(&account_key(email)))
+    Ok(read_account_set(conn, WRITE_GRANTED_KEY)?.contains(&account_key(email)))
 }
 
 /// Record that `email`'s account granted the calendar write scope.
 pub fn mark_write_granted(conn: &Connection, email: &str) -> Result<()> {
-    let mut all = granted(conn)?;
+    let mut all = read_account_set(conn, WRITE_GRANTED_KEY)?;
     all.insert(account_key(email));
-    store_granted(conn, &all)
+    write_account_set(conn, WRITE_GRANTED_KEY, &all)
 }
 
 /// PM revoked `email`'s grant at Google, which ends the write scope with everything else.
 pub fn forget_write_grant(conn: &Connection, email: &str) -> Result<()> {
-    let mut all = granted(conn)?;
+    let mut all = read_account_set(conn, WRITE_GRANTED_KEY)?;
     all.remove(&account_key(email));
-    store_granted(conn, &all)
+    write_account_set(conn, WRITE_GRANTED_KEY, &all)
 }
 
 #[cfg(test)]

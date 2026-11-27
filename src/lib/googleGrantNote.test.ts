@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import { googleGrantNote } from "./googleGrantNote";
 import type { GoogleUse } from "./types";
 
-const note = (service: "calendar" | "drive", keptFor: GoogleUse[]) =>
+const note = (service: "calendar" | "drive" | "contacts", keptFor: GoogleUse[]) =>
   googleGrantNote({ service, email: "me@example.com", keptFor });
 
 describe("googleGrantNote", () => {
@@ -61,5 +61,28 @@ describe("googleGrantNote", () => {
     expect(note("drive", ["calendar", "drive", "backup"])).toContain(
       "for Google Calendar, Google Drive and backups, so",
     );
+  });
+
+  // A Calendar disconnect must not revoke Contacts' access and the reverse, so each says so.
+  it("names Google Contacts, whether it left or stayed", () => {
+    expect(note("calendar", ["contacts"])).toBe(
+      "Disconnected me@example.com from Google Calendar. PM still uses this account for Google Contacts, so Google keeps PM's access to it. To remove PM's access completely, disconnect that too, or remove PM at",
+    );
+    expect(note("contacts", ["calendar"])).toBe(
+      "Disconnected me@example.com from Google Contacts. PM still uses this account for Google Calendar, so Google keeps PM's access to it. To remove PM's access completely, disconnect that too, or remove PM at",
+    );
+    expect(note("contacts", [])).toBeNull();
+    expect(note("drive", ["calendar", "contacts", "backup"])).toContain(
+      "for Google Calendar, Google Contacts and backups, so",
+    );
+    // Only a Calendar disconnect carries the calendar write note.
+    expect(
+      googleGrantNote({
+        service: "contacts",
+        email: "me@example.com",
+        keptFor: ["calendar"],
+        calendarWrite: true,
+      }),
+    ).not.toContain("change its calendar events");
   });
 });

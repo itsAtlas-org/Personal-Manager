@@ -39,14 +39,15 @@ pub(super) fn own_client(
 
 // --- one Google grant, several PM features ---
 //
-// Calendar, Drive (with Sheets) and the Drive backup all sign in to a Google account through the
-// same OAuth client, so they share one grant at Google — and revoking ANY of their tokens removes
+// Calendar, Drive (with Sheets), the Drive backup and Contacts all sign in to a Google account through
+// the same OAuth client, so they share one grant at Google — and revoking ANY of their tokens removes
 // that whole grant ("Revocation removes all OAuth 2.0 scopes previously granted to a project", per
 // Google's native-app OAuth guide). They also share the account's own client when it has one (an
 // Advanced-Protection account; every token that client minted refreshes through it, see
 // `google::client_creds_for_token`). So a disconnect may revoke, or forget that client, only when it
-// is the last PM feature still using the account. Both Google disconnects decide that here, in one
-// place.
+// is the last PM feature still using the account. Every Google disconnect decides that here, in one
+// place. Contacts is a user only while its account has a sign-in: a Copy once account that let go of
+// its sign-in no longer holds the grant open.
 
 /// One PM feature that signs in to a Google account. Serialized into [`GoogleDisconnect`], whose
 /// strings the UI's `GoogleUse` union mirrors.
@@ -56,6 +57,8 @@ pub enum GoogleUse {
     Calendar,
     Drive,
     Backup,
+    /// Last, so adding it reorders nothing a disconnect already reported.
+    Contacts,
 }
 
 /// What a Google disconnect returns: the features that still use the account, and so kept PM's grant
@@ -78,6 +81,8 @@ pub(super) fn google_grant_users(conn: &Connection, email: &str) -> Result<BTree
         .filter_map(|(s, _)| match s.as_str() {
             crate::calendar::SERVICE => Some(GoogleUse::Calendar),
             crate::drive::SERVICE => Some(GoogleUse::Drive),
+            // Without this arm a Calendar disconnect would revoke Contacts' access, and the reverse.
+            crate::contacts_accounts::SERVICE => Some(GoogleUse::Contacts),
             _ => None,
         })
         .collect();
@@ -85,6 +90,13 @@ pub(super) fn google_grant_users(conn: &Connection, email: &str) -> Result<BTree
         users.insert(GoogleUse::Backup);
     }
     Ok(users)
+}
+
+/// A revoke ended `email`'s whole grant at Google, so every write scope it held goes with it: forget
+/// that Calendar editing and Contacts sending were ever granted.
+pub(super) fn forget_write_grants(conn: &Connection, email: &str) -> Result<()> {
+    crate::calendar_editing::forget_write_grant(conn, email)?;
+    crate::contacts_accounts::forget_write_grant(conn, email)
 }
 
 /// The Google connector rows for `email`'s account, as `(service, account_email as stored)`. The
@@ -304,7 +316,7 @@ pub(super) fn temp_db() -> (tempfile::TempDir, Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use GoogleUse::{Backup, Calendar, Drive};
+    use GoogleUse::{Backup, Calendar, Contacts, Drive};
 
     fn set(uses: &[GoogleUse]) -> BTreeSet<GoogleUse> {
         uses.iter().copied().collect()
@@ -358,13 +370,13 @@ mod tests {
     /// Drive token outlives a Drive disconnect only while backup signs in through it (#600).
     #[test]
     fn release_plan_releases_the_grant_only_for_the_last_user() {
-        let all = [Calendar, Drive, Backup];
-        for mask in 0..8u8 {
-            let users: BTreeSet<GoogleUse> = (0..3)
+        let all = [Calendar, Drive, Backup, Contacts];
+        for mask in 0..16u8 {
+            let users: BTreeSet<GoogleUse> = (0..4)
                 .filter(|i| mask & (1 << i) != 0)
                 .map(|i| all[i])
                 .collect();
-            for leaving in [Calendar, Drive] {
+            for leaving in [Calendar, Drive, Contacts] {
                 let plan = release_plan(&users, leaving);
                 let others: Vec<GoogleUse> =
                     users.iter().copied().filter(|u| *u != leaving).collect();
@@ -416,6 +428,35 @@ mod tests {
                 kept_for: vec![Backup],
             }
         );
+        // Contacts and Calendar on one account: neither disconnect revokes the other's access.
+        assert_eq!(
+            release_plan(&set(&[Calendar, Contacts]), Calendar),
+            GrantRelease {
+                revoke: false,
+                forget_account_client: false,
+                keep_own_token: false,
+                kept_for: vec![Contacts],
+            }
+        );
+        assert_eq!(
+            release_plan(&set(&[Calendar, Contacts]), Contacts),
+            GrantRelease {
+                revoke: false,
+                forget_account_client: false,
+                keep_own_token: false,
+                kept_for: vec![Calendar],
+            }
+        );
+        // Contacts as the last user releases everything, and keeps nobody's token.
+        assert_eq!(
+            release_plan(&set(&[Contacts]), Contacts),
+            GrantRelease {
+                revoke: true,
+                forget_account_client: true,
+                keep_own_token: false,
+                kept_for: vec![],
+            }
+        );
         // The last user releases everything.
         assert_eq!(
             release_plan(&set(&[Calendar]), Calendar),
@@ -459,14 +500,21 @@ mod tests {
         .unwrap();
         crate::calendar::upsert_source(&conn, "ics:abc", "google", None, "Holidays").unwrap();
         crate::drive::upsert_account(&conn, "other@example.com", "Other").unwrap();
+        // A Contacts link counts for its account, whatever the case, and for nobody else's.
+        crate::contacts_accounts::upsert_source(&conn, "Me@Example.com").unwrap();
+        crate::contacts_accounts::upsert_source(&conn, "contacts-only@example.com").unwrap();
 
         assert_eq!(
             google_grant_users(&conn, "me@example.com").unwrap(),
-            set(&[Calendar, Drive, Backup])
+            set(&[Calendar, Drive, Backup, Contacts])
         );
         assert_eq!(
             google_grant_users(&conn, "other@example.com").unwrap(),
             set(&[Drive])
+        );
+        assert_eq!(
+            google_grant_users(&conn, "contacts-only@example.com").unwrap(),
+            set(&[Contacts])
         );
         assert_eq!(
             google_grant_users(&conn, "nobody@example.com").unwrap(),
@@ -571,13 +619,13 @@ mod tests {
     #[test]
     fn google_use_serializes_to_the_strings_the_ui_names() {
         let json = serde_json::to_string(&GoogleDisconnect {
-            kept_for: vec![Calendar, Drive, Backup],
+            kept_for: vec![Calendar, Drive, Backup, Contacts],
             calendar_write: true,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"kept_for":["calendar","drive","backup"],"calendar_write":true}"#
+            r#"{"kept_for":["calendar","drive","backup","contacts"],"calendar_write":true}"#
         );
     }
 }

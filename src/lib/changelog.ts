@@ -24,6 +24,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.205.0-alpha",
+    date: "2026-11-27",
+    highlights: [
+      "People can now copy your contacts from Google Contacts, or stay in sync with them. PM keeps its own copy, so you can stop syncing at any time and keep everyone.",
+    ],
+  },
+  {
     version: "3.202.0-alpha",
     date: "2026-11-27",
     highlights: [

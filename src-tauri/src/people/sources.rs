@@ -196,6 +196,40 @@ pub fn retire(tx: &Connection, person_ids: &[i64]) -> Result<()> {
     Ok(())
 }
 
+/// How many links "Forget this account's links" removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ForgottenLinks {
+    /// Rows of `person_sources`: linked, copied, waiting and tombstoned alike.
+    pub people: usize,
+    /// Rows of `label_sources`.
+    pub labels: usize,
+}
+
+/// Delete every Google link of one account: its `person_sources` (tombstones and waiting Google
+/// deletes too) and its `label_sources`. `acct` is the lowercased address the rows are stored under.
+///
+/// Only the links go. No person, label, detail or timeline row is touched, and nothing is sent to
+/// Google, so a waiting delete is dropped rather than carried out. The caller stops the account's
+/// sync first, or the next pass would list every contact again and bring each one back as a new
+/// person. Must run in the caller's transaction.
+pub fn forget_account_links_in(tx: &Connection, acct: &str) -> Result<ForgottenLinks> {
+    require_transaction(tx)?;
+    let people = tx.execute(
+        "DELETE FROM person_sources WHERE provider = ?1 AND account = ?2",
+        params![PROVIDER_GOOGLE, acct],
+    )?;
+    let labels = tx.execute(
+        "DELETE FROM label_sources WHERE provider = ?1 AND account = ?2",
+        params![PROVIDER_GOOGLE, acct],
+    )?;
+    Ok(ForgottenLinks { people, labels })
+}
+
+/// [`forget_account_links_in`] in a transaction of its own.
+pub fn forget_account_links(conn: &Connection, acct: &str) -> Result<ForgottenLinks> {
+    super::in_tx(conn, |tx| forget_account_links_in(tx, acct))
+}
+
 /// A person's links, oldest first.
 pub fn sources_of(conn: &Connection, person_id: i64) -> Result<Vec<SourceInfo>> {
     let mut stmt = conn.prepare(

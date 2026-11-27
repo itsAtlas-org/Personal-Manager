@@ -9,7 +9,7 @@ export const GOOGLE_PERMISSIONS_URL = "https://myaccount.google.com/permissions"
 
 /** One Google disconnect's outcome: which service left which account, and what kept PM's access. */
 export interface GoogleGrantOutcome {
-  service: "calendar" | "drive";
+  service: "calendar" | "drive" | "contacts";
   email: string;
   keptFor: GoogleUse[];
   /** A Calendar disconnect of an account whose editing was granted: the access Google keeps includes
@@ -21,6 +21,7 @@ const USE_NAME: Record<GoogleUse, string> = {
   calendar: "Google Calendar",
   drive: "Google Drive",
   backup: "backups",
+  contacts: "Google Contacts",
 };
 
 /** "a", "a and b", "a, b and c". */

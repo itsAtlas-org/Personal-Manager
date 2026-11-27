@@ -23,6 +23,7 @@ use crate::calendar_editing::{self, Choice, ConsentVerdict, EditingStatus};
 use crate::calendar_fresh::{Freshness, Plan, Verdict};
 use crate::calendar_write::dto::ListRights;
 use crate::calendar_write::reconcile::Stamp;
+use crate::contacts_accounts;
 use crate::error::{Error, Result};
 use crate::google;
 use crate::{briefing, drive, flags, microsoft, outlook_calendar, secrets, AppState};
@@ -30,9 +31,9 @@ use crate::{briefing, drive, flags, microsoft, outlook_calendar, secrets, AppSta
 use super::shared::own_client;
 use super::shared::resolve_zone;
 use super::shared::{
-    caller_may_write, google_account_emails, google_grant_token_keys, google_grant_users,
-    pin_existing_grants, release_plan, require_calendar_window, saved_project_account,
-    wrong_account, GoogleDisconnect, GoogleUse,
+    caller_may_write, forget_write_grants, google_account_emails, google_grant_token_keys,
+    google_grant_users, pin_existing_grants, release_plan, require_calendar_window,
+    saved_project_account, wrong_account, GoogleDisconnect, GoogleUse,
 };
 use super::vaults::require_vault_owner;
 
@@ -461,7 +462,7 @@ pub async fn disconnect_google_calendar_account(
     // A grant Google keeps still carries the write scope if editing was ever granted; a revoke ends it.
     let calendar_write = !plan.revoke && calendar_editing::write_granted(&conn, &email)?;
     if plan.revoke {
-        calendar_editing::forget_write_grant(&conn, &email)?;
+        forget_write_grants(&conn, &email)?;
     }
     Ok(GoogleDisconnect {
         kept_for: plan.kept_for,
@@ -813,7 +814,8 @@ pub fn dev_google_grant_report(state: State<'_, AppState>) -> Result<Vec<GrantRe
 
 /// Forget the Google client credentials. The client is shared by every Google service, so this
 /// invalidates them all: drop each Calendar account + every Drive account and the events/items they
-/// mirror (ICS/Outlook events, which don't depend on this client, are kept).
+/// mirror (ICS/Outlook events, which don't depend on this client, are kept), and every Contacts
+/// sign-in and its settings (the people in PM and their links to Google stay).
 ///
 /// Owner-only, like every connector removal: on a shared vault a joiner would drop the owner's rows
 /// while the owner's tokens stayed live in the owner's keychain.
@@ -836,7 +838,17 @@ pub fn clear_google_client(app: AppHandle, state: State<'_, AppState>) -> Result
         }
         calendar::remove_source(&conn, &acc.id)?;
     }
-    secrets::clear_google_token_for(google::CALENDAR_TOKEN_KEY).ok(); // any not-yet-migrated legacy token
+    // Any not-yet-migrated legacy token.
+    secrets::clear_google_token_for(google::CALENDAR_TOKEN_KEY).ok();
+    // Contacts: each linked account's sign-in goes before its row, as above. Never a person or a
+    // link: the people stay in PM, linked and shown "Not syncing", and linking again matches by
+    // Google's id.
+    for email in contacts_accounts::linked_emails(&conn)? {
+        secrets::clear_google_token_for(&contacts_accounts::token_key(&email))?;
+        secrets::clear_google_client_for_account(&email)?;
+        contacts_accounts::remove_source(&conn, &email)?;
+    }
+    contacts_accounts::clear_all(&conn)?;
     calendar_editing::clear_all(&conn)?;
     calendar::clear_account_settings(&conn)?;
     drive::forget_all_accounts(&conn)?;
@@ -2204,6 +2216,17 @@ mod tests {
             .contains("calendar::forget_account_settings(&conn, &email)?;"));
         assert!(body_of("pub fn clear_google_client(")
             .contains("calendar::clear_account_settings(&conn)?;"));
+        // Clearing the credentials also clears Contacts' rows, tokens and settings (the contacts
+        // line), and never reaches a person or a link: "Your people stay in PM."
+        let clear = body_of("pub fn clear_google_client(");
+        assert!(clear.contains("contacts_accounts::clear_all(&conn)?;"));
+        assert!(clear.contains("contacts_accounts::remove_source(&conn, &email)?;"));
+        assert!(clear
+            .contains("secrets::clear_google_token_for(&contacts_accounts::token_key(&email))?;"));
+        assert!(!clear.contains("people::"));
+        // Both disconnects that can revoke forget Contacts' write grant with Calendar's.
+        assert!(body_of("pub async fn disconnect_google_calendar_account(")
+            .contains("forget_write_grants(&conn, &email)?;"));
     }
 
     /// The calendar view reads what it may offer on a row beside the row's own fields (C14): one

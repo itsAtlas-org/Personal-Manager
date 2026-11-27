@@ -1708,6 +1708,88 @@ fn identifiers_resolve_through_folded_idents_and_sources() {
     );
 }
 
+/// "Forget this account's links" removes that account's links and nothing else: every state of
+/// person link (tombstones and a waiting Google delete included), the account's label links, and
+/// not another account's, not a file's, and never a person, a label or a detail.
+#[test]
+fn forgetting_an_accounts_links_deletes_only_its_links() {
+    let (_dir, conn) = store();
+    let sam = person(&conn, "Sam", "Example");
+    let alex = person(&conn, "Alex", "Example");
+    let label = create_label(&conn, "Friends").unwrap();
+    label_people(&conn, &[sam], label).unwrap();
+    star_people(&conn, &[sam], true).unwrap();
+    for (external, state) in [
+        ("people/c1", "linked"),
+        ("people/c2", "pending_delete"),
+        ("people/c3", "ignored"),
+        ("people/c4", "gone"),
+    ] {
+        add_source(&conn, sam, "google", Some(external), state, Some("{}"));
+    }
+    // Another account's link, and a file's, stay.
+    conn.execute(
+        "INSERT INTO person_sources(person_id, provider, account, external_id) \
+         VALUES (?1, 'google', 'other@example.com', 'people/c9')",
+        params![alex],
+    )
+    .unwrap();
+    add_source(&conn, alex, "vcard", Some("file-1"), "linked", None);
+    for acct in ["me@example.com", "other@example.com"] {
+        conn.execute(
+            "INSERT INTO label_sources(label_id, provider, account, external_id) \
+             VALUES (?1, 'google', ?2, ?3)",
+            params![label, acct, format!("contactGroups/{acct}")],
+        )
+        .unwrap();
+    }
+    let held = |conn: &Connection| {
+        (
+            count(conn, "SELECT COUNT(*) FROM people"),
+            count(conn, "SELECT COUNT(*) FROM contact_labels"),
+            count(conn, "SELECT COUNT(*) FROM person_labels"),
+            count(conn, "SELECT COUNT(*) FROM people WHERE starred = 1"),
+        )
+    };
+    let before = held(&conn);
+
+    let gone = sources::forget_account_links(&conn, "me@example.com").unwrap();
+    assert_eq!(
+        gone,
+        sources::ForgottenLinks {
+            people: 4,
+            labels: 1
+        }
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM person_sources \
+              WHERE provider = 'google' AND account = 'me@example.com'"
+        ),
+        0
+    );
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM person_sources"), 2);
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM label_sources"), 1);
+    // People, labels and stars are never touched.
+    assert_eq!(held(&conn), before);
+    // Forgetting twice is a no-op.
+    assert_eq!(
+        sources::forget_account_links(&conn, "me@example.com").unwrap(),
+        sources::ForgottenLinks {
+            people: 0,
+            labels: 0
+        }
+    );
+}
+
+/// The `*_in` form refuses to run outside a transaction, like every other people write.
+#[test]
+fn forgetting_links_needs_a_transaction_when_called_in() {
+    let (_dir, conn) = store();
+    assert!(sources::forget_account_links_in(&conn, "me@example.com").is_err());
+}
+
 #[test]
 fn the_consts_are_the_spec_vocabulary() {
     assert_eq!(DETAIL_KINDS.len(), 12);

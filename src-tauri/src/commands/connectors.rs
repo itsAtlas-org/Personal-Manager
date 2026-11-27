@@ -21,8 +21,8 @@ use crate::{
 use super::archivist::refuse_if_rebuilding;
 use super::shared::own_client;
 use super::shared::{
-    google_grant_token_keys, google_grant_users, pin_existing_grants, release_plan,
-    saved_project_account, wrong_account, GoogleDisconnect, GoogleUse, GrantRelease,
+    forget_write_grants, google_grant_token_keys, google_grant_users, pin_existing_grants,
+    release_plan, saved_project_account, wrong_account, GoogleDisconnect, GoogleUse, GrantRelease,
 };
 use super::vaults::require_vault_owner;
 
@@ -141,8 +141,8 @@ pub async fn disconnect_drive(
         let conn = state.conn()?;
         drive::forget_account(&conn, &email, drive_credentials(&plan))?;
         if plan.revoke {
-            // The revoke ended the whole grant, a calendar write scope included.
-            crate::calendar_editing::forget_write_grant(&conn, &email)?;
+            // The revoke ended the whole grant, a calendar or contacts write scope included.
+            forget_write_grants(&conn, &email)?;
         }
     }
     state.sync_index_only();

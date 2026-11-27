@@ -39,6 +39,7 @@ mod commands;
 mod commands_dev;
 mod components;
 mod connector_sync;
+mod contacts_accounts;
 mod context_budget;
 mod cost;
 mod db;
@@ -2095,6 +2096,13 @@ pub fn run() {
             commands::owed_meetings,
             commands::event_guests,
             commands::answer_meeting,
+            commands::contacts_google_status,
+            commands::link_google_contacts,
+            commands::ask_contacts_sending_consent,
+            commands::pause_contacts_sending,
+            commands::switch_contacts_to_copy_once,
+            commands::stop_contacts_syncing,
+            commands::forget_contacts_links,
             commands::calendar_overview,
             commands::request_calendar_access,
             commands::set_calendar_selected,

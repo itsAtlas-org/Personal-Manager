@@ -7,8 +7,9 @@
 //! a **loopback redirect with PKCE** — PM opens the system browser to Google's
 //! consent screen with `redirect_uri=http://127.0.0.1:<ephemeral-port>`, runs a
 //! one-shot local HTTP server to catch the redirect, and exchanges the code for
-//! tokens. Scopes are read-only except two opt-ins: `drive.file` for encrypted backups and
-//! `calendar.events` for calendar editing, which the user turns on per account. Access tokens are
+//! tokens. Scopes are read-only except three opt-ins: `drive.file` for encrypted backups,
+//! `calendar.events` for calendar editing and `contacts` for sending People's changes to Google
+//! Contacts, which the user turns on per account. Access tokens are
 //! refreshed transparently; the token blob lives only in the keychain, never on disk.
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,20 @@ pub const SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets.rea
 /// `drive.readonly` grant on the account because a Drive consent sets `include_granted_scopes=true`
 /// ([`merges_granted_scopes`]).
 pub const DRIVE_FILE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
+/// Read-only Contacts scope: every Contacts link asks for it, and People copies from Google through
+/// it (the People API's `connections.list` and `contactGroups.list`). It can't change anything. It
+/// is also the scope the account's address is read through, beside [`USERINFO_EMAIL_SCOPE`].
+pub const CONTACTS_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/contacts.readonly";
+/// The Contacts **write** scope, whose wording on Google's screen is "see, edit, download, and
+/// permanently delete your contacts". Asked for only by the per-account "Send my PM changes to
+/// Google" consent, always together with [`CONTACTS_READONLY_SCOPE`] (see [`contacts_sending_scopes`]).
+/// Holding it is not enough to send: `crate::contacts_accounts` also requires the user's own switch.
+pub const CONTACTS_SCOPE: &str = "https://www.googleapis.com/auth/contacts";
+/// The signed-in address, a non-sensitive scope. A contacts-only token has no calendar or Drive
+/// listing to learn its account from, so every Contacts consent asks for it and PM reads the address
+/// from `people/me` (the People API accepts it there), then compares it with the account the user
+/// meant before anything is saved.
+pub const USERINFO_EMAIL_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.email";
 /// The keychain key for the Calendar service's token — passed into the per-service token
 /// helpers below (the connector-generic flow takes a key so Drive accounts get their own).
 pub const CALENDAR_TOKEN_KEY: &str = secrets::GOOGLE_TOKEN_CALENDAR;
@@ -59,21 +74,40 @@ pub fn calendar_editing_scopes() -> String {
     format!("{CALENDAR_SCOPE} {CALENDAR_EVENTS_SCOPE}")
 }
 
+/// The scope set of a Contacts link: read-only, plus the address scope. Contacts consents never ask
+/// Google to fold in earlier grants ([`merges_granted_scopes`]), so each states everything it needs.
+pub fn contacts_link_scopes() -> String {
+    format!("{CONTACTS_READONLY_SCOPE} {USERINFO_EMAIL_SCOPE}")
+}
+
+/// The scope set of the "Send my PM changes to Google" consent: read and write, stated in full.
+pub fn contacts_sending_scopes() -> String {
+    format!("{CONTACTS_READONLY_SCOPE} {CONTACTS_SCOPE} {USERINFO_EMAIL_SCOPE}")
+}
+
 /// Whether the space-separated scope set `scopes` (a token's granted `scope`, or a consent request)
 /// contains `wanted`, compared whole so `calendar` never matches `calendar.readonly`.
 pub fn scope_set_has(scopes: &str, wanted: &str) -> bool {
     scopes.split_ascii_whitespace().any(|s| s == wanted)
 }
 
+/// The scopes whose consents ask Google to fold the account's earlier grants into the new token
+/// (`include_granted_scopes=true`): Drive, Sheets and `drive.file`. A backup's `drive.file` must land
+/// on the same token as the Drive connector's read scopes, because both use one keychain key.
+/// Anything not named here states its whole scope set instead.
+const MERGING_SCOPES: [&str; 3] = [DRIVE_SCOPE, SHEETS_SCOPE, DRIVE_FILE_SCOPE];
+
 /// Whether a consent for `scope` asks Google to fold the account's earlier grants into the new token
-/// (`include_granted_scopes=true`). Drive and backup consents do: a backup's `drive.file` must land on
-/// the same token as the Drive connector's read scopes, because both use one keychain key. Calendar
-/// consents don't. Google calls incremental authorisation unsupported for installed apps, so what a
-/// merge carries is undefined, and a calendar token is what PM would edit with: a read-only reconnect
-/// must not come back holding a write scope nobody asked for this time. They state their whole scope
-/// set instead ([`calendar_editing_scopes`]).
+/// (`include_granted_scopes=true`): only when every scope it asks for is on [`MERGING_SCOPES`]. Google
+/// calls incremental authorisation unsupported for installed apps, so what a merge carries is
+/// undefined. Calendar and Contacts tokens are what PM would edit with, so a read-only reconnect must
+/// not come back holding a write scope nobody asked for this time; they state their whole scope set
+/// ([`calendar_editing_scopes`], [`contacts_sending_scopes`]). An allow-list, so a scope added later
+/// doesn't silently start asking Google to merge, and a set that mixes in one scope off the list
+/// stops merging whole.
 fn merges_granted_scopes(scope: &str) -> bool {
-    !scope_set_has(scope, CALENDAR_SCOPE) && !scope_set_has(scope, CALENDAR_EVENTS_SCOPE)
+    let mut asked = scope.split_ascii_whitespace().peekable();
+    asked.peek().is_some() && asked.all(|s| MERGING_SCOPES.contains(&s))
 }
 
 /// The stored OAuth token blob (one keychain entry, JSON). `expiry` is Unix seconds.
@@ -465,6 +499,22 @@ pub async fn get_json_with_token(token: &Token, url: &str) -> Result<serde_json:
         .send()
         .await?;
     json_or_err(resp).await
+}
+
+/// As [`get_json_with_token`], but hands back the status and the body text whatever the status, and
+/// never builds an error from the body. For a caller whose body can hold a person's data (the People
+/// API's): it reads what it needs out of a success and answers a failure in fixed words of its own,
+/// where [`json_or_err`] would copy the start of Google's reply into the error.
+pub async fn get_raw_with_token(token: &Token, url: &str) -> Result<(u16, String)> {
+    let resp = http()?
+        .get(url)
+        .bearer_auth(token.access_token.expose())
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    // A body that can't be read is an empty one: the status alone says what happened.
+    let body = resp.text().await.unwrap_or_default();
+    Ok((status, body))
 }
 
 /// Send an authorised Google request built by `build`: proactive refresh a minute before expiry,
@@ -943,18 +993,35 @@ mod tests {
         assert!(url.contains("prompt=select_account+consent"));
     }
 
-    /// Calendar consents state their whole scope set and never fold in earlier grants, so a read-only
-    /// reconnect can't come back holding the write scope; Drive and backup consents still merge, which
-    /// is how a backup's `drive.file` joins the Drive connector's read scopes on one token.
+    /// Only the scopes on the allow-list (Drive, Sheets, `drive.file`) ask Google to fold in earlier
+    /// grants, which is how a backup's `drive.file` joins the Drive connector's read scopes on one
+    /// token. Everything else states its whole scope set: a read-only calendar or contacts reconnect
+    /// can't come back holding a write scope, and a scope nobody has thought about yet doesn't merge
+    /// by default. One scope off the list stops a whole set merging.
     #[test]
-    fn only_calendar_consents_stop_merging_earlier_grants() {
+    fn only_the_allow_listed_consents_merge_earlier_grants() {
         let editing = calendar_editing_scopes();
         let drive = format!("{DRIVE_SCOPE} {SHEETS_SCOPE}");
+        let link = contacts_link_scopes();
+        let sending = contacts_sending_scopes();
+        let mixed = format!("{DRIVE_SCOPE} {CONTACTS_READONLY_SCOPE}");
         for (scope, merges) in [
             (CALENDAR_SCOPE, false),
             (editing.as_str(), false),
             (drive.as_str(), true),
+            (DRIVE_SCOPE, true),
+            (SHEETS_SCOPE, true),
             (DRIVE_FILE_SCOPE, true),
+            // Every Contacts consent states its whole set and merges nothing.
+            (CONTACTS_READONLY_SCOPE, false),
+            (CONTACTS_SCOPE, false),
+            (USERINFO_EMAIL_SCOPE, false),
+            (link.as_str(), false),
+            (sending.as_str(), false),
+            // A scope nobody listed, an empty request and a mixed one never merge.
+            ("https://www.googleapis.com/auth/gmail.readonly", false),
+            ("", false),
+            (mixed.as_str(), false),
         ] {
             assert_eq!(merges_granted_scopes(scope), merges, "{scope}");
             // The URL every consent opens carries it: the builder derives it from the scope.
@@ -967,6 +1034,27 @@ mod tests {
         // The editing consent asks for the read scope by name, since nothing merges it in.
         assert!(scope_set_has(&editing, CALENDAR_SCOPE));
         assert!(scope_set_has(&editing, CALENDAR_EVENTS_SCOPE));
+    }
+
+    /// The link asks to read and to learn the address; sending asks for both again and the write
+    /// scope, stated in full, in the order the consent screen lists them.
+    #[test]
+    fn the_contacts_consents_state_their_whole_scope_sets() {
+        assert_eq!(
+            contacts_link_scopes(),
+            "https://www.googleapis.com/auth/contacts.readonly \
+             https://www.googleapis.com/auth/userinfo.email"
+        );
+        assert_eq!(
+            contacts_sending_scopes(),
+            "https://www.googleapis.com/auth/contacts.readonly \
+             https://www.googleapis.com/auth/contacts \
+             https://www.googleapis.com/auth/userinfo.email"
+        );
+        // The link never asks for the write scope; `contacts` is not a prefix match of the read one.
+        assert!(!scope_set_has(&contacts_link_scopes(), CONTACTS_SCOPE));
+        assert!(scope_set_has(&contacts_sending_scopes(), CONTACTS_SCOPE));
+        assert!(!scope_set_has(CONTACTS_READONLY_SCOPE, CONTACTS_SCOPE));
     }
 
     #[test]

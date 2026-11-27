@@ -58,8 +58,8 @@ export function GoogleCredentialBlock({
       </div>
       <p className="mt-1 text-xs text-ink4">
         One Google Cloud “Desktop app” client, pasted once and shared by every Google service
-        (Calendar, Drive). PM ships no Google secret — you supply your own; it stays in your
-        keychain. Setting it up connects nothing on its own.
+        (Calendar, Drive, Contacts). PM ships no Google secret — you supply your own; it stays in
+        your keychain. Setting it up connects nothing on its own.
       </p>
 
       {!configured ? (
@@ -125,9 +125,10 @@ export function GoogleCredentialBlock({
         onClose={() => setConfirmClear(false)}
       >
         This forgets your Google client ID + secret and signs out every connected Google service
-        (Calendar, Drive), clearing its mirrored data. Google Drive backups are turned off and their
-        sign-in is removed; the backups already in your Drive are kept. Calendar subscriptions
-        (iCal) are unaffected. You can re-enter the credentials anytime.
+        (Calendar, Drive, Contacts), clearing its mirrored data. Google Drive backups are turned off
+        and their sign-in is removed; the backups already in your Drive are kept. Your people stay
+        in PM. They keep their links to their Google contacts, shown as Not syncing. Calendar
+        subscriptions (iCal) are unaffected. You can re-enter the credentials anytime.
       </ConfirmDialog>
     </div>
   );
@@ -169,7 +170,16 @@ function ClientSetupGuide() {
         >
           Google Calendar API
         </a>{" "}
-        and/or{" "}
+        ,{" "}
+        <a
+          href="https://console.cloud.google.com/apis/library/people.googleapis.com"
+          target="_blank"
+          rel="noreferrer"
+          className={link}
+        >
+          Google People API
+        </a>{" "}
+        (that is Google Contacts) and/or{" "}
         <a
           href="https://console.cloud.google.com/apis/library/sheets.googleapis.com"
           target="_blank"

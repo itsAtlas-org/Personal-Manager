@@ -1169,15 +1169,57 @@ export type ProjectProposalEvent =
 // --- Google grants shared across features ---
 
 /** A PM feature that signs in to a Google account (Rust `commands::shared::GoogleUse`). */
-export type GoogleUse = "calendar" | "drive" | "backup";
+export type GoogleUse = "calendar" | "drive" | "backup" | "contacts";
 
-/** What a Google Calendar or Drive disconnect returns: the features still using the account, which
- *  kept PM's access at Google alive. Empty when the disconnect was the last and access was revoked. */
+/** What a Google Calendar, Drive or Contacts disconnect returns: the features still using the
+ *  account, which kept PM's access at Google alive. Empty when the disconnect was the last and access
+ *  was revoked. */
 export interface GoogleDisconnect {
   kept_for: GoogleUse[];
   /** The kept access still lets PM change the account's calendar events (editing was granted once
    *  and never revoked). Only a Calendar disconnect sets it. */
   calendar_write: boolean;
+}
+
+// --- Google Contacts accounts (Rust `contacts_accounts`, `commands::contacts_google`) ---
+
+/** How a linked account is used: Copy once, or Keep in sync. */
+export type ContactsMode = "once" | "live";
+
+/** Whether PM may send changes to an account's Google Contacts, the same four answers as calendar
+ *  editing's: `needs_consent` means sending was turned on but the sign-in no longer carries Google's
+ *  permission to change contacts. Sending belongs to Keep in sync: any other mode reads `off`. */
+export type ContactsSending = "off" | "on" | "paused" | "needs_consent";
+
+/** One account Contacts knows (`contacts_accounts::ContactsAccount`). */
+export interface ContactsAccount {
+  /** Lowercased. */
+  email: string;
+  /** `null` for an account that is only a set of kept links ("Not syncing"). */
+  mode: ContactsMode | null;
+  /** There is a Contacts sign-in on this computer. */
+  signed_in: boolean;
+  /** A restored store has the account's row but not its sign-in: "Reconnect". */
+  needs_reconnect: boolean;
+  sending: ContactsSending;
+  /** Links to Google contacts the account keeps, tombstones and copies included. */
+  links: number;
+  /** Links to Google labels. */
+  label_links: number;
+}
+
+/** What linking an account did. */
+export interface LinkedContacts {
+  account: ContactsAccount;
+  /** The account had sending on or paused, and this read-only link turned it off: say so
+   *  ("Connecting again gave PM reading only, so sending your changes to Google is off."). */
+  sending_turned_off: boolean;
+}
+
+/** What "Forget this account's links" did: the sign-in it let go of and the links it deleted. */
+export interface ForgotContactsLinks {
+  disconnect: GoogleDisconnect;
+  forgotten: { people: number; labels: number };
 }
 
 // --- Personal Assistant: Calendar connectors (multi-provider, read-only — cards 6A/6B) ---
