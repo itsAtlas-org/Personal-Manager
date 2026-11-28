@@ -333,10 +333,14 @@ pub fn clear_direct_key(app: AppHandle, provider: String) -> Result<Vec<RoleMove
     Ok(direct_providers::moves_to_openrouter(d.provider, &moved))
 }
 
-/// Why a role can't be pointed at a provider, or `Ok`. PURE. OpenRouter is always allowed and
-/// never reaches this. The sentences name what is missing; an unreadable keychain refuses with its
-/// own, because "no key" would be a guess.
-fn gate_role_provider(
+/// THE rule for putting a direct provider in front of a reply, or `Ok`: opted in, a readable key, and
+/// not paused where the person is (a free Gemini key in the UK, EEA or Switzerland). The role setter
+/// asks it to MOVE a role, the not-working card asks it before it BUILDS an offer, and a one-click
+/// re-send asks it again before it sends, so no way of choosing a provider can skip a refusal
+/// another way of choosing it gives. PURE. OpenRouter is always allowed and never
+/// reaches this. The sentences name what is missing; an unreadable keychain refuses with its own,
+/// because "no key" would be a guess.
+pub(crate) fn gate_entry(
     d: &DirectProvider,
     role: Role,
     opted_in: bool,
@@ -372,27 +376,59 @@ pub fn set_role_cloud_provider(app: AppHandle, role: String, provider: String) -
         direct_providers::set_role_provider(&conn, role, CloudProvider::OpenRouter)?;
     } else {
         let d = parse_provider(&provider)?;
-        // The keychain first, then where this computer is, with no guard held.
-        let (key, fp) = direct_providers::key_state_of(d);
-        let region = if d.tiers {
-            region::assumed()
-        } else {
-            Region::Outside
-        };
+        gate_entry_now(&app, role, d)?;
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        let opted = direct_providers::opted_in(&conn, d.provider)?;
-        let blocked = if d.tiers && key == KeyPresence::Present {
-            let tier = direct_providers::tier_now(&conn, d.provider, fp.as_deref())?;
-            direct_providers::refuses(d.provider, tier, &region)
-        } else {
-            None
-        };
-        gate_role_provider(d, role, opted, key, blocked.as_ref())?;
         direct_providers::set_role_provider(&conn, role, d.provider)?;
     }
     llm_gateway::ping_status(&app);
     Ok(())
+}
+
+/// What the world says about a direct provider right now, read with no guard held across it: the
+/// keychain first, then where this computer is, then one short store read.
+pub(crate) struct EntryWorld {
+    pub opted_in: bool,
+    pub key: KeyPresence,
+    /// Why the provider is paused here, if it is.
+    pub blocked: Option<RegionRefusal>,
+    /// On whose terms the key is, for a provider with tiers (Gemini); `None` otherwise or when there
+    /// is no usable verdict (which reads as free).
+    pub tier: Option<KeyTier>,
+}
+
+pub(crate) fn read_entry_world(app: &AppHandle, d: &DirectProvider) -> Result<EntryWorld> {
+    let (key, fp) = direct_providers::key_state_of(d);
+    let region = if d.tiers {
+        region::assumed()
+    } else {
+        Region::Outside
+    };
+    let state = app.state::<AppState>();
+    let conn = state.conn()?;
+    let opted_in = direct_providers::opted_in(&conn, d.provider)?;
+    let tier = if d.tiers && key == KeyPresence::Present {
+        direct_providers::tier_now(&conn, d.provider, fp.as_deref())?
+    } else {
+        None
+    };
+    let blocked = if d.tiers && key == KeyPresence::Present {
+        direct_providers::refuses(d.provider, tier, &region)
+    } else {
+        None
+    };
+    Ok(EntryWorld {
+        opted_in,
+        key,
+        blocked,
+        tier,
+    })
+}
+
+/// [`gate_entry`] against the live world. Used by the role setter and by a one-click re-send.
+pub(crate) fn gate_entry_now(app: &AppHandle, role: Role, d: &DirectProvider) -> Result<()> {
+    let w = read_entry_world(app, d)?;
+    gate_entry(d, role, w.opted_in, w.key, w.blocked.as_ref())
 }
 
 /// Choose a role's model and effort on a provider in ONE write, so the effort is checked against
@@ -448,15 +484,14 @@ mod tests {
     #[test]
     fn a_role_moves_to_a_provider_only_when_it_is_on_and_keyed() {
         let d = parse_provider("openai").unwrap();
-        assert!(gate_role_provider(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
-        let off = gate_role_provider(d, Role::Chat, false, KeyPresence::Present, None).unwrap_err();
+        assert!(gate_entry(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
+        let off = gate_entry(d, Role::Chat, false, KeyPresence::Present, None).unwrap_err();
         assert!(off.to_string().contains("Turn on OpenAI"), "{off}");
-        let none = gate_role_provider(d, Role::Chat, true, KeyPresence::Absent, None).unwrap_err();
+        let none = gate_entry(d, Role::Chat, true, KeyPresence::Absent, None).unwrap_err();
         assert!(none.to_string().contains("Add your OpenAI key"), "{none}");
         // An unreadable keychain refuses too, in its own words: it is not "no key".
         let unreadable =
-            gate_role_provider(d, Role::Background, true, KeyPresence::Unreadable, None)
-                .unwrap_err();
+            gate_entry(d, Role::Background, true, KeyPresence::Unreadable, None).unwrap_err();
         assert!(
             unreadable.to_string().contains("can't read"),
             "{unreadable}"
@@ -475,7 +510,7 @@ mod tests {
         let uk = region::region_of_on(Some("Europe/London"), false);
         let blocked = direct_providers::refuses(CloudProvider::Gemini, Some(KeyTier::Free), &uk);
         assert!(blocked.is_some());
-        let e = gate_role_provider(d, Role::Chat, true, KeyPresence::Present, blocked.as_ref())
+        let e = gate_entry(d, Role::Chat, true, KeyPresence::Present, blocked.as_ref())
             .unwrap_err()
             .to_string();
         assert!(
@@ -483,9 +518,9 @@ mod tests {
             "{e}"
         );
         // Paid: nothing blocks it. Turned off still says "turn on" first.
-        assert!(gate_role_provider(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
-        let off = gate_role_provider(d, Role::Chat, false, KeyPresence::Present, blocked.as_ref())
-            .unwrap_err();
+        assert!(gate_entry(d, Role::Chat, true, KeyPresence::Present, None).is_ok());
+        let off =
+            gate_entry(d, Role::Chat, false, KeyPresence::Present, blocked.as_ref()).unwrap_err();
         assert!(off.to_string().contains("Turn on Google Gemini"), "{off}");
     }
 

@@ -597,8 +597,62 @@ export interface GroundingConfidence {
 /** Mirrors `llm_gateway::ThinkingNote`. */
 export type ThinkingNote = "fell_back" | "no_room";
 
+/** One one-click offer on the "not working" card. Mirrors `offers::Offer`. `provider` and `model` are
+ *  what a click sends back (the backend re-checks them); `kind` says where the offer comes from. */
+export interface NotWorkingOffer {
+  key: string;
+  provider: "openrouter" | "openai" | "gemini" | "anthropic" | "local";
+  model: string;
+  /** The model as a person names it. */
+  label: string;
+  /** Who gets the reply: "Google", "Anthropic", "OpenAI", "OpenRouter", "this computer". */
+  company: string;
+  /** One line on what that company does with the reply, from the provider's own warning. */
+  data_note: string;
+  kind: "same_key" | "other_company" | "openrouter" | "local";
+}
+
+/** The person's daily limit as the card shows it. Mirrors `offers::LimitInfo`. */
+export interface NotWorkingLimit {
+  provider: string;
+  limit_usd: number;
+  spent_today_usd: number;
+  /** RFC 3339: when the pause lifts by itself. */
+  resumes_at: string;
+}
+
+/** The card a failed chat reply shows. Mirrors `offers::NotWorking`. */
+export interface NotWorkingInfo {
+  /** The id of the user turn that failed. */
+  turn_id: number;
+  /** The failure class token (`busy`, `no_credit`, `refused`, `limit_reached`, ...). */
+  class: string;
+  headline: string;
+  reason: string;
+  /** The error's own sentence when the reason is only a class line (what to do about it: where to add
+   *  credit, make a new key, how long to wait); null when the reason already says it. */
+  detail: string | null;
+  /** Said only when it is true; absent otherwise. */
+  reassurance: string | null;
+  offers: NotWorkingOffer[];
+  can_edit_list: boolean;
+  limit: NotWorkingLimit | null;
+  /** Every entry already tried for this turn, this failure included. Handed back unchanged with the
+   *  next click so the next card never offers one of them again. */
+  tried: EntryRef[];
+}
+
+/** What a click on an offer sends: the provider token and the model id the offer carried. */
+export interface EntryRef {
+  provider: NotWorkingOffer["provider"];
+  model: string;
+}
+
 export type ChatEvent =
   | { type: "token"; text: string }
+  // Sent INSTEAD of `error` when the reply could not be answered and there is something to offer
+  // (or the failure is one the person can act on).
+  | ({ type: "not_working" } & NotWorkingInfo)
   // Developer mode only: the exact assembled request + the confidence readout, once before streaming.
   | { type: "prompt"; messages: PromptMessage[]; confidence: GroundingConfidence }
   // `served_by` is which provider actually answered ("local"/"cloud"), for the per-message footer.

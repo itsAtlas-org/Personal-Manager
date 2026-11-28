@@ -541,6 +541,10 @@ export const HELP: Record<string, HelpEntry> = {
     title: "Idle conversation",
     body: "This chat has been quiet for a while. Starting a new one keeps each topic separate and gives the assistant a clean slate, rather than carrying a stale thread forward. Dismiss to keep writing in this one — nothing is deleted either way.",
   },
+  "chat-not-working": {
+    title: "A reply that didn't work",
+    body: "When a model can't answer, PM says why in plain words, with the provider's own message under it when that adds something, and offers up to three other models you can use for this one reply: another model on the same key, each other company you have a key for, OpenRouter, or your Local AI model. PM never sends the reply anywhere else by itself: nothing is sent until you press one, and the line under the reason says so only when it is true. A button sends this reply once; 'Use … from now on' also makes it the model for Chat. A reply a provider's safety system stopped isn't re-sent either: rephrase it, or ask another model. A company you have turned off, haven't a key for, have paused with your daily limit, or can't use where you are (a free Google Gemini key in the UK, the EU or Switzerland) is never offered. 'Edit my list' opens AI & Models.",
+  },
   "chat-resumed": {
     title: "Where you left off",
     body: "Marks where an earlier conversation picks back up, with when it was last active — so a long-running chat you return to reads in order instead of looking brand-new.",

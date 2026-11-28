@@ -1260,6 +1260,181 @@ pub(crate) fn background_model_list(app: &AppHandle) -> Result<Vec<String>> {
     crate::settings::models_for(&conn, BACKGROUND_MODELS_KEY)
 }
 
+/// Whether the person's daily limit has paused a provider right now, for the not-working card (it
+/// never offers a provider that is paused). The limit's read takes the guard itself, so this is
+/// called with none held, like the readiness reads; it lives here because the gateway is the one
+/// place allowed to ask (a scan pins that).
+pub(crate) fn limit_paused(app: &AppHandle, p: CloudProvider) -> bool {
+    crate::daily_limit::is_paused(app, p)
+}
+
+/// OpenRouter's first model for a role, when its key is here: what the not-working card can offer as
+/// "OpenRouter". `None` with no key, an unreadable keychain or an empty list. Takes the guard once,
+/// after the keychain read.
+pub(crate) fn openrouter_offer_model(app: &AppHandle, role: Role) -> Option<String> {
+    let key = key_for(CloudProvider::OpenRouter, role).ok().flatten()?;
+    drop(key);
+    let (models_key, _) = openrouter_keys(role);
+    let state = app.state::<AppState>();
+    let conn = state.conn().ok()?;
+    crate::settings::models_for(&conn, models_key)
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+/// The settings keys of OpenRouter's model list and auto-switch for a role.
+fn openrouter_keys(role: Role) -> (&'static str, &'static str) {
+    match role {
+        Role::Chat => (CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY),
+        Role::Background => (BACKGROUND_MODELS_KEY, BACKGROUND_AUTO_SWITCH_KEY),
+    }
+}
+
+/// The local model the not-working card can offer for a role, and whether it really runs on this
+/// computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalOffer {
+    pub model: String,
+    /// False when the Local AI server is another machine (a LAN or public address): the reply then
+    /// leaves this computer, and the card must not say it stays here.
+    pub on_this_computer: bool,
+}
+
+/// The offer for a role from the three settings it reads. PURE. A loopback server is this computer;
+/// anything else is a server the person set up elsewhere, and says so.
+pub(crate) fn local_offer_from(
+    switch_on: bool,
+    base: Option<&str>,
+    model: Option<&str>,
+) -> Option<LocalOffer> {
+    let base = base?.trim();
+    let model = model?.trim();
+    (switch_on && !base.is_empty() && !model.is_empty()).then(|| LocalOffer {
+        model: model.to_string(),
+        on_this_computer: crate::openai_compat::host_is_loopback_literal(base),
+    })
+}
+
+/// The model for a role when Local AI is on and a server and a model are chosen: what the
+/// not-working card can offer as "this computer" (or, for a server on another machine, as that
+/// server). Settings only (no keychain read).
+pub(crate) fn local_offer_model(app: &AppHandle, role: Role) -> Option<LocalOffer> {
+    let state = app.state::<AppState>();
+    let conn = state.conn().ok()?;
+    let on = crate::local_ai_switch::read(&conn).ok()?;
+    let (model_key, _) = local_model_keys(role);
+    let base = db::get_setting(&conn, LOCAL_BASE_URL_KEY).ok().flatten();
+    let model = db::get_setting(&conn, model_key).ok().flatten();
+    local_offer_from(on, base.as_deref(), model.as_deref())
+}
+
+/// The ONE-ENTRY plan for a reply the person chose to send to a specific model (a click on the
+/// not-working card): a single attempt on exactly that entry, no walk, no fallback, for this turn
+/// only. The entry comes from the webview, so NOTHING about it is trusted: a direct provider passes
+/// the same entry gate the role setter uses (opted in, a readable key, not paused where the person
+/// is, which is what refuses a free Gemini key in the UK) and the model must be a catalogue row (so
+/// Mythos is never reachable); OpenRouter's model must be one the person already lists; the local
+/// model must be the one chosen for the role with Local AI on. A mod never comes through here: this
+/// is only called by the chat send, and no mod path can name it.
+pub(crate) fn plan_for_entry(
+    app: &AppHandle,
+    role: Role,
+    entry: &crate::offers::EntryRef,
+) -> Result<RoutePlan> {
+    use crate::offers::Target;
+    match entry.target()? {
+        Target::Local => {
+            let chosen = local_offer_model(app, role).map(|l| l.model);
+            if chosen.as_deref() != Some(entry.model.as_str()) {
+                return Err(Error::Other(
+                    "That model on this computer isn't set up any more.".into(),
+                ));
+            }
+            local_arm(app, role)?
+                .map(RoutePlan::LocalOnly)
+                .ok_or_else(|| {
+                    Error::Other("That model on this computer isn't set up any more.".into())
+                })
+        }
+        Target::Cloud(CloudProvider::OpenRouter) => {
+            let Some(key) = key_for(CloudProvider::OpenRouter, role)? else {
+                return Err(Error::Other(missing_key_message(CloudProvider::OpenRouter)));
+            };
+            let (models_key, _) = openrouter_keys(role);
+            let listed = {
+                let state = app.state::<AppState>();
+                let conn = state.conn()?;
+                crate::settings::models_for(&conn, models_key)?
+            };
+            if !listed.contains(&entry.model) {
+                return Err(Error::Other(
+                    "PM only sends a reply to an OpenRouter model you have saved.".into(),
+                ));
+            }
+            Ok(RoutePlan::Cloud(CloudArm::new(
+                CloudProvider::OpenRouter,
+                key,
+                vec![entry.model.clone()],
+            )))
+        }
+        Target::Cloud(p) => {
+            let d = crate::direct_providers::provider(p)
+                .ok_or_else(|| Error::Other("PM doesn't know that provider.".into()))?;
+            // The world is read first (keychain, then the store), then the pure rule decides.
+            let world = crate::commands::direct_keys::read_entry_world(app, d)?;
+            let Some(key) = key_for(p, role)? else {
+                return Err(Error::Other(missing_key_message(p)));
+            };
+            let inputs = {
+                let state = app.state::<AppState>();
+                let conn = state.conn()?;
+                crate::direct_providers::apply_seen(&conn)?;
+                crate::direct_providers::arm_inputs(&conn, p, role)?
+            };
+            direct_entry_plan(d, role, &world, &entry.model, key, inputs)
+        }
+    }
+}
+
+/// The one-entry plan for a direct provider, from what the world says. PURE. The entry gate is asked
+/// FIRST (opted in, a readable key, not paused where the person is), so a free Gemini key in the UK
+/// is refused here exactly as the role setter refuses it; the model must then be a catalogue row for
+/// that provider (so a made-up id and Mythos, which is not in the catalogue, are refused); the arm
+/// carries that ONE model, the role's stored effort only if this model offers it, and the key's
+/// tier only when it was stored beside this key.
+pub(crate) fn direct_entry_plan(
+    d: &crate::direct_providers::DirectProvider,
+    role: Role,
+    world: &crate::commands::direct_keys::EntryWorld,
+    model_id: &str,
+    key: Secret,
+    inputs: crate::direct_providers::ArmInputs,
+) -> Result<RoutePlan> {
+    crate::commands::direct_keys::gate_entry(
+        d,
+        role,
+        world.opted_in,
+        world.key,
+        world.blocked.as_ref(),
+    )?;
+    let model = crate::direct_models::models(d.provider)
+        .iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| Error::Other(format!("PM doesn't list {model_id} for {}.", d.name)))?;
+    let tier =
+        crate::direct_providers::tier_for_key(inputs.tier, inputs.key_fp.as_deref(), key.expose());
+    Ok(RoutePlan::Cloud(CloudArm {
+        provider: d.provider,
+        key,
+        models: vec![model.id.clone()],
+        // The role's stored level, only if THIS model offers it; else the model's own default.
+        effort: inputs.effort.filter(|l| model.offers(l)),
+        tier,
+        role: Some(role),
+    }))
+}
+
 /// Hydrate the local arm for a role: the shared base URL + the role's model + the optional bearer
 /// token, or `None` when the endpoint isn't fully configured (no URL, or no model for the role).
 fn local_arm(app: &AppHandle, role: Role) -> Result<Option<LocalArm>> {
@@ -1602,28 +1777,104 @@ async fn cloud_complete_via(
     cache_prefix: bool,
     max_tokens: Option<u32>,
 ) -> Result<Completion> {
-    crate::daily_limit::gate(arm.provider)?;
-    match arm.provider {
-        CloudProvider::OpenRouter => {
-            openrouter::complete(
-                arm.key.expose(),
-                &arm.models,
-                messages,
-                cache_prefix,
-                max_tokens,
-            )
-            .await
+    attempt(arm, async {
+        crate::daily_limit::gate(arm.provider)?;
+        match arm.provider {
+            CloudProvider::OpenRouter => {
+                openrouter::complete(
+                    arm.key.expose(),
+                    &arm.models,
+                    messages,
+                    cache_prefix,
+                    max_tokens,
+                )
+                .await
+            }
+            CloudProvider::OpenAi => {
+                crate::openai_direct::complete(arm, messages, cache_prefix, max_tokens).await
+            }
+            CloudProvider::Gemini => {
+                crate::gemini_direct::complete(arm, messages, cache_prefix, max_tokens).await
+            }
+            CloudProvider::Anthropic => {
+                crate::anthropic_direct::complete(arm, messages, cache_prefix, max_tokens).await
+            }
         }
-        CloudProvider::OpenAi => {
-            crate::openai_direct::complete(arm, messages, cache_prefix, max_tokens).await
+    })
+    .await
+}
+
+/// Run ONE cloud attempt under its own wire mark and say, on a failure, what it proved. This is the
+/// only place `Billing::NeverLeft` is decided from the wire: the mark here is fresh for the attempt
+/// (and still counts on a mod's outer mark, [`crate::wire_mark::WireMark::nested`]), so "did this
+/// attempt send anything?" is about this attempt alone. `Rejected` comes from the HTTP-error sites in
+/// the adapters, and everything else stays `MaybeBilled`.
+async fn attempt<T>(
+    arm: &CloudArm,
+    call: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let mark = crate::wire_mark::WireMark::nested();
+    let out = mark.scope(call).await;
+    out.map_err(|e| {
+        stamp_attempt(
+            e,
+            arm.provider,
+            // With auto-switch on there are several models and the error doesn't say which one
+            // failed: naming the first would put the wrong model in the headline, so none is named.
+            match arm.models.as_slice() {
+                [only] => Some(only.as_str()),
+                _ => None,
+            },
+            mark.may_have_reached_the_wire(),
+        )
+    })
+}
+
+/// What a failed cloud attempt is, given whether anything of it may have reached the provider. PURE.
+/// A typed failure keeps its class and any proof it already carries (`NeverLeft` from PM's own
+/// refusal, `Rejected` from a response status), and still at the safe default it becomes `NeverLeft`
+/// only when the mark says nothing left. A transport or plain error is wrapped so every cloud
+/// failure is typed: after a send it is `MaybeBilled` (a body cut off while it was being read reads
+/// "stopped partway"; a transport failure before any body is `Other`), before one it is `NeverLeft`.
+/// Only transport and plain errors are wrapped; a locked vault or a database error is not a
+/// provider's failure and passes through untouched. The sentence is the error's own, unchanged.
+pub(crate) fn stamp_attempt(
+    e: Error,
+    provider: CloudProvider,
+    model: Option<&str>,
+    reached_the_wire: bool,
+) -> Error {
+    use crate::error::{Billing, FailureClass};
+    let mut f = match e {
+        Error::Provider(f) => *f,
+        Error::Http(_) | Error::Other(_) => {
+            // "Stopped partway" is said only for a failure while the response body was being read: a
+            // timeout or a reset before the first byte came back began no reply at all, and the
+            // card would be lying. That one stays `Other` (and `MaybeBilled`, so the card says PM
+            // can't tell whether it was charged).
+            let class = match &e {
+                Error::Http(h) if reached_the_wire && (h.is_body() || h.is_decode()) => {
+                    FailureClass::StoppedPartway
+                }
+                _ => FailureClass::Other,
+            };
+            crate::error::ProviderFailure {
+                class,
+                billing: Billing::MaybeBilled,
+                provider,
+                model: None,
+                message: e.to_string(),
+            }
         }
-        CloudProvider::Gemini => {
-            crate::gemini_direct::complete(arm, messages, cache_prefix, max_tokens).await
-        }
-        CloudProvider::Anthropic => {
-            crate::anthropic_direct::complete(arm, messages, cache_prefix, max_tokens).await
-        }
+        other => return other,
+    };
+    if f.billing == Billing::MaybeBilled && !reached_the_wire {
+        f.billing = Billing::NeverLeft;
     }
+    if f.model.is_none() {
+        f.model = model.map(str::to_string);
+    }
+    Error::Provider(Box::new(f))
 }
 
 /// Stream a chat completion through the resolved route, forwarding each answer delta to `on_delta`,
@@ -1924,28 +2175,31 @@ async fn cloud_stream_via<F>(
 where
     F: FnMut(&str),
 {
-    crate::daily_limit::gate(arm.provider)?;
-    match arm.provider {
-        CloudProvider::OpenRouter => {
-            openrouter::stream_chat(
-                arm.key.expose(),
-                &arm.models,
-                messages,
-                cache_through,
-                on_token,
-            )
-            .await
+    attempt(arm, async {
+        crate::daily_limit::gate(arm.provider)?;
+        match arm.provider {
+            CloudProvider::OpenRouter => {
+                openrouter::stream_chat(
+                    arm.key.expose(),
+                    &arm.models,
+                    messages,
+                    cache_through,
+                    on_token,
+                )
+                .await
+            }
+            CloudProvider::OpenAi => {
+                crate::openai_direct::stream_chat(arm, messages, cache_through, on_token).await
+            }
+            CloudProvider::Gemini => {
+                crate::gemini_direct::stream_chat(arm, messages, cache_through, on_token).await
+            }
+            CloudProvider::Anthropic => {
+                crate::anthropic_direct::stream_chat(arm, messages, cache_through, on_token).await
+            }
         }
-        CloudProvider::OpenAi => {
-            crate::openai_direct::stream_chat(arm, messages, cache_through, on_token).await
-        }
-        CloudProvider::Gemini => {
-            crate::gemini_direct::stream_chat(arm, messages, cache_through, on_token).await
-        }
-        CloudProvider::Anthropic => {
-            crate::anthropic_direct::stream_chat(arm, messages, cache_through, on_token).await
-        }
-    }
+    })
+    .await
 }
 
 /// The message shown when NO provider is configured — provider-aware (a deliberate copy change from
@@ -2397,6 +2651,492 @@ mod tests {
                 "{provider:?}: a refusal before send leaves the mark at never left"
             );
         }
+    }
+
+    // ---- typed failures: what one attempt proves about its billing -------------------------------
+
+    fn transport_error() -> Error {
+        // A real `reqwest::Error` (a builder error), told as the transport failure it stands for.
+        Error::Http(
+            reqwest::Client::new()
+                .get("not a url")
+                .build()
+                .expect_err("a bad url"),
+        )
+    }
+
+    fn typed(billing: crate::error::Billing) -> Error {
+        Error::Provider(Box::new(crate::error::ProviderFailure {
+            class: crate::error::FailureClass::Busy,
+            billing,
+            provider: CloudProvider::Anthropic,
+            model: None,
+            message: "Anthropic is having trouble right now. Try again shortly.".into(),
+        }))
+    }
+
+    /// The stamp: a typed failure at the safe default becomes `NeverLeft` only when the attempt's own
+    /// mark says nothing left; a proof it already carries (`Rejected` from a response status,
+    /// `NeverLeft` from PM's own refusal) is never changed either way.
+    #[test]
+    fn an_attempt_is_stamped_never_left_only_when_its_own_mark_says_so() {
+        use crate::error::Billing::{MaybeBilled, NeverLeft, Rejected};
+        let stamp = |e: Error, reached: bool| {
+            stamp_attempt(e, CloudProvider::Anthropic, Some("m"), reached)
+                .provider_failure()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(stamp(typed(MaybeBilled), false).billing, NeverLeft);
+        assert_eq!(stamp(typed(MaybeBilled), true).billing, MaybeBilled);
+        assert_eq!(stamp(typed(Rejected), true).billing, Rejected);
+        assert_eq!(stamp(typed(Rejected), false).billing, Rejected);
+        assert_eq!(stamp(typed(NeverLeft), true).billing, NeverLeft);
+        // The model is filled in once, never overwritten.
+        assert_eq!(stamp(typed(MaybeBilled), true).model.as_deref(), Some("m"));
+        let mut with_model = typed(MaybeBilled);
+        if let Error::Provider(f) = &mut with_model {
+            f.model = Some("other".into());
+        }
+        assert_eq!(stamp(with_model, true).model.as_deref(), Some("other"));
+    }
+
+    /// A plain or transport error is wrapped so every cloud failure is typed, with its sentence
+    /// unchanged: before a send it is `NeverLeft`, after one it may have billed, and only a body cut off
+    /// while it was being read reads "stopped partway". Errors that are not a provider's (a locked
+    /// vault, a database error) are left exactly as they were.
+    #[test]
+    fn plain_and_transport_errors_are_wrapped_and_other_errors_are_left_alone() {
+        use crate::error::{Billing, FailureClass};
+        let plain = |reached| {
+            stamp_attempt(
+                Error::Other("PM no longer lists x for Anthropic.".into()),
+                CloudProvider::Anthropic,
+                None,
+                reached,
+            )
+        };
+        let f = plain(false);
+        assert_eq!(f.to_string(), "PM no longer lists x for Anthropic.");
+        let f = f.provider_failure().unwrap().clone();
+        assert_eq!(
+            (f.class, f.billing),
+            (FailureClass::Other, Billing::NeverLeft)
+        );
+        let f = plain(true).provider_failure().unwrap().clone();
+        assert_eq!(
+            (f.class, f.billing),
+            (FailureClass::Other, Billing::MaybeBilled)
+        );
+
+        let sentence = transport_error().to_string();
+        let sent = stamp_attempt(transport_error(), CloudProvider::Gemini, None, true);
+        assert_eq!(sent.to_string(), sentence);
+        let f = sent.provider_failure().unwrap();
+        // A transport failure with no body read (a timeout or a reset before the first byte) began no
+        // reply, so it must not read "stopped partway".
+        assert_eq!(
+            (f.class, f.billing, f.provider),
+            (
+                FailureClass::Other,
+                Billing::MaybeBilled,
+                CloudProvider::Gemini
+            )
+        );
+        let not_sent = stamp_attempt(transport_error(), CloudProvider::Gemini, None, false);
+        let f = not_sent.provider_failure().unwrap();
+        assert_eq!(
+            (f.class, f.billing),
+            (FailureClass::Other, Billing::NeverLeft)
+        );
+
+        let io = stamp_attempt(
+            Error::Io(std::io::Error::other("disk")),
+            CloudProvider::Gemini,
+            None,
+            true,
+        );
+        assert!(matches!(io, Error::Io(_)), "not a provider's failure");
+    }
+
+    /// A body cut off while it was being read IS a reply that stopped partway; a hang-up before any
+    /// response is not. Both come from a real socket, so the classification is made on real
+    /// `reqwest` errors, not on a stand-in.
+    #[tokio::test]
+    async fn only_a_body_cut_off_midway_reads_as_stopped_partway() {
+        use crate::error::{Billing, FailureClass};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let client = reqwest::Client::new();
+
+        // Headers and a few bytes of a body that promised 100, then the line goes dead.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            // Read the whole request first: closing a socket with unread bytes sends a reset, which
+            // can reach the client before it has parsed the headers and fail the send instead of
+            // the body.
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
+        });
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect("the headers arrive");
+        let cut = Error::from(resp.bytes().await.expect_err("the body is cut"));
+        peer.join().unwrap();
+        let f = stamp_attempt(cut, CloudProvider::Anthropic, None, true);
+        let f = f.provider_failure().unwrap();
+        assert_eq!(
+            (f.class, f.billing),
+            (FailureClass::StoppedPartway, Billing::MaybeBilled)
+        );
+
+        // Accepted, then dropped before any response: nothing of a reply was ever read.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || drop(l.accept()));
+        let hung_up = Error::from(
+            client
+                .get(format!("http://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .expect_err("hung up on"),
+        );
+        peer.join().unwrap();
+        let f = stamp_attempt(hung_up, CloudProvider::Anthropic, None, true);
+        let f = f.provider_failure().unwrap();
+        assert_eq!(
+            (f.class, f.billing),
+            (FailureClass::Other, Billing::MaybeBilled)
+        );
+    }
+
+    /// The real thing: `attempt` runs the call under its own fresh mark. A connect that is refused
+    /// proves nothing left (`NeverLeft`); a connection that was made, then hung up on, may have
+    /// carried the request (`MaybeBilled`), and a mod's outer mark sees both requests.
+    #[tokio::test]
+    async fn an_attempt_reads_its_own_mark_and_the_outer_mark_still_sees_every_send() {
+        use crate::error::Billing;
+        use std::net::TcpListener;
+        let arm = cloud(&["some/model"]);
+        let client = reqwest::Client::new();
+        let outer = crate::wire_mark::WireMark::new();
+        let (first, second) = outer
+            .scope(async {
+                let l = TcpListener::bind("127.0.0.1:0").unwrap();
+                let closed = l.local_addr().unwrap().port();
+                drop(l);
+                let first = attempt(&arm, async {
+                    crate::wire_mark::send(client.post(format!("http://127.0.0.1:{closed}/")))
+                        .await
+                        .map_err(Error::from)
+                })
+                .await
+                .expect_err("refused");
+
+                let l = TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = l.local_addr().unwrap().port();
+                let peer = std::thread::spawn(move || drop(l.accept()));
+                let second = attempt(&arm, async {
+                    crate::wire_mark::send(client.post(format!("http://127.0.0.1:{port}/")))
+                        .await
+                        .map_err(Error::from)
+                })
+                .await
+                .expect_err("hung up on");
+                peer.join().unwrap();
+                (first, second)
+            })
+            .await;
+        assert_eq!(
+            first.provider_failure().unwrap().billing,
+            Billing::NeverLeft
+        );
+        assert_eq!(
+            second.provider_failure().unwrap().billing,
+            Billing::MaybeBilled
+        );
+        assert_eq!(
+            first.provider_failure().unwrap().model.as_deref(),
+            Some("some/model")
+        );
+        assert!(
+            outer.may_have_reached_the_wire(),
+            "the mod's mark sees the second attempt's send"
+        );
+    }
+
+    /// A refusal PM makes before any network (here the catalogue's: a model it no longer lists)
+    /// comes back typed and `NeverLeft` from every direct dispatch, through both functions, with the
+    /// sentence unchanged.
+    #[tokio::test]
+    async fn a_refusal_before_the_network_is_typed_and_never_left_for_each_direct_provider() {
+        use crate::error::Billing;
+        let _gate = crate::daily_limit::test_gate(|_| Ok(()));
+        for provider in [
+            CloudProvider::OpenAi,
+            CloudProvider::Gemini,
+            CloudProvider::Anthropic,
+        ] {
+            let arm = CloudArm {
+                provider,
+                ..cloud(&["some/unlisted-model"])
+            };
+            for e in [
+                cloud_complete_via(&arm, &msgs(1), false, Some(10))
+                    .await
+                    .err(),
+                cloud_stream_via(&arm, &msgs(1), None, |_| {}).await.err(),
+            ] {
+                let e = e.expect("refused");
+                let f = e.provider_failure().expect("typed");
+                assert_eq!(f.billing, Billing::NeverLeft, "{provider:?}");
+                assert_eq!(f.provider, provider);
+                assert_eq!(f.model.as_deref(), Some("some/unlisted-model"));
+                // Gemini's send seam speaks first (a key that reads as free where the host's time
+                // zone is the UK is paused before the catalogue is asked), and either refusal is
+                // PM's own and unsent. The catalogue sentence is checked where it is the one.
+                if provider != CloudProvider::Gemini {
+                    assert!(e.to_string().contains("some/unlisted-model"), "{e}");
+                }
+            }
+        }
+    }
+
+    /// The local offer says where the reply goes: a loopback server is this computer, anything else
+    /// is a server elsewhere, and a missing piece is no offer at all.
+    #[test]
+    fn the_local_offer_knows_whether_it_is_on_this_computer() {
+        let offer = |on, base, model| local_offer_from(on, base, model);
+        let here = offer(true, Some("http://127.0.0.1:11434/v1"), Some("llama3")).unwrap();
+        assert_eq!(
+            (here.model.as_str(), here.on_this_computer),
+            ("llama3", true)
+        );
+        assert!(
+            offer(true, Some("http://localhost:11434"), Some("m"))
+                .unwrap()
+                .on_this_computer
+        );
+        for remote in [
+            "http://192.168.1.20:11434/v1",
+            "https://ollama.example.org/v1",
+            "http://localhost.example.org:11434",
+        ] {
+            let o = offer(true, Some(remote), Some("llama3")).unwrap();
+            assert!(!o.on_this_computer, "{remote}");
+        }
+        assert!(offer(false, Some("http://127.0.0.1:11434"), Some("m")).is_none());
+        assert!(offer(true, None, Some("m")).is_none());
+        assert!(offer(true, Some("  "), Some("m")).is_none());
+        assert!(offer(true, Some("http://127.0.0.1:11434"), Some(" ")).is_none());
+    }
+
+    // ---- the one-entry plan a click on the card builds -------------------------------------------
+
+    fn world(
+        opted_in: bool,
+        key: KeyPresence,
+        blocked: Option<crate::region::RegionRefusal>,
+    ) -> crate::commands::direct_keys::EntryWorld {
+        crate::commands::direct_keys::EntryWorld {
+            opted_in,
+            key,
+            blocked,
+            tier: None,
+        }
+    }
+
+    fn arm_inputs(effort: Option<&str>) -> crate::direct_providers::ArmInputs {
+        crate::direct_providers::ArmInputs {
+            models: vec!["ignored".into()],
+            effort: effort.map(str::to_string),
+            tier: None,
+            key_fp: None,
+        }
+    }
+
+    fn direct(p: CloudProvider) -> &'static crate::direct_providers::DirectProvider {
+        crate::direct_providers::provider(p).unwrap()
+    }
+
+    /// A click builds exactly ONE entry: a single `Cloud` arm with that one model, never a ladder,
+    /// and the role's effort only if that model offers it.
+    #[test]
+    fn a_click_builds_a_one_entry_plan() {
+        let d = direct(CloudProvider::Anthropic);
+        let plan = direct_entry_plan(
+            d,
+            Role::Chat,
+            &world(true, KeyPresence::Present, None),
+            "anthropic/claude-haiku-5-5",
+            Secret::from("k".to_string()),
+            arm_inputs(Some("not-a-level")),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let RoutePlan::Cloud(arm) = plan else {
+            panic!("a single cloud arm");
+        };
+        assert_eq!(arm.models, vec!["anthropic/claude-haiku-5-5".to_string()]);
+        assert_eq!(arm.provider, CloudProvider::Anthropic);
+        assert_eq!(
+            arm.effort, None,
+            "an effort this model does not offer is dropped"
+        );
+        assert_eq!(arm.role, Some(Role::Chat));
+        // A plan that is not power-routed and serves no mod.
+        assert!(!RoutePlan::Cloud(arm).is_power_routed());
+    }
+
+    /// The re-send is gated like the role setter: a free Gemini key in the UK, a provider that is
+    /// off, a missing key and an unreadable keychain are each refused BEFORE a plan exists.
+    #[test]
+    fn a_forced_entry_is_refused_by_the_same_gate_as_the_role_setter() {
+        use crate::region::region_of_on;
+        let d = direct(CloudProvider::Gemini);
+        let uk = region_of_on(Some("Europe/London"), false);
+        let blocked = crate::direct_providers::refuses(
+            CloudProvider::Gemini,
+            Some(crate::direct_providers::KeyTier::Free),
+            &uk,
+        );
+        assert!(blocked.is_some());
+        let go = |w: crate::commands::direct_keys::EntryWorld| {
+            direct_entry_plan(
+                d,
+                Role::Chat,
+                &w,
+                "gemini/gemini-3.8-flash",
+                Secret::from("k".to_string()),
+                arm_inputs(None),
+            )
+            .err()
+            .map(|e| e.to_string())
+        };
+        let said = go(world(true, KeyPresence::Present, blocked)).expect("refused");
+        assert!(said.starts_with("Gemini is paused"), "{said}");
+        assert!(go(world(false, KeyPresence::Present, None))
+            .unwrap()
+            .contains("Turn on"));
+        assert!(go(world(true, KeyPresence::Absent, None))
+            .unwrap()
+            .contains("Add your"));
+        assert!(go(world(true, KeyPresence::Unreadable, None))
+            .unwrap()
+            .contains("can't read"));
+        // And a clean world builds.
+        assert!(go(world(true, KeyPresence::Present, None)).is_none());
+    }
+
+    /// An id the webview makes up, a model of another provider and Mythos are all refused: the model
+    /// must be a catalogue row of THAT provider.
+    #[test]
+    fn a_forced_entry_must_be_a_catalogue_row_of_its_provider() {
+        let d = direct(CloudProvider::Anthropic);
+        for id in [
+            "anthropic/claude-mythos-5-2",
+            "gemini/gemini-3.8-flash",
+            "anthropic/nope",
+            "",
+        ] {
+            let e = direct_entry_plan(
+                d,
+                Role::Chat,
+                &world(true, KeyPresence::Present, None),
+                id,
+                Secret::from("k".to_string()),
+                arm_inputs(None),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{id:?} must be refused"));
+            assert!(e.to_string().contains("doesn't list"), "{id}: {e}");
+        }
+    }
+
+    /// A mod can never come through the override: the plan builder is named only by the chat send,
+    /// and nothing under `mods/` names it or the argument. (A mod's call is built from `resolve`, and
+    /// `serves_a_mod` refuses any direct arm besides.)
+    #[test]
+    fn no_mod_path_can_name_the_route_override() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        for file in files {
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&file).unwrap();
+            let mentions = text.contains(concat!("plan_for_", "entry("))
+                || text.contains(concat!("route_", "override"));
+            let allowed = matches!(
+                rel.as_str(),
+                "llm_gateway.rs" | "commands/conversations.rs" | "offers.rs"
+            );
+            assert!(
+                !mentions || allowed,
+                "{rel} names the route override: only the chat send may"
+            );
+            assert!(
+                !(rel.starts_with("mods/") && mentions),
+                "{rel}: a mod can never name the override"
+            );
+        }
+    }
+
+    /// The tests above exercise the pure `direct_entry_plan`; this pins that the command-facing
+    /// `plan_for_entry` really goes through it for every direct provider (and so through the entry
+    /// gate), so dropping that call, or building an arm inline, fails here.
+    #[test]
+    fn plan_for_entry_builds_every_direct_arm_through_the_gated_plan() {
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let body = live
+            .split("pub(crate) fn plan_for_entry(")
+            .nth(1)
+            .and_then(|r| {
+                r.split("\n/// The one-entry plan for a direct provider")
+                    .next()
+            })
+            .expect("plan_for_entry");
+        let (_, direct) = body
+            .split_once("Target::Cloud(p) =>")
+            .expect("the direct-provider arm");
+        assert!(
+            direct.contains("read_entry_world("),
+            "the world is read first"
+        );
+        assert!(
+            direct.contains("direct_entry_plan("),
+            "the gated plan builds the arm"
+        );
+        assert!(
+            !direct.contains("CloudArm::new("),
+            "no arm may be built here without the gate"
+        );
     }
 
     /// The check is the FIRST thing both dispatch functions do: before the provider match builds a

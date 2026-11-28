@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::cloud_openai::{self, Flavour};
-use crate::error::{Error, Result};
+use crate::error::{Error, FailureClass, Result};
 
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const MODELS_ENDPOINT: &str = "https://openrouter.ai/api/v1/models";
@@ -466,14 +466,49 @@ fn request_error(status: reqwest::StatusCode, detail: &str) -> Error {
         || lower.contains("no allowed providers")
         || lower.contains("zero data")
         || lower.contains("zdr");
-    if zdr_related {
-        Error::Other(format!(
+    let message = if zdr_related {
+        format!(
             "OpenRouter request failed ({status}): {detail}. PM enforces zero-data-retention on \
              every request, so this model may have no compliant provider — pick another model, or \
              turn on auto-switch with a compliant fallback."
-        ))
+        )
     } else {
-        Error::Other(format!("OpenRouter request failed ({status}): {detail}"))
+        format!("OpenRouter request failed ({status}): {detail}")
+    };
+    // A 404 "no endpoints match your data policy" is PM's zero-data-retention pin refusing the model,
+    // not the model being gone: it keeps its own guidance sentence (above) as a plain error rather
+    // than a card that says "OpenRouter no longer offers this model" and hides the hint.
+    let class = if zdr_related {
+        FailureClass::Other
+    } else {
+        failure_class(status.as_u16(), &lower)
+    };
+    Error::provider(
+        crate::llm_gateway::CloudProvider::OpenRouter,
+        class,
+        message,
+    )
+}
+
+/// The class of an OpenRouter failure, from its status (OpenRouter's errors are strings only) and,
+/// for a 400, the words that say the conversation is too long. PURE. The status is advisory for a
+/// mid-stream error (the transport said 200), which is fine: the class is wording, and billing is
+/// never decided here.
+fn failure_class(status: u16, lower_detail: &str) -> FailureClass {
+    match status {
+        401 => FailureClass::KeyBad,
+        402 => FailureClass::NoCredit,
+        404 => FailureClass::ModelGone,
+        413 => FailureClass::ContextTooLong,
+        429 => FailureClass::RateLimited,
+        400 if lower_detail.contains("context length")
+            || lower_detail.contains("maximum context")
+            || lower_detail.contains("too long") =>
+        {
+            FailureClass::ContextTooLong
+        }
+        408 | 500..=599 => FailureClass::Busy,
+        _ => FailureClass::Other,
     }
 }
 
@@ -706,6 +741,133 @@ mod tests {
             answered_a_decapitated_prompt.usable_text().is_some(),
             "this check is about the REPLY; input truncation is unobservable from here"
         );
+    }
+
+    /// OpenRouter's errors are strings only, so the class comes from the status (and, for a 400, the
+    /// words for "too long"). The sentence is the one it has always been.
+    #[test]
+    fn a_failure_is_told_as_a_class_from_its_status_and_keeps_its_sentence() {
+        use FailureClass as C;
+        for (status, detail, class) in [
+            (401u16, "bad key", C::KeyBad),
+            (402, "no credits", C::NoCredit),
+            (404, "no such model", C::ModelGone),
+            // The zero-data-retention pin refusing a model is not "gone": it keeps its guidance.
+            (
+                404,
+                "No endpoints found matching your data policy",
+                C::Other,
+            ),
+            (413, "too big", C::ContextTooLong),
+            (429, "slow down", C::RateLimited),
+            (
+                400,
+                "This model's maximum context length is 8192 tokens",
+                C::ContextTooLong,
+            ),
+            (400, "bad field", C::Other),
+            (408, "timeout", C::Busy),
+            (502, "upstream provider is down", C::Busy),
+            (503, "overloaded", C::Busy),
+            (403, "moderation", C::Other),
+        ] {
+            let e = request_error(reqwest::StatusCode::from_u16(status).unwrap(), detail);
+            let f = e.provider_failure().expect("typed");
+            assert_eq!(f.class, class, "{status} {detail}");
+            assert_eq!(f.provider, crate::llm_gateway::CloudProvider::OpenRouter);
+            assert!(
+                e.to_string()
+                    .starts_with(&format!("OpenRouter request failed ({status}")),
+                "{e}"
+            );
+        }
+    }
+
+    /// An error chunk inside a 200 stream is told by its code but may have billed: `chunk_error` never
+    /// calls it `Rejected`, which only a response status before any body can.
+    #[test]
+    fn a_mid_stream_error_chunk_may_have_billed() {
+        let e = chunk_error(&serde_json::json!({
+            "error": {"code": 429, "message": "slow down"}
+        }))
+        .unwrap();
+        let f = e.provider_failure().expect("typed");
+        assert_eq!(f.class, FailureClass::RateLimited);
+        assert_eq!(f.billing, crate::error::Billing::MaybeBilled);
+    }
+
+    /// The status table through the REAL request path, for OpenRouter's flavour.
+    #[tokio::test]
+    async fn a_failed_status_is_rejected_only_for_the_documented_unbilled_ones() {
+        use crate::error::Billing::{MaybeBilled, Rejected};
+        use std::io::{Read, Write};
+        for (status, want) in [
+            (400u16, Rejected),
+            (401, Rejected),
+            (402, Rejected),
+            (403, Rejected),
+            (404, Rejected),
+            (413, Rejected),
+            (422, Rejected),
+            (429, Rejected),
+            (503, Rejected),
+            (529, Rejected),
+            (408, MaybeBilled),
+            (500, MaybeBilled),
+            (502, MaybeBilled),
+            (504, MaybeBilled),
+            (524, MaybeBilled),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                sock.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+                    .ok();
+                let _ = sock.read(&mut buf);
+                let body = "upstream said no";
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: text/plain\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(body.as_bytes());
+            });
+            let endpoint: &'static str =
+                Box::leak(format!("http://127.0.0.1:{port}/").into_boxed_str());
+            let flavour = Flavour {
+                endpoint,
+                name: FLAVOUR.name,
+                auth: FLAVOUR.auth,
+                cache_control_blocks: FLAVOUR.cache_control_blocks,
+                decorate: FLAVOUR.decorate,
+                request_error: FLAVOUR.request_error,
+                max_tokens_field: FLAVOUR.max_tokens_field,
+                patient: FLAVOUR.patient,
+                stream_error: FLAVOUR.stream_error,
+                stop_error: FLAVOUR.stop_error,
+                usage: FLAVOUR.usage,
+            };
+            let body = chat_body(&["m/x".to_string()], &[], true, None, None);
+            let e = cloud_openai::stream(&flavour, "test-key-not-real", &body, |_| {})
+                .await
+                .err()
+                .expect("an error");
+            assert_eq!(
+                e.provider_failure().expect("typed").billing,
+                want,
+                "{status}"
+            );
+        }
     }
 
     #[test]

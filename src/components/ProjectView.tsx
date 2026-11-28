@@ -607,6 +607,16 @@ export function ProjectView({
               {chat.error}
             </Callout>
           )}
+          {/* The one-click offers live in the main chat; a project chat says what happened in plain
+              words and where to change it, so a failed reply is never a silent one. */}
+          {chat.notWorking && (
+            <Callout variant="strip" size="md">
+              {chat.notWorking.info.headline}. {chat.notWorking.info.reason}
+              {chat.notWorking.info.detail ? ` ${chat.notWorking.info.detail}` : ""}
+              {chat.notWorking.info.reassurance ? ` ${chat.notWorking.info.reassurance}` : ""} You
+              can pick another model in Settings &gt; AI &amp; Models.
+            </Callout>
+          )}
           {chat.fallback && (
             <FallbackStrip fallback={chat.fallback} onDismiss={chat.dismissFallback} />
           )}

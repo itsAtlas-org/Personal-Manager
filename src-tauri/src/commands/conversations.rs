@@ -108,6 +108,12 @@ pub enum ChatEvent {
     Error {
         message: String,
     },
+    /// Sent INSTEAD of `Error` when a reply could not be answered and there is something to offer
+    /// (or the failure is one the person can act on): the reason in plain words and up to three
+    /// one-click alternatives, each of which is the person's own explicit choice. Built in Rust from
+    /// the typed failure ([`crate::offers`]); the command still returns the same error, so the
+    /// queue and the dangling-turn clean-up behave as for any failed send.
+    NotWorking(crate::offers::NotWorking),
     /// The reply was served by cloud despite a local-endpoint preference (#297): the user asked for
     /// local, but it failed or was resting, so cloud answered. NOT an error (the reply is real) and
     /// NEVER a power-policy switch: an On battery route is filtered out by
@@ -156,6 +162,86 @@ fn chat_event_for(delta: llm_gateway::ChatDelta<'_>, show_thinking: bool) -> Opt
 /// `None` for a model PM doesn't list.
 fn direct_input_window(model: &str) -> Option<i64> {
     crate::direct_models::find(model).map(|m| i64::from(m.max_input))
+}
+
+/// What failed, for the card, from the error a send came back with and the plan it ran. `None` when
+/// the failure is not one the card speaks to: a power-routed turn keeps its own hint ("Keep using
+/// local"), and a cloud plan's error that is not a provider's (a locked vault, a database error) is
+/// just an error. A plan with a local arm whose error is not a provider's is the local model failing.
+fn failed_attempt(e: &Error, plan: &llm_gateway::RoutePlan) -> Option<crate::offers::Failed> {
+    use llm_gateway::RoutePlan;
+    if plan.is_power_routed() {
+        return None;
+    }
+    if let Some(f) = e.provider_failure() {
+        return Some(crate::offers::Failed {
+            provider: Some(f.provider),
+            model: f.model.clone(),
+            class: f.class,
+            billing: Some(f.billing),
+            message: f.message.clone(),
+        });
+    }
+    match plan {
+        RoutePlan::LocalOnly(local) | RoutePlan::LocalThenCloud { local, .. } => {
+            Some(crate::offers::Failed {
+                provider: None,
+                model: Some(local.model.clone()),
+                class: crate::error::FailureClass::Other,
+                billing: None,
+                message: e.to_string(),
+            })
+        }
+        RoutePlan::Cloud(_) | RoutePlan::CloudForPower { .. } => None,
+    }
+}
+
+/// The card for a failed turn, or `None` for the plain error. Reads the keychain and the store (no
+/// guard held across the keychain), so it runs only on a failure.
+fn not_working_card(
+    app: &AppHandle,
+    conversation_id: i64,
+    failed: &crate::offers::Failed,
+    earlier: &[crate::offers::EntryRef],
+) -> Option<crate::offers::NotWorking> {
+    let facts = crate::offers::gather(app, Role::Chat);
+    let limit = failed
+        .provider
+        .filter(|_| failed.class == crate::error::FailureClass::LimitReached)
+        .and_then(|p| crate::offers::limit_info(app, p));
+    // The user turn the failed attempt left behind: the card belongs to it.
+    let turn_id = app
+        .state::<AppState>()
+        .conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT id FROM messages WHERE conversation_id = ?1 AND role = 'user' \
+                 ORDER BY id DESC LIMIT 1",
+                params![conversation_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(0);
+    crate::offers::card_for(turn_id, failed, &facts, limit, earlier)
+}
+
+/// The entries this turn tried before the failing one: what the page handed back (the earlier clicks
+/// of this same turn), plus this computer when a Local-then-cloud plan tried it first and the cloud
+/// then failed. The card never offers any of them again.
+fn earlier_entries(
+    handed_back: Option<Vec<crate::offers::EntryRef>>,
+    plan: &llm_gateway::RoutePlan,
+) -> Vec<crate::offers::EntryRef> {
+    let mut out = handed_back.unwrap_or_default();
+    if let llm_gateway::RoutePlan::LocalThenCloud { local, .. } = plan {
+        out.push(crate::offers::EntryRef {
+            provider: "local".into(),
+            model: local.model.clone(),
+        });
+    }
+    out
 }
 
 /// A reply with no answer in it is not a turn: storing it puts a blank (or a cut-off marker and
@@ -601,6 +687,8 @@ fn assemble_chat_messages(
 
 /// Persist the user's turn, stream the assistant's reply from OpenRouter (tokens
 /// pushed over `on_event`), then persist the assistant's turn.
+// A Tauri command takes its arguments one by one; the webview names each of them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -614,6 +702,13 @@ pub async fn send_message(
     // The chat Thinking toggle, read by the frontend at send time. `None` (an older caller that
     // omits it) is off. Only this streaming path can carry it; background work never sees it.
     show_thinking: Option<bool>,
+    // A click on the not-working card: send THIS turn to exactly this model, once, with no walk and
+    // no fallback. It passes the same entry gate the role setters use (see `plan_for_entry`), so a
+    // free Gemini key in the UK is refused here as everywhere. `None` is every ordinary send.
+    route_override: Option<crate::offers::EntryRef>,
+    // The entries the card said were already tried for THIS turn, handed back on a re-send so the next
+    // card never offers one again. Only ever an exclusion list: nothing is sent to any of them.
+    tried: Option<Vec<crate::offers::EntryRef>>,
     on_event: Channel<ChatEvent>,
 ) -> Result<()> {
     let show_thinking = show_thinking.unwrap_or(false);
@@ -629,11 +724,19 @@ pub async fn send_message(
     // settles, so background indexing never competes with a live exchange.
     state.mark_user_activity();
 
-    let Some(plan) = llm_gateway::resolve(&app, Role::Chat)? else {
-        return Err(Error::Other(llm_gateway::no_provider_message_for(
-            &app,
-            Role::Chat,
-        )));
+    let plan = match &route_override {
+        // Refused (gate, key, catalogue) BEFORE the user turn is saved, so a refused click leaves
+        // nothing behind.
+        Some(entry) => llm_gateway::plan_for_entry(&app, Role::Chat, entry)?,
+        None => {
+            let Some(plan) = llm_gateway::resolve(&app, Role::Chat)? else {
+                return Err(Error::Other(llm_gateway::no_provider_message_for(
+                    &app,
+                    Role::Chat,
+                )));
+            };
+            plan
+        }
     };
     // Decided once, here: a reply finishes where it started, whatever the battery does meanwhile.
     let power_routed = plan.is_power_routed();
@@ -865,9 +968,22 @@ pub async fn send_message(
             } else {
                 e
             };
-            let _ = on_event.send(ChatEvent::Error {
-                message: e.to_string(),
+            // A failure the person can act on gets the card (reason plus one-click offers) in
+            // place of the plain error. The rejection below still carries the sentence.
+            let card = failed_attempt(&e, &plan).and_then(|failed| {
+                not_working_card(
+                    &app,
+                    conversation_id,
+                    &failed,
+                    &earlier_entries(tried.clone(), &plan),
+                )
             });
+            let _ = match card {
+                Some(card) => on_event.send(ChatEvent::NotWorking(card)),
+                None => on_event.send(ChatEvent::Error {
+                    message: e.to_string(),
+                }),
+            };
             return Err(e);
         }
     };
@@ -879,9 +995,37 @@ pub async fn send_message(
         if let Ok(conn) = state.conn() {
             book_an_empty_reply(&conn, &completion, plan.primary_model_id(), &meta);
         }
-        let _ = on_event.send(ChatEvent::Error {
-            message: e.to_string(),
-        });
+        // A refused reply is billed and would refuse again, so PM never re-sends it on its own; the
+        // card says so and offers other models, each one the person's own click. Only a cloud
+        // provider's refusal has a card (it is the one that carries `refused`).
+        let card = (completion.usage.refused && !power_routed)
+            .then(|| {
+                meta.cloud_provider.map(|provider| crate::offers::Failed {
+                    provider: Some(provider),
+                    model: completion
+                        .model
+                        .clone()
+                        .or_else(|| Some(plan.primary_model_id().to_string())),
+                    class: crate::error::FailureClass::Refused,
+                    billing: Some(crate::error::Billing::MaybeBilled),
+                    message: e.to_string(),
+                })
+            })
+            .flatten()
+            .and_then(|failed| {
+                not_working_card(
+                    &app,
+                    conversation_id,
+                    &failed,
+                    &earlier_entries(tried.clone(), &plan),
+                )
+            });
+        let _ = match card {
+            Some(card) => on_event.send(ChatEvent::NotWorking(card)),
+            None => on_event.send(ChatEvent::Error {
+                message: e.to_string(),
+            }),
+        };
         return Err(e);
     }
     // If the local endpoint the user preferred didn't serve this turn (it failed or was resting), tell
@@ -1436,6 +1580,188 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
 mod tests {
     use super::*;
     use crate::commands::shared::temp_db;
+
+    fn cloud_plan(p: llm_gateway::CloudProvider) -> llm_gateway::RoutePlan {
+        llm_gateway::RoutePlan::Cloud(llm_gateway::CloudArm::new(
+            p,
+            crate::secret::Secret::from("k".to_string()),
+            vec!["m".into()],
+        ))
+    }
+
+    fn local_arm() -> llm_gateway::LocalArm {
+        llm_gateway::LocalArm {
+            base_url: "http://127.0.0.1:1".into(),
+            model: "llama3".into(),
+            token: None,
+        }
+    }
+
+    /// What the card is told failed: a typed cloud failure carries its own class, billing, provider
+    /// and model; a plain error from a plan with a local arm is the local model failing (billing
+    /// unknown, so no reassurance); a plain error from a cloud plan (a locked vault, say) and any
+    /// power-routed turn keep today's plain error.
+    #[test]
+    fn the_card_is_told_what_failed_from_the_error_and_the_plan() {
+        use crate::error::{Billing, FailureClass};
+        use llm_gateway::CloudProvider;
+        let typed = Error::Provider(Box::new(crate::error::ProviderFailure {
+            class: FailureClass::NoCredit,
+            billing: Billing::Rejected,
+            provider: CloudProvider::Anthropic,
+            model: Some("anthropic/claude-sonnet-5-5".into()),
+            message: "out of credit".into(),
+        }));
+        let f = failed_attempt(&typed, &cloud_plan(CloudProvider::Anthropic)).unwrap();
+        assert_eq!(f.provider, Some(CloudProvider::Anthropic));
+        assert_eq!(f.class, FailureClass::NoCredit);
+        assert_eq!(f.billing, Some(Billing::Rejected));
+        assert_eq!(f.model.as_deref(), Some("anthropic/claude-sonnet-5-5"));
+
+        let plain = Error::Other("local server not reachable".into());
+        let f = failed_attempt(&plain, &llm_gateway::RoutePlan::LocalOnly(local_arm())).unwrap();
+        assert_eq!(f.provider, None);
+        assert_eq!(f.model.as_deref(), Some("llama3"));
+        assert_eq!(f.billing, None);
+        assert!(failed_attempt(&plain, &cloud_plan(CloudProvider::Gemini)).is_none());
+
+        let power = llm_gateway::RoutePlan::CloudForPower {
+            cloud: llm_gateway::CloudArm::new(
+                CloudProvider::OpenRouter,
+                crate::secret::Secret::from("k".to_string()),
+                vec!["m".into()],
+            ),
+            displaced_local_model: "llama3".into(),
+        };
+        assert!(failed_attempt(&typed, &power).is_none());
+    }
+
+    /// What a turn tried before the failing attempt: the earlier clicks the page handed back, plus this
+    /// computer when a Local-then-cloud plan tried it first (so the cloud failure's card never offers
+    /// the local model that already failed).
+    #[test]
+    fn a_local_then_cloud_turn_has_already_tried_this_computer() {
+        let handed = vec![crate::offers::EntryRef {
+            provider: "gemini".into(),
+            model: "g".into(),
+        }];
+        let plan = llm_gateway::RoutePlan::LocalThenCloud {
+            local: local_arm(),
+            cloud: llm_gateway::CloudArm::new(
+                llm_gateway::CloudProvider::Anthropic,
+                crate::secret::Secret::from("k".to_string()),
+                vec!["m".into()],
+            ),
+        };
+        let got = earlier_entries(Some(handed.clone()), &plan);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[1].provider.as_str(), got[1].model.as_str()),
+            ("local", "llama3")
+        );
+        // A plain cloud turn adds nothing; nothing handed back is an empty list.
+        assert!(earlier_entries(None, &cloud_plan(llm_gateway::CloudProvider::Gemini)).is_empty());
+        assert_eq!(
+            earlier_entries(
+                Some(handed.clone()),
+                &cloud_plan(llm_gateway::CloudProvider::Gemini)
+            ),
+            handed
+        );
+    }
+
+    /// The event's shape the webview reads: flat, tagged `not_working`.
+    #[test]
+    fn the_not_working_event_is_flat_and_tagged() {
+        let card = crate::offers::NotWorking {
+            turn_id: 12,
+            class: "busy",
+            headline: "Claude isn't working right now".into(),
+            reason: "Anthropic is busy.".into(),
+            detail: Some("Try again in a minute.".into()),
+            reassurance: Some("Nothing was sent anywhere else.".into()),
+            offers: vec![],
+            can_edit_list: true,
+            limit: None,
+            tried: vec![crate::offers::EntryRef {
+                provider: "anthropic".into(),
+                model: "anthropic/claude-sonnet-5-5".into(),
+            }],
+        };
+        let v = serde_json::to_value(ChatEvent::NotWorking(card)).unwrap();
+        assert_eq!(v["tried"][0]["provider"], "anthropic");
+        assert_eq!(v["type"], "not_working");
+        assert_eq!(v["turn_id"], 12);
+        assert_eq!(v["class"], "busy");
+        assert_eq!(v["reassurance"], "Nothing was sent anywhere else.");
+        assert_eq!(v["detail"], "Try again in a minute.");
+        assert_eq!(v["offers"], serde_json::json!([]));
+        assert_eq!(v["can_edit_list"], true);
+        assert!(v["limit"].is_null());
+    }
+
+    /// PM never moves a failed reply to another company by itself. A send reaches the gateway ONCE;
+    /// the only plan other than `resolve`'s is the one a click names (`route_override`), and that
+    /// plan is built in exactly one place, in the arm that has an override. The failure path builds a
+    /// card and returns: it asks the gateway for nothing.
+    #[test]
+    fn a_failed_reply_is_never_re_sent_by_pm() {
+        let live = include_str!("conversations.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        let send = live
+            .split("pub async fn send_message(")
+            .nth(1)
+            .and_then(|r| r.split("\n/// The chat context-usage meter").next())
+            .expect("send_message");
+        assert_eq!(send.matches("llm_gateway::stream_chat(").count(), 1);
+        assert_eq!(send.matches("plan_for_entry(").count(), 1);
+        assert_eq!(send.matches("llm_gateway::resolve(").count(), 1);
+        let (before, _) = send.split_once("plan_for_entry(").unwrap();
+        assert!(
+            before.trim_end().ends_with("Some(entry) =>")
+                || before
+                    .rsplit('\n')
+                    .next()
+                    .unwrap()
+                    .contains("Some(entry) =>"),
+            "the override plan is built only for an override"
+        );
+        // The failure handlers: from the line that unpacks the one stream's result (its Err arm builds
+        // the card) to the fallback strip that follows the empty-reply card. They send no second
+        // request: the only gateway call is the wording helper for a power-routed turn.
+        let handler = send
+            .split("let llm_gateway::LlmOutcome")
+            .nth(1)
+            .and_then(|r| {
+                r.split("// If the local endpoint the user preferred")
+                    .next()
+            })
+            .expect("the failure handlers");
+        assert!(
+            handler.contains("ChatEvent::NotWorking(") && handler.contains("return Err(e)"),
+            "the slice must really be the failure handlers: {handler}"
+        );
+        for call in handler.split("llm_gateway::").skip(1) {
+            assert!(
+                call.starts_with("power_route_error("),
+                "a failure handler may call only llm_gateway::power_route_error, not: {}",
+                call.lines().next().unwrap_or("")
+            );
+        }
+        for banned in [
+            "stream_chat(",
+            ".complete(",
+            "::complete(",
+            "resolve(",
+            "plan_for_entry(",
+            "cloud_complete",
+            "cloud_stream",
+        ] {
+            assert!(!handler.contains(banned), "{banned} in a failure handler");
+        }
+    }
 
     /// After a switch from OpenRouter to your own key, the last reply's `model` can be an
     /// OpenRouter-only id whose `last_prompt_tokens` was measured on the OLD model. With chat on a
