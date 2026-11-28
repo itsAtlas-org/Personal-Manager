@@ -250,9 +250,12 @@ export function useChatStream(currentConvId: () => number | null) {
             } else if (event.type === "fallback") {
               if (isCurrent())
                 setFallback({
+                  kind: event.kind,
                   from_model: event.from_model,
                   to_model: event.to_model,
                   reason: event.reason,
+                  steps: event.steps,
+                  answered: event.answered,
                 });
             } else if (event.type === "not_working") {
               ok = false;

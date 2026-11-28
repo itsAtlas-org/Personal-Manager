@@ -172,7 +172,7 @@ pub(crate) async fn generate_title(app: &AppHandle, conversation_id: i64) -> Res
 
     // 2. Resolve the background model + key off the lock; no key ⇒ we cannot title (a later launch retries
     //    once a key exists, since the state is still `pending`).
-    let Some(route) = crate::llm_gateway::resolve(app, crate::llm_gateway::Role::Background)?
+    let Some(route) = crate::llm_gateway::resolve_plan(app, crate::llm_gateway::Role::Background)?
     else {
         return Ok(false);
     };

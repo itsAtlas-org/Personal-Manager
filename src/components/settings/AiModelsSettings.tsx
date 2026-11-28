@@ -4,39 +4,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { msUntilResume, todayLine } from "../../lib/dailyLimit";
-import {
-  dayMonthYear,
-  directInfo,
-  isDirect,
-  roleDefaultEffort,
-  roleModel,
-} from "../../lib/directProviders";
+import { dayMonthYear, directInfo, isDirect } from "../../lib/directProviders";
 import { formatWhen } from "../../lib/format";
 import {
   costSummary,
   getLocalLlmConfig,
-  getSettings,
   hasOpenRouterBackgroundKey,
   hasOpenRouterKey,
   importAiMemory,
   openrouterLimitState,
   refreshPricing,
-  setBackgroundAutoSwitch,
-  setBackgroundModels,
-  setChatAutoSwitch,
-  setChatModels,
-  setDirectRole,
+  routeReset,
   setOpenRouterBackgroundKey,
   setOpenRouterKey,
-  setRoleCloudProvider,
   settingsDefaults,
 } from "../../lib/ipc";
 import { useDirectProviders } from "../../lib/useDirectProviders";
-import type { CostSummary, LimitView, RoleName, Settings } from "../../lib/types";
+import { atDefaultCloudRows } from "../../lib/roleRoute";
+import { useRoutes } from "../../lib/useRoutes";
+import type { CostSummary, LimitView, RoleName, RouteView, Settings } from "../../lib/types";
 import {
   atLeast,
   detailLine,
   fmtUsd,
+  listWalksLine,
   partialTitle,
   unpricedWarning,
   viaLabel,
@@ -56,16 +47,19 @@ import {
 } from "../ui";
 import { DailyLimitControl } from "./DailyLimitControl";
 import { DirectProviders } from "./DirectProviders";
-import { RoleBlock } from "./RoleBlock";
+import { RoleRoute } from "./RoleRoute";
 import { TabResetSection } from "./ResetControls";
 import { LocalAiOffRow, LocalAiPickPrompt } from "./LocalAiOffControls";
 import { readReviewAiEnabled, writeReviewAiEnabled } from "../../lib/reviewPrefs";
 import { useLocalAiSwitch } from "../../lib/localAiSwitch";
+import { isLoopback } from "../localai/readiness";
 
-/** Order-sensitive equality for the two model-role lists — a reset is offered only when a role's
- *  ordered list (or its auto-switch) differs from the default. */
-function sameList(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((m, i) => m === b[i]);
+/** Whether a role's ordered list is the one a fresh install has (the same cloud rows in the same
+ *  order; this computer is the person's own choice and never what a reset is about): a reset is
+ *  offered only when it isn't. Until both are read there is nothing to reset. */
+function isDefaultRoute(route: RouteView | null, defaults: RouteView | undefined): boolean {
+  if (!route || !defaults) return true;
+  return atDefaultCloudRows(route, defaults);
 }
 
 /** What mods spent, all time, from the by-mod rows: the sum of what could be priced, and whether
@@ -113,14 +107,6 @@ export function AiModelsSettings({
   const [bgKeyAlreadySet, setBgKeyAlreadySet] = useState(false);
   const [keySaved, setKeySaved] = useState(false);
   const [bgKeySaved, setBgKeySaved] = useState(false);
-  const [chatModels, setChatModelsState] = useState<string[]>([]);
-  const [backgroundModels, setBackgroundModelsState] = useState<string[]>([]);
-  const [chatAuto, setChatAuto] = useState(false);
-  const [backgroundAuto, setBackgroundAuto] = useState(false);
-  // True once getSettings() has populated the model lists. Model writes gate on this (not a non-empty
-  // list) so clearing a role back to "use the default" persists, while a write can never fire against
-  // the empty pre-load state.
-  const [settingsLoaded, setSettingsLoaded] = useState(false);
   // The out-of-the-box defaults (one backend source), for the per-role + per-tab reset affordances.
   const [defaults, setDefaults] = useState<Settings | null>(null);
   const [cost, setCost] = useState<CostSummary | null>(null);
@@ -138,19 +124,40 @@ export function AiModelsSettings({
   // The providers a person reaches with their own key, shared by the "Your own keys" card and both
   // role blocks so they never disagree about what is on, keyed, or moved.
   const dp = useDirectProviders();
-  // Each role's routing, which decides what the note under a direct provider says. "cloud" while
-  // Local AI is off (nothing local can answer then) and until the read lands.
-  const [routing, setRouting] = useState({ chat: "cloud", background: "cloud" });
+  // Each role's ordered list and every row's status (the lists are Rust's; this only draws them).
+  const routes = useRoutes();
+  // The model chosen on this computer for each role, which is what "This computer" in a list means.
+  // None while Local AI is off (nothing local can answer then) and until the read lands.
+  const [localModels, setLocalModels] = useState<{
+    chat: string | null;
+    background: string | null;
+  }>({ chat: null, background: null });
   const localOn = localAi?.on === true;
+  // Local AI points at a server on another machine: the picker then says "Your Local AI server",
+  // never "This computer" (the rows, the card and the strip say the same, by the same loopback rule).
+  const [localElsewhere, setLocalElsewhere] = useState(false);
+  // A provider turned off, a key removed or a key saved changes the lists in Rust (its rows leave, or
+  // a row's status moves): whenever the own-keys card re-reads, so do the lists.
+  const { reload: reloadRoutes } = routes;
+  useEffect(() => {
+    if (dp.state) void reloadRoutes();
+  }, [dp.state, reloadRoutes]);
   useEffect(() => {
     if (!localOn) {
-      setRouting({ chat: "cloud", background: "cloud" });
+      setLocalModels({ chat: null, background: null });
+      setLocalElsewhere(false);
       return;
     }
     let cancelled = false;
     getLocalLlmConfig()
       .then((c) => {
-        if (!cancelled) setRouting({ chat: c.chat_routing, background: c.background_routing });
+        if (!cancelled) {
+          setLocalModels({
+            chat: c.chat_model?.trim() || null,
+            background: c.background_model?.trim() || null,
+          });
+          setLocalElsewhere(!!c.base_url?.trim() && !isLoopback(c.base_url));
+        }
       })
       .catch(() => {});
     return () => {
@@ -167,21 +174,15 @@ export function AiModelsSettings({
     let cancelled = false;
     void (async () => {
       try {
-        const [hasKey, hasBgKey, settings, defs] = await Promise.all([
+        const [hasKey, hasBgKey, defs] = await Promise.all([
           hasOpenRouterKey(),
           hasOpenRouterBackgroundKey(),
-          getSettings(),
           settingsDefaults(),
         ]);
         if (cancelled) return;
         setKeyAlreadySet(hasKey);
         setBgKeyAlreadySet(hasBgKey);
-        setChatModelsState(settings.chat_models);
-        setBackgroundModelsState(settings.background_models);
-        setChatAuto(settings.chat_auto_switch);
-        setBackgroundAuto(settings.background_auto_switch);
         setDefaults(defs);
-        setSettingsLoaded(true);
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -266,22 +267,6 @@ export function AiModelsSettings({
     }
   }
 
-  function changeChatModels(models: string[]) {
-    setChatModelsState(models);
-    if (settingsLoaded) void setChatModels(models).catch((e) => setError(String(e)));
-  }
-  function changeBackgroundModels(models: string[]) {
-    setBackgroundModelsState(models);
-    if (settingsLoaded) void setBackgroundModels(models).catch((e) => setError(String(e)));
-  }
-  function changeChatAuto(on: boolean) {
-    setChatAuto(on);
-    void setChatAutoSwitch(on).catch((e) => setError(String(e)));
-  }
-  function changeBackgroundAuto(on: boolean) {
-    setBackgroundAuto(on);
-    void setBackgroundAutoSwitch(on).catch((e) => setError(String(e)));
-  }
   function changeReviewAi(on: boolean) {
     setReviewAi(on);
     writeReviewAiEnabled(on); // shared with the Review tab's "Turn on AI" banner
@@ -331,63 +316,36 @@ export function AiModelsSettings({
     }
   }
 
-  // A role is at its default when its ordered list AND auto-switch match the backend defaults. Until
-  // the defaults load, nothing is offered a reset. Reset restores both the list and the auto toggle
-  // (reusing the same change* handlers, so it persists exactly like a manual edit).
-  const chatRoleIsDefault = !defaults || (sameList(chatModels, defaults.chat_models) && !chatAuto);
-  const backgroundRoleIsDefault =
-    !defaults || (sameList(backgroundModels, defaults.background_models) && !backgroundAuto);
-  function resetChatRole() {
-    if (!defaults) return;
-    changeChatModels(defaults.chat_models);
-    changeChatAuto(false);
-  }
-  function resetBackgroundRole() {
-    if (!defaults) return;
-    changeBackgroundModels(defaults.background_models);
-    changeBackgroundAuto(false);
-  }
-
-  // The provider half of a reset: a role on a provider of its own goes back to OpenRouter, and an
-  // effort someone chose goes back to the role's default. It narrows toward zero data retention, so
-  // it can only ever lose a choice, never widen where data goes. It turns no provider off and
-  // deletes no key. The model chosen on a direct provider is left: the wire has no "default model".
+  // A role is at its default when its ordered list is the one a fresh install has. Until the
+  // defaults load, nothing is offered a reset. Reset writes that list as the role's own, through the
+  // same one list writer as every other edit: it narrows toward zero data retention (OpenRouter's
+  // default row), so it can only ever lose a choice, never widen where data goes. It turns no
+  // provider off and deletes no key.
   const roles: RoleName[] = ["chat", "background"];
-  function roleOnOwnProvider(role: RoleName): boolean {
-    return dp.state !== null && isDirect(dp.state.roles[role].stored);
-  }
-  function roleEffortChosen(role: RoleName): boolean {
-    return (dp.state?.providers ?? []).some((p) => {
-      const eff = p.roles[role].effort;
-      return eff !== roleDefaultEffort(role, roleModel(p, role));
-    });
-  }
-  const directDefault = roles.every((r) => !roleOnOwnProvider(r) && !roleEffortChosen(r));
-  async function resetDirect() {
-    if (!dp.state) return;
+  const chatRoleIsDefault = isDefaultRoute(routes.chat, defaults?.chat_route);
+  const backgroundRoleIsDefault = isDefaultRoute(routes.background, defaults?.background_route);
+  async function resetRoles() {
     for (const role of roles) {
-      if (roleOnOwnProvider(role)) await setRoleCloudProvider(role, "openrouter");
-      for (const p of dp.state.providers) {
-        const model = roleModel(p, role);
-        if (model && p.roles[role].effort !== roleDefaultEffort(role, model)) {
-          await setDirectRole(p.provider, role, [model.id], null);
-        }
-      }
+      // A role already on the default list is left alone: nothing is stored for a role nobody edited.
+      if (role === "chat" ? chatRoleIsDefault : backgroundRoleIsDefault) continue;
+      const fresh = await routeReset(role);
+      routes.set(role, fresh.route);
     }
-    await dp.reload();
   }
 
-  // The cloud model each role will really use, for the Local AI prompt: a direct role's one model,
-  // else the first of OpenRouter's list.
+  // The cloud model each role will really use, for the Local AI prompt: the first cloud row of its
+  // list.
   function cloudModelOf(role: RoleName): string | null {
-    const list = role === "chat" ? chatModels : backgroundModels;
-    if (dp.state && isDirect(dp.state.roles[role].effective)) {
-      const view = dp.state.providers.find((p) => p.provider === dp.state?.roles[role].effective);
-      return view ? view.roles[role].model : null;
-    }
-    return list[0] ?? null;
+    const route = role === "chat" ? routes.chat : routes.background;
+    return route?.entries.find((e) => e.kind === "cloud")?.model ?? null;
   }
   const orKey = { chat: keyAlreadySet, background: keyAlreadySet || bgKeyAlreadySet };
+  // An edit answered with the list as it now is. The own-keys card reads which provider each role is
+  // on from the same list, so it is read again too.
+  function onRoute(role: RoleName, route: RouteView) {
+    routes.set(role, route);
+    void dp.reload();
+  }
   // "Refresh prices" asks OpenRouter for its list, which a person using only their own keys has
   // never opted into: hide it for them, and only them.
   const noOpenRouterAtAll =
@@ -513,54 +471,46 @@ export function AiModelsSettings({
         {localAi && (
           <LocalAiPickPrompt
             sw={localAi}
-            chatModel={settingsLoaded ? cloudModelOf("chat") : null}
-            backgroundModel={settingsLoaded ? cloudModelOf("background") : null}
+            chatModel={routes.chat ? cloudModelOf("chat") : null}
+            backgroundModel={routes.background ? cloudModelOf("background") : null}
             onError={setError}
           />
         )}
-        <RoleBlock
+        <RoleRoute
           role="chat"
-          label="Chat model"
-          description="Answers your chats. Add several and turn on auto-switch to fall back when one runs out."
+          route={routes.chat}
+          dp={dp.state}
+          openRouterKey={orKey.chat}
+          local={{ on: localOn, model: localModels.chat, elsewhere: localElsewhere }}
           helpId="settings-chat-models"
-          dp={dp}
-          routing={routing.chat}
-          openRouter={{
-            models: chatModels,
-            onChange: changeChatModels,
-            autoSwitch: chatAuto,
-            onAutoSwitchChange: changeChatAuto,
-            onReset: chatRoleIsDefault ? undefined : resetChatRole,
-          }}
-          openRouterUsable={orKey.chat && !orLimit?.reached}
+          onRoute={onRoute}
+          onChanged={() => void routes.reload()}
           onError={setError}
+          defaultRoute={defaults?.chat_route}
+          failed={routes.failed}
         />
-        <RoleBlock
+        <RoleRoute
           role="background"
-          label="Background model"
-          description="Runs sorting proposals and Learning You. Free models work well here; chain a few for daily limits."
+          route={routes.background}
+          dp={dp.state}
+          openRouterKey={orKey.background}
+          local={{ on: localOn, model: localModels.background, elsewhere: localElsewhere }}
           helpId="settings-background-models"
-          dp={dp}
-          routing={routing.background}
-          openRouter={{
-            models: backgroundModels,
-            onChange: changeBackgroundModels,
-            autoSwitch: backgroundAuto,
-            onAutoSwitchChange: changeBackgroundAuto,
-            onReset: backgroundRoleIsDefault ? undefined : resetBackgroundRole,
-          }}
-          openRouterUsable={orKey.background && !orLimit?.reached}
+          onRoute={onRoute}
+          onChanged={() => void routes.reload()}
           onError={setError}
+          defaultRoute={defaults?.background_route}
+          failed={routes.failed}
         />
-        {/* A pointer, deliberately not a mirror: the local controls keep one home, in the Local AI
-         *  tab. Without this, the two roles above read as the whole of model choice. While Local AI
-         *  is off that tab is gone, and the pointer becomes the switch's one way back on (its home
-         *  while on is the top of the tab, so it is never in two places at once). */}
+        {/* A pointer, deliberately not a mirror: this computer's model, server and battery rules keep
+         *  one home, in the Local AI tab. Where this computer SITS in each list is set here, in the
+         *  lists above, and the Local AI tab says so the other way round. While Local AI is off that
+         *  tab is gone, and the pointer becomes the switch's one way back on (its home while on is
+         *  the top of the tab, so it is never in two places at once). */}
         {localAi?.on && (
           <p className="text-xs text-ink4">
-            These are cloud models. Which cloud provider answers each role is set above. A model on
-            your own machine is chosen separately: same two roles, plus whether each one uses local,
-            cloud, or local with a cloud fallback.{" "}
+            To use a model on your own computer, add This computer to a list above. Which model it
+            is, your server and the On battery rules are set separately.{" "}
             {onOpenLocalAi && (
               <button
                 type="button"
@@ -736,6 +686,13 @@ export function AiModelsSettings({
               {cost.unpriced_30d === 1
                 ? "1 call in the last 30 days couldn't be priced in full"
                 : `${cost.unpriced_30d} calls in the last 30 days couldn't be priced in full`}
+            </p>
+          )}
+          {/* Status, never folded: the record of replies a later row of the list answered. Background
+              and Review have no strip, so this is where a bad first row would otherwise hide. */}
+          {cost.list_walks && (
+            <p className="mt-1 text-xs text-ink3" data-testid="list-walks">
+              {listWalksLine(cost.list_walks)}
             </p>
           )}
           {(cost.unpriced_30d > 0 || cost.total_30d_partial || cost.total_all_time_partial) && (
@@ -924,25 +881,24 @@ export function AiModelsSettings({
 
       <TabResetSection
         tabName="AI & Models"
-        isDefault={chatRoleIsDefault && backgroundRoleIsDefault && directDefault && !reviewAi}
+        isDefault={chatRoleIsDefault && backgroundRoleIsDefault && !reviewAi}
         onReset={async () => {
-          resetChatRole();
-          resetBackgroundRole();
           changeReviewAi(false);
           try {
-            await resetDirect();
+            await resetRoles();
           } catch (e) {
             // Like the tab's other writes: say so instead of an unhandled rejection.
             setError(String(e));
-            await dp.reload();
           }
+          await dp.reload();
+          await routes.reload();
         }}
         confirmBody={
           <>
-            Restores the chat and background models and their auto-switch, sends both roles back to
-            OpenRouter, and turns Review filing suggestions back off. Your saved API keys, and which
-            providers you&apos;ve turned on, aren&apos;t affected. Nor are your daily limits: they
-            only ever hold spending back, so a reset leaves them as they are.
+            Puts the chat and background lists back to PM&apos;s default model on OpenRouter, and
+            turns Review filing suggestions back off. Your saved API keys, and which providers
+            you&apos;ve turned on, aren&apos;t affected. Nor are your daily limits: they only ever
+            hold spending back, so a reset leaves them as they are.
           </>
         }
       />

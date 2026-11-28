@@ -62,7 +62,7 @@ pub(crate) const PICK_A_MODEL_MESSAGE: &str =
 
 /// The refusal a command that does local work gives while the switch is off. Reached only by a
 /// stale view or a script: the controls that call these are gone with the tab.
-const OFF_REFUSAL: &str = "Local AI is off. Turn it on in Settings → AI & Models first.";
+pub(crate) const OFF_REFUSAL: &str = "Local AI is off. Turn it on in Settings → AI & Models first.";
 
 /// A stored row's meaning: `None` for an absent row or one PM never writes.
 fn parse(raw: Option<&str>) -> Option<bool> {
@@ -118,6 +118,12 @@ pub(crate) fn write_off(conn: &Connection) -> Result<()> {
         }
         db::delete_setting(&tx, model_key)?;
     }
+    // A role with a list of its own keeps its "This computer" row where the person put it: the
+    // planner stops the role while Local AI is off (list_plan, Q4) and the editor's row reads
+    // "Local AI is off". Taking the row out would have made [This computer, Claude] answer from
+    // Claude, a cloud bill nobody chose (D7), while a never-edited local-then-cloud role in the same
+    // state stops. The emptied record above reads the routing from the stored list too, so "pick a
+    // model" works the same for a list.
     db::set_bool(&tx, LOCAL_AI_ENABLED_KEY, false)?;
     db::set_bool(&tx, crate::settings::ONBOARDING_DONE_KEY, true)?;
     tx.commit()?;
@@ -385,6 +391,78 @@ mod tests {
         );
     }
 
+    /// A stored list keeps its "This computer" row when Local AI goes off (R11: this replaces the
+    /// old `local_off` test, which pinned the row being deleted). Taking it out would have turned
+    /// [This computer, X] into a cloud bill; kept, the role reads like a never-edited
+    /// local-then-cloud one: the pick prompt shows, and the planner stops it.
+    #[test]
+    fn turning_local_ai_off_leaves_a_stored_list_alone_and_the_role_stops() {
+        use crate::route::{edit, stored_entries, Entry};
+        let conn = mem_conn();
+        db::set_setting(&conn, LOCAL_BASE_URL_KEY, "http://127.0.0.1:11434").unwrap();
+        db::set_setting(&conn, LOCAL_CHAT_MODEL_KEY, "gemma3:4b").unwrap();
+        assert!(stamp_default(&conn).unwrap());
+        // Chat: [this computer, OpenRouter default]. Background: this computer alone.
+        edit::add(&conn, Role::Chat, Entry::Local, Some(0)).unwrap();
+        edit::add(&conn, Role::Background, Entry::Local, Some(0)).unwrap();
+        edit::remove(&conn, Role::Background, 1).unwrap();
+        let before_chat = stored_entries(&conn, Role::Chat).unwrap();
+        let before_background = stored_entries(&conn, Role::Background).unwrap();
+        assert_eq!(before_chat.as_ref().map(Vec::len), Some(2));
+
+        write_off(&conn).unwrap();
+
+        assert_eq!(stored_entries(&conn, Role::Chat).unwrap(), before_chat);
+        assert_eq!(
+            stored_entries(&conn, Role::Background).unwrap(),
+            before_background
+        );
+        let prefs = llm_gateway::routing_prefs(&conn).unwrap();
+        let view = switch_view(&prefs, true);
+        assert!(
+            view.chat_needs_model && view.background_needs_model,
+            "both stop and ask for a pick, never the cloud: {view:?}"
+        );
+        assert!(
+            prefs.emptied.chat,
+            "the model this role had is recorded as emptied"
+        );
+    }
+
+    /// A this-computer row BELOW a cloud row is not a role that needs a model while Local AI is off:
+    /// the rows above it answer, and the walk stops at the Local row. A Local HEAD still asks for the
+    /// pick. Nothing in either list is touched by the switch.
+    #[test]
+    fn a_local_row_below_a_cloud_row_does_not_ask_for_a_pick_while_off() {
+        use crate::route::{edit, stored_entries, Entry};
+        let conn = mem_conn();
+        db::set_setting(&conn, LOCAL_BASE_URL_KEY, "http://127.0.0.1:11434").unwrap();
+        db::set_setting(&conn, LOCAL_CHAT_MODEL_KEY, "gemma3:4b").unwrap();
+        db::set_setting(&conn, LOCAL_BACKGROUND_MODEL_KEY, "qwen3:8b").unwrap();
+        assert!(stamp_default(&conn).unwrap());
+        // Chat: [OpenRouter default, this computer]. Background: [this computer, OpenRouter default].
+        edit::add(&conn, Role::Chat, Entry::Local, None).unwrap();
+        edit::add(&conn, Role::Background, Entry::Local, Some(0)).unwrap();
+        let before = stored_entries(&conn, Role::Chat).unwrap();
+        write_off(&conn).unwrap();
+        assert_eq!(stored_entries(&conn, Role::Chat).unwrap(), before);
+        let prefs = llm_gateway::routing_prefs(&conn).unwrap();
+        let view = switch_view(&prefs, true);
+        assert!(
+            !view.chat_needs_model,
+            "the cloud row above the Local row answers: {view:?}"
+        );
+        assert!(
+            view.background_needs_model,
+            "a Local head still stops the role and asks for a pick: {view:?}"
+        );
+        // Back on with the model gone (the role waits for a pick): still answered by the row above.
+        db::set_bool(&conn, LOCAL_AI_ENABLED_KEY, true).unwrap();
+        let prefs = llm_gateway::routing_prefs(&conn).unwrap();
+        assert!(prefs.emptied.chat);
+        assert!(!switch_view(&prefs, true).chat_needs_model);
+    }
+
     /// Back on, "turning it back on is one click" reconnects the server and no more: a role it
     /// emptied waits for a model and never falls through to the cloud. A role that had no model to
     /// empty (local-then-cloud before one was picked, as on main) keeps going to the cloud, and a
@@ -448,6 +526,7 @@ mod tests {
             background,
             local_ai_on: on,
             emptied: llm_gateway::Emptied::default(),
+            local_behind: llm_gateway::Emptied::default(),
         };
         use ProviderPref::*;
         assert_eq!(

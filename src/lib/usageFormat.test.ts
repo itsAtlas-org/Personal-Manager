@@ -8,6 +8,7 @@ import {
   detailLine,
   fmtCount,
   fmtUsd,
+  listWalksLine,
   partialTitle,
   unpricedWarning,
   viaLabel,
@@ -73,6 +74,28 @@ describe("detailLine", () => {
     expect(fmtCount(999_499)).toBe("999k");
     expect(fmtCount(999_500)).toBe("1m");
     expect(fmtCount(2_340_000)).toBe("2.3m");
+  });
+});
+
+describe("listWalksLine", () => {
+  it("counts the replies, names the first one's reason and its day as DD-MM-YYYY", () => {
+    // Noon on the person's OWN clock (not noon UTC, which is the next day at UTC+13 and +14), so the
+    // date is the same in every zone the tests run in.
+    expect(
+      listWalksLine({
+        replies: 3,
+        first_reason: "busy",
+        first_at: new Date(2026, 10, 3, 12).toISOString(),
+      }),
+    ).toBe(
+      "3 replies in the last 30 days went to a later model in your list because an earlier one couldn't answer. The first was on 03-11-2026 (busy).",
+    );
+  });
+
+  it("says 'reply' for one, and leaves an unreadable stamp as it came", () => {
+    const line = listWalksLine({ replies: 1, first_reason: "paused where you are", first_at: "?" });
+    expect(line.startsWith("1 reply in the last 30 days")).toBe(true);
+    expect(line).toContain("The first was on ? (paused where you are).");
   });
 });
 

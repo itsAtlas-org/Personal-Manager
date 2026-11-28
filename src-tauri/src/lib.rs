@@ -75,6 +75,13 @@ mod hardware;
 mod ics;
 mod index_only;
 mod ingest;
+// The walk down a person's list as pure policy (when another row may be tried, I-41), and the
+// in-memory memory of rows that failed. The gateway's executors drive both.
+mod entry_health;
+mod ladder;
+// A role's list as a plan to run: the planner, the plan type the person's own paths use and the
+// line that says why nothing can answer.
+mod list_plan;
 mod llm_gateway;
 mod local_ai;
 // The Local AI switch (D7): one stored setting that turns the whole Workbench on or off, enforced
@@ -142,6 +149,9 @@ mod retrieval_config;
 mod retrieval_diag;
 mod retrieval_feedback;
 mod review;
+// The ordered list of models a role tries: the type, the strict stored shape and the read, and (in
+// `route/edit.rs`) every way a list is written.
+mod route;
 mod secret;
 mod secrets;
 mod settings;
@@ -923,6 +933,9 @@ impl AppState {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // The same rule as `take_conn`: a new store never inherits another's notes.
             direct_providers::forget_all_seen();
+            // ...nor another vault's "not working" memory of its models and keys (a restore, an
+            // unlock of a different vault, a shared-vault switch all land here).
+            entry_health::global().clear_all();
             self.clear_people_undo();
         }
         // The one choke point that heals fault state: every successful open path (retry,
@@ -1027,6 +1040,8 @@ impl AppState {
         // What failed calls learned about a direct provider's key (free, paid, a spent allowance)
         // belongs to the store it was learned in: a locked or replaced vault starts clean.
         direct_providers::forget_all_seen();
+        // And what PM remembered about a model or a key failing: it was learned on that vault's keys.
+        entry_health::global().clear_all();
         self.clear_people_undo();
         Ok(guard.take())
     }
@@ -1894,8 +1909,17 @@ pub fn run() {
             commands::recheck_direct_key,
             commands::clear_direct_key,
             commands::set_role_cloud_provider,
-            commands::set_direct_role,
             commands::set_direct_data_sharing,
+            // A role's ordered list of models: read it, edit it, put a row first. Not `set_*`: a
+            // refused edit must never show the Settings "Saved" tick.
+            commands::route_status,
+            commands::route_add,
+            commands::route_move,
+            commands::route_remove,
+            commands::route_set_effort,
+            commands::route_reset,
+            commands::route_try_again,
+            commands::promote_entry,
             // Local AI endpoint (#297): detection, the posture-checked endpoint check, config
             // get/set, model listing, and the live status snapshot.
             local_ai::probe_local_llm_ports,
@@ -1938,6 +1962,7 @@ pub fn run() {
             settings::settings_defaults,
             settings::set_indexing_speed,
             settings::set_chat_models,
+            settings::use_larger_chat_model,
             settings::set_background_models,
             settings::set_chat_auto_switch,
             settings::set_background_auto_switch,
@@ -2403,6 +2428,30 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What PM remembered about a model or a key not working belongs to the vault whose keys failed:
+    /// opening another store (an unlock, a restore, a shared-vault switch, all through `open_session`)
+    /// and closing one (`take_conn`) both forget it, so one vault's "not working" never carries into
+    /// another. The memory is process-wide, so this is pinned in the source (a behavioural test would
+    /// clear the live memory under every parallel test that reads it).
+    #[test]
+    fn opening_or_closing_a_store_forgets_the_not_working_memory() {
+        let live = include_str!("lib.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        for sig in [
+            "pub fn open_session(",
+            "pub fn take_conn(&self) -> error::Result<Option<Connection>> {",
+        ] {
+            let body = live.split(sig).nth(1).expect(sig);
+            let body = body.split("\n    }\n").next().unwrap();
+            assert!(
+                body.contains("entry_health::global().clear_all()"),
+                "{sig} forgets the not-working memory"
+            );
+        }
+    }
 
     /// A store launch opens (a device vault) never passes through `open_session`, and is settled by
     /// `after_store_open` alone. That hook must teach the runtime the Local AI switch and write its

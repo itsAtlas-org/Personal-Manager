@@ -828,7 +828,7 @@ pub async fn propose_project_metadata(
     names: Option<Vec<String>>,
     on_event: Channel<ProjectProposalEvent>,
 ) -> Result<()> {
-    let Some(mut plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(mut plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             &app,
             Role::Background,

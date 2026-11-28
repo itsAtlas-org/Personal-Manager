@@ -275,10 +275,10 @@ export function LocalAiEndpoint({
             onClose={() => setConfirmDisconnect(false)}
           >
             PM forgets this server's address, its saved token, and the models you gave chat and
-            background work. Your server and the models in it aren't touched. Afterwards, a job set
-            to Local only has nothing to answer with until you connect again, and one set to Local,
-            fall back to cloud uses your cloud model if you have one. To change the address or
-            token, disconnect and connect again.
+            background work. Your server and the models in it aren't touched. Afterwards, a list
+            that is only This computer has nothing to answer with until you connect again, and one
+            with a cloud model behind This computer uses that model. To change the address or token,
+            disconnect and connect again.
           </ConfirmDialog>
         </div>
       ) : (

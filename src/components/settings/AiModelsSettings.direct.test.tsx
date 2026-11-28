@@ -4,19 +4,26 @@
 
 // AI & Models with a provider the person reaches with their own key: the "Your own keys" section
 // and the role blocks share ONE read of the state; "Refresh prices" (which asks OpenRouter) goes
-// only for a person using no OpenRouter at all; and Reset sends both roles back to OpenRouter and an
-// effort someone chose back to the role's default, without turning a provider off or deleting a key.
+// only for a person using no OpenRouter at all; and Reset puts both roles' lists back to the default
+// one (and edits only a list that differs), without turning a provider off or deleting a key.
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { anthropicView, directState, openaiView } from "../../lib/directProvidersFixture";
-import type { DirectProvidersState } from "../../lib/types";
+import { claudeRow, orRow, routeView } from "../../lib/routeFixture";
+import type { DirectProvidersState, RouteView } from "../../lib/types";
+
+const DEFAULT_ROUTE = routeView([orRow("anthropic/claude-sonnet-4.6")]);
 
 const m = vi.hoisted(() => ({
-  world: { state: null as unknown, orKey: false },
-  setRoleCloudProvider: vi.fn(),
-  setDirectRole: vi.fn(),
+  world: {
+    state: null as unknown,
+    orKey: false,
+    chat: null as unknown,
+    background: null as unknown,
+  },
+  routeReset: vi.fn(),
   costSummary: vi.fn(),
 }));
 
@@ -31,6 +38,8 @@ const SETTINGS = {
   background_cloud_model: null,
   chat_route_terms: null,
   background_route_terms: null,
+  chat_route: DEFAULT_ROUTE,
+  background_route: DEFAULT_ROUTE,
 };
 
 vi.mock("../../lib/ipc", async (importOriginal) => ({
@@ -42,8 +51,9 @@ vi.mock("../../lib/ipc", async (importOriginal) => ({
   settingsDefaults: () => Promise.resolve(SETTINGS),
   getLocalAiSwitch: () => Promise.reject(new Error("not in this test")),
   directProvidersState: () => Promise.resolve(m.world.state),
-  setRoleCloudProvider: (...a: unknown[]) => m.setRoleCloudProvider(...a),
-  setDirectRole: (...a: unknown[]) => m.setDirectRole(...a),
+  routeStatus: () => Promise.resolve({ chat: m.world.chat, background: m.world.background }),
+  onRouteChanged: () => Promise.resolve(() => {}),
+  routeReset: (...a: unknown[]) => m.routeReset(...a),
   listModels: () => Promise.resolve([]),
 }));
 vi.mock("../../kit/theme", async (importOriginal) => ({
@@ -68,17 +78,27 @@ const SUMMARY = {
 
 beforeEach(() => {
   m.world.orKey = false;
+  m.world.chat = DEFAULT_ROUTE;
+  m.world.background = DEFAULT_ROUTE;
   m.costSummary.mockResolvedValue(SUMMARY);
-  m.setRoleCloudProvider.mockResolvedValue(undefined);
-  m.setDirectRole.mockResolvedValue(undefined);
+  m.routeReset.mockImplementation(async () => ({
+    route: DEFAULT_ROUTE,
+    materialised: true,
+    unused_saved: 0,
+  }));
 });
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
-function mount(state: DirectProvidersState | null) {
+function mount(
+  state: DirectProvidersState | null,
+  routes?: { chat?: RouteView; background?: RouteView },
+) {
   m.world.state = state;
+  if (routes?.chat) m.world.chat = routes.chat;
+  if (routes?.background) m.world.background = routes.background;
   return render(<AiModelsSettings />);
 }
 
@@ -98,14 +118,31 @@ describe("the Your own keys section", () => {
     ).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Use my own OpenAI key" });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
-    // No provider to choose between, so the role blocks are today's editors.
+    // There is no provider Select any more: the list says who answers, row by row.
     expect(screen.queryByLabelText("Chat provider")).toBeNull();
   });
 
-  it("gives each role a provider choice once a provider is on and keyed", async () => {
+  it("draws each role's list and an Add a model beside each, and offers the provider in it", async () => {
     mount(directState());
-    expect(await screen.findByLabelText("Chat provider")).toBeTruthy();
-    expect(screen.getByLabelText("Background provider")).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "Chat model" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Background model" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Add a model to Chat" }));
+    expect(screen.getByRole("dialog", { name: "Add a model to Chat" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "OpenAI" })).toBeTruthy();
+  });
+
+  it("draws the rows of the list the backend sent, in its order", async () => {
+    mount(directState(), { chat: routeView([claudeRow(), orRow("a/one")]) });
+    await screen.findByRole("region", { name: "Chat model" });
+    const chat = await screen.findAllByText("Claude Sonnet 5.5");
+    expect(chat.length).toBeGreaterThan(0);
+    const items = [...document.querySelectorAll("[data-row-key]")].map((li) =>
+      li.getAttribute("data-row-key"),
+    );
+    expect(items.slice(0, 2)).toEqual([
+      "anthropic:anthropic/claude-sonnet-5-5",
+      "openrouter:a/one",
+    ]);
   });
 
   it("says the Background OpenRouter key is only used while Background is on OpenRouter", async () => {
@@ -180,7 +217,10 @@ describe("Reset to defaults", () => {
     const button = await screen.findByRole("button", { name: "Reset to defaults" });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(button);
-    fireEvent.click(await screen.findByRole("button", { name: "Reset" }));
+    // A list that differs also has its own "Reset" link beside it: the confirm is the dialog's.
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", { name: "Reset" }),
+    );
   }
 
   it("is at its default when both roles are on OpenRouter and no effort was chosen", async () => {
@@ -189,31 +229,40 @@ describe("Reset to defaults", () => {
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
   });
 
-  it("sends a role on its own provider back to OpenRouter, turning nothing off", async () => {
-    mount(directState({ chat: "openai", background: "openai" }));
+  it("puts both lists back to the default one, turning nothing off", async () => {
+    mount(directState({ chat: "openai", background: "openai" }), {
+      chat: routeView([claudeRow(), orRow("a/one")]),
+      background: routeView([claudeRow()]),
+    });
     await reset();
-    await waitFor(() => expect(m.setRoleCloudProvider).toHaveBeenCalledTimes(2));
-    expect(m.setRoleCloudProvider).toHaveBeenCalledWith("chat", "openrouter");
-    expect(m.setRoleCloudProvider).toHaveBeenCalledWith("background", "openrouter");
+    await waitFor(() => expect(m.routeReset).toHaveBeenCalledTimes(2));
+    expect(m.routeReset).toHaveBeenCalledWith("chat");
+    expect(m.routeReset).toHaveBeenCalledWith("background");
   });
 
-  it("puts a chosen effort back to the role's default (null), keeping the model", async () => {
-    const view = openaiView();
-    view.roles.chat = { uses_this_provider: false, model: "openai/gpt-6.2-sol", effort: "high" };
-    mount(directState({ view }));
+  it("edits only a list that differs, so a role nobody edited stays unwritten", async () => {
+    mount(directState(), { chat: routeView([claudeRow()]) });
     await reset();
-    await waitFor(() =>
-      expect(m.setDirectRole).toHaveBeenCalledWith("openai", "chat", ["openai/gpt-6.2-sol"], null),
-    );
-    expect(m.setRoleCloudProvider).not.toHaveBeenCalled();
+    await waitFor(() => expect(m.routeReset).toHaveBeenCalledTimes(1));
+    expect(m.routeReset).toHaveBeenCalledWith("chat");
+  });
+
+  it("a chosen effort on a direct row is a list that differs, and reset clears it with the list", async () => {
+    const view = openaiView();
+    mount(directState({ view }), {
+      chat: routeView([claudeRow({ effort: "high" }), orRow("anthropic/claude-sonnet-4.6")]),
+    });
+    await reset();
+    await waitFor(() => expect(m.routeReset).toHaveBeenCalledWith("chat"));
+    expect(m.routeReset).not.toHaveBeenCalledWith("background");
   });
 
   it("states what it leaves alone", async () => {
-    mount(directState({ chat: "openai" }));
+    mount(directState({ chat: "openai" }), { chat: routeView([claudeRow()]) });
     fireEvent.click(await screen.findByRole("button", { name: "Reset to defaults" }));
     expect(
       await screen.findByText(
-        /sends both roles back to OpenRouter.*Your saved API keys, and which providers you've turned on, aren't affected\./s,
+        /back to PM's default model on OpenRouter.*Your saved API keys, and which providers you've turned on, aren't affected\./s,
       ),
     ).toBeTruthy();
   });

@@ -172,7 +172,7 @@ export function blockedReason(role: LocalRole, blocked: PowerBlocked, power: Pow
     case "cloud_routing":
       return `${name} already uses the cloud`;
     case "local_only":
-      return `${name} is set to Local only, which never uses the cloud`;
+      return `${name}'s list is only This computer, which never uses the cloud`;
     case "no_local_model":
       return `${name} has no local model`;
     case "no_key": {
@@ -354,7 +354,7 @@ export function powerSummary(gate: PowerGate, power: PowerView | null): string |
     case "key_unreadable":
       return "On battery, PM stays on your local model while it can't read your saved keys.";
     case "not_with_roles":
-      return "On battery, PM stays on your local model — your roles aren't set to Local, fall back to cloud.";
+      return "On battery, PM stays on your local model — no role's list starts with This computer and has a cloud model after it.";
     case "ready":
       break;
   }

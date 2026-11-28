@@ -177,13 +177,22 @@ export interface Step {
  */
 export const ACTION_MIRRORS: Record<
   StepAction["kind"],
-  { ipc: readonly string[]; control: string | null }
+  {
+    ipc: readonly string[];
+    control: string | null;
+    /** Wrappers in `ipc` whose control is in ANOTHER tab, so this tab's control can't be pressed to
+     *  make them. */
+    elsewhere?: readonly string[];
+  }
 > = {
   connect: { ipc: ["setLocalLlmEndpoint"], control: "Model server › Connect" },
   download: { ipc: ["pullLocalModel"], control: "All models › Download" },
   assign: {
     ipc: ["setLocalLlmRoleModel", "setLocalLlmRouting"],
-    control: "Assign roles › the model and “Where … runs” selects",
+    // Where this computer sits in a role's list is that list's to set (one control, one home): the
+    // card writes it through the same list edit AI & Models › Add a model › This computer makes.
+    control: "Assign roles › the model selects, and AI & Models › Add a model › This computer",
+    elsewhere: ["setLocalLlmRouting"],
   },
   test: { ipc: ["testLocalLlm"], control: "Assign roles › Test it" },
   release: { ipc: ["releaseLocalGpu"], control: "Model memory › Release now" },
@@ -301,7 +310,9 @@ function roleFacts(i: ReadinessInput, role: LocalRole): RoleFacts {
     routing,
     effective,
     local,
-    atWork: local || effective === "cloud_for_power",
+    // A list that asks the cloud first still uses this computer, behind it: not "local" (it is
+    // not what answers first) but at work, so the tab never says PM isn't using it for anything.
+    atWork: local || effective === "cloud_for_power" || effective === "cloud_then_local",
   };
 }
 
@@ -639,6 +650,8 @@ function roleSentence(f: RoleFacts, where: string): string {
     case "local_then_cloud":
     case "cloud_for_power":
       return `${runs} on ${f.name}, ${where}, with your cloud model as a fallback.`;
+    case "cloud_then_local":
+      return `${ROLE_NAME[f.role]} asks your cloud model first, with ${f.name}, ${where}, behind it.`;
     case "cloud":
       return `${ROLE_NAME[f.role]} uses your cloud model.`;
     case "nothing":

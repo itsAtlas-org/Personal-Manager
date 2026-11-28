@@ -38,7 +38,7 @@ async fn migrate_preferences_once(app: AppHandle) -> Result<()> {
     };
 
     // No provider yet → leave the blob untouched and unstamped; a later trigger retries.
-    let Some(plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Ok(());
     };
 
@@ -153,7 +153,7 @@ pub async fn parse_preference_statement(
         let conn = state.conn()?;
         entities::canonical_project_names(&conn)?
     };
-    let Some(plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             &app,
             Role::Background,
@@ -206,7 +206,7 @@ pub async fn import_ai_memory(app: AppHandle, text: String) -> Result<usize> {
     if text.is_empty() {
         return Err(Error::Other("paste your exported memory first".into()));
     }
-    let Some(plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             &app,
             Role::Background,

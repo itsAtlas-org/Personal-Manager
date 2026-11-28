@@ -7,7 +7,7 @@
 // the page it opens on. With none given it opens on General, as it always did; a page that isn't on
 // the rail falls back like any other vanished tab.
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import app from "../App.tsx?raw";
@@ -43,7 +43,17 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
   languageOptions: () => Promise.reject(new Error("not in this test")),
   vaultStatus: () => Promise.resolve({ mode: "device" }),
 }));
-vi.mock("./settings/AiModelsSettings", () => ({ AiModelsSettings: () => <p>AI tab</p> }));
+// A role's list section as RoleRoute draws it: a labelled section whose heading takes focus on a deep link.
+vi.mock("./settings/AiModelsSettings", () => ({
+  AiModelsSettings: () => (
+    <section id="sec-ai-route-chat" aria-labelledby="chat-h">
+      <h2 id="chat-h" tabIndex={-1}>
+        Chat model
+      </h2>
+      <p>AI tab</p>
+    </section>
+  ),
+}));
 vi.mock("./settings/GeneralSettings", () => ({ GeneralSettings: () => <p>General tab</p> }));
 vi.mock("./settings/DeveloperSettings", () => ({
   DeveloperSettings: () => <p>Developer tab</p>,
@@ -68,6 +78,7 @@ beforeEach(() => {
     };
   }
   if (!Element.prototype.scrollTo) Element.prototype.scrollTo = () => {};
+  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
 });
 afterEach(cleanup);
 
@@ -103,15 +114,41 @@ describe("the page Settings opens on", () => {
   });
 });
 
+describe("a deep link to a section", () => {
+  it("moves focus to the section's heading, so a keyboard or screen-reader person lands there", async () => {
+    render(
+      <SettingsView
+        onClose={() => {}}
+        onboarding={false}
+        initialTab="ai"
+        initialSection="sec-ai-route-chat"
+      />,
+    );
+    const heading = await screen.findByRole("heading", { name: "Chat model" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+  });
+
+  it("leaves focus alone when no section is asked for", async () => {
+    render(<SettingsView onClose={() => {}} onboarding={false} initialTab="ai" />);
+    const heading = await screen.findByRole("heading", { name: "Chat model" });
+    expect(document.activeElement).not.toBe(heading);
+  });
+});
+
 describe("App's way in", () => {
   it("opens Settings through one function that names the page, and gives the modal that page", () => {
     // App can't be rendered in a test, so its wiring is read from the source: the one opener sets
     // the page with the open, a mod tab's link passes its page through, and the modal gets it.
+    // The opener also takes an element on the page to scroll to (the not-working card's "Edit my
+    // list" lands on the role's own list), and every plain open clears it, as it clears the tab.
     expect(app).toMatch(
-      /const openSettings = \(tab: SettingsTab = "general"\) => \{\s*setSettingsTab\(tab\);\s*setShowSettings\(true\);\s*\}/,
+      /const openSettings = \(\s*tab: SettingsTab = "general",\s*section: string \| null = null,?\s*\) => \{\s*setSettingsTab\(tab\);\s*setSettingsSection\(section\);\s*setShowSettings\(true\);\s*\}/,
     );
     expect(app).toMatch(/onOpenSettings=\{\(tab\) => openSettings\(tab\)\}/);
-    expect(app).toMatch(/<SettingsView\s+onboarding=\{false\}\s+initialTab=\{settingsTab\}/);
+    expect(app).toMatch(
+      /<SettingsView\s+onboarding=\{false\}\s+initialTab=\{settingsTab\}\s+initialSection=\{settingsSection\}/,
+    );
+    expect(app).toMatch(/onEditList=\{\(\) => openSettings\("ai", "sec-ai-route-chat"\)\}/);
   });
 
   it("never opens Settings any other way, so a deep link can't stick for the next plain open", () => {

@@ -41,6 +41,21 @@ const done = (over: Partial<Extract<ChatEvent, { type: "done" }>> = {}): ChatEve
   ...over,
 });
 
+/** A local-to-cloud `fallback` event, which carries no list steps. */
+const localFallback = (
+  from_model: string,
+  to_model: string,
+  reason: string,
+): Extract<ChatEvent, { type: "fallback" }> => ({
+  type: "fallback",
+  kind: "local",
+  from_model,
+  to_model,
+  reason,
+  steps: [],
+  answered: null,
+});
+
 describe("useChatStream provider honesty", () => {
   beforeEach(() => {
     h.onEvent = null;
@@ -55,13 +70,14 @@ describe("useChatStream provider honesty", () => {
       void result.current.send(1, "hi");
     });
     act(() => h.onEvent!({ type: "token", text: "y" }));
-    act(() =>
-      h.onEvent!({ type: "fallback", from_model: "llama", to_model: "gpt", reason: "cooldown" }),
-    );
+    act(() => h.onEvent!(localFallback("llama", "gpt", "cooldown")));
     expect(result.current.fallback).toEqual({
+      kind: "local",
       from_model: "llama",
       to_model: "gpt",
       reason: "cooldown",
+      steps: [],
+      answered: null,
     });
 
     act(() => h.onEvent!(done({ message_id: 42, served_by: "cloud" })));
@@ -70,20 +86,36 @@ describe("useChatStream provider honesty", () => {
     expect(result.current.fallback).not.toBeNull();
   });
 
+  it("keeps a list's steps and answering row for the strip", () => {
+    const { result } = renderHook(() => useChatStream(() => 1));
+    act(() => {
+      void result.current.send(1, "hi");
+    });
+    const steps = [
+      { label: "Claude Opus 5.5", company: "Anthropic", why: "busy", how: "failed" as const },
+    ];
+    const answered = { label: "Gemini 4 Carbon", via: "Google" };
+    act(() =>
+      h.onEvent!({
+        type: "fallback",
+        kind: "list",
+        from_model: "anthropic/claude-opus-5-5",
+        to_model: "gemini/gemini-4-carbon",
+        reason: "list_busy",
+        steps,
+        answered,
+      }),
+    );
+    expect(result.current.fallback).toMatchObject({ kind: "list", steps, answered });
+  });
+
   it("dismiss clears the strip but keeps the committed providers", () => {
     const current = 1;
     const { result } = renderHook(() => useChatStream(() => current));
     act(() => {
       void result.current.send(1, "hi");
     });
-    act(() =>
-      h.onEvent!({
-        type: "fallback",
-        from_model: "a",
-        to_model: "b",
-        reason: "hard_failure:timeout",
-      }),
-    );
+    act(() => h.onEvent!(localFallback("a", "b", "hard_failure:timeout")));
     act(() => h.onEvent!(done({ message_id: 7, served_by: "cloud" })));
 
     act(() => result.current.dismissFallback());
@@ -97,7 +129,7 @@ describe("useChatStream provider honesty", () => {
     act(() => {
       void result.current.send(2, "hi"); // ...but this reply is for conversation 2
     });
-    act(() => h.onEvent!({ type: "fallback", from_model: "a", to_model: "b", reason: "cooldown" }));
+    act(() => h.onEvent!(localFallback("a", "b", "cooldown")));
     act(() => h.onEvent!(done({ message_id: 9, served_by: "local" })));
 
     expect(result.current.fallback).toBeNull();
@@ -196,14 +228,7 @@ describe("useChatStream thinking", () => {
 
     // The cloud answers; its reply must not sit under the local model's thinking.
     act(() => h.onEvent!({ type: "token", text: "cloud answer" }));
-    act(() =>
-      h.onEvent!({
-        type: "fallback",
-        from_model: "gemma4",
-        to_model: "gpt",
-        reason: "hard_failure:timeout",
-      }),
-    );
+    act(() => h.onEvent!(localFallback("gemma4", "gpt", "hard_failure:timeout")));
     act(() => h.onEvent!(done({ message_id: 42, served_by: "cloud" })));
     expect(result.current.streamingThought).toBeNull();
     expect(result.current.thoughts[42]).toBeUndefined();
@@ -224,14 +249,7 @@ describe("useChatStream thinking", () => {
     const result = sending();
     act(() => h.onEvent!({ type: "thinking_note", note: "no_room" }));
     act(() => h.onEvent!({ type: "token", text: "cloud answer" }));
-    act(() =>
-      h.onEvent!({
-        type: "fallback",
-        from_model: "gemma4",
-        to_model: "gpt",
-        reason: "hard_failure:timeout",
-      }),
-    );
+    act(() => h.onEvent!(localFallback("gemma4", "gpt", "hard_failure:timeout")));
     act(() => h.onEvent!(done({ message_id: 42, served_by: "cloud" })));
     expect(result.current.thoughts[42]).toBeUndefined();
     expect(result.current.providers[42]).toBe("cloud");

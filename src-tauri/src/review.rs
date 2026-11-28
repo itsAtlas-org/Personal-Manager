@@ -349,7 +349,7 @@ pub fn batch_within(
 /// vocabulary the store already has instead of coining a near-duplicate of it.
 pub async fn propose_batch(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     docs: &[DocInput<'_>],
     existing_projects: &[String],
     existing_tags: &[String],

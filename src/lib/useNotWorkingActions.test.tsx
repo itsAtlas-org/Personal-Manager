@@ -3,14 +3,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // What the card's three buttons do, wired as the app wires them: an offer re-sends to exactly that
-// model; "from now on" runs the CHAT setters in order and then re-sends as an ordinary send; one
-// click at a time (a second one while the settings are being written must not send the reply twice);
-// a failed setter shows the error and sends nothing.
+// model; "from now on" puts that row first in Chat's list (one list edit) and then re-sends as an
+// ordinary send; one click at a time (a second one while the list is being written must not send the
+// reply twice); a refused edit shows the error and sends nothing.
 
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { FromNowOnSetters } from "./notWorking";
-import type { NotWorkingInfo, NotWorkingOffer } from "./types";
+import type { EntryRef, NotWorkingInfo, NotWorkingOffer } from "./types";
 import type { NotWorkingState } from "./useChatStream";
 import { useNotWorkingActions } from "./useNotWorkingActions";
 import { useSendQueue } from "./useSendQueue";
@@ -39,24 +38,17 @@ const info: NotWorkingInfo = {
 };
 const card: NotWorkingState = { convId: 3, text: "hello", info };
 
-function setup(over: { setDirectRole?: FromNowOnSetters["setDirectRole"] } = {}) {
+function setup(over: { promote?: (entry: EntryRef) => Promise<unknown> } = {}) {
   const order: string[] = [];
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
-  const setters: FromNowOnSetters = {
-    setDirectRole:
-      over.setDirectRole ??
-      vi.fn(async (p, role) => {
-        order.push(`directRole ${p} ${role}`);
-        await gate;
-      }),
-    setRoleCloudProvider: vi.fn(async (role, p) => {
-      order.push(`roleProvider ${role} ${p}`);
-    }),
-    setChatModels: vi.fn(async () => {}),
-    setLocalLlmRouting: vi.fn(async () => {}),
-    chatEffortFor: vi.fn(async () => null),
-  };
+  // `promoteEntry("chat", provider, model)` in the app: ONE list edit, so one call.
+  const promote =
+    over.promote ??
+    vi.fn(async (entry: EntryRef) => {
+      order.push(`promote ${entry.provider} ${entry.model}`);
+      await gate;
+    });
   const resend = vi.fn(async () => true);
   const setError = vi.fn();
   const settled = vi.fn(async () => {});
@@ -66,8 +58,7 @@ function setup(over: { setDirectRole?: FromNowOnSetters["setDirectRole"] } = {})
   const hook = renderHook(() =>
     useNotWorkingActions({
       card,
-      chatModels: [],
-      setters,
+      promote,
       resend,
       setError,
       settled,
@@ -80,7 +71,7 @@ function setup(over: { setDirectRole?: FromNowOnSetters["setDirectRole"] } = {})
     hook,
     order,
     release,
-    setters,
+    promote,
     resend,
     setError,
     settled,
@@ -98,21 +89,21 @@ describe("useNotWorkingActions", () => {
     });
     expect(t.resend).toHaveBeenCalledTimes(1);
     expect(t.resend).toHaveBeenCalledWith(card, { provider: "gemini", model: gemini.model });
-    expect(t.setters.setDirectRole).not.toHaveBeenCalled();
+    expect(t.promote).not.toHaveBeenCalled();
     expect(t.focusComposer).toHaveBeenCalledTimes(1);
     expect(t.settled).toHaveBeenCalledWith(3);
   });
 
-  it("'from now on' sets the Chat role in order, then re-sends as an ordinary send (no override)", async () => {
+  it("'from now on' puts the row first in Chat's list, then re-sends to that one row (never an ordinary walk that could re-ask the row that just refused)", async () => {
     const t = setup();
     t.release();
     await act(async () => {
       await t.hook.result.current.use(gemini, true);
     });
-    expect(t.order).toEqual(["directRole gemini chat", "roleProvider chat gemini"]);
+    expect(t.order).toEqual(["promote gemini gemini/gemini-3.5-flash"]);
     expect(t.refreshSettings).toHaveBeenCalled();
     expect(t.resend).toHaveBeenCalledTimes(1);
-    expect(t.resend).toHaveBeenCalledWith(card, null);
+    expect(t.resend).toHaveBeenCalledWith(card, { provider: "gemini", model: gemini.model });
   });
 
   it("a second click while the settings are being written sends nothing more", async () => {
@@ -131,7 +122,7 @@ describe("useNotWorkingActions", () => {
       await first;
     });
     expect(t.resend).toHaveBeenCalledTimes(1);
-    expect(t.setters.setDirectRole).toHaveBeenCalledTimes(1);
+    expect(t.promote).toHaveBeenCalledTimes(1);
     expect(t.hook.result.current.busy).toBe(false);
     // Once it has settled, the card (if it is still there) can be clicked again.
     await act(async () => {
@@ -140,9 +131,9 @@ describe("useNotWorkingActions", () => {
     expect(t.resend).toHaveBeenCalledTimes(2);
   });
 
-  it("a setter that fails shows its error, sends nothing, and leaves focus alone", async () => {
+  it("a list edit that is refused shows its error, sends nothing, and leaves focus alone", async () => {
     const t = setup({
-      setDirectRole: vi.fn(async () => {
+      promote: vi.fn(async () => {
         throw new Error("Gemini is paused where you are.");
       }),
     });
@@ -160,8 +151,7 @@ describe("useNotWorkingActions", () => {
     const hook = renderHook(() =>
       useNotWorkingActions({
         card: null,
-        chatModels: [],
-        setters: {} as FromNowOnSetters,
+        promote: vi.fn(async () => {}),
         resend,
         setError: vi.fn(),
         settled: vi.fn(async () => {}),
@@ -178,7 +168,7 @@ describe("useNotWorkingActions", () => {
 
   it("a refused 'from now on' keeps the failed message queued; a click that re-sends takes it off", async () => {
     const refused = setup({
-      setDirectRole: vi.fn(async () => {
+      promote: vi.fn(async () => {
         throw new Error("no");
       }),
     });
@@ -210,14 +200,7 @@ describe("useNotWorkingActions", () => {
         });
         const actions = useNotWorkingActions({
           card,
-          chatModels: [],
-          setters: {
-            setDirectRole: vi.fn(async () => {}),
-            setRoleCloudProvider: vi.fn(async () => {}),
-            setChatModels: vi.fn(async () => {}),
-            setLocalLlmRouting: vi.fn(async () => {}),
-            chatEffortFor: vi.fn(async () => null),
-          },
+          promote: vi.fn(async () => {}),
           resend,
           setError: vi.fn(),
           settled: vi.fn(async () => {}),

@@ -184,7 +184,7 @@ pub(crate) async fn extract_for_session(app: &AppHandle, conversation_id: i64) -
 
     // 2. Resolve the background key + models + known projects off the lock; no key ⇒ we cannot extract
     //    (the cursor stays put, so a later launch retries once a key exists).
-    let Some(route) = crate::llm_gateway::resolve(app, crate::llm_gateway::Role::Background)?
+    let Some(route) = crate::llm_gateway::resolve_plan(app, crate::llm_gateway::Role::Background)?
     else {
         return Ok(0);
     };

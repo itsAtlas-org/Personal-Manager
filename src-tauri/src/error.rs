@@ -136,6 +136,17 @@ pub enum Error {
     #[error("{}", .0.message)]
     Provider(Box<ProviderFailure>),
 
+    /// A list of models that ran out: every row was skipped or failed without billing, so nothing
+    /// is left to try. `attempts` is what happened to each row in order and `last` is the error the
+    /// last row that was tried ended on. It Displays as one plain sentence a background job can log
+    /// and serialises as that sentence, like every other variant but `Vault`, so no webview shape
+    /// changes.
+    #[error("{}", exhausted_sentence(attempts))]
+    Exhausted {
+        attempts: Vec<Attempt>,
+        last: Box<Error>,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -176,6 +187,23 @@ pub enum FailureClass {
 }
 
 impl FailureClass {
+    /// Every class, for the reverse lookup of a logged token ([`list_reason_words`]).
+    pub const ALL: [FailureClass; 13] = [
+        FailureClass::Busy,
+        FailureClass::RateLimited,
+        FailureClass::ModelGone,
+        FailureClass::ContextTooLong,
+        FailureClass::KeyBad,
+        FailureClass::NoCredit,
+        FailureClass::NeedsRetention,
+        FailureClass::SetupStale,
+        FailureClass::LimitReached,
+        FailureClass::Paused,
+        FailureClass::Refused,
+        FailureClass::StoppedPartway,
+        FailureClass::Other,
+    ];
+
     /// The stable token the webview's copy keys on and a log line carries.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -206,6 +234,245 @@ impl FailureClass {
                 | FailureClass::LimitReached
                 | FailureClass::Paused
         )
+    }
+}
+
+impl FailureClass {
+    /// The class as the end of "{Who} didn't answer ({why})": a fragment, not a sentence. The full
+    /// sentences a card shows live in `offers::reason_line`; this is the one short form the list's
+    /// own notices (the walk strip, `Error::Exhausted`, the log) share, so each class is worded once
+    /// for them.
+    pub fn why(self) -> &'static str {
+        match self {
+            FailureClass::Busy => "busy",
+            FailureClass::RateLimited => "rate limiting this key",
+            FailureClass::ModelGone => "no longer offers this model",
+            FailureClass::ContextTooLong => "can't take this much text",
+            FailureClass::KeyBad => "doesn't accept this key",
+            FailureClass::NoCredit => "no credit left or at a spend limit",
+            FailureClass::NeedsRetention => "needs data retention turned on for this model",
+            FailureClass::SetupStale => "PM's settings for it are out of date",
+            FailureClass::LimitReached => "paused by your daily limit",
+            FailureClass::Paused => "paused where you are",
+            FailureClass::Refused => "stopped this reply for safety reasons",
+            FailureClass::StoppedPartway => "stopped partway",
+            FailureClass::Other => "it failed",
+        }
+    }
+}
+
+/// Why a row of a person's list was passed over without a request being sent to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The provider's key is not on this device.
+    NoKey,
+    /// The key could not be read (the keychain is locked or broken).
+    KeyUnreadable,
+    /// The provider is not turned on in Your own keys.
+    NotOnForYou,
+    /// This computer has no model chosen for the role, or no server set.
+    NoLocalModel,
+    /// Paused where the person is (a free Gemini key in the UK, EEA or Switzerland).
+    Paused,
+    /// The person's daily limit has paused the provider.
+    LimitReached,
+    /// An earlier request failed and PM remembers it for a few minutes ([`crate::entry_health`]).
+    Down(FailureClass),
+    /// The conversation is longer than the model's window by more than the margin.
+    TooLong,
+    /// A this-computer row the walk reached while Local AI is off: the list stops here, so nothing
+    /// after it is tried (Local AI off is never a back door to a cloud bill).
+    LocalAiOff,
+    /// A this-computer row the walk reached while the role waits for its model to be picked: the
+    /// list stops here for the same reason.
+    PickAModel,
+}
+
+impl SkipReason {
+    /// A stable token for `usage_log.fallback_reason` (`list_skip_<token>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::NoKey => "no_key",
+            SkipReason::KeyUnreadable => "key_unreadable",
+            SkipReason::NotOnForYou => "not_on",
+            SkipReason::NoLocalModel => "no_local_model",
+            SkipReason::Paused => "paused",
+            SkipReason::LimitReached => "limit_reached",
+            SkipReason::Down(_) => "down",
+            SkipReason::TooLong => "too_long",
+            SkipReason::LocalAiOff => "local_ai_off",
+            SkipReason::PickAModel => "pick_a_model",
+        }
+    }
+
+    /// The reason as the end of "{Who} was skipped ({why})".
+    pub fn why(self) -> &'static str {
+        match self {
+            SkipReason::NoKey => "no key saved",
+            SkipReason::KeyUnreadable => "PM can't read the key",
+            SkipReason::NotOnForYou => "turned off in Your own keys",
+            SkipReason::NoLocalModel => "no model chosen on this computer",
+            SkipReason::Paused => "paused where you are",
+            SkipReason::LimitReached => "paused by your daily limit",
+            SkipReason::Down(c) => c.why(),
+            SkipReason::TooLong => "too long for its window",
+            SkipReason::LocalAiOff => "Local AI is off",
+            SkipReason::PickAModel => "no model is picked for Local AI yet",
+        }
+    }
+
+    /// The sentence that ends a list the walk STOPPED at this row, when this reason stops the list
+    /// (a this-computer row that cannot run for a reason PM will not route round). `None` for every
+    /// reason that only passes a row over.
+    pub fn stop_sentence(self) -> Option<&'static str> {
+        match self {
+            SkipReason::LocalAiOff => Some(
+                "Local AI is off, so PM stopped there and didn't try the rest of your list.",
+            ),
+            SkipReason::PickAModel => Some(
+                "No model is picked for Local AI, so PM stopped there and didn't try the rest of your list.",
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// What happened to one row of a list during one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptOutcome {
+    Skipped(SkipReason),
+    Failed(FailureClass),
+    /// This computer's own model failed (before the walk began, as a list's head), for a reason that
+    /// has its own words ("your local model timed out"): the same words the local strip uses, so a
+    /// Local row's step never reads as a company's class line ("it failed"). Counted as a failure
+    /// everywhere a failed row is.
+    LocalFailed(&'static str),
+    Answered,
+}
+
+/// The row an [`Attempt`] was about: a company's model, or this computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptEntry {
+    /// `None` is this computer's model.
+    pub provider: Option<crate::llm_gateway::CloudProvider>,
+    pub model: Option<String>,
+    /// This computer's row, when Local AI points at a server that is NOT this computer (the same
+    /// loopback test the 4c card makes, `offers::local_company`). Always false for a company's row.
+    /// The strip, the log sentences and the list chip then say "your Local AI server", never "this
+    /// computer", because the text left the machine.
+    pub local_elsewhere: bool,
+}
+
+impl AttemptEntry {
+    /// Who a person calls it: "Anthropic", "Gemini", "this computer" ("your Local AI server" when
+    /// Local AI is on another machine).
+    pub fn who(&self) -> &'static str {
+        match self.provider {
+            Some(p) => crate::offers::short_name(p),
+            None => crate::offers::local_company(!self.local_elsewhere),
+        }
+    }
+
+    /// Who gets the request, as the card's data line says it ("Google", not "Gemini"): the company
+    /// the strip names when a reply went somewhere else.
+    pub fn company(&self) -> &'static str {
+        match self.provider {
+            Some(p) => crate::offers::company(p),
+            None => crate::offers::local_company(!self.local_elsewhere),
+        }
+    }
+
+    /// The model as a person reads it: a catalogue name for a direct model, otherwise the id the
+    /// row holds (OpenRouter's and this computer's own), which the page trims to its last part.
+    pub fn label(&self) -> String {
+        match (&self.model, self.provider) {
+            (Some(m), Some(p)) if p.is_direct() => crate::direct_models::find(m)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| m.clone()),
+            (Some(m), _) => m.clone(),
+            (None, _) => capitalise(self.who()),
+        }
+    }
+}
+
+/// The words for a `usage_log.fallback_reason` that came from a list: `list_<class>` for a row that
+/// failed and `list_skip_<reason>` for one passed over. `None` for any other value (a local
+/// failure, a power-policy route, or nothing), so the Usage tab counts only a list's own walks. The
+/// log keeps no class for a row PM passed over because it remembered it as down, so that one reads
+/// as the remembered failure.
+pub fn list_reason_words(slug: &str) -> Option<&'static str> {
+    if let Some(token) = slug.strip_prefix("list_skip_") {
+        return Some(match token {
+            "no_key" => SkipReason::NoKey.why(),
+            "key_unreadable" => SkipReason::KeyUnreadable.why(),
+            "not_on" => SkipReason::NotOnForYou.why(),
+            "no_local_model" => SkipReason::NoLocalModel.why(),
+            "paused" => SkipReason::Paused.why(),
+            "limit_reached" => SkipReason::LimitReached.why(),
+            "too_long" => SkipReason::TooLong.why(),
+            "local_ai_off" => SkipReason::LocalAiOff.why(),
+            "pick_a_model" => SkipReason::PickAModel.why(),
+            "down" => "an earlier request to it had failed",
+            _ => return None,
+        });
+    }
+    let token = slug.strip_prefix("list_")?;
+    FailureClass::ALL
+        .into_iter()
+        .find(|c| c.as_str() == token)
+        .map(FailureClass::why)
+}
+
+/// One row of the person's list and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    pub entry: AttemptEntry,
+    pub outcome: AttemptOutcome,
+}
+
+impl Attempt {
+    /// "Anthropic didn't answer (no credit left or at a spend limit)." or "Gemini was skipped (paused
+    /// where you are)." An answered row reads "Gemini answered.".
+    pub fn sentence(&self) -> String {
+        let who = capitalise(self.entry.who());
+        match self.outcome {
+            AttemptOutcome::Answered => format!("{who} answered."),
+            AttemptOutcome::Failed(c) => format!("{who} didn't answer ({}).", c.why()),
+            AttemptOutcome::LocalFailed(why) => format!("{who} didn't answer ({why})."),
+            AttemptOutcome::Skipped(r) => format!("{who} was skipped ({}).", r.why()),
+        }
+    }
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The sentence for a list that ran out, from what happened to each row in order. A list the walk
+/// stopped at a this-computer row (Local AI off, or no model picked) ends by saying that, not that
+/// nothing else is in the list: there is more, and PM did not try it.
+pub fn exhausted_sentence(attempts: &[Attempt]) -> String {
+    let mut out = attempts
+        .iter()
+        .map(Attempt::sentence)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(stop_note(attempts).unwrap_or("Nothing else is in your list."));
+    out
+}
+
+/// The sentence for the row a walk stopped at, when its last note is a skip that stops the list.
+pub fn stop_note(attempts: &[Attempt]) -> Option<&'static str> {
+    match attempts.last()?.outcome {
+        AttemptOutcome::Skipped(r) => r.stop_sentence(),
+        _ => None,
     }
 }
 
@@ -388,6 +655,45 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every token a list writes to `usage_log.fallback_reason` reads back as the SAME words the
+    /// strip and `Error::Exhausted` use, and nothing else is taken for one.
+    #[test]
+    fn a_logged_list_reason_reads_back_as_its_class_words() {
+        for c in FailureClass::ALL {
+            assert_eq!(
+                list_reason_words(&format!("list_{}", c.as_str())),
+                Some(c.why())
+            );
+        }
+        for (token, r) in [
+            ("no_key", SkipReason::NoKey),
+            ("key_unreadable", SkipReason::KeyUnreadable),
+            ("not_on", SkipReason::NotOnForYou),
+            ("no_local_model", SkipReason::NoLocalModel),
+            ("paused", SkipReason::Paused),
+            ("limit_reached", SkipReason::LimitReached),
+            ("too_long", SkipReason::TooLong),
+        ] {
+            assert_eq!(r.as_str(), token);
+            assert_eq!(
+                list_reason_words(&format!("list_skip_{token}")),
+                Some(r.why())
+            );
+        }
+        assert!(list_reason_words("list_skip_down").is_some());
+        for other in [
+            "cooldown",
+            "power_policy",
+            "hard_failure:timeout",
+            "list_",
+            "list_nonsense",
+            "list_skip_nonsense",
+            "",
+        ] {
+            assert_eq!(list_reason_words(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn truncate_detail_keeps_short_and_cuts_long() {
@@ -611,5 +917,152 @@ mod tests {
         assert_eq!(folded.code, VaultFaultCode::Other);
         assert_eq!(folded.op, "open the vault");
         assert_eq!(folded.message, "boom");
+    }
+
+    fn attempt(
+        provider: Option<crate::llm_gateway::CloudProvider>,
+        outcome: AttemptOutcome,
+    ) -> Attempt {
+        Attempt {
+            entry: AttemptEntry {
+                provider,
+                model: None,
+                local_elsewhere: false,
+            },
+            outcome,
+        }
+    }
+
+    /// A Local row on another machine is "your Local AI server" in every sentence (the log, the
+    /// strip, the card share `offers::local_company`); a loopback one stays "this computer".
+    #[test]
+    fn a_local_row_on_another_machine_is_named_for_what_it_is() {
+        let here = attempt(None, AttemptOutcome::Failed(FailureClass::Other));
+        assert_eq!(here.entry.who(), "this computer");
+        assert_eq!(here.entry.company(), "this computer");
+        assert_eq!(here.sentence(), "This computer didn't answer (it failed).");
+        let mut away = attempt(None, AttemptOutcome::Failed(FailureClass::Other));
+        away.entry.local_elsewhere = true;
+        assert_eq!(away.entry.who(), "your Local AI server");
+        assert_eq!(away.entry.company(), "your Local AI server");
+        assert_eq!(
+            away.sentence(),
+            "Your Local AI server didn't answer (it failed)."
+        );
+        // The flag means nothing for a company's row.
+        let mut cloud = attempt(
+            Some(crate::llm_gateway::CloudProvider::Gemini),
+            AttemptOutcome::Answered,
+        );
+        cloud.entry.local_elsewhere = true;
+        assert_eq!(cloud.entry.who(), "Gemini");
+    }
+
+    /// A list that ran out reads as one plain sentence a background job can log, row by row, ending
+    /// "Nothing else is in your list.", and serialises as that sentence like every other variant.
+    #[test]
+    fn an_exhausted_list_is_one_plain_sentence_and_serialises_as_it() {
+        use crate::llm_gateway::CloudProvider::{Anthropic, Gemini};
+        let e = Error::Exhausted {
+            attempts: vec![
+                attempt(
+                    Some(Anthropic),
+                    AttemptOutcome::Failed(FailureClass::NoCredit),
+                ),
+                attempt(Some(Gemini), AttemptOutcome::Skipped(SkipReason::Paused)),
+                attempt(None, AttemptOutcome::Failed(FailureClass::Busy)),
+            ],
+            last: Box::new(Error::Other("busy".into())),
+        };
+        let want = "Anthropic didn't answer (no credit left or at a spend limit). \
+                    Gemini was skipped (paused where you are). \
+                    This computer didn't answer (busy). Nothing else is in your list.";
+        assert_eq!(e.to_string(), want);
+        assert_eq!(serde_json::to_value(&e).unwrap(), serde_json::json!(want));
+        // An empty list of attempts still says something true.
+        assert_eq!(exhausted_sentence(&[]), "Nothing else is in your list.");
+        assert_eq!(
+            attempt(Some(Gemini), AttemptOutcome::Answered).sentence(),
+            "Gemini answered."
+        );
+    }
+
+    /// Every class and every skip reason has a fragment, and the tokens the log keeps are the
+    /// stable ones the usage column reads.
+    #[test]
+    fn every_class_and_skip_reason_has_words_and_a_stable_token() {
+        for class in [
+            FailureClass::Busy,
+            FailureClass::RateLimited,
+            FailureClass::ModelGone,
+            FailureClass::ContextTooLong,
+            FailureClass::KeyBad,
+            FailureClass::NoCredit,
+            FailureClass::NeedsRetention,
+            FailureClass::SetupStale,
+            FailureClass::LimitReached,
+            FailureClass::Paused,
+            FailureClass::Refused,
+            FailureClass::StoppedPartway,
+            FailureClass::Other,
+        ] {
+            assert!(!class.why().is_empty(), "{class:?}");
+            assert!(!class.as_str().is_empty());
+        }
+        for (why, token) in [
+            (SkipReason::NoKey, "no_key"),
+            (SkipReason::KeyUnreadable, "key_unreadable"),
+            (SkipReason::NotOnForYou, "not_on"),
+            (SkipReason::NoLocalModel, "no_local_model"),
+            (SkipReason::Paused, "paused"),
+            (SkipReason::LimitReached, "limit_reached"),
+            (SkipReason::Down(FailureClass::Busy), "down"),
+            (SkipReason::TooLong, "too_long"),
+            (SkipReason::LocalAiOff, "local_ai_off"),
+            (SkipReason::PickAModel, "pick_a_model"),
+        ] {
+            assert_eq!(why.as_str(), token);
+            assert!(!why.why().is_empty());
+            // The log's words for a token read back the same, so the Usage tab can say them.
+            let expected = if token == "down" {
+                "an earlier request to it had failed"
+            } else {
+                why.why()
+            };
+            assert_eq!(
+                list_reason_words(&format!("list_skip_{token}")),
+                Some(expected),
+                "{token}"
+            );
+        }
+        // Only a this-computer row that cannot run ends the list, and says so; a row merely passed
+        // over never does.
+        assert!(SkipReason::LocalAiOff
+            .stop_sentence()
+            .unwrap()
+            .starts_with("Local AI is off"));
+        assert!(SkipReason::PickAModel.stop_sentence().is_some());
+        for passed_over in [
+            SkipReason::NoKey,
+            SkipReason::NoLocalModel,
+            SkipReason::Paused,
+        ] {
+            assert_eq!(passed_over.stop_sentence(), None);
+        }
+        let stopped = [Attempt {
+            entry: AttemptEntry {
+                provider: None,
+                model: None,
+                local_elsewhere: false,
+            },
+            outcome: AttemptOutcome::Skipped(SkipReason::LocalAiOff),
+        }];
+        assert!(exhausted_sentence(&stopped).ends_with("didn't try the rest of your list."));
+        assert!(!exhausted_sentence(&stopped).contains("Nothing else is in your list"));
+        // A remembered-down row says why it is down.
+        assert_eq!(
+            SkipReason::Down(FailureClass::NoCredit).why(),
+            FailureClass::NoCredit.why()
+        );
     }
 }

@@ -480,6 +480,23 @@ describe("standing — where the user stands, first match wins", () => {
     );
   });
 
+  it("says a list that asks the cloud first asks the cloud first, with this computer behind it", () => {
+    const i = input({
+      config: cfg({ chat_model: "qwen2.5:7b", chat_routing: "local-then-cloud" }),
+      served: served("qwen2.5:7b"),
+      status: routes(
+        { effective: "cloud_then_local", cloud_key: "present" },
+        { effective: "cloud", cloud_key: "present" },
+      ),
+    });
+    const text = standing(i);
+    expect(text).toContain(
+      "Chat asks your cloud model first, with qwen2.5:7b, on this computer, behind it.",
+    );
+    expect(text).not.toContain("isn't using it for anything");
+    expect(text).not.toMatch(/Chat runs on/);
+  });
+
   it("words each job from its own route, never from its routing alone", () => {
     const i = input({
       config: cfg({

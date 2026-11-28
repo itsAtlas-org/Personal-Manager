@@ -205,10 +205,12 @@ describe("when the section can't act", () => {
     );
     expect(screen.getByText("Switch to cloud on battery — not used with your roles")).toBeTruthy();
     const body = screen.getByText(/To let PM switch while you're on battery/);
-    expect(body.textContent).toContain("Chat is set to Local only, which never uses the cloud.");
+    expect(body.textContent).toContain(
+      "Chat's list is only This computer, which never uses the cloud.",
+    );
     expect(body.textContent).toContain("Background work already uses the cloud.");
     expect(body.textContent).toContain(
-      "set a role to Local, fall back to cloud under Assign roles.",
+      "put This computer above a cloud model in a role's list in AI & Models.",
     );
     expectAllDisabled();
   });
@@ -267,11 +269,11 @@ describe("the controls", () => {
     // All three "Suits you if" details at once, never one revealed by picking.
     expect(screen.getAllByText(/Suits you if/)).toHaveLength(3);
     expect(both.closest("label")?.textContent).toContain(
-      "With your setup only chat would move: Background work is set to Local only, which never uses the cloud.",
+      "With your setup only chat would move: Background work's list is only This computer, which never uses the cloud.",
     );
     expect(chat.closest("label")?.textContent).toContain("With your setup this moves chat.");
     expect(background.closest("label")?.textContent).toContain(
-      "With your setup this moves nothing: Background work is set to Local only, which never uses the cloud.",
+      "With your setup this moves nothing: Background work's list is only This computer, which never uses the cloud.",
     );
     fireEvent.click(chat);
     expect(setLocalPowerPolicy).toHaveBeenCalledWith({ roles: "chat" });

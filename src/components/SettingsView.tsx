@@ -79,6 +79,9 @@ interface Props {
    *  Settings opens: a page that isn't on the rail (Local AI while it is off) falls back like any
    *  other vanished tab. */
   initialTab?: SettingsTab;
+  /** An element on that page to scroll to once it is drawn (the not-working card's "Edit my list"
+   *  lands on the role's own list). Read once, when Settings opens. */
+  initialSection?: string | null;
   /** Jump to the Dev tab (issue #78) — closes Settings and navigates. Non-onboarding only. */
   onOpenDev?: () => void;
   /** Jump to the Teach tab — closes Settings and navigates (after an AI-memory import). */
@@ -96,6 +99,7 @@ export function SettingsView({
   onClose,
   onboarding,
   initialTab,
+  initialSection,
   onOpenDev,
   onOpenTeach,
   betterFit,
@@ -206,7 +210,7 @@ export function SettingsView({
   // way, so the sub-nav always answers "which one is that?" and doubles as a locator rather than
   // being purely a scroll shortcut. Re-triggering on an already-washed section needs the class
   // removed and the layout flushed first, or the browser reuses the running animation.
-  function scrollToSection(id: string) {
+  function scrollToSection(id: string, moveFocus = false) {
     const el = contentRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
     if (!el) {
       // A jump to an id nothing carries does nothing at all, which is invisible — say so while
@@ -219,7 +223,33 @@ export function SettingsView({
     void el.offsetWidth; // force a reflow so the re-added class restarts the animation
     el.classList.add("pm-locate");
     el.addEventListener("animationend", () => el.classList.remove("pm-locate"), { once: true });
+    // A deep link (the not-working card's "Edit my list") lands a keyboard or screen-reader person
+    // on the section's heading, not at the start of Settings. Only a heading that opted in with
+    // tabIndex={-1} takes focus, so no other section changes.
+    if (moveFocus) {
+      const labelled = el.getAttribute("aria-labelledby");
+      const heading = labelled ? document.getElementById(labelled) : null;
+      if (heading?.getAttribute("tabindex") === "-1") heading.focus({ preventScroll: true });
+    }
   }
+
+  // A deep link names an element on the page; the page may still be reading its data, so look for
+  // it for a few seconds, then give up quietly (the tab itself is already open).
+  useEffect(() => {
+    if (!initialSection) return;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const look = () => {
+      if (contentRef.current?.querySelector(`#${CSS.escape(initialSection)}`)) {
+        scrollToSection(initialSection, true);
+      } else if (tries++ < 30) {
+        timer = setTimeout(look, 100);
+      }
+    };
+    look();
+    return () => clearTimeout(timer);
+    // Once, when Settings opens: `scrollToSection` is a fresh function on every render.
+  }, [initialSection]);
 
   useEffect(() => {
     void (async () => {
@@ -340,12 +370,15 @@ export function SettingsView({
       // Persist the model lists only once they've loaded from the backend — gating on the load
       // flag (not a non-empty list) lets the user clear a role back to "use the default" and have
       // it stick, while still refusing to overwrite the defaults with the empty pre-load state.
+      // Auto-switch FIRST: a list nobody has edited reads the switch to decide how many of the saved
+      // models are in use, so saving the models while it still read "off" kept only the first and
+      // the switch turned on after had nothing left to switch between.
+      await setChatAutoSwitch(chatAuto);
+      await setBackgroundAutoSwitch(backgroundAuto);
       if (settingsLoaded) {
         await setChatModels(chatModels);
         await setBackgroundModels(backgroundModels);
       }
-      await setChatAutoSwitch(chatAuto);
-      await setBackgroundAutoSwitch(backgroundAuto);
       await setTimeZone(tzAuto ? deviceTimeZone() : timeZone);
       // Let the shared time/location context re-read the zone at once (it also re-reads on refocus).
       window.dispatchEvent(new Event("pm:settings-changed"));
@@ -478,6 +511,7 @@ export function SettingsView({
               <OnboardingDirectKey
                 dp={dp}
                 hasOpenRouterKey={openRouterKeyHere}
+                openRouterModels={{ chat: chatModels[0], background: backgroundModels[0] }}
                 onError={setError}
               />
             </>
@@ -725,7 +759,11 @@ export function SettingsView({
           )}
 
           {tab === "localai" && features.localAi && (
-            <LocalAiSettings onBetterFitChange={onBetterFitChange} onLocate={scrollToSection} />
+            <LocalAiSettings
+              onBetterFitChange={onBetterFitChange}
+              onLocate={scrollToSection}
+              onOpenAiModels={() => selectTab("ai")}
+            />
           )}
 
           {tab === "search" && <SearchSettings />}

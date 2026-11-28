@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type { ModelSpend, ServedRoad, UnpricedTokenSlug } from "./types";
+import type { ListWalks, ModelSpend, ServedRoad, UnpricedTokenSlug } from "./types";
 
 /** Format a USD cost, or "—" when unknown (the model isn't in the price cache yet). */
 export function fmtUsd(v: number | null): string {
@@ -76,6 +76,24 @@ const UNPRICED_WORDS: Record<UnpricedTokenSlug, string> = {
   server_tool_use: "tool use",
   new_token_type: "a new kind of token the provider started reporting",
 };
+
+/** DD-MM-YYYY in the person's own day. An unreadable stamp is returned as it came. */
+function dayOf(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()}`;
+}
+
+/** The Usage tab's standing line for replies a later row of the person's list answered. Background
+ *  and Review have no strip, and a row PM remembers as down is passed over without a request, so
+ *  this is where a bad first row shows up: how many, the first one's reason (Rust's class words) and
+ *  its date. Says "couldn't answer", not "failed", because a row passed over without a request is
+ *  counted too. */
+export function listWalksLine(w: Pick<ListWalks, "replies" | "first_reason" | "first_at">): string {
+  const n = w.replies;
+  return `${n} ${n === 1 ? "reply" : "replies"} in the last 30 days went to a later model in your list because an earlier one couldn't answer. The first was on ${dayOf(w.first_at)} (${w.first_reason}).`;
+}
 
 /** The Usage tab's warning for a token type PM can't price. Only a slug PM knows is worded; the
  *  words are PM's own, never text from the provider. */

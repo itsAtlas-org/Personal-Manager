@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HELP } from "../../lib/help";
 import { INERT_POWER_VIEW } from "../../lib/powerRoute";
+import { localRow, orRow, routeView } from "../../lib/routeFixture";
 import type {
   EffectiveRoute,
   LocalCoResidency,
@@ -21,11 +22,12 @@ import type {
 } from "../../lib/types";
 
 const setLocalLlmRoleModel = vi.fn();
-const setLocalLlmRouting = vi.fn();
+const routeStatus = vi.fn();
 
 vi.mock("../../lib/ipc", () => ({
   setLocalLlmRoleModel: (...a: unknown[]) => setLocalLlmRoleModel(...a),
-  setLocalLlmRouting: (...a: unknown[]) => setLocalLlmRouting(...a),
+  routeStatus: () => routeStatus(),
+  onRouteChanged: () => Promise.resolve(() => {}),
 }));
 
 vi.mock("../../kit/theme", async (importOriginal) => ({
@@ -86,6 +88,7 @@ function show({
   served = SERVED,
   coResidency = null as LocalCoResidency | null,
   configured = true,
+  onOpenAiModels = undefined as (() => void) | undefined,
 } = {}) {
   return render(
     <LocalAiRoles
@@ -99,6 +102,7 @@ function show({
       roleTests={{ testing: null, tests: {}, runTest: vi.fn(), clearTest: vi.fn() }}
       onConfigPatch={vi.fn()}
       onError={vi.fn()}
+      onOpenAiModels={onOpenAiModels}
     />,
   );
 }
@@ -106,20 +110,20 @@ function show({
 beforeEach(() => {
   vi.clearAllMocks();
   setLocalLlmRoleModel.mockResolvedValue(undefined);
-  setLocalLlmRouting.mockResolvedValue(undefined);
+  // Chat has this computer second of two; Background's list has no row for it.
+  routeStatus.mockResolvedValue({
+    chat: routeView([orRow("a/one"), localRow()]),
+    background: routeView([orRow("a/one")]),
+  });
 });
 afterEach(cleanup);
 
 describe("each role's row", () => {
-  it("asks where the job runs first, then which model, and names both controls", () => {
+  it("asks which model, names both controls, and has no routing control: that is the list's", () => {
     show();
     const names = screen.getAllByRole("combobox").map((el) => el.getAttribute("aria-label") ?? "");
-    expect(names).toEqual([
-      "Where chat runs",
-      "Chat model",
-      "Where background work runs",
-      "Background work model",
-    ]);
+    expect(names).toEqual(["Chat model", "Background work model"]);
+    expect(screen.queryByRole("combobox", { name: /Where .* runs/ })).toBeNull();
     expect(screen.getByText("Background work")).toBeTruthy();
   });
 
@@ -130,21 +134,25 @@ describe("each role's row", () => {
     expect(screen.queryByRole("option", { name: /use cloud/ })).toBeNull();
   });
 
-  it("says who each routing suits, for the one chosen", () => {
+  it("says where this computer sits in each list, with the one link to where that is set", async () => {
+    const open = vi.fn();
+    show({ onOpenAiModels: open });
+    expect(await screen.findByText(/This computer is number 2 of 2 in Chat's list\./)).toBeTruthy();
+    expect(screen.getByText(/This computer is not in Background's list\./)).toBeTruthy();
+    const links = screen.getAllByRole("button", {
+      // The arrow is decoration (aria-hidden), so it is not part of the name a screen reader says.
+      name: "Where this computer sits in each list is set in AI & Models",
+    });
+    expect(links).toHaveLength(2);
+    fireEvent.click(links[0]);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about the place until the list has been read, and draws no link without a way there", () => {
+    routeStatus.mockRejectedValue("no");
     show();
-    expect(
-      screen.getByText(
-        "Good for most setups with a cloud key: your own model when it can, your cloud model when your server can't — it isn't reachable, a reply fails or times out before anything is shown, or a request is too long for the window it gives the model. It's the only setting On battery can move.",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to your cloud provider.",
-      ),
-    ).toBeTruthy();
-    cleanup();
-    show({ config: cfg({ chat_routing: "local" }) });
-    expect(screen.getByText(/^Good if nothing should ever go to the cloud\./)).toBeTruthy();
+    expect(screen.queryByText(/This computer is/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /set in AI & Models/ })).toBeNull();
   });
 });
 
@@ -179,6 +187,14 @@ describe("the line that says where a job really goes", () => {
     );
   });
 
+  it("says a list that asks the cloud first asks the cloud first, never 'local first'", () => {
+    const text = line("cloud_then_local");
+    expect(text).toBe(
+      "Asks your cloud model first; tiny-chat:1b on this computer answers when the model above it can't answer.",
+    );
+    expect(text).not.toMatch(/Runs on|local first/i);
+  });
+
   it("never says a job with nothing to answer with uses the cloud", () => {
     expect(line("nothing", cfg({ chat_routing: "cloud" }))).toBe(
       "There's no cloud key, so this job has nothing to answer with.",
@@ -208,7 +224,7 @@ describe("the line that says where a job really goes", () => {
     const NARROW =
       /only if your server|when your server is down|only on a hard failure|unreachable or broken server/;
     show({ config: cfg({ chat_routing: "local-then-cloud" }) });
-    // The whole section, the folded "How routing & fallback work" included — a fold mounts its body.
+    // The whole section, the folded "How this computer is used" included — a fold mounts its body.
     const text = document.body.textContent ?? "";
     expect(text).not.toMatch(NARROW);
     const fold = screen.getByText(/tries local first/);
@@ -236,7 +252,7 @@ describe("a server serving nothing yet", () => {
     });
     const hint = screen.getByText(/isn't serving any models yet/);
     expect(hint.textContent).not.toMatch(/cloud/);
-    expect(hint.textContent).toMatch(/the line under each job says where it goes meanwhile/);
+    expect(hint.textContent).toMatch(/the lines under each job say where it goes meanwhile/);
     expect(
       screen.getByText("No local model chosen, so this job has nothing to answer with."),
     ).toBeTruthy();

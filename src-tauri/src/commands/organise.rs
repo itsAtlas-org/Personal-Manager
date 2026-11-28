@@ -102,7 +102,7 @@ pub async fn propose_metadata(
     document_ids: Option<Vec<i64>>,
     on_event: Channel<ReviewEvent>,
 ) -> Result<()> {
-    let Some(mut plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(mut plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             &app,
             Role::Background,
@@ -561,7 +561,7 @@ pub async fn propose_retag_vocabulary(app: AppHandle) -> Result<Vec<String>> {
 }
 
 async fn propose_vocabulary_inner(app: &AppHandle, sink: &retag::RetagSink) -> Result<Vec<String>> {
-    let Some(plan) = llm_gateway::resolve(app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             app,
             Role::Background,
@@ -643,7 +643,7 @@ async fn apply_vocabulary_inner(
     sink: &retag::RetagSink,
     vocabulary: Vec<String>,
 ) -> Result<()> {
-    let Some(mut plan) = llm_gateway::resolve(app, Role::Background)? else {
+    let Some(mut plan) = llm_gateway::resolve_plan(app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             app,
             Role::Background,
@@ -702,7 +702,7 @@ async fn apply_vocabulary_inner(
 /// the lock and drops it before the next call goes out.
 async fn retag_assign(
     app: &AppHandle,
-    plan: &mut llm_gateway::RoutePlan,
+    plan: &mut llm_gateway::Plan,
     docs: &[RetagDoc],
     vocabulary: &[String],
     sink: &retag::RetagSink,

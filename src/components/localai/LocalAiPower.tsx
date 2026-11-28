@@ -152,8 +152,8 @@ export function LocalAiPower({
         <p className="text-xs text-ink4">
           Saves: sending requests to your cloud model {REDUCES_POWER}. Costs: what you send leaves
           this computer and {costClause(power)}, and PM asks you before the first time.
-          {retention ? ` ${retention}` : ""} Needs: a cloud key, and a job set to Local, fall back
-          to cloud.
+          {retention ? ` ${retention}` : ""} Needs: a cloud key, and a job whose list starts with
+          This computer and has a cloud model after it.
         </p>
         <SettingRow label="Switch to the cloud at" helpId="settings-localai-power">
           {(a11y) => (
@@ -317,8 +317,8 @@ export function LocalAiPower({
           between batches.
         </p>
         <p>
-          Only roles set to Local, fall back to cloud ever move. Local only means the cloud is never
-          used for that role, on battery or not.
+          Only a role whose list starts with This computer, with a cloud model after it, ever moves.
+          A list that is only This computer never uses the cloud, on battery or not.
         </p>
         <p>
           Requests sent to the cloud are billed to the key of the cloud provider that role uses
@@ -388,8 +388,8 @@ function GateBlock({
           {title("Switch to cloud on battery — not used with your roles")}
           {body(
             <>
-              {reasons.join(" ")} To let PM switch while you're on battery, set a role to Local,
-              fall back to cloud under <SectionLink to="sec-localai-roles" />.
+              {reasons.join(" ")} To let PM switch while you're on battery, put This computer above
+              a cloud model in a role's list in AI &amp; Models.
             </>,
           )}
         </>

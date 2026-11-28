@@ -61,7 +61,20 @@ pub fn set_openrouter_key(key: String) -> Result<()> {
         return Err(Error::Other("API key is empty".into()));
     }
     refuse_a_key_held_for_a_direct_provider(key)?;
-    secrets::set_openrouter_key(key)
+    secrets::set_openrouter_key(key)?;
+    forget_openrouter_trouble();
+    Ok(())
+}
+
+/// A new OpenRouter key is a new chance: what the entry-health memory holds against OpenRouter (a
+/// bad key, no credit) was about the OLD key, and keeping it would send replies to the next
+/// company, a paid one, for up to ten minutes while the person believes OpenRouter is back.
+fn forget_openrouter_trouble() {
+    forget_openrouter_trouble_in(crate::entry_health::global());
+}
+
+fn forget_openrouter_trouble_in(health: &crate::entry_health::Health) {
+    health.clear_provider(crate::llm_gateway::CloudProvider::OpenRouter);
 }
 
 #[tauri::command]
@@ -76,12 +89,51 @@ pub fn set_openrouter_background_key(key: String) -> Result<()> {
         return Err(Error::Other("API key is empty".into()));
     }
     refuse_a_key_held_for_a_direct_provider(key)?;
-    secrets::set_openrouter_background_key(key)
+    secrets::set_openrouter_background_key(key)?;
+    forget_openrouter_trouble();
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new OpenRouter key clears what the entry-health memory holds against OpenRouter (a bad
+    /// key is remembered for ten minutes and would send replies to the next company meanwhile).
+    /// Both key boxes call it, and it touches no other provider.
+    #[test]
+    fn a_new_openrouter_key_forgets_the_old_ones_trouble() {
+        use crate::error::FailureClass;
+        use crate::llm_gateway::CloudProvider::{Anthropic, OpenRouter};
+        // A private memory: any list edit in a parallel test clears the process-wide one.
+        let health = crate::entry_health::private_for_test();
+        health.mark(OpenRouter, "keys-test/model", FailureClass::KeyBad, None);
+        health.mark(Anthropic, "keys-test-claude", FailureClass::KeyBad, None);
+        assert!(health.is_down(OpenRouter, "keys-test/model").is_some());
+        forget_openrouter_trouble_in(&health);
+        assert!(health.is_down(OpenRouter, "keys-test/model").is_none());
+        assert!(
+            health.is_down(Anthropic, "keys-test-claude").is_some(),
+            "another company's memory is not OpenRouter's to clear"
+        );
+        let src = include_str!("keys.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for sig in [
+            "pub fn set_openrouter_key(",
+            "pub fn set_openrouter_background_key(",
+        ] {
+            let body = src
+                .split(sig)
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            assert!(body.contains("forget_openrouter_trouble()"), "{sig}");
+        }
+    }
 
     /// The refusal is decided before any keychain write, whichever box the key was pasted into.
     #[test]

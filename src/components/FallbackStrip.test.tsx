@@ -8,7 +8,35 @@
 
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { FallbackStrip, fallbackCopy } from "./FallbackStrip";
+import { FallbackStrip, fallbackCopy, listFallbackCopy } from "./FallbackStrip";
+import type { ChatFallback } from "../lib/types";
+
+/** The local-to-cloud strip's shape: no steps, no answering row. */
+const LOCAL: ChatFallback = {
+  kind: "local",
+  from_model: "",
+  to_model: "",
+  reason: "",
+  steps: [],
+  answered: null,
+};
+
+/** One row that failed and a later one that answered. */
+const LIST_ONE: ChatFallback = {
+  kind: "list",
+  from_model: "anthropic/claude-opus-5-5",
+  to_model: "gemini/gemini-4-carbon",
+  reason: "list_no_credit",
+  steps: [
+    {
+      label: "Claude Opus 5.5",
+      company: "Anthropic",
+      why: "no credit left or at a spend limit",
+      how: "failed",
+    },
+  ],
+  answered: { label: "Gemini 4 Carbon", via: "Google" },
+};
 
 describe("fallbackCopy", () => {
   it("maps the known slugs to friendly reasons", () => {
@@ -23,6 +51,17 @@ describe("fallbackCopy", () => {
     expect(fallbackCopy("hard_failure:unfinished_thought")).toBe(
       "your local model thought without answering",
     );
+  });
+
+  // The other half of `FallbackReason::local_why` (llm_gateway.rs): the seeded Local step of a list's
+  // strip carries these exact words, so a Local row's step reads like the local strip, never "it
+  // failed". Rust pins the same sentences in `a_local_heads_tail_is_walked_and_tagged_with_why_local_failed`.
+  it("has the sentences the list strip's seeded Local step carries", () => {
+    expect(fallbackCopy("cooldown")).toBe("your local model was resting after repeated errors");
+    expect(fallbackCopy("hard_failure:timeout")).toBe("your local model timed out");
+    expect(fallbackCopy("hard_failure:refused")).toBe("your local model wasn't reachable");
+    expect(fallbackCopy("hard_failure:model_loading")).toBe("your local model was still loading");
+    expect(fallbackCopy("hard_failure:server_error")).toBe("your local model couldn't answer");
   });
 
   // The banked half of a contract whose other half is compiler-enforced. `FallbackReason::PowerPolicy`
@@ -59,6 +98,7 @@ describe("FallbackStrip", () => {
     const { container, getByTitle } = render(
       <FallbackStrip
         fallback={{
+          ...LOCAL,
           from_model: "llama3",
           to_model: "openai/gpt-x",
           reason: "hard_failure:timeout",
@@ -75,11 +115,88 @@ describe("FallbackStrip", () => {
   it("degrades gracefully when the model names are empty", () => {
     const { container } = render(
       <FallbackStrip
-        fallback={{ from_model: "", to_model: "", reason: "cooldown" }}
+        fallback={{ ...LOCAL, from_model: "", to_model: "", reason: "cooldown" }}
         onDismiss={() => {}}
       />,
     );
     expect(container.textContent).toContain("cloud");
     expect(container.textContent).not.toContain("(via");
+  });
+
+  // The list's own notice is a different strip: it names the row that did not answer, why, and who
+  // got the reply instead. The local-to-cloud words never appear for it.
+  it("says, for a list, which row did not answer, why, and where the reply went", () => {
+    const { container } = render(<FallbackStrip fallback={LIST_ONE} onDismiss={() => {}} />);
+    // The strip's text is the sentence, then the Dismiss button's glyph.
+    expect(container.textContent).toContain(
+      "Claude Opus 5.5 couldn't answer (no credit left or at a spend limit), so Gemini 4 Carbon did. This reply went to Google, not Anthropic.",
+    );
+    expect(container.textContent).not.toContain("came from the cloud");
+  });
+});
+
+describe("listFallbackCopy", () => {
+  it("joins several rows into one sentence, the later ones shortened", () => {
+    expect(
+      listFallbackCopy({
+        ...LIST_ONE,
+        steps: [
+          { label: "Claude Opus 5.5", company: "Anthropic", why: "no credit left", how: "failed" },
+          { label: "Gemini 4 Carbon", company: "Google", why: "busy", how: "failed" },
+        ],
+        answered: { label: "vendor/some-model", via: "OpenRouter" },
+      }),
+    ).toBe(
+      "Claude Opus 5.5 couldn't answer (no credit left) and Gemini 4 Carbon couldn't (busy), so some-model did. This reply went to OpenRouter, not Anthropic or Google.",
+    );
+  });
+
+  it("names a Local AI server on another machine as what it is, not 'this computer'", () => {
+    expect(
+      listFallbackCopy({
+        ...LIST_ONE,
+        steps: [{ label: "Claude Opus 5.5", company: "Anthropic", why: "busy", how: "failed" }],
+        answered: { label: "llama3", via: "your Local AI server" },
+      }),
+    ).toBe(
+      "Claude Opus 5.5 couldn't answer (busy), so llama3 did. This reply went to your Local AI server, not Anthropic.",
+    );
+  });
+
+  it("reads a row that was only held back as paused, and says 'answered'", () => {
+    expect(
+      listFallbackCopy({
+        ...LIST_ONE,
+        steps: [
+          {
+            label: "Gemini 4 Carbon",
+            company: "Google",
+            why: "paused where you are",
+            how: "paused",
+          },
+        ],
+        answered: { label: "Claude Opus 5.5", via: "Anthropic" },
+      }),
+    ).toBe(
+      "Gemini 4 Carbon is paused where you are, so Claude Opus 5.5 answered. This reply went to Anthropic, not Google.",
+    );
+  });
+
+  it("says a skipped row was passed over, and leaves out the company line when it did not change", () => {
+    const copy = listFallbackCopy({
+      ...LIST_ONE,
+      steps: [
+        { label: "Claude Opus 5.5", company: "Anthropic", why: "no key saved", how: "skipped" },
+      ],
+      answered: { label: "Claude Sonnet 5.5", via: "Anthropic" },
+    });
+    expect(copy).toBe("Claude Opus 5.5 was skipped (no key saved), so Claude Sonnet 5.5 answered.");
+    expect(copy).not.toContain("This reply went to");
+  });
+
+  it("has a plain sentence when the event carries no steps", () => {
+    expect(listFallbackCopy({ ...LIST_ONE, steps: [], answered: null })).toBe(
+      "A later model in your list answered this reply.",
+    );
   });
 });

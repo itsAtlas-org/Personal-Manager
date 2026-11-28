@@ -863,7 +863,7 @@ pub enum ProjectProposalEvent {
 /// failed call logs nothing (not even a phantom zero-token request).
 pub async fn propose(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     project: &str,
     samples: &[String],
     other_projects: &[String],

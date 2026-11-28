@@ -34,7 +34,7 @@ const MAX_ROWS: usize = 20;
 /// so the interactive panel can show it, rather than pretending it "diagnosed" nothing.
 pub async fn diagnose(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     symptom: &str,
     query: &str,
     explain: &DevRetrievalExplain,
