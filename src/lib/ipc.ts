@@ -73,6 +73,8 @@ import type {
   LimitView,
   RoleMove,
   RoleName,
+  RouteEdited,
+  RouteStatusResult,
   Document,
   DocumentLocation,
   DraftPreference,
@@ -320,19 +322,60 @@ export const clearDirectKey = (provider: CloudProviderId) =>
   invoke<RoleMove[]>("clear_direct_key", { provider });
 
 /** Choose which cloud provider answers a role. "openrouter" is always allowed; a direct provider
- *  only when it is opted in and its key is there (the error says which is missing). */
+ *  only when it is opted in and its key is there (the error says which is missing). In terms of the
+ *  role's list: every cloud row becomes that provider's and this computer's row stays where it is.
+ *  Kept for the one-provider controls and the setup wizard until the list editor replaces them. */
 export const setRoleCloudProvider = (role: RoleName, provider: CloudProviderId) =>
   invoke<void>("set_role_cloud_provider", { role, provider });
 
-/** Choose a role's model and effort on a provider in ONE write, so the effort is checked against the
- *  new model. One model per role in this version. `effort` null = the role's default; the word
- *  "default" is refused (it is not a level). */
-export const setDirectRole = (
-  provider: CloudProviderId,
+// ---- A role's ordered list of models (commands/routes.rs) ----
+// Not `set_*`: a refused edit must never show the Settings "Saved" tick, and the editor announces
+// its own results. Every row is checked in Rust before it is stored (a provider must be on, keyed and
+// not paused; this computer needs Local AI on and a model); nothing the page sends is trusted.
+
+/** Both roles' lists and every row's status. Read again on `route://changed`. */
+export const routeStatus = () => invoke<RouteStatusResult>("route_status");
+
+/** Add a model to a role's list (at `at`, the end by default). `provider` is `local` for this
+ *  computer (model ignored). The answer says how many saved OpenRouter models the FIRST edit left
+ *  out, once. */
+export const routeAdd = (
   role: RoleName,
-  models: string[],
-  effort: string | null,
-) => invoke<void>("set_direct_role", { provider, role, models, effort });
+  provider: CloudProviderId | "local",
+  model: string,
+  effort: string | null = null,
+  at: number | null = null,
+) => invoke<RouteEdited>("route_add", { role, provider, model, effort, at });
+
+/** Move the row at `from` so it sits at `to`. `key` is the row (`RouteRow.key`) the person means:
+ *  when the list changed under the page the backend refuses ("Your list changed. Here it is
+ *  again.") and writes nothing, so a stale position never moves the wrong row. */
+export const routeMove = (role: RoleName, from: number, to: number, key: string) =>
+  invoke<RouteEdited>("route_move", { role, from, to, key });
+
+/** Take a row out. The last row cannot go. Carries the row's key, like `routeMove`. */
+export const routeRemove = (role: RoleName, index: number, key: string) =>
+  invoke<RouteEdited>("route_remove", { role, index, key });
+
+/** Set a direct row's effort; null is the role's default. Carries the row's key, like `routeMove`. */
+export const routeSetEffort = (role: RoleName, index: number, key: string, effort: string | null) =>
+  invoke<RouteEdited>("route_set_effort", { role, index, key, effort });
+
+/** Write the default list (what a fresh install uses) as the role's own. */
+export const routeReset = (role: RoleName) => invoke<RouteEdited>("route_reset", { role });
+
+/** "Use {model} from now on": put the row first in the role's list (inserted, or moved there). The
+ *  not-working card calls this and then re-sends the failed message. */
+export const promoteEntry = (role: RoleName, provider: CloudProviderId | "local", model: string) =>
+  invoke<RouteEdited>("promote_entry", { role, provider, model });
+
+/** "Try again now": forget that this provider was remembered as not working. */
+export const routeTryAgain = (provider: CloudProviderId) =>
+  invoke<void>("route_try_again", { provider });
+
+/** Fires when a list was edited or a row's health may have changed. */
+export const onRouteChanged = (handler: () => void): Promise<UnlistenFn> =>
+  listen("route://changed", () => handler());
 
 /** The person's own "my project shares data with this provider" tick-box. Display only. */
 export const setDirectDataSharing = (provider: CloudProviderId, shares: boolean) =>
@@ -423,8 +466,16 @@ export const getPref = (key: string) => invoke<string | null>("get_pref", { key 
  *  Pinboard is a mod now and its old board row is a frozen snapshot only Rust reads. */
 export const setPref = (key: string, value: string) => invoke<void>("set_pref", { key, value });
 
-/** Ordered preferred chat models (first = primary). */
-export const setChatModels = (models: string[]) => invoke<void>("set_chat_models", { models });
+/** Ordered preferred chat models (first = primary). Answers how many saved models the first edit of
+ *  a list nobody had edited left out because they were not in use (0 on every later edit), so the
+ *  caller can say it, as the list editor does. */
+export const setChatModels = (models: string[]) => invoke<number>("set_chat_models", { models });
+
+/** The context meter's "use a larger model": this one OpenRouter model goes where chat's first
+ *  OpenRouter row stands and no other row moves. Answers how many saved models the first edit of a
+ *  list nobody had edited left out, as `setChatModels` does. */
+export const switchToLargerChatModel = (model: string) =>
+  invoke<number>("use_larger_chat_model", { model });
 
 /** Ordered preferred background models (sorting proposals + Learning You). */
 export const setBackgroundModels = (models: string[]) =>

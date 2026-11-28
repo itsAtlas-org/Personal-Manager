@@ -13,8 +13,9 @@
 //! leg followed by a refused second one still reads as "a request left".
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 tokio::task_local! {
     static MARK: WireMark;
@@ -30,6 +31,10 @@ struct Counts {
     /// request here is also counted on. A mod's booking is judged by the OUTER mark, so an attempt's
     /// own mark must never hide a send from it.
     parent: Option<WireMark>,
+    /// The longest `Retry-After` (whole seconds) a rate-limited reply of this attempt asked for, 0 =
+    /// none. A side channel on purpose: the typed failure the walk reads is shared with code that
+    /// builds it field by field, and the wait is only needed by the entry-health memory.
+    retry_after_secs: AtomicU64,
 }
 
 /// What one call's requests did. Cheap to clone; clones share the counts.
@@ -78,12 +83,59 @@ impl WireMark {
         }
     }
 
+    /// A reply asked to be retried after `wait`. Counted on every mark above this one too, so the
+    /// walk's own holder (made with [`Self::nested`]) sees what the attempt inside it saw.
+    pub fn retry_after_seen(&self, wait: Duration) {
+        self.0
+            .retry_after_secs
+            .fetch_max(wait.as_secs(), Ordering::SeqCst);
+        if let Some(parent) = &self.0.parent {
+            parent.retry_after_seen(wait);
+        }
+    }
+
+    /// What the replies of this mark's requests asked to wait, if any did.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self.0.retry_after_secs.load(Ordering::SeqCst) {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        }
+    }
+
     /// Whether any request may have reached the provider. `sending` is counted before `never_left`
     /// can be, so a call cut off between the two reads as sent.
     pub fn may_have_reached_the_wire(&self) -> bool {
         let never_left = self.0.never_left.load(Ordering::SeqCst);
         self.0.sending.load(Ordering::SeqCst) > never_left
     }
+}
+
+/// A `Retry-After` value in whole seconds. The HTTP-date form is ignored (the memory's own default
+/// applies): nobody here sends it, and guessing a clock is how a row gets skipped for a day.
+pub fn parse_retry_after(value: &str) -> Option<Duration> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+}
+
+/// Note the `Retry-After` of a failed reply on the current mark, when a scope is current. Called at
+/// the sites that see a failed STATUS, so a rate limit's wait reaches the entry-health memory.
+pub fn note_retry_after(headers: &reqwest::header::HeaderMap) {
+    let wait = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    if let Some(wait) = wait {
+        note_retry_after_for(wait);
+    }
+}
+
+/// [`note_retry_after`] for a wait the caller already parsed.
+pub fn note_retry_after_for(wait: Duration) {
+    let _ = MARK.try_with(|m| m.retry_after_seen(wait));
 }
 
 /// Whether a failed send proves the request never left: the connection was never made.

@@ -23,7 +23,7 @@ use crate::region::{self, Region, RegionRefusal};
 use crate::AppState;
 
 /// "chat" or "background". Anything else is refused rather than guessed.
-fn parse_role(role: &str) -> Result<Role> {
+pub(crate) fn parse_role(role: &str) -> Result<Role> {
     match role.trim() {
         "chat" => Ok(Role::Chat),
         "background" => Ok(Role::Background),
@@ -108,6 +108,7 @@ pub fn set_direct_opt_in(app: AppHandle, provider: String, enabled: bool) -> Res
         let conn = state.conn()?;
         direct_providers::set_opt_in(&conn, d.provider, enabled)?
     };
+    crate::entry_health::global().clear_provider(d.provider);
     llm_gateway::ping_status(&app);
     Ok(direct_providers::moves_to_openrouter(d.provider, &moved))
 }
@@ -216,6 +217,8 @@ pub async fn save_direct_key(
             &direct_providers::key_fp(&key),
         )?;
     }
+    // A new key is a fresh chance for a row that was remembered as not working (6.6).
+    crate::entry_health::global().clear_provider(d.provider);
     Ok(KeyCheckResult {
         outcome: check.outcome,
         saved: true,
@@ -305,6 +308,8 @@ pub async fn recheck_direct_key(app: AppHandle, provider: String) -> Result<KeyC
             None
         }
     };
+    // "Check again" is the person asking for a fresh look (6.6): the memory of a failure goes.
+    crate::entry_health::global().clear_provider(d.provider);
     Ok(KeyCheckResult {
         outcome: check.outcome,
         saved: true,
@@ -329,6 +334,7 @@ pub fn clear_direct_key(app: AppHandle, provider: String) -> Result<Vec<RoleMove
         direct_providers::clear_key_check(&conn, d.provider)?;
         direct_providers::retire_roles(&conn, d.provider)?
     };
+    crate::entry_health::global().clear_provider(d.provider);
     llm_gateway::ping_status(&app);
     Ok(direct_providers::moves_to_openrouter(d.provider, &moved))
 }
@@ -365,21 +371,25 @@ pub(crate) fn gate_entry(
     }
 }
 
-/// Choose which cloud provider answers a role. "openrouter" is always allowed (and deletes the
-/// row); a direct provider only when opted in AND its key is there.
+/// Choose which cloud provider answers a role, in terms of the role's list: every cloud row becomes
+/// that provider's (its default model for a direct one), and this computer's row stays where it is.
+/// "openrouter" is always allowed; a direct provider only when opted in AND its key is there (the
+/// same [`gate_entry`] a list write asks). Kept for the one-provider Settings controls and the setup
+/// wizard; the list editor edits the list itself (`commands/routes.rs`).
 #[tauri::command]
 pub fn set_role_cloud_provider(app: AppHandle, role: String, provider: String) -> Result<()> {
     let role = parse_role(&role)?;
-    if provider.trim() == "openrouter" {
-        let state = app.state::<AppState>();
-        let conn = state.conn()?;
-        direct_providers::set_role_provider(&conn, role, CloudProvider::OpenRouter)?;
+    let p = if provider.trim() == "openrouter" {
+        CloudProvider::OpenRouter
     } else {
         let d = parse_provider(&provider)?;
         gate_entry_now(&app, role, d)?;
+        d.provider
+    };
+    {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        direct_providers::set_role_provider(&conn, role, d.provider)?;
+        crate::route::edit::use_provider(&conn, role, p)?;
     }
     llm_gateway::ping_status(&app);
     Ok(())
@@ -431,27 +441,9 @@ pub(crate) fn gate_entry_now(app: &AppHandle, role: Role, d: &DirectProvider) ->
     gate_entry(d, role, w.opted_in, w.key, w.blocked.as_ref())
 }
 
-/// Choose a role's model and effort on a provider in ONE write, so the effort is checked against
-/// the new model. One model per role in this version; `effort` is `null` (the role's default) or
-/// a level that model offers. The word "default" is refused: it is not a level.
-#[tauri::command]
-pub fn set_direct_role(
-    app: AppHandle,
-    provider: String,
-    role: String,
-    models: Vec<String>,
-    effort: Option<String>,
-) -> Result<()> {
-    let d = parse_provider(&provider)?;
-    let role = parse_role(&role)?;
-    {
-        let state = app.state::<AppState>();
-        let conn = state.conn()?;
-        direct_providers::set_role_model(&conn, d.provider, role, &models, effort.as_deref())?;
-    }
-    llm_gateway::ping_status(&app);
-    Ok(())
-}
+// The older "choose a role's model and effort on a provider" command is gone: a row's model is
+// chosen by adding it to the list and its effort by `route_set_effort` (commands/routes.rs), which
+// check the level against that row's own model.
 
 /// The person's own "my project shares data with this provider" tick-box. Display only: it changes
 /// the warning's headline and the chip, and never gates a call.
@@ -816,11 +808,17 @@ mod tests {
 
     #[test]
     fn a_role_move_serialises_as_role_from_to() {
-        let moved = direct_providers::moves_to_openrouter(CloudProvider::OpenAi, &[Role::Chat]);
+        let retired = [crate::route::edit::Retired {
+            role: Role::Chat,
+            removed: 1,
+            restored_default: true,
+        }];
+        let moved = direct_providers::moves_to_openrouter(CloudProvider::OpenAi, &retired);
         let v = serde_json::to_value(&moved).unwrap();
         assert_eq!(v[0]["role"], "chat");
         assert_eq!(v[0]["from"], "openai");
         assert_eq!(v[0]["to"], "openrouter");
+        assert_eq!(v[0]["restored_default"], true);
     }
 
     /// No command in this file hands a key back: nothing it returns can carry one. A source check,

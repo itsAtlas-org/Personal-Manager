@@ -5,7 +5,7 @@
 // built in Rust (`offers.rs`); what is pinned here is what this file owns, plus the one string table
 // the two sides must keep in step (each provider's one-line warning).
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import rust from "../../src-tauri/src/offers.rs?raw";
 import { DIRECT_PROVIDERS } from "./directProviders";
 import {
@@ -13,13 +13,10 @@ import {
   entryOf,
   fromNowOnName,
   fromNowOnNote,
-  fromNowOnSteps,
   introLine,
   limitLine,
   offerName,
   offerVia,
-  runFromNowOn,
-  type FromNowOnSetters,
 } from "./notWorking";
 import type { NotWorkingOffer } from "./types";
 
@@ -109,97 +106,20 @@ describe("the lines around the buttons", () => {
   });
 });
 
-describe("what 'from now on' changes, with the setters that already exist", () => {
-  it("writes a direct model, then moves Chat onto the provider", () => {
-    expect(fromNowOnSteps(offer(), ["x/y"])).toEqual([
-      { kind: "directRole", provider: "gemini", model: "gemini/gemini-3.5-flash" },
-      { kind: "roleProvider", provider: "gemini" },
-    ]);
-  });
-
-  it("puts the OpenRouter model first and keeps the others behind it, once", () => {
-    const or = offer({ provider: "openrouter", model: "b/two", kind: "openrouter" });
-    // The list is written before the role moves to OpenRouter, as for a direct model.
-    expect(fromNowOnSteps(or, ["a/one", "b/two", "c/three"])).toEqual([
-      { kind: "chatModels", models: ["b/two", "a/one", "c/three"] },
-      { kind: "roleProvider", provider: "openrouter" },
-    ]);
-  });
-
-  it("makes this computer Chat's routing", () => {
-    expect(
-      fromNowOnSteps(offer({ provider: "local", kind: "local", model: "llama3" }), []),
-    ).toEqual([{ kind: "localRouting" }]);
-  });
-});
-
-describe("running 'from now on' with the setters", () => {
-  function setters(over: Partial<FromNowOnSetters> = {}) {
-    const calls: string[] = [];
-    const s: FromNowOnSetters = {
-      setDirectRole: vi.fn(async (p, role, models, effort) => {
-        calls.push(`directRole ${p} ${role} ${models.join(",")} ${effort}`);
-      }),
-      setRoleCloudProvider: vi.fn(async (role, p) => {
-        calls.push(`roleProvider ${role} ${p}`);
-      }),
-      setChatModels: vi.fn(async (m) => {
-        calls.push(`chatModels ${m.join(",")}`);
-      }),
-      setLocalLlmRouting: vi.fn(async (role, pref) => {
-        calls.push(`localRouting ${role} ${pref}`);
-      }),
-      chatEffortFor: vi.fn(async () => null),
-      ...over,
-    };
-    return { s, calls };
-  }
-
-  it("writes the model, then moves the CHAT role (never Background), for a direct model", async () => {
-    const { s, calls } = setters();
-    await runFromNowOn(fromNowOnSteps(offer(), []), s);
-    expect(calls).toEqual([
-      "directRole gemini chat gemini/gemini-3.5-flash null",
-      "roleProvider chat gemini",
-    ]);
-  });
-
-  it("keeps an effort the person already set on that very model", async () => {
-    const { s, calls } = setters({ chatEffortFor: vi.fn(async () => "high") });
-    await runFromNowOn(fromNowOnSteps(offer(), []), s);
-    expect(calls[0]).toBe("directRole gemini chat gemini/gemini-3.5-flash high");
-    // An unreadable state is the role's default, never a failed click.
-    const bad = setters({
-      chatEffortFor: vi.fn(async () => {
-        throw new Error("no");
-      }),
+/** "From now on" is one list edit, `promoteEntry("chat", provider, model)`: the offer's own provider
+ *  and model are all it sends (the backend re-checks both, like any list write), whoever the company
+ *  is. The ordering of several settings the old setters needed is gone. */
+describe("what 'from now on' asks the backend", () => {
+  it("is the offered row, for a direct model, OpenRouter and this computer alike", () => {
+    expect(entryOf(offer())).toEqual({ provider: "gemini", model: "gemini/gemini-3.5-flash" });
+    expect(entryOf(offer({ provider: "openrouter", model: "b/two", kind: "openrouter" }))).toEqual({
+      provider: "openrouter",
+      model: "b/two",
     });
-    await runFromNowOn(fromNowOnSteps(offer(), []), bad.s);
-    expect(bad.calls[0]).toBe("directRole gemini chat gemini/gemini-3.5-flash null");
-  });
-
-  it("OpenRouter writes the list then the role; this computer sets Chat's routing", async () => {
-    const a = setters();
-    await runFromNowOn(
-      fromNowOnSteps(offer({ provider: "openrouter", model: "b/two", kind: "openrouter" }), [
-        "a/one",
-      ]),
-      a.s,
-    );
-    expect(a.calls).toEqual(["chatModels b/two,a/one", "roleProvider chat openrouter"]);
-    const b = setters();
-    await runFromNowOn(fromNowOnSteps(offer({ provider: "local", kind: "local" }), []), b.s);
-    expect(b.calls).toEqual(["localRouting chat local"]);
-  });
-
-  it("the first failure stops the rest and rejects", async () => {
-    const { s, calls } = setters({
-      setDirectRole: vi.fn(async () => {
-        throw new Error("Gemini is paused");
-      }),
+    expect(entryOf(offer({ provider: "local", kind: "local", model: "llama3" }))).toEqual({
+      provider: "local",
+      model: "llama3",
     });
-    await expect(runFromNowOn(fromNowOnSteps(offer(), []), s)).rejects.toThrow("Gemini is paused");
-    expect(calls).toEqual([]);
   });
 });
 

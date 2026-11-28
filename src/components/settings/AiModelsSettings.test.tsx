@@ -348,6 +348,26 @@ describe("the Usage tab's honest figures", () => {
     expect(screen.queryByText(/evil/)).toBeNull();
   });
 
+  // Background and Review have no strip, so this standing line is where a bad first row shows up.
+  it("says how many replies a later row of the list answered, why the first moved, and when", async () => {
+    costSummary.mockResolvedValue(
+      summary([line({ model: "typed/m" })], {
+        list_walks: { replies: 4, first_reason: "busy", first_at: "2026-11-03T12:00:00.000Z" },
+      }),
+    );
+    render(<AiModelsSettings />);
+    await screen.findByText(
+      "4 replies in the last 30 days went to a later model in your list because an earlier one couldn't answer. The first was on 03-11-2026 (busy).",
+    );
+  });
+
+  it("says nothing about a list's walks when there were none", async () => {
+    costSummary.mockResolvedValue(summary([line({ model: "typed/m" })], { list_walks: null }));
+    render(<AiModelsSettings />);
+    await screen.findByText("typed/m");
+    expect(screen.queryByTestId("list-walks")).toBeNull();
+  });
+
   it("says models on this computer are listed and cost nothing, when Local AI is on", async () => {
     getLocalAiSwitch.mockResolvedValue({
       on: true,

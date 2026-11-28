@@ -440,15 +440,16 @@ pub struct LocalLlmConfig {
 #[tauri::command]
 pub fn get_local_llm_config(state: State<'_, AppState>) -> Result<LocalLlmConfig> {
     let conn = state.conn()?;
-    let routing = |key: &str| -> Result<String> {
-        Ok(db::get_setting(&conn, key)?.unwrap_or_else(|| "cloud".to_string()))
-    };
+    // The routing words come from the role's list when it has one (the list is the one truth for
+    // where this computer sits), else from the old row exactly as before.
+    let routing =
+        |role: Role| -> Result<String> { Ok(llm_gateway::routing_word(&conn, role)?.to_string()) };
     Ok(LocalLlmConfig {
         base_url: db::get_setting(&conn, LOCAL_BASE_URL_KEY)?,
         chat_model: db::get_setting(&conn, LOCAL_CHAT_MODEL_KEY)?,
         background_model: db::get_setting(&conn, LOCAL_BACKGROUND_MODEL_KEY)?,
-        chat_routing: routing(CHAT_ROUTING_KEY)?,
-        background_routing: routing(BACKGROUND_ROUTING_KEY)?,
+        chat_routing: routing(Role::Chat)?,
+        background_routing: routing(Role::Background)?,
         has_token: secrets::has_local_llm_endpoint_token()?,
     })
 }
@@ -583,15 +584,16 @@ fn write_role_model(
 /// The store half of [`set_local_llm_routing`]. Choosing where a role runs, with the Roles section
 /// saying beside it what that choice does, also ends the "pick a model" state switching Local AI
 /// off left it in: from here the route is the one chosen (AI & Models' "Use the cloud model" is one
-/// such choice).
+/// such choice). The role's LIST is what changes (this computer comes out, goes first, or stands
+/// alone: `route::edit::set_routing`); the older routing row is not written.
 fn write_routing(
     conn: &rusqlite::Connection,
-    routing_key: &str,
+    role: Role,
     emptied_key: &str,
-    pref: &str,
+    pref: llm_gateway::ProviderPref,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    db::set_setting(&tx, routing_key, pref)?;
+    crate::route::edit::set_routing(&tx, role, pref)?;
     db::delete_setting(&tx, emptied_key)?;
     tx.commit()?;
     Ok(())
@@ -599,11 +601,14 @@ fn write_routing(
 
 #[tauri::command]
 pub fn set_local_llm_routing(app: AppHandle, role: String, pref: String) -> Result<()> {
-    let key = role_routing_key(&role)?;
+    let list_role = role_of(&role)?;
     // Validate the preference string so an unknown value can't silently read back as "cloud".
-    if !matches!(pref.as_str(), "cloud" | "local" | "local-then-cloud") {
-        return Err(Error::Other(format!("unknown routing preference '{pref}'")));
-    }
+    let pref_kind = match pref.as_str() {
+        "cloud" => llm_gateway::ProviderPref::Cloud,
+        "local" => llm_gateway::ProviderPref::Local,
+        "local-then-cloud" => llm_gateway::ProviderPref::LocalThenCloud,
+        _ => return Err(Error::Other(format!("unknown routing preference '{pref}'"))),
+    };
     // "cloud" is what AI & Models' model picker writes while Local AI is off, to give a role that
     // has nothing to answer it the cloud model; a local preference then would answer nothing.
     if pref != "cloud" {
@@ -611,7 +616,7 @@ pub fn set_local_llm_routing(app: AppHandle, role: String, pref: String) -> Resu
     }
     let state = app.state::<AppState>();
     let conn = state.conn()?;
-    write_routing(&conn, key, role_emptied_key(&role)?, &pref)?;
+    write_routing(&conn, list_role, role_emptied_key(&role)?, pref_kind)?;
     drop(conn);
     // Same as the role-model write: routing decides which model the sidebar names.
     crate::llm_gateway::ping_status(&app);
@@ -646,10 +651,10 @@ fn role_model_key(role: &str) -> Result<&'static str> {
     }
 }
 
-fn role_routing_key(role: &str) -> Result<&'static str> {
+fn role_of(role: &str) -> Result<Role> {
     match role {
-        "chat" => Ok(CHAT_ROUTING_KEY),
-        "background" => Ok(BACKGROUND_ROUTING_KEY),
+        "chat" => Ok(Role::Chat),
+        "background" => Ok(Role::Background),
         other => Err(Error::Other(format!("unknown role '{other}'"))),
     }
 }
@@ -722,6 +727,9 @@ fn delete_local_ai_settings(conn: &rusqlite::Connection) -> Result<()> {
     for key in LOCAL_AI_SETTINGS {
         db::delete_setting(&tx, key)?;
     }
+    // The rows above are everything a role nobody has edited reads; a role with a list of its own
+    // keeps this computer's row there, so the reset takes it out too ("puts routing back to the cloud").
+    crate::route::edit::local_reset(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -1106,8 +1114,20 @@ pub(crate) fn power_view_with(
         // A role on a paused provider (a free Gemini key where only paid ones are used, or one the
         // daily limit has paused) is never one the policy can move: it would fail every call.
         let paused = route_terms == Some(crate::direct_providers::RouteTerms::Blocked);
-        let blocked =
-            llm_gateway::power_blocked_with_limit(pref, local_ready, key, paused, limit_reached);
+        // The policy moves a role only off a Local HEAD (the planner never makes any other move), so
+        // a list that starts with a cloud row has nothing to move, said as the cloud routing it is.
+        let power_pref = if prefs.local_behind(role) {
+            llm_gateway::ProviderPref::Cloud
+        } else {
+            pref
+        };
+        let blocked = llm_gateway::power_blocked_with_limit(
+            power_pref,
+            local_ready,
+            key,
+            paused,
+            limit_reached,
+        );
         let route = match llm_gateway::power_route(role, &ctx, blocked) {
             // Plugged back in, with the latch still waiting out its minute: there is nothing left to
             // ask about. The question says "you're on battery" and offers the cloud "until you plug
@@ -1124,12 +1144,15 @@ pub(crate) fn power_view_with(
             route,
             blocked,
             local_model: bound.map(str::to_string),
-            effective: llm_gateway::effective_route(
-                pref,
-                prefs.local_ai_on,
-                local_ready,
-                key,
-                route == PowerRoute::Cloud,
+            effective: llm_gateway::effective_route_for_list(
+                llm_gateway::effective_route(
+                    pref,
+                    prefs.local_ai_on,
+                    local_ready,
+                    key,
+                    route == PowerRoute::Cloud,
+                ),
+                prefs.local_behind(role),
             ),
             cloud_key: key,
             cloud_provider: settings.providers.for_role(role),
@@ -1262,11 +1285,11 @@ pub async fn local_llm_status(app: AppHandle) -> Result<LocalLlmStatus> {
         // the On battery strip) then draws nothing, and the 30-second poll never probes the server.
         let configured = base_url.is_some() && prefs.local_ai_on;
         let chat = role_local_model(
-            db::get_setting(&conn, CHAT_ROUTING_KEY)?.as_deref(),
+            Some(llm_gateway::routing_word(&conn, Role::Chat)?),
             db::get_setting(&conn, LOCAL_CHAT_MODEL_KEY)?.as_deref(),
         );
         let background = role_local_model(
-            db::get_setting(&conn, BACKGROUND_ROUTING_KEY)?.as_deref(),
+            Some(llm_gateway::routing_word(&conn, Role::Background)?),
             db::get_setting(&conn, LOCAL_BACKGROUND_MODEL_KEY)?.as_deref(),
         );
         let power_settings = PowerSettings::read(&conn);
@@ -2319,13 +2342,13 @@ pub async fn test_local_llm(app: AppHandle, role: String) -> Result<LocalTestRes
     let model = {
         let state = app.state::<AppState>();
         let conn = state.conn()?;
-        let (routing_key, model_key) = match role.as_str() {
-            "chat" => (CHAT_ROUTING_KEY, LOCAL_CHAT_MODEL_KEY),
-            "background" => (BACKGROUND_ROUTING_KEY, LOCAL_BACKGROUND_MODEL_KEY),
+        let (routing_role, model_key) = match role.as_str() {
+            "chat" => (Role::Chat, LOCAL_CHAT_MODEL_KEY),
+            "background" => (Role::Background, LOCAL_BACKGROUND_MODEL_KEY),
             other => return Err(Error::Other(format!("unknown role '{other}'"))),
         };
         role_local_model(
-            db::get_setting(&conn, routing_key)?.as_deref(),
+            Some(llm_gateway::routing_word(&conn, routing_role)?),
             db::get_setting(&conn, model_key)?.as_deref(),
         )
     };
@@ -3477,11 +3500,11 @@ fn assigned_co_residency(
         let conn = state.conn()?;
         (
             role_local_model(
-                db::get_setting(&conn, CHAT_ROUTING_KEY)?.as_deref(),
+                Some(llm_gateway::routing_word(&conn, Role::Chat)?),
                 db::get_setting(&conn, LOCAL_CHAT_MODEL_KEY)?.as_deref(),
             ),
             role_local_model(
-                db::get_setting(&conn, BACKGROUND_ROUTING_KEY)?.as_deref(),
+                Some(llm_gateway::routing_word(&conn, Role::Background)?),
                 db::get_setting(&conn, LOCAL_BACKGROUND_MODEL_KEY)?.as_deref(),
             ),
         )
@@ -4553,7 +4576,65 @@ mod tests {
             background: pref,
             local_ai_on: true,
             emptied: llm_gateway::Emptied::default(),
+            local_behind: llm_gateway::Emptied::default(),
         }
+    }
+
+    /// The On battery policy moves a role only off a Local HEAD, which is all the planner does. A
+    /// role whose this-computer row sits below a cloud row reads as cloud routing in the strip, asks
+    /// no consent and moves nowhere, however ready its local model is; the same prefs with the Local
+    /// row at the head are asked and moved as before.
+    #[test]
+    fn a_local_row_below_a_cloud_row_is_never_a_power_move() {
+        let view = |prefs: &RoutingPrefs| {
+            power_view_with(
+                &low_battery(),
+                &policy(true),
+                false,
+                prefs,
+                true,
+                Some("gemma3:4b"),
+                Some("qwen3:8b"),
+                KeyPresence::Present,
+                KeyPresence::Present,
+                (None, None),
+                (false, false),
+            )
+        };
+        let head = both(ProviderPref::LocalThenCloud);
+        assert_eq!(view(&head).chat.route, PowerRoute::Cloud);
+        assert_eq!(view(&head).chat.blocked, None);
+        let mut behind = both(ProviderPref::LocalThenCloud);
+        behind.local_behind = llm_gateway::Emptied {
+            chat: true,
+            background: false,
+        };
+        let v = view(&behind);
+        assert_eq!(v.chat.blocked, Some(PowerBlocked::CloudRouting));
+        assert_eq!(v.chat.route, PowerRoute::Unchanged);
+        assert!(!v.consent_needed);
+        // The other role, a Local head, still moves.
+        assert_eq!(v.background.route, PowerRoute::Cloud);
+        // The cloud is asked FIRST for the Local-behind role, so no surface may say "local first"
+        // (lead item n1); the Local head reads as it always did.
+        assert_eq!(
+            v.chat.effective,
+            llm_gateway::EffectiveRoute::CloudThenLocal
+        );
+        assert_eq!(
+            v.background.effective,
+            llm_gateway::EffectiveRoute::CloudForPower
+        );
+        assert_eq!(
+            view(&head).chat.effective,
+            llm_gateway::EffectiveRoute::CloudForPower
+        );
+        // Off, the role is served by the rows above the Local row, never stopped.
+        behind.local_ai_on = false;
+        assert_eq!(
+            view(&behind).chat.effective,
+            llm_gateway::EffectiveRoute::Cloud
+        );
     }
 
     /// A role on a paused provider (a free Gemini key where only paid ones are used) is one the On
@@ -4636,8 +4717,14 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("\n}\n").next())
             .expect("power_view_with");
-        assert!(view
-            .contains("power_blocked_with_limit(pref, local_ready, key, paused, limit_reached)"));
+        // R11: the call now takes `power_pref` (the role's preference, read as cloud routing when its
+        // this-computer row sits below a cloud row) in place of `pref`, with the same terms after it.
+        let compact: String = view.split_whitespace().collect();
+        // Whitespace is gone but rustfmt's trailing comma is not: take it out too, so the scan
+        // reads the same on a build that formats the call on one line.
+        assert!(compact
+            .replace(",)", ")")
+            .contains("power_blocked_with_limit(power_pref,local_ready,key,paused,limit_reached)"));
         let status = src
             .split("pub async fn local_llm_status(")
             .nth(1)
@@ -4950,6 +5037,7 @@ mod tests {
                 background: ProviderPref::Cloud,
                 local_ai_on: true,
                 emptied: llm_gateway::Emptied::default(),
+                local_behind: llm_gateway::Emptied::default(),
             },
             true,
             Some("gemma3:4b"),
@@ -5003,6 +5091,7 @@ mod tests {
                 background: ProviderPref::Cloud,
                 local_ai_on: true,
                 emptied: llm_gateway::Emptied::default(),
+                local_behind: llm_gateway::Emptied::default(),
             },
             true,
             None,
@@ -6940,13 +7029,22 @@ mod tests {
             }
         );
 
-        write_routing(&conn, BACKGROUND_ROUTING_KEY, background, "cloud").unwrap();
+        write_routing(
+            &conn,
+            Role::Background,
+            background,
+            llm_gateway::ProviderPref::Cloud,
+        )
+        .unwrap();
         assert_eq!(emptied(&conn), llm_gateway::Emptied::default());
+        // The role's LIST says "cloud" now; the older routing row is never written.
         assert_eq!(
-            db::get_setting(&conn, BACKGROUND_ROUTING_KEY)
-                .unwrap()
-                .as_deref(),
-            Some("cloud")
+            llm_gateway::routing_word(&conn, Role::Background).unwrap(),
+            "cloud"
+        );
+        assert_eq!(
+            db::get_setting(&conn, BACKGROUND_ROUTING_KEY).unwrap(),
+            None
         );
     }
 

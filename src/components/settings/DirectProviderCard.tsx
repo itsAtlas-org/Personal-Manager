@@ -137,7 +137,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
     if (!next) setTyped("");
     try {
       const moves = await setDirectOptIn(view.provider, next);
-      setMoved(next ? null : movedLine(moves, orKey));
+      setMoved(next ? null : movedLine(moves, orKey, name));
       await reload();
       setAnnounce(
         next
@@ -237,7 +237,7 @@ export function DirectProviderCard({ info, view, reload, orKey, onError, onKeySa
       setRefusal(null);
       setHeldRefusal(null);
       setTyped("");
-      setMoved(movedLine(moves, orKey));
+      setMoved(movedLine(moves, orKey, name));
       await reload();
       setFocusTick((t) => t + 1);
     } catch (e) {

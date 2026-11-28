@@ -23,13 +23,14 @@
 //! never a failure. "Local only" never moves. A request decides its route once, at dispatch; the
 //! long multi-batch jobs re-resolve between batches through [`refresh_plan`].
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::context_budget;
 use crate::error::{Error, Result};
+use crate::list_plan::{self, KeyRead, Mode, Seat};
 use crate::local_slot::{
     loading_retry_backoff, preemption_retry_delay, tunables, CallOutcome, SlotOutcome,
 };
@@ -38,10 +39,11 @@ use crate::openrouter::{self, ChatMessage, Completion};
 use crate::power::{Consent, DirectConsent, PowerScope, PowerSettings, PowerSnapshot, PowerState};
 use crate::secret::Secret;
 use crate::settings::{
-    effective_models, BACKGROUND_AUTO_SWITCH_KEY, BACKGROUND_MODELS_KEY, CHAT_AUTO_SWITCH_KEY,
-    CHAT_MODELS_KEY,
+    BACKGROUND_AUTO_SWITCH_KEY, BACKGROUND_MODELS_KEY, CHAT_AUTO_SWITCH_KEY, CHAT_MODELS_KEY,
 };
 use crate::{db, secrets, AppState};
+
+pub use crate::list_plan::{Ladder, Plan, Rung};
 
 /// Which of PM's two AI roles a request belongs to. Chat is the interactive, user-facing model;
 /// Background is every unattended `complete()` consumer (summaries, titles, briefing, proposals).
@@ -75,6 +77,12 @@ pub struct RoutingPrefs {
     /// the same guard for the same reason: it decides what "Local, fall back to cloud" means for
     /// them once the switch is back on (see [`resolve_provider`]).
     pub emptied: Emptied,
+    /// The roles whose STORED list has its first this-computer row BELOW a cloud row. While Local AI
+    /// is off, or the role waits for a model, such a role is served by the cloud rows above that row
+    /// (the walk stops at the Local row, [`crate::list_plan::plan`]), so nothing here calls it
+    /// stopped, asks it for a model, or describes a power move the planner never makes (the policy
+    /// moves a role only from a Local HEAD). Never set for a list nobody edited.
+    pub local_behind: Emptied,
 }
 
 /// Per role: switching Local AI off deleted this role's chosen local model while the role was routed
@@ -109,18 +117,38 @@ impl RoutingPrefs {
     /// readers ([`effective_route`] and [`power_blocked`] take a preference, not the prefs).
     pub fn served_pref(&self, role: Role) -> ProviderPref {
         match self.for_role(role) {
+            // A role whose this-computer row sits below cloud rows is served by those rows while
+            // the Local row cannot run.
+            ProviderPref::LocalThenCloud if self.local_unreached_behind(role) => {
+                ProviderPref::Cloud
+            }
             ProviderPref::LocalThenCloud if self.emptied(role) => ProviderPref::Local,
             pref => pref,
         }
     }
 
+    /// Whether the role's stored list has a this-computer row below its cloud rows.
+    pub fn local_behind(&self, role: Role) -> bool {
+        match role {
+            Role::Chat => self.local_behind.chat,
+            Role::Background => self.local_behind.background,
+        }
+    }
+
+    /// Whether this role's Local row sits below cloud rows AND cannot run now (Local AI off, or the
+    /// role waits for its model): the walk stops there and the rows above serve the role.
+    pub fn local_unreached_behind(&self, role: Role) -> bool {
+        self.local_behind(role) && (!self.local_ai_on || self.emptied(role))
+    }
+
     #[cfg(test)]
-    fn uniform(pref: ProviderPref) -> Self {
+    pub(crate) fn uniform(pref: ProviderPref) -> Self {
         Self {
             chat: pref,
             background: pref,
             local_ai_on: true,
             emptied: Emptied::default(),
+            local_behind: Emptied::default(),
         }
     }
 }
@@ -237,6 +265,9 @@ pub fn resolve_provider(
 ) -> ProviderChoice {
     match prefs.for_role(role) {
         ProviderPref::Cloud => ProviderChoice::Cloud,
+        // A stored list with its this-computer row BELOW cloud rows, while that row cannot run: the
+        // rows above answer and the walk stops at the Local row, so the role is a cloud one.
+        ProviderPref::LocalThenCloud if prefs.local_unreached_behind(role) => ProviderChoice::Cloud,
         ProviderPref::Local | ProviderPref::LocalThenCloud if !prefs.local_ai_on => {
             ProviderChoice::LocalAiOff
         }
@@ -245,7 +276,11 @@ pub fn resolve_provider(
         // Local only afterwards (#432 decision 7).
         ProviderPref::Local => ProviderChoice::Local,
         ProviderPref::LocalThenCloud if prefs.emptied(role) => ProviderChoice::Local,
-        ProviderPref::LocalThenCloud if runtime.moves(role) => ProviderChoice::CloudForPower,
+        // The policy moves a role only off a Local HEAD; a list that starts with a cloud row has
+        // nothing to move (the planner never makes this move for it).
+        ProviderPref::LocalThenCloud if runtime.moves(role) && !prefs.local_behind(role) => {
+            ProviderChoice::CloudForPower
+        }
         ProviderPref::LocalThenCloud => ProviderChoice::LocalThenCloud,
     }
 }
@@ -263,6 +298,11 @@ pub enum EffectiveRoute {
     LocalOnly,
     /// The local model answers, and the cloud model takes over on a hard failure.
     LocalThenCloud,
+    /// A person's own list that puts the cloud ahead of this computer ([Claude, This computer]):
+    /// the cloud row is asked first and this computer answers when it cannot. Never from
+    /// [`effective_route`] itself (which knows only the older three routings); the Local AI view
+    /// sets it from the list, so no surface says "local first" about a list that asks the cloud first.
+    CloudThenLocal,
     /// A "Local, fall back to cloud" role the On battery policy has moved to the cloud.
     CloudForPower,
     /// Nothing can answer: no key for a cloud route, or no local model for a local one.
@@ -309,6 +349,17 @@ pub fn effective_route(
             (false, KeyPresence::Present) => EffectiveRoute::Cloud,
             (false, KeyPresence::Absent) => EffectiveRoute::Nothing,
         },
+    }
+}
+
+/// [`effective_route`] read for a person's own list: when this computer sits BELOW a cloud row
+/// (`local_behind`) and would answer after it, the cloud is asked first, so the role reads
+/// [`EffectiveRoute::CloudThenLocal`], not the "local first" the older routing words would say.
+/// Every other reading is the older one, so a list nobody edited is described exactly as before.
+pub fn effective_route_for_list(effective: EffectiveRoute, local_behind: bool) -> EffectiveRoute {
+    match effective {
+        EffectiveRoute::LocalThenCloud if local_behind => EffectiveRoute::CloudThenLocal,
+        other => other,
     }
 }
 
@@ -430,28 +481,71 @@ pub(crate) fn cloud_provider_key(role: Role) -> &'static str {
     }
 }
 
-/// The role's stored provider through the allow-list, with no regard for whether it may be used:
-/// what the Settings state command shows as "stored", beside [`role_cloud_provider`]'s "effective".
+/// The provider the OLD rows name for a role, through the allow-list, with no regard for whether it
+/// may be used. Read only by a list nobody has edited (`route::derive`): once a role has a stored
+/// list, that list is the one truth and these rows are never read for routing again.
 /// DB read only.
-pub(crate) fn stored_role_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+pub(crate) fn legacy_stored_role_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
     Ok(CloudProvider::from_setting(
         db::get_setting(conn, cloud_provider_key(role))?.as_deref(),
     ))
 }
 
-/// The provider that actually answers the role: its stored one, demoted to OpenRouter when it is a
-/// direct provider the person has not opted into. The setters keep that true, so a demotion here is
-/// defence in depth for a restored backup or a hand-edited row, and it is never silent: the state
-/// command reports both the stored and the effective value. DB read only.
-pub(crate) fn role_cloud_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
-    let stored = stored_role_provider(conn, role)?;
+/// [`legacy_stored_role_provider`], demoted to OpenRouter when it is a direct provider the person
+/// has not opted into. The setters keep that true, so a demotion here is defence in depth for a
+/// restored backup or a hand-edited row. DB read only.
+pub(crate) fn legacy_role_cloud_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    let stored = legacy_stored_role_provider(conn, role)?;
     if stored.is_direct() && !crate::direct_providers::opted_in(conn, stored)? {
         return Ok(CloudProvider::OpenRouter);
     }
     Ok(stored)
 }
 
-/// Both roles' effective providers, read once. What the power policy and its status copy need.
+/// The role's provider as the Settings state command shows it as "stored", beside
+/// [`role_cloud_provider`]'s "effective": the provider of the list's first cloud row, which is the
+/// person's own list once they have one, else what the old rows say. DB read only.
+pub(crate) fn stored_role_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    match crate::route::stored_entries(conn, role)? {
+        Some(entries) => Ok(head_cloud_provider(&entries)),
+        None => legacy_stored_role_provider(conn, role),
+    }
+}
+
+/// The provider that actually answers the role: the list's first cloud row, or for a list nobody
+/// has edited its old provider row, demoted to OpenRouter when that is a direct provider that is not
+/// turned on. A stored list is NOT demoted here: a row that cannot be used is skipped, and said, when
+/// the request is planned, never answered from another company. DB read only.
+pub(crate) fn role_cloud_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    match crate::route::stored_entries(conn, role)? {
+        Some(entries) => Ok(head_cloud_provider(&entries)),
+        None => legacy_role_cloud_provider(conn, role),
+    }
+}
+
+/// The provider of the first cloud row of a list; OpenRouter, the inert value, when it has none.
+fn head_cloud_provider(entries: &[crate::route::Entry]) -> CloudProvider {
+    entries
+        .iter()
+        .find_map(|e| match e {
+            crate::route::Entry::Cloud { provider, .. } => Some(*provider),
+            crate::route::Entry::Local => None,
+        })
+        .unwrap_or(CloudProvider::OpenRouter)
+}
+
+/// The provider of the role's first cloud row. A list nobody has edited is read as the older rows
+/// say (the role's provider, even when its routing is local only), so a person who never edits a
+/// list sees no change; a stored list with no cloud row at all reads as OpenRouter, the inert value.
+/// DB read only.
+pub(crate) fn first_cloud_provider(conn: &Connection, role: Role) -> Result<CloudProvider> {
+    role_cloud_provider(conn, role)
+}
+
+/// Both roles' effective providers, read once: the provider of each role's FIRST cloud row, which is
+/// the row the On battery policy would move the role onto and so the one whose consent counts. A
+/// list nobody has edited reads exactly as before (the role's own provider setting). What the power
+/// policy and its status copy need; it stays `Copy`, one provider per role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoleProviders {
     pub chat: CloudProvider,
@@ -473,8 +567,8 @@ impl RoleProviders {
 
     pub(crate) fn read(conn: &Connection) -> Result<Self> {
         Ok(Self {
-            chat: role_cloud_provider(conn, Role::Chat)?,
-            background: role_cloud_provider(conn, Role::Background)?,
+            chat: first_cloud_provider(conn, Role::Chat)?,
+            background: first_cloud_provider(conn, Role::Background)?,
         })
     }
 
@@ -556,16 +650,57 @@ fn is_one_of(candidate: &str, stored: &[&str]) -> bool {
     !candidate.is_empty() && stored.iter().any(|s| s.trim() == candidate)
 }
 
-/// The role's effective provider from the open store, under a SHORT lock that is gone before this
-/// returns. `Err` when the store is closed or unreadable.
-fn role_provider_now(app: &AppHandle, role: Role) -> Result<CloudProvider> {
+/// The cloud providers a role's list reaches, in the list's order, each once, that PM may use: a
+/// direct provider only while it is turned on. A list nobody has edited whose routing is local only
+/// still reads as the role's own provider, because readiness has always asked "can this role reach a
+/// cloud provider" of the provider setting alone (the first-run gate must not change for a person
+/// who never edits a list); a stored list with no cloud row reaches none. A SHORT lock that is gone
+/// before this returns. `Err` when the store is closed or unreadable.
+fn role_providers_now(app: &AppHandle, role: Role) -> Result<Vec<CloudProvider>> {
     let state = app.state::<AppState>();
     let conn = state.conn()?;
-    role_cloud_provider(&conn, role)
+    providers_in(&conn, role)
 }
 
-/// Whether this role has a cloud key — a read of the role's provider setting, then the keychain's
-/// in-memory cache.
+/// [`role_providers_now`] on a connection, so the rule is a plain test.
+pub(crate) fn providers_in(conn: &Connection, role: Role) -> Result<Vec<CloudProvider>> {
+    let route = crate::route::entries_for(conn, role)?;
+    // A person's list is walked only down to a this-computer row that cannot run (Local AI off, or
+    // waiting for a model): the rows after it are never tried, so they are not a way for the role to
+    // answer, and a Local HEAD leaves the role nothing. A list nobody edited keeps reading every
+    // cloud row it has, as readiness always did.
+    let reach = if route.derived {
+        route.entries.len()
+    } else {
+        let prefs = routing_prefs(conn)?;
+        match route
+            .entries
+            .iter()
+            .position(|e| matches!(e, crate::route::Entry::Local))
+        {
+            Some(i) if !prefs.local_ai_on || prefs.emptied(role) => i,
+            _ => route.entries.len(),
+        }
+    };
+    let mut out: Vec<CloudProvider> = Vec::new();
+    for entry in &route.entries[..reach] {
+        if let crate::route::Entry::Cloud { provider, .. } = entry {
+            let on = !provider.is_direct() || crate::direct_providers::opted_in(conn, *provider)?;
+            if on && !out.contains(provider) {
+                out.push(*provider);
+            }
+        }
+    }
+    if out.is_empty() && route.derived {
+        out.push(role_cloud_provider(conn, role)?);
+    }
+    Ok(out)
+}
+
+/// Whether this role has a cloud key — a read of the role's list, then the keychain's in-memory
+/// cache. Ready means ANY cloud row of the list has its key (a restored list can name a provider
+/// whose key is not on this device, and the rows after it still count). Pause and the daily limit are
+/// not part of ready: they are the send's to refuse and to say, as they always were.
 ///
 /// THE one place that answers "can this role reach a cloud provider": the first-run gate, the three
 /// follow-up jobs' `ready` checks and the On battery policy all ask here instead of reading a key
@@ -573,13 +708,21 @@ fn role_provider_now(app: &AppHandle, role: Role) -> Result<CloudProvider> {
 /// called with the DB guard held: the mutex is not reentrant, and that is a self-deadlock. A closed
 /// store or a read error is `Unreadable`, never `Absent`: the role may well have a key.
 pub(crate) fn key_presence(app: &AppHandle, role: Role) -> KeyPresence {
-    let Ok(provider) = role_provider_now(app, role) else {
+    let Ok(providers) = role_providers_now(app, role) else {
         return KeyPresence::Unreadable;
     };
-    match key_for(provider, role) {
-        Ok(Some(_)) => KeyPresence::Present,
-        Ok(None) => KeyPresence::Absent,
-        Err(_) => KeyPresence::Unreadable,
+    let mut unreadable = false;
+    for provider in providers {
+        match key_for(provider, role) {
+            Ok(Some(_)) => return KeyPresence::Present,
+            Ok(None) => {}
+            Err(_) => unreadable = true,
+        }
+    }
+    if unreadable {
+        KeyPresence::Unreadable
+    } else {
+        KeyPresence::Absent
     }
 }
 
@@ -593,8 +736,15 @@ pub(crate) fn role_has_cloud(app: &AppHandle, role: Role) -> bool {
 /// folding it into "no" (the first-run status does, and always has). Same lock rule as
 /// [`key_presence`]: call it BEFORE taking the guard.
 pub(crate) fn try_role_has_cloud(app: &AppHandle, role: Role) -> Result<bool> {
-    let provider = role_provider_now(app, role)?;
-    Ok(key_for(provider, role)?.is_some())
+    let mut failed = None;
+    for provider in role_providers_now(app, role)? {
+        match key_for(provider, role) {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(e) => failed = failed.or(Some(e)),
+        }
+    }
+    failed.map_or(Ok(false), Err)
 }
 
 /// Whether the vault is open and the Background role has a cloud key: the gate the three
@@ -648,13 +798,47 @@ pub enum FallbackReason {
     /// of its own so a policy switch can never be folded into a hard-failure value, and filtered out
     /// of the failure strip by [`CallMeta::failure_fallback`].
     PowerPolicy,
+    /// A row of the person's list failed without billing and the next one answered. Failure-family
+    /// (it is shown in the strip) but kept apart from the local failures above and from
+    /// [`FallbackReason::PowerPolicy`].
+    ListWalk(crate::error::FailureClass),
+    /// A row of the person's list was passed over without a request (no key, paused, remembered as
+    /// down) and a later one answered. Kept apart from a failure: nothing was sent to it.
+    ListSkip(crate::error::SkipReason),
 }
 
 impl FallbackReason {
+    /// Why the local model did not answer, in the words the local strip uses (`fallbackCopy` in
+    /// `FallbackStrip.tsx`, pinned beside it by a test on each side). Only the local reasons have
+    /// their own; anything else reads as the strip's generic clause.
+    pub fn local_why(&self) -> &'static str {
+        match self {
+            FallbackReason::Cooldown => "your local model was resting after repeated errors",
+            FallbackReason::EndpointRefused => {
+                "your local endpoint's address now points somewhere PM won't send chats in the clear"
+            }
+            FallbackReason::HardFailure(kind) => match kind {
+                LocalFailKind::Timeout => "your local model timed out",
+                LocalFailKind::Refused => "your local model wasn't reachable",
+                LocalFailKind::ModelLoading => "your local model was still loading",
+                LocalFailKind::MalformedStream | LocalFailKind::DegenerateStream => {
+                    "your local model's reply was unusable"
+                }
+                LocalFailKind::ReplyTooLarge => "your local model's reply was too large",
+                LocalFailKind::UnfinishedThought => "your local model thought without answering",
+                _ => "your local model couldn't answer",
+            },
+            _ => "your local model couldn't answer",
+        }
+    }
+
     /// A stable snake_case token for `usage_log.fallback_reason` and the honesty surface. The
     /// failure family is prefixed `hard_failure:`; a power-policy switch is never in that family.
+    /// A list's own walk is `list_<class>` and its skip `list_skip_<reason>`.
     pub fn as_log_str(&self) -> String {
         match self {
+            FallbackReason::ListWalk(class) => format!("list_{}", class.as_str()),
+            FallbackReason::ListSkip(why) => format!("list_skip_{}", why.as_str()),
             FallbackReason::HardFailure(kind) => format!("hard_failure:{}", fail_kind_slug(kind)),
             FallbackReason::Cooldown => "cooldown".to_string(),
             FallbackReason::EndpointRefused => "endpoint_refused".to_string(),
@@ -777,6 +961,9 @@ pub enum ChatDelta<'a> {
     Answer(&'a str),
     Thinking(&'a str),
     Note(ThinkingNote),
+    /// A later row of the person's list answered: what became of every row, in order, for the
+    /// notice. Sent once, after the answer's tokens and before the call returns.
+    Walked(&'a [crate::error::Attempt]),
 }
 
 /// What a failed local chat leg does next.
@@ -875,7 +1062,7 @@ pub(crate) fn ping_status(app: &AppHandle) {
 /// requests fall under. Every arm is OpenRouter today; the others are the providers a person's own
 /// key will be able to reach, named now so the seams (the two dispatch functions below, and what a
 /// mod may use) decide about them in one place each instead of by accident later.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
     OpenRouter,
@@ -1080,7 +1267,10 @@ fn parse_pref(raw: Option<String>) -> ProviderPref {
     }
 }
 
-pub(crate) fn routing_prefs(conn: &rusqlite::Connection) -> Result<RoutingPrefs> {
+/// The routing the OLD rows say, with the Local AI switch and the emptied records. Read by a list
+/// nobody has edited (`route::derive`) and by [`routing_prefs`] for such a role, never for a role
+/// that has a stored list.
+pub(crate) fn legacy_routing_prefs(conn: &rusqlite::Connection) -> Result<RoutingPrefs> {
     Ok(RoutingPrefs {
         chat: parse_pref(crate::db::get_setting(conn, CHAT_ROUTING_KEY)?),
         background: parse_pref(crate::db::get_setting(conn, BACKGROUND_ROUTING_KEY)?),
@@ -1089,6 +1279,59 @@ pub(crate) fn routing_prefs(conn: &rusqlite::Connection) -> Result<RoutingPrefs>
             chat: crate::db::get_bool(conn, CHAT_MODEL_EMPTIED_KEY, false)?,
             background: crate::db::get_bool(conn, BACKGROUND_MODEL_EMPTIED_KEY, false)?,
         },
+        local_behind: Emptied::default(),
+    })
+}
+
+/// Whether a list has its first this-computer row below at least one cloud row.
+pub(crate) fn local_is_behind(entries: &[crate::route::Entry]) -> bool {
+    entries
+        .iter()
+        .position(|e| matches!(e, crate::route::Entry::Local))
+        .is_some_and(|i| i > 0)
+}
+
+/// What a person's own list says about where a role runs, in the words the old routing used: no
+/// this-computer row is `Cloud`, this computer alone is `Local`, this computer beside any cloud row
+/// is `LocalThenCloud`. (Where the row sits is the planner's to read; the Local AI tab and the
+/// switch only ask "does this role use a local model, and is anything else behind it".)
+pub(crate) fn pref_of_list(entries: &[crate::route::Entry]) -> ProviderPref {
+    let local = entries
+        .iter()
+        .any(|e| matches!(e, crate::route::Entry::Local));
+    let cloud = entries
+        .iter()
+        .any(|e| matches!(e, crate::route::Entry::Cloud { .. }));
+    match (local, cloud) {
+        (false, _) => ProviderPref::Cloud,
+        (true, false) => ProviderPref::Local,
+        (true, true) => ProviderPref::LocalThenCloud,
+    }
+}
+
+/// The routing every reader sees: a role with a stored list reads its routing FROM the list (so the
+/// Local AI tab, the switch and the status never describe a routing the person did not write), and a
+/// role without one reads the old rows exactly as before.
+pub(crate) fn routing_prefs(conn: &rusqlite::Connection) -> Result<RoutingPrefs> {
+    let mut prefs = legacy_routing_prefs(conn)?;
+    if let Some(list) = crate::route::stored_entries(conn, Role::Chat)? {
+        prefs.chat = pref_of_list(&list);
+        prefs.local_behind.chat = local_is_behind(&list);
+    }
+    if let Some(list) = crate::route::stored_entries(conn, Role::Background)? {
+        prefs.background = pref_of_list(&list);
+        prefs.local_behind.background = local_is_behind(&list);
+    }
+    Ok(prefs)
+}
+
+/// The routing words a role's Local AI view shows (`cloud`, `local`, `local-then-cloud`), from the
+/// list when the role has one, else the old row. The one place the Local AI code reads it.
+pub(crate) fn routing_word(conn: &rusqlite::Connection, role: Role) -> Result<&'static str> {
+    Ok(match routing_prefs(conn)?.for_role(role) {
+        ProviderPref::Cloud => "cloud",
+        ProviderPref::Local => "local",
+        ProviderPref::LocalThenCloud => "local-then-cloud",
     })
 }
 
@@ -1102,58 +1345,148 @@ pub(crate) fn routing_prefs(conn: &rusqlite::Connection) -> Result<RoutingPrefs>
 /// holds a lock across `resolve`'s return or across the caller's later work. The power latch is read
 /// BEFORE the DB guard is taken, so no lock is ever acquired while another is held.
 pub fn resolve(app: &AppHandle, role: Role) -> Result<Option<RoutePlan>> {
+    // A mod is handed one of the four old shapes, never a ladder: the return type says so (I-13).
+    Ok(match resolve_in(app, role, Mode::Mod)? {
+        Some(Plan::Route(plan)) => Some(plan),
+        Some(Plan::Ladder(_)) | None => None,
+    })
+}
+
+/// The plan for a person's own request: their list as it stands, walked rung by rung when it is
+/// more than one of the old shapes. EVERY caller that is not a mod asks here, never [`resolve`]
+/// (a scan pins it), so a mod can never be handed a ladder and a person never a mod's cut of their
+/// list. Same locking as [`resolve`].
+pub fn resolve_plan(app: &AppHandle, role: Role) -> Result<Option<Plan>> {
+    resolve_in(app, role, Mode::Person)
+}
+
+/// What the store says about a role's request, read under ONE short guard.
+struct Read {
+    prefs: RoutingPrefs,
+    ctx: RuntimeContext,
+    route: crate::route::RoleRoute,
+    /// Each direct provider that has a row: whether it is turned on, and what its arm needs from the
+    /// store.
+    direct: Vec<(CloudProvider, bool, crate::direct_providers::ArmInputs)>,
+}
+
+fn resolve_in(app: &AppHandle, role: Role, mode: Mode) -> Result<Option<Plan>> {
     let state = app.state::<AppState>();
     // In-memory and read BEFORE the DB guard, so no lock is ever taken while another is held.
     let snap = state.local_ai.power_snapshot(Instant::now());
     let keep_local = state.local_ai.keep_local();
 
-    let choice = {
+    let Read {
+        prefs,
+        ctx,
+        route,
+        direct,
+    } = {
         let conn = state.conn()?;
         // Write what earlier calls learned about a key's tier BEFORE the consent is read: a paid key
         // that a call just found free drops its On battery yes here, so this very plan can't still
         // send under that yes. Cheap when nothing is pending (no key read, no DB write).
         crate::direct_providers::apply_seen(&conn)?;
         let prefs = routing_prefs(&conn)?;
-        resolve_provider(
-            role,
-            &prefs,
-            &RuntimeContext::current(&snap, keep_local, &conn),
-        )
+        let ctx = RuntimeContext::current(&snap, keep_local, &conn);
+        let route = crate::route::entries_for(&conn, role)?;
+        let mut direct = Vec::new();
+        for entry in &route.entries {
+            if let crate::route::Entry::Cloud { provider, .. } = entry {
+                if provider.is_direct() && !direct.iter().any(|(p, _, _)| p == provider) {
+                    direct.push((
+                        *provider,
+                        crate::direct_providers::opted_in(&conn, *provider)?,
+                        crate::direct_providers::arm_inputs(&conn, *provider, role)?,
+                    ));
+                }
+            }
+        }
+        Read {
+            prefs,
+            ctx,
+            route,
+            direct,
+        }
     };
 
-    let plan = match choice {
-        ProviderChoice::Cloud => cloud_arm(app, role)?.map(RoutePlan::Cloud),
-        ProviderChoice::Local => local_arm(app, role)?.map(RoutePlan::LocalOnly),
-        ProviderChoice::LocalThenCloud | ProviderChoice::CloudForPower => {
-            let local = local_arm(app, role)?;
-            let cloud = cloud_arm(app, role)?;
-            // The policy never moves a role onto a paused provider (a free Gemini key where only paid
-            // ones are used): the status says it stays local, and the send seam would refuse it.
-            //
-            // Nor onto one the person's daily limit has paused: the send seam would refuse it, so the
-            // role would fail every call on battery instead of staying on the local model. No guard
-            // is held here (the block above has closed), which the limit's read needs.
-            let power = choice == ProviderChoice::CloudForPower
-                && !cloud
-                    .as_ref()
-                    .is_some_and(crate::direct_providers::arm_paused)
-                && !cloud
-                    .as_ref()
-                    .is_some_and(|c| crate::daily_limit::is_paused(app, c.provider));
-            hydrate_local_then_cloud(power, local, cloud)
-        }
-        // No arm is hydrated at all, so not even a key is read: the role has nothing to answer it,
-        // and the caller says so ([`no_provider_message_for`]) or skips.
-        ProviderChoice::LocalAiOff => None,
+    // The guard is gone: the keychain, the local arm's own short reads and the limit's read (which
+    // takes the guard itself) may all run now.
+    let has_local = route
+        .entries
+        .iter()
+        .any(|e| matches!(e, crate::route::Entry::Local));
+    // With Local AI off the role stops at the planner and no local arm (nor its token) is read.
+    let local = if has_local && prefs.local_ai_on {
+        local_arm(app, role)?
+    } else {
+        None
     };
-    Ok(plan)
+    let mut seat = |p: CloudProvider| -> Seat {
+        let (opted_in, inputs) = match direct.iter().find(|(d, _, _)| *d == p) {
+            Some((_, on, inputs)) => (*on, Some(inputs)),
+            None => (!p.is_direct(), None),
+        };
+        // A provider that is turned off is never asked for its key.
+        if !opted_in {
+            return Seat {
+                opted_in,
+                key: KeyRead::None,
+                tier: None,
+            };
+        }
+        let key = match key_for(p, role) {
+            Ok(Some(k)) => KeyRead::Key(k),
+            Ok(None) => KeyRead::None,
+            Err(e) => KeyRead::Unreadable(e.to_string()),
+        };
+        // A stored verdict counts only when it was stored beside THIS key: a verdict carried in a
+        // backup or a shared vault says nothing about a key typed on this device.
+        let tier = match (&key, inputs) {
+            (KeyRead::Key(k), Some(i)) => {
+                crate::direct_providers::tier_for_key(i.tier, i.key_fp.as_deref(), k.expose())
+            }
+            _ => None,
+        };
+        Seat {
+            opted_in,
+            key,
+            tier,
+        }
+    };
+    // The policy never moves a role onto a paused provider (a free Gemini key where only paid ones
+    // are used): the status says it stays local, and the send seam would refuse it. Nor onto one the
+    // person's daily limit has paused: the send seam would refuse it, so the role would fail every
+    // call on battery instead of staying on the local model. No guard is held here (the block above
+    // has closed), which the limit's read needs.
+    let power_ok = |arm: &CloudArm| {
+        !crate::direct_providers::arm_paused(arm)
+            && !crate::daily_limit::is_paused(app, arm.provider)
+    };
+    list_plan::plan(
+        list_plan::Inputs {
+            role,
+            route: &route,
+            prefs: &prefs,
+            ctx: &ctx,
+            local,
+        },
+        mode,
+        &mut seat,
+        &power_ok,
+    )
 }
 
 /// The "Local, fall back to cloud" ladder, with the power policy's one substitution. Pure. The
 /// policy only ever replaces a both-arms pair, so it adds no failure mode and can never route a
 /// request to nothing: without a key or without a local model, the plan is exactly the one the
 /// preference alone gives.
-fn hydrate_local_then_cloud(
+///
+/// Since the list became the route this is no longer what [`resolve_in`] builds with: the planner
+/// ([`list_plan::plan`]) does, and is held to this function's answers by the golden plan test, which
+/// keeps it as the oracle for every configuration that existed before lists.
+#[cfg(test)]
+pub(crate) fn hydrate_local_then_cloud(
     power: bool,
     local: Option<LocalArm>,
     cloud: Option<CloudArm>,
@@ -1182,8 +1515,8 @@ fn hydrate_local_then_cloud(
 /// Deliberately NOT re-checked: the in-call retry loops in `run_local_complete` (the preemption and
 /// model-loading budgets). That request has already started on its arm and may already have caused a
 /// load; moving it mid-call would pay for the load and then not use it.
-pub fn refresh_plan(app: &AppHandle, role: Role, plan: &mut RoutePlan) {
-    match resolve(app, role) {
+pub fn refresh_plan(app: &AppHandle, role: Role, plan: &mut Plan) {
+    match resolve_plan(app, role) {
         Ok(Some(fresh)) => *plan = fresh,
         Ok(None) => {}
         Err(e) => {
@@ -1202,62 +1535,20 @@ pub(crate) fn power_route_error(e: Error) -> Error {
     Error::Other(format!("{e} — {POWER_ROUTED_FAILED_HINT}"))
 }
 
-/// Hydrate the cloud arm for a role: the role's provider, its key and its models, or `None` with no
-/// key. One short lock reads the provider and, for a direct provider, its model and effort; the
-/// guard is gone before the keychain is asked.
-fn cloud_arm(app: &AppHandle, role: Role) -> Result<Option<CloudArm>> {
-    let state = app.state::<AppState>();
-    let (provider, direct) = {
-        let conn = state.conn()?;
-        let provider = role_cloud_provider(&conn, role)?;
-        let direct = if provider.is_direct() {
-            // What failed calls learned since the last resolve is written first, so this arm is built
-            // on the latest verdict. The guard is already held; nothing here awaits.
-            crate::direct_providers::apply_seen(&conn)?;
-            Some(crate::direct_providers::arm_inputs(&conn, provider, role)?)
-        } else {
-            None
-        };
-        (provider, direct)
-    };
-    let Some(key) = key_for(provider, role)? else {
-        return Ok(None);
-    };
-    if let Some(inputs) = direct {
-        // A stored verdict counts only when it was stored beside THIS key: a verdict carried in a
-        // backup or a shared vault says nothing about a key typed on this device. Compared here, after
-        // the keychain read, so no second guard is needed.
-        let tier = crate::direct_providers::tier_for_key(
-            inputs.tier,
-            inputs.key_fp.as_deref(),
-            key.expose(),
-        );
-        return Ok(Some(CloudArm {
-            provider,
-            key,
-            models: inputs.models,
-            effort: inputs.effort,
-            tier,
-            role: Some(role),
-        }));
-    }
-    let (models_key, auto_key) = match role {
-        Role::Chat => (CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY),
-        Role::Background => (BACKGROUND_MODELS_KEY, BACKGROUND_AUTO_SWITCH_KEY),
-    };
-    let models = {
-        let conn = state.conn()?;
-        effective_models(&conn, models_key, auto_key)?
-    };
-    Ok(Some(CloudArm::new(CloudProvider::OpenRouter, key, models)))
-}
-
-/// The Background role's whole model list in the person's order, with auto-switch ignored (the
-/// money prompt of a mod's `ai` names all of it; see `mods::api::ai::ModelEdge::listed_models`).
+/// The OpenRouter rows of the plan a mod's call runs on, which is what the mod's money prompt names
+/// (see `mods::api::ai::ModelEdge::listed_models`). A list nobody has edited keeps what it always
+/// was: the Background role's whole saved list in the person's order, with auto-switch ignored, so
+/// the prompt stays true when the person turns auto-switch on later. A list the person wrote is its
+/// own source: the first run of OpenRouter rows when the list's first cloud row is OpenRouter, and
+/// nothing when it is a direct provider's (the mod gets no AI then, and the prompt is never shown).
 pub(crate) fn background_model_list(app: &AppHandle) -> Result<Vec<String>> {
     let state = app.state::<AppState>();
     let conn = state.conn()?;
-    crate::settings::models_for(&conn, BACKGROUND_MODELS_KEY)
+    let route = crate::route::entries_for(&conn, Role::Background)?;
+    if route.derived {
+        return crate::settings::models_for(&conn, BACKGROUND_MODELS_KEY);
+    }
+    Ok(list_plan::mod_openrouter_models(&route.entries))
 }
 
 /// Whether the person's daily limit has paused a provider right now, for the not-working card (it
@@ -1274,17 +1565,36 @@ pub(crate) fn limit_paused(app: &AppHandle, p: CloudProvider) -> bool {
 pub(crate) fn openrouter_offer_model(app: &AppHandle, role: Role) -> Option<String> {
     let key = key_for(CloudProvider::OpenRouter, role).ok().flatten()?;
     drop(key);
-    let (models_key, _) = openrouter_keys(role);
     let state = app.state::<AppState>();
     let conn = state.conn().ok()?;
-    crate::settings::models_for(&conn, models_key)
-        .ok()?
-        .into_iter()
-        .next()
+    role_openrouter_ids(&conn, role).ok()?.into_iter().next()
+}
+
+/// The OpenRouter models a role has: the OpenRouter rows of its list when it has one of its own
+/// (none at all is possible, and then there is nothing to offer), else the saved model list it has
+/// always had. DB read only.
+pub(crate) fn role_openrouter_ids(conn: &Connection, role: Role) -> Result<Vec<String>> {
+    match crate::route::stored_entries(conn, role)? {
+        Some(list) => Ok(list
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::route::Entry::Cloud {
+                    provider: CloudProvider::OpenRouter,
+                    model,
+                    ..
+                } => Some(model),
+                _ => None,
+            })
+            .collect()),
+        None => {
+            let (models_key, _) = openrouter_keys(role);
+            crate::settings::models_for(conn, models_key)
+        }
+    }
 }
 
 /// The settings keys of OpenRouter's model list and auto-switch for a role.
-fn openrouter_keys(role: Role) -> (&'static str, &'static str) {
+pub(crate) fn openrouter_keys(role: Role) -> (&'static str, &'static str) {
     match role {
         Role::Chat => (CHAT_MODELS_KEY, CHAT_AUTO_SWITCH_KEY),
         Role::Background => (BACKGROUND_MODELS_KEY, BACKGROUND_AUTO_SWITCH_KEY),
@@ -1361,11 +1671,10 @@ pub(crate) fn plan_for_entry(
             let Some(key) = key_for(CloudProvider::OpenRouter, role)? else {
                 return Err(Error::Other(missing_key_message(CloudProvider::OpenRouter)));
             };
-            let (models_key, _) = openrouter_keys(role);
             let listed = {
                 let state = app.state::<AppState>();
                 let conn = state.conn()?;
-                crate::settings::models_for(&conn, models_key)?
+                role_openrouter_ids(&conn, role)?
             };
             if !listed.contains(&entry.model) {
                 return Err(Error::Other(
@@ -1484,15 +1793,30 @@ pub(crate) fn local_chat_configured(conn: &Connection) -> Result<bool> {
     })
 }
 
+/// Whether this computer has a server and a model chosen for the role, with Local AI on. A short
+/// guard of its own, so it is called with none held.
+fn local_chat_ready(app: &AppHandle, role: Role) -> bool {
+    local_offer_model(app, role).is_some()
+}
+
 /// Run a non-streaming completion through the resolved route, returning the completion plus how it
 /// was served. Background consumers (summaries, titles, proposals) call this.
 pub async fn complete(
     app: &AppHandle,
-    plan: &RoutePlan,
+    plan: &Plan,
     messages: &[ChatMessage],
     cache_prefix: bool,
 ) -> Result<LlmOutcome> {
-    complete_capped(app, plan, messages, cache_prefix, None).await
+    match plan {
+        Plan::Route(plan) => complete_capped(app, plan, messages, cache_prefix, None).await,
+        Plan::Ladder(ladder) => {
+            // A list with a local row exists only because Local AI was on when it was resolved.
+            if plan.needs_local_ai() {
+                local_ai_gate(&app.state::<AppState>().local_ai)?;
+            }
+            complete_ladder(app, ladder, messages, cache_prefix, None).await
+        }
+    }
 }
 
 /// [`complete`] with the answer's length bounded (`max_tokens`) on every leg the route can take,
@@ -1520,10 +1844,10 @@ pub async fn complete_capped(
             })
         }
         RoutePlan::LocalOnly(local) => {
-            run_local_complete(app, local, messages, None, max_tokens).await
+            run_local_complete(app, local, messages, CloudTail::None, max_tokens).await
         }
         RoutePlan::LocalThenCloud { local, cloud } => {
-            run_local_complete(app, local, messages, Some(cloud), max_tokens).await
+            run_local_complete(app, local, messages, CloudTail::One(cloud), max_tokens).await
         }
         // Straight to the cloud arm with the caller's own `cache_prefix`, NOT through `cloud_complete`,
         // which hard-codes `false`: the review and retag batches ask for the cached prefix and a
@@ -1566,7 +1890,7 @@ async fn run_local_complete(
     app: &AppHandle,
     local: &LocalArm,
     messages: &[ChatMessage],
-    cloud: Option<&CloudArm>,
+    tail: CloudTail<'_>,
     max_tokens: Option<u32>,
 ) -> Result<LlmOutcome> {
     let state = app.state::<AppState>();
@@ -1574,19 +1898,19 @@ async fn run_local_complete(
 
     // Cooldown gate: skip the local attempt entirely while the host rests after repeated failures.
     if !rt.available() {
-        return match cloud {
-            Some(cloud) => {
-                cloud_complete(
-                    rt,
-                    cloud,
-                    messages,
-                    FallbackReason::Cooldown,
-                    local.model.clone(),
-                    max_tokens,
-                )
-                .await
-            }
-            None => Err(Error::Other(cooldown_message(rt))),
+        return if tail.exists() {
+            tail_complete(
+                app,
+                rt,
+                tail,
+                messages,
+                FallbackReason::Cooldown,
+                local.model.clone(),
+                max_tokens,
+            )
+            .await
+        } else {
+            Err(Error::Other(cooldown_message(rt)))
         };
     }
 
@@ -1595,19 +1919,19 @@ async fn run_local_complete(
     // loop below — a warming host can iterate a dozen-plus times and must not re-resolve each pass.
     // A refusal is never recorded against the circuit breaker (see `endpoint_refused_now`).
     if crate::local_ai::endpoint_refused_now(&local.base_url).await {
-        return match cloud {
-            Some(cloud) => {
-                cloud_complete(
-                    rt,
-                    cloud,
-                    messages,
-                    FallbackReason::EndpointRefused,
-                    local.model.clone(),
-                    max_tokens,
-                )
-                .await
-            }
-            None => Err(Error::Other(crate::local_ai::CALL_TIME_REFUSAL.into())),
+        return if tail.exists() {
+            tail_complete(
+                app,
+                rt,
+                tail,
+                messages,
+                FallbackReason::EndpointRefused,
+                local.model.clone(),
+                max_tokens,
+            )
+            .await
+        } else {
+            Err(Error::Other(crate::local_ai::CALL_TIME_REFUSAL.into()))
         };
     }
 
@@ -1621,21 +1945,21 @@ async fn run_local_complete(
         // is what lets "raise the context length and restart the server" actually work without
         // also restarting PM.
         ensure_local_window_cached(app, local);
-        return match cloud {
-            // Cloud windows are orders of magnitude larger, so the prompt that did not fit locally
-            // all but certainly fits there.
-            Some(cloud) => {
-                cloud_complete(
-                    rt,
-                    cloud,
-                    messages,
-                    FallbackReason::HardFailure(failure.kind),
-                    local.model.clone(),
-                    max_tokens,
-                )
-                .await
-            }
-            None => Err(local_failure_to_error(&failure)),
+        // Cloud windows are orders of magnitude larger, so the prompt that did not fit locally all
+        // but certainly fits there.
+        return if tail.exists() {
+            tail_complete(
+                app,
+                rt,
+                tail,
+                messages,
+                FallbackReason::HardFailure(failure.kind),
+                local.model.clone(),
+                max_tokens,
+            )
+            .await
+        } else {
+            Err(local_failure_to_error(&failure))
         };
     }
 
@@ -1720,19 +2044,19 @@ async fn run_local_complete(
                     tokio::time::sleep(loading_retry_backoff(loading_recheck)).await;
                     continue;
                 }
-                return match cloud {
-                    Some(cloud) => {
-                        cloud_complete(
-                            rt,
-                            cloud,
-                            messages,
-                            FallbackReason::HardFailure(failure.kind),
-                            local.model.clone(),
-                            max_tokens,
-                        )
-                        .await
-                    }
-                    None => Err(local_failure_to_error(&failure)),
+                return if tail.exists() {
+                    tail_complete(
+                        app,
+                        rt,
+                        tail,
+                        messages,
+                        FallbackReason::HardFailure(failure.kind),
+                        local.model.clone(),
+                        max_tokens,
+                    )
+                    .await
+                } else {
+                    Err(local_failure_to_error(&failure))
                 };
             }
         }
@@ -1886,6 +2210,39 @@ pub(crate) fn stamp_attempt(
 /// has no such argument, so it can never think.
 pub async fn stream_chat<F>(
     app: &AppHandle,
+    plan: &Plan,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    show_thinking: bool,
+    on_delta: F,
+) -> Result<LlmOutcome>
+where
+    F: FnMut(ChatDelta<'_>),
+{
+    match plan {
+        Plan::Route(plan) => {
+            stream_route(app, plan, messages, cache_through, show_thinking, on_delta).await
+        }
+        Plan::Ladder(ladder) => {
+            if plan.needs_local_ai() {
+                local_ai_gate(&app.state::<AppState>().local_ai)?;
+            }
+            stream_ladder(
+                app,
+                ladder,
+                messages,
+                cache_through,
+                show_thinking,
+                on_delta,
+            )
+            .await
+        }
+    }
+}
+
+/// [`stream_chat`] for one of the four old shapes.
+async fn stream_route<F>(
+    app: &AppHandle,
     plan: &RoutePlan,
     messages: &[ChatMessage],
     cache_through: Option<usize>,
@@ -1914,7 +2271,7 @@ where
                 local,
                 messages,
                 cache_through,
-                None,
+                CloudTail::None,
                 show_thinking,
                 on_delta,
             )
@@ -1926,7 +2283,7 @@ where
                 local,
                 messages,
                 cache_through,
-                Some(cloud),
+                CloudTail::One(cloud),
                 show_thinking,
                 on_delta,
             )
@@ -1962,7 +2319,7 @@ async fn run_local_stream<F>(
     local: &LocalArm,
     messages: &[ChatMessage],
     cache_through: Option<usize>,
-    cloud: Option<&CloudArm>,
+    tail: CloudTail<'_>,
     show_thinking: bool,
     mut on_delta: F,
 ) -> Result<LlmOutcome>
@@ -1973,40 +2330,40 @@ where
     let rt = &state.local_ai;
 
     if !rt.available() {
-        return match cloud {
-            Some(cloud) => {
-                cloud_stream(
-                    rt,
-                    cloud,
-                    messages,
-                    cache_through,
-                    on_delta,
-                    FallbackReason::Cooldown,
-                    local.model.clone(),
-                )
-                .await
-            }
-            None => Err(Error::Other(cooldown_message(rt))),
+        return if tail.exists() {
+            tail_stream(
+                app,
+                rt,
+                tail,
+                messages,
+                cache_through,
+                on_delta,
+                FallbackReason::Cooldown,
+                local.model.clone(),
+            )
+            .await
+        } else {
+            Err(Error::Other(cooldown_message(rt)))
         };
     }
 
     // The same call-time posture gate as `run_local_complete`, before a single chat token can leave
     // the machine. Nothing has been streamed yet, so falling back to cloud here is always clean.
     if crate::local_ai::endpoint_refused_now(&local.base_url).await {
-        return match cloud {
-            Some(cloud) => {
-                cloud_stream(
-                    rt,
-                    cloud,
-                    messages,
-                    cache_through,
-                    on_delta,
-                    FallbackReason::EndpointRefused,
-                    local.model.clone(),
-                )
-                .await
-            }
-            None => Err(Error::Other(crate::local_ai::CALL_TIME_REFUSAL.into())),
+        return if tail.exists() {
+            tail_stream(
+                app,
+                rt,
+                tail,
+                messages,
+                cache_through,
+                on_delta,
+                FallbackReason::EndpointRefused,
+                local.model.clone(),
+            )
+            .await
+        } else {
+            Err(Error::Other(crate::local_ai::CALL_TIME_REFUSAL.into()))
         };
     }
 
@@ -2026,20 +2383,20 @@ where
         failure
             .detail
             .push_str(" — or use Compress to shrink this conversation");
-        return match cloud {
-            Some(cloud) => {
-                cloud_stream(
-                    rt,
-                    cloud,
-                    messages,
-                    cache_through,
-                    on_delta,
-                    FallbackReason::HardFailure(failure.kind),
-                    local.model.clone(),
-                )
-                .await
-            }
-            None => Err(local_failure_to_error(&failure)),
+        return if tail.exists() {
+            tail_stream(
+                app,
+                rt,
+                tail,
+                messages,
+                cache_through,
+                on_delta,
+                FallbackReason::HardFailure(failure.kind),
+                local.model.clone(),
+            )
+            .await
+        } else {
+            Err(local_failure_to_error(&failure))
         };
     }
 
@@ -2108,21 +2465,19 @@ where
         Err(failure) => {
             rt.record(CallOutcome::for_failure(&failure.kind));
             ping_status(app);
-            match (
-                after_local_failure(leg.answered, leg.shown_thinking, cloud.is_some()),
-                cloud,
-            ) {
+            match after_local_failure(leg.answered, leg.shown_thinking, tail.exists()) {
                 // No answer shown yet — a fallback to cloud is safe, once any shown thinking is gone.
-                (AfterLocalFailure::FallBack { drop_thinking }, Some(cloud)) => {
+                AfterLocalFailure::FallBack { drop_thinking } => {
                     // Asked before the note too: a fallback the switch refuses must not first tell
                     // the chat it is falling back.
                     local_ai_gate(rt)?;
                     if drop_thinking {
                         on_delta(ChatDelta::Note(ThinkingNote::FellBack));
                     }
-                    cloud_stream(
+                    tail_stream(
+                        app,
                         rt,
-                        cloud,
+                        tail,
                         messages,
                         cache_through,
                         on_delta,
@@ -2132,7 +2487,7 @@ where
                     .await
                 }
                 // Local-only, or the local leg already streamed an answer: surface the failure.
-                _ => Err(local_failure_to_error(&failure)),
+                AfterLocalFailure::Surface => Err(local_failure_to_error(&failure)),
             }
         }
     }
@@ -2202,6 +2557,845 @@ where
     .await
 }
 
+// ---- THE LADDER: running a person's list ----------------------------------------------------------
+//
+// THREAT MODEL. These guards catch MISTAKES by PM and real provider replies; they are not a lock
+// against a hostile local user and do not defend against a vendor lying about usage. What must never
+// happen here: a request billed twice (a walk after a failure that may have billed), a reply sent to
+// a row the person did not put in their list, a daily limit turning into a switch of meter, and
+// Local AI off becoming a cloud bill. The loop that decides is [`ladder::walk`]; this section only
+// supplies what it asks (the skips, the limit, the one request) and tags the answer.
+
+/// What a Local head falls back to when it cannot answer: nothing, one cloud arm (today's
+/// local-then-cloud), or the rest of the person's list.
+#[derive(Clone, Copy)]
+pub(crate) enum CloudTail<'a> {
+    None,
+    One(&'a CloudArm),
+    /// The rest of the list, and whether the Local head that fell is a server on ANOTHER machine
+    /// (so the notes name it "your Local AI server", not "this computer").
+    Ladder(&'a [Rung], bool),
+}
+
+impl CloudTail<'_> {
+    /// Whether there is anything to fall back TO. Rows PM could not even build do not count: a
+    /// local failure then surfaces as itself, as it does for a local-only role.
+    fn exists(self) -> bool {
+        match self {
+            CloudTail::None => false,
+            CloudTail::One(_) => true,
+            CloudTail::Ladder(rungs, _) => rungs.iter().any(|r| matches!(r, Rung::Cloud(_))),
+        }
+    }
+}
+
+/// Whether a Local row's server is another machine, by the same loopback test the 4c card makes
+/// ([`local_offer_from`]), so the strip, the log and the chip say the same thing about it.
+fn local_is_elsewhere(local: &LocalArm) -> bool {
+    !crate::openai_compat::host_is_loopback_literal(&local.base_url)
+}
+
+/// What a failed cloud call is to the walk. PURE: `answered` is "an answer token already reached the
+/// UI", and then NOTHING follows whatever the adapter proved (R3). The only place that rule is
+/// applied to a cloud rung, so a test (and a scan of both streaming attempts) can pin it.
+fn rung_failure(e: Error, answered: bool, retry_after: Option<Duration>) -> RungFailure {
+    let f = RungFailure::of(e).with_retry_after(retry_after);
+    if answered {
+        f.after_an_answer()
+    } else {
+        f
+    }
+}
+
+/// ONE cloud call as a walk's rung: it runs under a mark of its own (so a rate limit's
+/// `Retry-After`, seen deep inside the adapter, reaches the failure) and a failure becomes a
+/// [`RungFailure`] through [`rung_failure`]. `answered` is read AFTER the call, when it failed.
+async fn rung_call<T>(
+    call: impl std::future::Future<Output = Result<T>>,
+    answered: impl FnOnce() -> bool,
+) -> std::result::Result<T, RungFailure> {
+    let holder = crate::wire_mark::WireMark::nested();
+    let out = holder.scope(call).await;
+    out.map_err(|e| rung_failure(e, answered(), holder.retry_after()))
+}
+
+/// A rung's failure with what the walk reads from it. Billing and class come from the typed error a
+/// cloud attempt ends in; a local rung's are decided in [`RungFailure::local`].
+pub(crate) struct RungFailure {
+    error: Error,
+    billing: crate::error::Billing,
+    class: crate::error::FailureClass,
+    /// How long a rate-limited reply asked to wait, for the entry-health memory. `None` for every
+    /// other failure and for a reply that named no wait.
+    retry_after: Option<Duration>,
+}
+
+impl RungFailure {
+    fn of(error: Error) -> Self {
+        use crate::ladder::Failed;
+        let (billing, class) = (error.billing(), error.class());
+        Self {
+            error,
+            billing,
+            class,
+            retry_after: None,
+        }
+    }
+
+    /// An answer token already reached the UI, so whatever the adapter proved, nothing follows.
+    fn after_an_answer(mut self) -> Self {
+        self.billing = crate::error::Billing::MaybeBilled;
+        self
+    }
+
+    /// A local row's failure. It costs nothing, so it walks on, UNLESS an answer token reached the UI
+    /// or Local AI went off under it: then it STOPS (the switch said no more local work, never "try
+    /// the cloud instead"). `MaybeBilled` is how the walk is told to stop.
+    fn local(error: Error, answered: bool, local_ai_on: bool) -> Self {
+        let walks = !answered && local_ai_on;
+        Self {
+            error,
+            billing: if walks {
+                crate::error::Billing::NeverLeft
+            } else {
+                crate::error::Billing::MaybeBilled
+            },
+            class: crate::error::FailureClass::Other,
+            retry_after: None,
+        }
+    }
+
+    /// A row the plan marked unusable reached an attempt, which the walk's skip check prevents.
+    fn never_tried() -> Self {
+        Self {
+            error: Error::Other("PM tried a row of your list it had already passed over.".into()),
+            billing: crate::error::Billing::MaybeBilled,
+            class: crate::error::FailureClass::Other,
+            retry_after: None,
+        }
+    }
+
+    /// The wait the failed reply asked for.
+    fn with_retry_after(mut self, wait: Option<Duration>) -> Self {
+        self.retry_after = wait;
+        self
+    }
+
+    fn walks(&self) -> bool {
+        self.billing != crate::error::Billing::MaybeBilled
+    }
+}
+
+impl crate::ladder::Failed for RungFailure {
+    fn billing(&self) -> crate::error::Billing {
+        self.billing
+    }
+    fn class(&self) -> crate::error::FailureClass {
+        self.class
+    }
+}
+
+/// How a walk began when a Local head already failed: why the reply moved and which local model it
+/// left, and what to say about that row.
+#[derive(Default)]
+struct Start {
+    seed: Vec<crate::error::Attempt>,
+    lead: Option<(FallbackReason, String)>,
+}
+
+impl Start {
+    fn after_local(reason: FallbackReason, displaced: String, local_elsewhere: bool) -> Self {
+        Self {
+            seed: vec![crate::error::Attempt {
+                entry: crate::error::AttemptEntry {
+                    provider: None,
+                    model: Some(displaced.clone()),
+                    local_elsewhere,
+                },
+                // The local strip's own words for why the local model did not answer, not a
+                // company's class line ("it failed").
+                outcome: crate::error::AttemptOutcome::LocalFailed(reason.local_why()),
+            }],
+            lead: Some((reason, displaced)),
+        }
+    }
+}
+
+/// What a walk asks of the world, so a test can answer without a network or a store.
+struct Checks<'a> {
+    health: &'a crate::entry_health::Health,
+    /// The prompt's size (an upper estimate), for the window check.
+    estimate: i64,
+    /// Each rung's window in tokens, by rung; `None` is "not known", which never skips.
+    windows: &'a [Option<i64>],
+    /// Whether a region pause refuses this arm (a free Gemini key where only paid ones are used).
+    paused: &'a (dyn Fn(&CloudArm) -> bool + Sync),
+    /// The person's daily limit: the typed refusal when this provider is paused by it.
+    limit: &'a (dyn Fn(CloudProvider) -> Option<Error> + Sync),
+}
+
+/// A prompt over a window by more than a tenth is not sent: the estimate is pessimistic on purpose,
+/// and a request that can only fail should not be paid for (6.10).
+fn too_long(estimate: i64, window: Option<i64>) -> bool {
+    window.is_some_and(|w| w > 0 && estimate * 10 > w * 11)
+}
+
+/// The window of a cloud row. A direct model's is the catalogue's `max_input`; an OpenRouter run's
+/// is the largest of its models, and only when EVERY model's is known (OpenRouter falls through the
+/// run itself, so one unknown model may take it).
+fn arm_window(arm: &CloudArm, openrouter: &dyn Fn(&str) -> Option<i64>) -> Option<i64> {
+    if arm.provider.is_direct() {
+        return arm
+            .models
+            .first()
+            .and_then(|m| crate::direct_models::find(m))
+            .map(|m| i64::from(m.max_input));
+    }
+    let known: Option<Vec<i64>> = arm.models.iter().map(|m| openrouter(m)).collect();
+    known?.into_iter().max()
+}
+
+/// Each rung's window, read once for the request under one short guard (none is held by a caller,
+/// and nothing awaits here). A store that will not open means no window is known, so nothing skips.
+fn rung_windows(app: &AppHandle, rungs: &[Rung]) -> Vec<Option<i64>> {
+    let state = app.state::<AppState>();
+    let guard = state.conn().ok();
+    let conn: Option<&Connection> = guard.as_deref();
+    let openrouter = |model: &str| -> Option<i64> {
+        conn?
+            .query_row(
+                "SELECT context_length FROM model_pricing WHERE model = ?1 \
+                 ORDER BY fetched_at DESC LIMIT 1",
+                [model],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+            .filter(|w| *w > 0)
+    };
+    rungs
+        .iter()
+        .map(|r| match r {
+            Rung::Cloud(arm) => arm_window(arm, &openrouter),
+            _ => None,
+        })
+        .collect()
+}
+
+fn prompt_estimate(messages: &[ChatMessage]) -> i64 {
+    context_budget::est_messages_tokens_upper(messages.iter().map(|m| m.content.as_str()))
+}
+
+/// What remembered failures say to skip, by rung. A row that is not skipped for another reason is
+/// "usable"; when every usable row is remembered as down the memory is ignored (a stale mark can
+/// never wedge a role). A Local row that can answer counts as a usable row that is never down, so
+/// the memory then applies to the cloud rows, which is the point of having a free row to fall to.
+fn remembered(
+    health: &crate::entry_health::Health,
+    rungs: &[Rung],
+    apart: &[Option<crate::error::SkipReason>],
+    limit: &(dyn Fn(CloudProvider) -> Option<Error> + Sync),
+) -> Vec<Option<crate::entry_health::Down>> {
+    let mut out = vec![None; rungs.len()];
+    let rows: Vec<(usize, CloudProvider, &str)> = rungs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| match r {
+            Rung::Cloud(arm) if apart[i].is_none() && limit(arm.provider).is_none() => Some((
+                i,
+                arm.provider,
+                arm.models.first().map(String::as_str).unwrap_or_default(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if rungs.iter().any(|r| matches!(r, Rung::Local(_))) {
+        for (i, p, m) in &rows {
+            out[*i] = health.is_down(*p, m);
+        }
+    } else {
+        let asked: Vec<(CloudProvider, &str)> = rows.iter().map(|(_, p, m)| (*p, *m)).collect();
+        for ((i, _, _), down) in rows.iter().zip(health.unless_all_down(&asked)) {
+            out[*i] = down;
+        }
+    }
+    out
+}
+
+/// The reason an answered request is tagged with when nothing led the walk: the first row that did
+/// not answer, said as a skip or a failure.
+fn first_note(attempts: &[crate::error::Attempt]) -> Option<FallbackReason> {
+    use crate::error::AttemptOutcome;
+    attempts.iter().find_map(|a| match a.outcome {
+        AttemptOutcome::Skipped(r) => Some(FallbackReason::ListSkip(r)),
+        AttemptOutcome::Failed(c) => Some(FallbackReason::ListWalk(c)),
+        // Only a Local head's seed, which leads the walk itself and is never a list's own note.
+        AttemptOutcome::LocalFailed(_) | AttemptOutcome::Answered => None,
+    })
+}
+
+/// Walk a person's rungs for ONE request. `attempt(index, rung)` makes the single request for a rung
+/// (the real ones are [`attempt_complete`] and [`attempt_stream`]); everything else is policy:
+/// - a row is passed over, and said, when it is unusable, paused where the person is, too long for
+///   its window or remembered as down ([`Checks`]);
+/// - the daily limit is asked before a paid row, and is a brake ([`ladder::walk`], R3b);
+/// - after a request that failed WITHOUT billing, a class the memory keeps is remembered, and a
+///   success forgets any mark on its row;
+/// - the answer is tagged with how it came about, and a list that ran out is one [`Error::Exhausted`].
+async fn walk_ladder<'r, A, Fut>(
+    checks: Checks<'_>,
+    rungs: &'r [Rung],
+    start: Start,
+    mut attempt: A,
+) -> (Result<LlmOutcome>, Vec<crate::error::Attempt>)
+where
+    A: FnMut(usize, &'r Rung) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<LlmOutcome, RungFailure>>,
+{
+    use crate::error::SkipReason;
+    use crate::ladder::End;
+    let Checks {
+        health,
+        estimate,
+        windows,
+        paused,
+        limit,
+    } = checks;
+    let apart: Vec<Option<SkipReason>> = rungs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| match r {
+            Rung::Unusable { why, .. } => Some(*why),
+            Rung::Local(_) => None,
+            Rung::Cloud(arm) => {
+                if paused(arm) {
+                    Some(SkipReason::Paused)
+                } else if too_long(estimate, windows.get(i).copied().flatten()) {
+                    Some(SkipReason::TooLong)
+                } else {
+                    None
+                }
+            }
+        })
+        .collect();
+    let downs = remembered(health, rungs, &apart, limit);
+    let items: Vec<(usize, &'r Rung)> = rungs.iter().enumerate().collect();
+    let walked = crate::ladder::walk(
+        &items,
+        |it| it.1.kind(),
+        |it| it.1.label(),
+        |it| apart[it.0].or_else(|| downs[it.0].as_ref().map(|d| SkipReason::Down(d.class))),
+        |it| match it.1 {
+            Rung::Cloud(arm) => limit(arm.provider).map(RungFailure::of),
+            _ => None,
+        },
+        |it| {
+            let (i, rung) = *it;
+            let fut = attempt(i, rung);
+            async move {
+                let result = fut.await;
+                if let Rung::Cloud(arm) = rung {
+                    let model = arm.models.first().map(String::as_str).unwrap_or_default();
+                    match &result {
+                        Ok(_) => health.succeeded(arm.provider, model),
+                        // Only a failure that proved it billed nothing is remembered: a class the
+                        // memory does not keep is ignored by `mark` itself.
+                        Err(f) if f.walks() => {
+                            health.mark(arm.provider, model, f.class, f.retry_after)
+                        }
+                        Err(_) => {}
+                    }
+                }
+                result
+            }
+        },
+    )
+    .await;
+
+    let seed_len = start.seed.len();
+    let mut attempts = start.seed;
+    attempts.extend(walked.attempts);
+    // The chat stream tells the person every row's part; the tag below is only the first note.
+    let notes = attempts.clone();
+    let out = match walked.end {
+        End::Answered { value, .. } => {
+            let mut out = value;
+            if let Some((reason, displaced)) = start.lead {
+                // A Local head that failed is why the reply moved. If a LATER row also failed or
+                // was passed over before the answer, the reply is tagged by that row's own note
+                // (so the chat tells every row, and the Usage line counts this reply: a quiet bad
+                // middle row must not hide behind the local reason). The displaced model is kept.
+                out.meta.fallback = Some(first_note(&attempts[seed_len..]).unwrap_or(reason));
+                out.meta.displaced_local_model = Some(displaced);
+            } else if let Some(reason) = first_note(&attempts) {
+                out.meta.fallback = Some(reason);
+            }
+            Ok(out)
+        }
+        End::Stopped(f) => Err(f.error),
+        End::Exhausted(last) => {
+            let last = last
+                .map(|f| f.error)
+                .unwrap_or_else(|| Error::Other(crate::error::exhausted_sentence(&attempts)));
+            Err(Error::Exhausted {
+                attempts,
+                last: Box::new(last),
+            })
+        }
+    };
+    (out, notes)
+}
+
+/// The model that answered, for a completion whose server did not say: the row's own, never the
+/// plan's first.
+fn served_on(completion: &mut Completion, model: Option<&String>) {
+    if completion.model.is_none() {
+        completion.model = model.cloned();
+    }
+}
+
+/// ONE cloud request on a rung, non-streaming. It goes through [`cloud_complete_via`], which asks the
+/// daily limit first and runs under its own wire mark. A Local row is not attempted here: the walk a
+/// Local head falls into never holds one (a list has at most one), and keeping Local out of this
+/// function is what stops the local executor and the walk from calling each other forever.
+async fn attempt_complete_cloud(
+    rung: &Rung,
+    messages: &[ChatMessage],
+    cache_prefix: bool,
+    max_tokens: Option<u32>,
+) -> std::result::Result<LlmOutcome, RungFailure> {
+    match rung {
+        Rung::Cloud(arm) => {
+            let start = Instant::now();
+            let mut completion = rung_call(
+                cloud_complete_via(arm, messages, cache_prefix, max_tokens),
+                || false,
+            )
+            .await?;
+            served_on(&mut completion, arm.models.first());
+            Ok(LlmOutcome {
+                completion,
+                meta: CallMeta::cloud(start.elapsed(), arm.provider),
+            })
+        }
+        Rung::Local(_) | Rung::Unusable { .. } => Err(RungFailure::never_tried()),
+    }
+}
+
+/// ONE request on a rung of a list walked from its first row: a cloud row as above, a Local row
+/// once on its own (all its gates and retries intact, no cloud behind it). `max_tokens` reaches
+/// every rung.
+async fn attempt_complete(
+    app: &AppHandle,
+    rung: &Rung,
+    messages: &[ChatMessage],
+    cache_prefix: bool,
+    max_tokens: Option<u32>,
+) -> std::result::Result<LlmOutcome, RungFailure> {
+    match rung {
+        Rung::Local(local) => {
+            let state = app.state::<AppState>();
+            let ran = run_local_complete(app, local, messages, CloudTail::None, max_tokens).await;
+            ran.map_err(|e| RungFailure::local(e, false, state.local_ai.local_ai_on()))
+        }
+        other => attempt_complete_cloud(other, messages, cache_prefix, max_tokens).await,
+    }
+}
+
+/// Tell the Settings page the rows' health may have changed, after a walk that failed or that a
+/// later row answered (the only walks that can have marked a row). A plain first-row answer says
+/// nothing: a Review run of 200 documents would otherwise emit 200 events for nothing.
+fn announce_walk(app: &AppHandle, out: &Result<LlmOutcome>) {
+    let changed = match out {
+        Err(_) => true,
+        Ok(o) => o.meta.fallback.is_some(),
+    };
+    if changed {
+        route_changed(app);
+    }
+}
+
+/// The event the Settings page re-reads the lists' status on: a list was edited, or a row's health
+/// changed.
+pub(crate) fn route_changed(app: &AppHandle) {
+    let _ = app.emit("route://changed", ());
+}
+
+/// Whether a provider's key is there, for the status of a list row. Keychain only, no DB, so it
+/// may be asked with or without the guard.
+pub(crate) fn provider_key_state(provider: CloudProvider, role: Role) -> KeyPresence {
+    match key_for(provider, role) {
+        Ok(Some(_)) => KeyPresence::Present,
+        Ok(None) => KeyPresence::Absent,
+        Err(_) => KeyPresence::Unreadable,
+    }
+}
+
+fn limit_now(p: CloudProvider) -> Option<Error> {
+    crate::daily_limit::gate(p).err()
+}
+
+fn paused_now(arm: &CloudArm) -> bool {
+    crate::direct_providers::arm_paused(arm)
+}
+
+/// The real walk, non-streaming, over whichever attempt the caller supplies.
+async fn walk_complete<'r, A, Fut>(
+    app: &AppHandle,
+    rungs: &'r [Rung],
+    messages: &[ChatMessage],
+    start: Start,
+    attempt: A,
+) -> Result<LlmOutcome>
+where
+    A: FnMut(usize, &'r Rung) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<LlmOutcome, RungFailure>>,
+{
+    let windows = rung_windows(app, rungs);
+    // A non-streaming call has no one watching to tell; the tag on the answer is all it keeps.
+    let (out, _) = walk_ladder(
+        Checks {
+            health: crate::entry_health::global(),
+            estimate: prompt_estimate(messages),
+            windows: &windows,
+            paused: &paused_now,
+            limit: &limit_now,
+        },
+        rungs,
+        start,
+        attempt,
+    )
+    .await;
+    announce_walk(app, &out);
+    out
+}
+
+/// A Local head's fallback to the rest of its list (or to its one cloud arm), non-streaming.
+async fn tail_complete(
+    app: &AppHandle,
+    rt: &crate::local_slot::LocalRuntime,
+    tail: CloudTail<'_>,
+    messages: &[ChatMessage],
+    reason: FallbackReason,
+    displaced: String,
+    max_tokens: Option<u32>,
+) -> Result<LlmOutcome> {
+    match tail {
+        CloudTail::One(cloud) => {
+            cloud_complete(rt, cloud, messages, reason, displaced, max_tokens).await
+        }
+        CloudTail::Ladder(rungs, elsewhere) => {
+            // Every fallback from a local arm asks the switch once more (see `cloud_complete`).
+            local_ai_gate(rt)?;
+            // The rows after a Local head hold no Local row, so the walk here is cloud only.
+            walk_complete(
+                app,
+                rungs,
+                messages,
+                Start::after_local(reason, displaced, elsewhere),
+                |_, rung| attempt_complete_cloud(rung, messages, false, max_tokens),
+            )
+            .await
+        }
+        CloudTail::None => Err(Error::Other("There is nothing to fall back to.".into())),
+    }
+}
+
+/// [`complete`] for a person's list. A Local head keeps every gate and retry of the local arm and
+/// falls to the rest of the list where it fell to one cloud arm; any other list is walked from its
+/// first rung, and a Local row that is not the head is tried once, on its own, when the rows before
+/// it walked or were passed over. `max_tokens` reaches every rung.
+pub(crate) async fn complete_ladder(
+    app: &AppHandle,
+    ladder: &Ladder,
+    messages: &[ChatMessage],
+    cache_prefix: bool,
+    max_tokens: Option<u32>,
+) -> Result<LlmOutcome> {
+    if let Some(Rung::Local(local)) = ladder.rungs.first() {
+        return run_local_complete(
+            app,
+            local,
+            messages,
+            CloudTail::Ladder(&ladder.rungs[1..], local_is_elsewhere(local)),
+            max_tokens,
+        )
+        .await;
+    }
+    walk_complete(app, &ladder.rungs, messages, Start::default(), |_, rung| {
+        attempt_complete(app, rung, messages, cache_prefix, max_tokens)
+    })
+    .await
+}
+
+/// Where a stream's deltas go, shared by every rung of one request. The lock is held only while one
+/// delta is handed over, never across an await, so the future stays `Send`. It also remembers
+/// whether an ANSWER reached the UI: after that no row may be tried (R3).
+struct Sink<F> {
+    forward: std::sync::Mutex<F>,
+    answered: std::sync::atomic::AtomicBool,
+}
+
+impl<F: FnMut(ChatDelta<'_>)> Sink<F> {
+    fn new(forward: F) -> Self {
+        Self {
+            forward: std::sync::Mutex::new(forward),
+            answered: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn send(&self, delta: ChatDelta<'_>) {
+        if matches!(delta, ChatDelta::Answer(_)) {
+            self.answered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut f = self.forward.lock().unwrap_or_else(|p| p.into_inner());
+        (*f)(delta);
+    }
+
+    /// A cloud token. An empty delta is not a token (the rule the local arm has).
+    fn answer(&self, t: &str) {
+        if !t.is_empty() {
+            self.send(ChatDelta::Answer(t));
+        }
+    }
+
+    fn answered(&self) -> bool {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// What became of each row of the list, once a later row has answered. Not an answer token, so
+    /// it never counts as one.
+    fn walked(&self, attempts: &[crate::error::Attempt]) {
+        self.send(ChatDelta::Walked(attempts));
+    }
+}
+
+/// ONE cloud request on a rung, streaming. A walk happens only BEFORE the stream started: a failure
+/// after an answer token reached the UI stops, whatever the adapter proved (R3). Local rows are
+/// attempted by [`attempt_stream`], not here, for the reason [`attempt_complete_cloud`] gives.
+async fn attempt_stream_cloud<F>(
+    rung: &Rung,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    sink: &Sink<F>,
+) -> std::result::Result<LlmOutcome, RungFailure>
+where
+    F: FnMut(ChatDelta<'_>),
+{
+    match rung {
+        Rung::Cloud(arm) => {
+            let start = Instant::now();
+            let mut completion = rung_call(
+                cloud_stream_via(arm, messages, cache_through, |t: &str| sink.answer(t)),
+                || sink.answered(),
+            )
+            .await?;
+            served_on(&mut completion, arm.models.first());
+            Ok(LlmOutcome {
+                completion,
+                meta: CallMeta::cloud(start.elapsed(), arm.provider),
+            })
+        }
+        Rung::Local(_) | Rung::Unusable { .. } => Err(RungFailure::never_tried()),
+    }
+}
+
+/// ONE request on a rung of a list walked from its first row. A Local row that failed after showing
+/// thinking and before any answer drops that thinking when a cloud row follows.
+async fn attempt_stream<F>(
+    app: &AppHandle,
+    rung: &Rung,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    show_thinking: bool,
+    sink: &Sink<F>,
+    cloud_follows: bool,
+) -> std::result::Result<LlmOutcome, RungFailure>
+where
+    F: FnMut(ChatDelta<'_>),
+{
+    match rung {
+        Rung::Local(local) => {
+            let state = app.state::<AppState>();
+            let thought = std::sync::atomic::AtomicBool::new(false);
+            let ran = run_local_stream(
+                app,
+                local,
+                messages,
+                cache_through,
+                CloudTail::None,
+                show_thinking,
+                |d: ChatDelta<'_>| {
+                    if matches!(d, ChatDelta::Thinking(_)) {
+                        thought.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    sink.send(d)
+                },
+            )
+            .await;
+            ran.map_err(|e| {
+                let f = RungFailure::local(e, sink.answered(), state.local_ai.local_ai_on());
+                if f.walks() && cloud_follows && thought.load(std::sync::atomic::Ordering::SeqCst) {
+                    sink.send(ChatDelta::Note(ThinkingNote::FellBack));
+                }
+                f
+            })
+        }
+        other => attempt_stream_cloud(other, messages, cache_through, sink).await,
+    }
+}
+
+/// The real walk, streaming, over whichever attempt the caller supplies. `tell` is handed every
+/// row's part when a LATER row of the list answered (never for a plain first-row answer, never for a
+/// failure: the failure's own card says what became of each row), so the chat can say who answered
+/// and why not the rows above it.
+async fn walk_stream<'r, A, Fut>(
+    app: &AppHandle,
+    rungs: &'r [Rung],
+    messages: &[ChatMessage],
+    start: Start,
+    attempt: A,
+    tell: impl FnOnce(&[crate::error::Attempt]),
+) -> Result<LlmOutcome>
+where
+    A: FnMut(usize, &'r Rung) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<LlmOutcome, RungFailure>>,
+{
+    let windows = rung_windows(app, rungs);
+    let (out, notes) = walk_ladder(
+        Checks {
+            health: crate::entry_health::global(),
+            estimate: prompt_estimate(messages),
+            windows: &windows,
+            paused: &paused_now,
+            limit: &limit_now,
+        },
+        rungs,
+        start,
+        attempt,
+    )
+    .await;
+    announce_walk(app, &out);
+    match &out {
+        // An answer tagged by a list's note is said row by row. A Local head that fell straight to
+        // the list's FIRST cloud row keeps the plain local strip (its reason leads); one whose tail
+        // also failed or passed over a row is tagged by that row's note, so it is told here too.
+        Ok(o) => {
+            if matches!(
+                o.meta.fallback,
+                Some(FallbackReason::ListWalk(_) | FallbackReason::ListSkip(_))
+            ) {
+                tell(&notes);
+            }
+        }
+        // A walk that STOPPED after asking other rows says so, so the card can tell the truth about
+        // what was asked before it ("Nothing was sent anywhere else" is false after a walk) and
+        // never offer those rows again. A list that ran out carries its own attempts.
+        Err(Error::Exhausted { .. }) => {}
+        Err(_) if notes.len() > 1 => tell(&notes),
+        Err(_) => {}
+    }
+    out
+}
+
+/// A Local head's fallback to the rest of its list (or to its one cloud arm), streaming.
+#[allow(clippy::too_many_arguments)]
+async fn tail_stream<F>(
+    app: &AppHandle,
+    rt: &crate::local_slot::LocalRuntime,
+    tail: CloudTail<'_>,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    on_delta: F,
+    reason: FallbackReason,
+    displaced: String,
+) -> Result<LlmOutcome>
+where
+    F: FnMut(ChatDelta<'_>),
+{
+    match tail {
+        CloudTail::One(cloud) => {
+            cloud_stream(
+                rt,
+                cloud,
+                messages,
+                cache_through,
+                on_delta,
+                reason,
+                displaced,
+            )
+            .await
+        }
+        CloudTail::Ladder(rungs, elsewhere) => {
+            local_ai_gate(rt)?;
+            let sink = Sink::new(on_delta);
+            let sink = &sink;
+            // The rows after a Local head hold no Local row, so the walk here is cloud only.
+            walk_stream(
+                app,
+                rungs,
+                messages,
+                Start::after_local(reason, displaced, elsewhere),
+                |_, rung| attempt_stream_cloud(rung, messages, cache_through, sink),
+                |notes| sink.walked(notes),
+            )
+            .await
+        }
+        CloudTail::None => Err(Error::Other("There is nothing to fall back to.".into())),
+    }
+}
+
+/// [`stream_chat`] for a person's list. Same shape as [`complete_ladder`]; a walk happens only
+/// before a token has reached the UI.
+pub(crate) async fn stream_ladder<F>(
+    app: &AppHandle,
+    ladder: &Ladder,
+    messages: &[ChatMessage],
+    cache_through: Option<usize>,
+    show_thinking: bool,
+    on_delta: F,
+) -> Result<LlmOutcome>
+where
+    F: FnMut(ChatDelta<'_>),
+{
+    if let Some(Rung::Local(local)) = ladder.rungs.first() {
+        return run_local_stream(
+            app,
+            local,
+            messages,
+            cache_through,
+            CloudTail::Ladder(&ladder.rungs[1..], local_is_elsewhere(local)),
+            show_thinking,
+            on_delta,
+        )
+        .await;
+    }
+    let sink = Sink::new(on_delta);
+    let sink = &sink;
+    let rungs = &ladder.rungs;
+    walk_stream(
+        app,
+        rungs,
+        messages,
+        Start::default(),
+        |i, rung| {
+            let cloud_follows = rungs[i + 1..].iter().any(|r| matches!(r, Rung::Cloud(_)));
+            attempt_stream(
+                app,
+                rung,
+                messages,
+                cache_through,
+                show_thinking,
+                sink,
+                cloud_follows,
+            )
+        },
+        |notes| sink.walked(notes),
+    )
+    .await
+}
+
 /// The message shown when NO provider is configured — provider-aware (a deliberate copy change from
 /// the old "No OpenRouter API key set", #297 PR3, changelog-noted). Neutral between the cloud and
 /// local paths so the keyless-onboarding direction (#295 PR7) reads right.
@@ -2228,19 +3422,71 @@ pub(crate) fn no_provider_message_with(prefs: &RoutingPrefs, role: Role) -> Stri
 /// so a caller must not be holding it (the mutex is not reentrant). A store that cannot be read
 /// gets the general message.
 pub fn no_provider_message_for(app: &AppHandle, role: Role) -> String {
-    let (prefs, provider) = {
+    let (prefs, provider, route, on) = {
         let state = app.state::<AppState>();
         let read = state.conn().map(|conn| {
+            let route = crate::route::entries_for(&conn, role).ok();
+            // Which direct providers are turned on, read with the list under the one guard.
+            let on: Vec<CloudProvider> = crate::direct_providers::PROVIDERS
+                .iter()
+                .filter(|d| crate::direct_providers::opted_in(&conn, d.provider).unwrap_or(false))
+                .map(|d| d.provider)
+                .collect();
             (
                 routing_prefs(&conn).ok(),
                 role_cloud_provider(&conn, role).ok(),
+                route,
+                on,
             )
         });
-        read.unwrap_or((None, None))
+        read.unwrap_or((None, None, None, Vec::new()))
     };
     let Some(prefs) = prefs else {
         return no_provider_message();
     };
+    // A list the person wrote says which of ITS rows can't answer and why, in one line. A list nobody
+    // has edited keeps the sentences below, unchanged.
+    if let Some(route) = route.filter(|r| !r.derived) {
+        let local_off_with_row = route
+            .entries
+            .iter()
+            .any(|e| matches!(e, crate::route::Entry::Local))
+            && !prefs.local_ai_on;
+        let rows: Vec<list_plan::RowStatus> = route
+            .entries
+            .iter()
+            .map(|e| match e {
+                crate::route::Entry::Local => list_plan::RowStatus {
+                    entry: crate::error::AttemptEntry {
+                        provider: None,
+                        model: None,
+                        local_elsewhere: false,
+                    },
+                    unusable: (prefs.emptied(role) || !local_chat_ready(app, role))
+                        .then_some(crate::error::SkipReason::NoLocalModel),
+                },
+                crate::route::Entry::Cloud {
+                    provider, model, ..
+                } => list_plan::RowStatus {
+                    entry: crate::error::AttemptEntry {
+                        provider: Some(*provider),
+                        model: Some(model.clone()),
+                        local_elsewhere: false,
+                    },
+                    unusable: if provider.is_direct() && !on.contains(provider) {
+                        Some(crate::error::SkipReason::NotOnForYou)
+                    } else {
+                        match key_for(*provider, role) {
+                            Ok(Some(_)) => None,
+                            Ok(None) => Some(crate::error::SkipReason::NoKey),
+                            Err(_) => Some(crate::error::SkipReason::KeyUnreadable),
+                        }
+                    },
+                },
+            })
+            .collect();
+        return list_plan::explain(&rows, local_off_with_row);
+    }
     // A role on your own key whose key isn't here: the state a restore onto a new machine leaves
     // (settings travel in a backup, keychain secrets don't). Say what is missing, not "no provider".
     if let Some(provider) = provider.filter(|p| p.is_direct()) {
@@ -2320,15 +3566,15 @@ fn local_refusal_ceiling(rt: &crate::local_slot::LocalRuntime, local: &LocalArm)
 /// This is the seam that lets the batchers stop building prompts the gateway would only refuse.
 /// [`prompt_fit_failure`] is the backstop for everything they cannot size — an unbounded project
 /// list, one enormous document — and for the window changing under a running app.
-pub fn prompt_ceiling_for(app: &AppHandle, plan: &RoutePlan) -> Option<i64> {
-    let local = sizing_arm(plan)?;
+pub fn prompt_ceiling_for(app: &AppHandle, plan: &Plan) -> Option<i64> {
+    let local = plan.sizing_arm()?;
     let state = app.state::<AppState>();
     local_prompt_ceiling(&state.local_ai, local)
 }
 
 /// The local arm a batch should be sized against, or `None` for a cloud route — including one the
 /// On battery policy chose, which is sized like any other cloud route.
-fn sizing_arm(plan: &RoutePlan) -> Option<&LocalArm> {
+pub(crate) fn sizing_arm(plan: &RoutePlan) -> Option<&LocalArm> {
     match plan {
         RoutePlan::Cloud(_) | RoutePlan::CloudForPower { .. } => None,
         RoutePlan::LocalOnly(local) | RoutePlan::LocalThenCloud { local, .. } => Some(local),
@@ -2496,14 +3742,31 @@ mod tests {
             plain.contains("complete_capped(app, plan, messages, cache_prefix, None)"),
             "{plain}"
         );
-        let streaming = live
-            .split("pub async fn stream_chat<F>(")
-            .nth(1)
-            .expect("stream_chat exists");
+        // A person's list is no different: `complete` hands its ladder no bound either.
         assert!(
-            !streaming.contains("max_tokens"),
-            "the chat stream is unbounded"
+            plain.contains("complete_ladder(app, ladder, messages, cache_prefix, None)"),
+            "{plain}"
         );
+        // The stream, whichever shape it runs, names no bound anywhere: not in `stream_chat`, and
+        // not in any function of the list's streaming side.
+        let body_of = |sig: &str| -> &str {
+            let rest = live.split(sig).nth(1).unwrap_or_else(|| panic!("{sig}"));
+            rest.split("\n}\n").next().unwrap()
+        };
+        for sig in [
+            "pub async fn stream_chat<F>(",
+            "async fn stream_route<F>(",
+            "async fn attempt_stream_cloud<F>(",
+            "async fn attempt_stream<F>(",
+            "async fn walk_stream<'r, A, Fut>(",
+            "async fn tail_stream<F>(",
+            "pub(crate) async fn stream_ladder<F>(",
+        ] {
+            assert!(
+                !body_of(sig).contains("max_tokens"),
+                "the chat stream is unbounded: {sig}"
+            );
+        }
     }
 
     /// A bounded call is bounded on EVERY leg the route can take: each request `complete_capped`
@@ -2538,10 +3801,41 @@ mod tests {
             ("gemini_direct::complete(", 1),
             ("anthropic_direct::complete(", 1),
             ("openai_compat::complete(", 1),
-            ("cloud_complete(\n", 4),
+            // The four ways a Local head hands over (cooldown, refused endpoint, fit gate, hard
+            // failure): each hands the bound to whatever follows, one arm or the rest of the list.
+            ("tail_complete(\n", 4),
             ("run_local_complete(app", 2),
         ] {
             let found = sites(needle);
+            assert_eq!(found.len(), count, "{needle}");
+            for site in found {
+                assert!(site.contains("max_tokens"), "{needle}: {site}");
+            }
+        }
+
+        // The list's own legs, in the ladder section: every request a rung can make, and every way
+        // into one, carries the bound too. A rung left out would be one a bounded call could spend
+        // on past the worst case PM booked.
+        let ladder_region = live
+            .split("// ---- THE LADDER: running a person's list")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Where a stream's deltas go").next())
+            .expect("the ladder's complete side comes before its stream side");
+        let ladder_sites = |needle: &str| -> Vec<&str> {
+            ladder_region
+                .match_indices(needle)
+                .filter(|(at, _)| !ladder_region[..*at].ends_with("fn "))
+                .map(|(at, _)| ladder_region[at..].split(".await").next().unwrap())
+                .collect()
+        };
+        for (needle, count) in [
+            ("cloud_complete_via(", 1),
+            ("cloud_complete(rt", 1),
+            ("run_local_complete(", 2),
+            ("attempt_complete_cloud(", 2),
+            ("attempt_complete(app", 1),
+        ] {
+            let found = ladder_sites(needle);
             assert_eq!(found.len(), count, "{needle}");
             for site in found {
                 assert!(site.contains("max_tokens"), "{needle}: {site}");
@@ -2561,7 +3855,8 @@ mod tests {
                 .filter(|(at, _)| !live[..*at].ends_with("fn "))
                 .count()
         };
-        assert_eq!(sites("cloud_stream_via("), 3);
+        // The cloud arm, the power route, the local fallback helper and a list's rung.
+        assert_eq!(sites("cloud_stream_via("), 4);
         assert_eq!(sites("openrouter::stream_chat("), 1);
         assert_eq!(sites("openrouter::complete("), 1);
         // Your own OpenAI key is reached by the same two dispatch functions and nowhere else.
@@ -3208,10 +4503,10 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
-        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let at = live.find("fn resolve_in(app: &AppHandle").unwrap();
         let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
         let closed = body
-            .find("let plan = match choice")
+            .find("// The guard is gone:")
             .expect("the guard block has closed by the time the arms are built");
         let asked = body
             .find(needles[1])
@@ -3851,6 +5146,7 @@ mod tests {
                 ChatDelta::Answer(t) => seen.push(format!("answer:{t}")),
                 ChatDelta::Thinking(t) => seen.push(format!("thinking:{t}")),
                 ChatDelta::Note(n) => seen.push(format!("note:{n:?}")),
+                ChatDelta::Walked(_) => seen.push("walked".into()),
             };
             let mut on_token = answers_only(&mut sink);
             on_token("");
@@ -3873,6 +5169,7 @@ mod tests {
                 ChatDelta::Answer(t) => seen.push(format!("answer:{t}")),
                 ChatDelta::Thinking(t) => seen.push(format!("thinking:{t}")),
                 ChatDelta::Note(n) => seen.push(format!("note:{n:?}")),
+                ChatDelta::Walked(_) => seen.push("walked".into()),
             };
             let mut leg = LocalLeg {
                 owes_no_room,
@@ -4003,6 +5300,7 @@ mod tests {
                 chat: false,
                 background: true,
             },
+            local_behind: Emptied::default(),
         };
         assert_eq!(prefs.for_role(Role::Chat), ProviderPref::Local);
         assert_eq!(prefs.for_role(Role::Background), ProviderPref::Cloud);
@@ -4444,21 +5742,20 @@ mod tests {
             resolve_provider(Role::Chat, &local, &ctx),
             ProviderChoice::Local
         );
-        // And `resolve` hydrates a cloud arm only for the three cloud choices.
+        // And `resolve_in` reads the local arm, and so builds anything at all for a list with a Local
+        // row, only while Local AI is on; the planner then stops such a role BEFORE it asks for a
+        // single key (`a_local_row_with_local_ai_off_stops_the_role_and_no_cloud_row_is_tried`).
         let live = include_str!("llm_gateway.rs")
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
         let resolve = live
-            .split("pub fn resolve(app: &AppHandle, role: Role)")
+            .split("fn resolve_in(app: &AppHandle")
             .nth(1)
-            .and_then(|r| {
-                r.split("/// The \"Local, fall back to cloud\" ladder")
-                    .next()
-            })
-            .expect("resolve");
-        assert!(resolve.contains("ProviderChoice::LocalAiOff => None"));
-        assert!(resolve.contains("ProviderChoice::Local => local_arm"));
+            .and_then(|r| r.split("\n}\n").next())
+            .expect("resolve_in");
+        assert!(resolve.contains("has_local && prefs.local_ai_on"));
+        assert!(resolve.contains("list_plan::plan("));
     }
 
     #[test]
@@ -4528,6 +5825,71 @@ mod tests {
             PowerRoute::NeedsConsent
         );
         assert_eq!(power_route(Role::Background, &ctx, None), PowerRoute::Cloud);
+    }
+
+    /// A stored list whose this-computer row sits BELOW a cloud row reads as the cloud role it is
+    /// while that row cannot run (Local AI off, or waiting for a model): not stopped, not asking for
+    /// a model, served as cloud. And the policy never moves it, on or off, because the planner moves
+    /// only a Local HEAD. A Local head keeps every old answer.
+    #[test]
+    fn a_local_row_below_a_cloud_row_is_a_cloud_role_while_it_cannot_run() {
+        let moving = RuntimeContext {
+            battery_low: true,
+            scope: PowerScope::Both,
+            consent: Consent::NONE
+                .with(PowerScope::Chat)
+                .with(PowerScope::Background),
+            keep_local: false,
+            ..RuntimeContext::default()
+        };
+        let mut behind = RoutingPrefs::uniform(ProviderPref::LocalThenCloud);
+        behind.local_behind = Emptied {
+            chat: true,
+            background: true,
+        };
+        let inert = RuntimeContext::default();
+        for role in [Role::Chat, Role::Background] {
+            // Off: the rows above answer.
+            behind.local_ai_on = false;
+            assert_eq!(
+                resolve_provider(role, &behind, &inert),
+                ProviderChoice::Cloud
+            );
+            assert_eq!(behind.served_pref(role), ProviderPref::Cloud);
+            // Waiting for a model (on, emptied): the same.
+            behind.local_ai_on = true;
+            behind.emptied = Emptied {
+                chat: true,
+                background: true,
+            };
+            assert_eq!(
+                resolve_provider(role, &behind, &inert),
+                ProviderChoice::Cloud
+            );
+            assert_eq!(behind.served_pref(role), ProviderPref::Cloud);
+            behind.emptied = Emptied::default();
+            // On and ready: still the old local-then-cloud reading, but never moved by the policy.
+            assert_eq!(
+                resolve_provider(role, &behind, &inert),
+                ProviderChoice::LocalThenCloud
+            );
+            assert_eq!(
+                resolve_provider(role, &behind, &moving),
+                ProviderChoice::LocalThenCloud,
+                "{role:?}: the policy moves only a Local head"
+            );
+            // A Local HEAD (nothing behind) keeps every old answer.
+            let mut head = RoutingPrefs::uniform(ProviderPref::LocalThenCloud);
+            assert_eq!(
+                resolve_provider(role, &head, &moving),
+                ProviderChoice::CloudForPower
+            );
+            head.local_ai_on = false;
+            assert_eq!(
+                resolve_provider(role, &head, &inert),
+                ProviderChoice::LocalAiOff
+            );
+        }
     }
 
     #[test]
@@ -4711,18 +6073,21 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
-        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let at = live.find("fn resolve_in(app: &AppHandle").unwrap();
         let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
         assert!(
-            body.contains("choice == ProviderChoice::CloudForPower")
-                && body.contains("crate::direct_providers::arm_paused"),
+            body.contains("let power_ok = |arm: &CloudArm|")
+                && body.contains("!crate::direct_providers::arm_paused(arm)"),
             "resolve must drop the power substitution for a paused cloud arm"
         );
         // And for one the person's daily limit has paused: the send seam refuses it too.
         assert!(
-            body.contains("crate::daily_limit::is_paused(app, c.provider)"),
+            body.contains("!crate::daily_limit::is_paused(app, arm.provider)"),
             "resolve must drop the power substitution for a limit-paused cloud arm"
         );
+        // The planner asks it before it lets the policy substitute (a golden test pins the effect).
+        let plan = include_str!("list_plan.rs");
+        assert!(plan.contains("Rung::Cloud(a) if power_ok(a)"));
     }
 
     /// A free note a call left in memory must reach the stored row (and forget a paid-time On battery
@@ -4733,7 +6098,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
-        let at = live.find("pub fn resolve(app: &AppHandle").unwrap();
+        let at = live.find("fn resolve_in(app: &AppHandle").unwrap();
         let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
         let seen = body
             .find("crate::direct_providers::apply_seen(&conn)")
@@ -4746,18 +6111,19 @@ mod tests {
     }
 
     /// A direct arm carries the role it was built for. Anthropic's request body reads it: Haiku's
-    /// thinking is switched off only for Background at Low. If `cloud_arm` ever dropped it, Haiku's
+    /// thinking is switched off only for Background at Low. If the planner ever dropped it, Haiku's
     /// background calls would silently keep thinking on and bill more, with nothing looking broken.
     /// The text is searched with its comments stripped, so a remark can't stand in for the field.
+    /// (The arm is built in `list_plan::plan` now; the golden plan test also compares the role.)
     #[test]
     fn the_direct_arm_is_built_with_its_role() {
-        let live = include_str!("llm_gateway.rs")
+        let live = include_str!("list_plan.rs")
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap();
-        let sig = concat!("fn cloud_arm(app: &AppHandle, ", "role: Role)");
-        let at = live.find(sig).expect("cloud_arm");
-        let body = &live[at..live[at..].find("\n}\n").unwrap() + at];
+        let sig = "pub(crate) fn plan(";
+        let at = live.find(sig).expect("the planner");
+        let body = &live[at..];
         let code: String = body
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
@@ -5002,6 +6368,7 @@ mod tests {
             (EffectiveRoute::Cloud, "cloud"),
             (EffectiveRoute::LocalOnly, "local_only"),
             (EffectiveRoute::LocalThenCloud, "local_then_cloud"),
+            (EffectiveRoute::CloudThenLocal, "cloud_then_local"),
             (EffectiveRoute::CloudForPower, "cloud_for_power"),
             (EffectiveRoute::Nothing, "nothing"),
             (EffectiveRoute::Unknown, "unknown"),
@@ -5024,4 +6391,288 @@ mod tests {
         assert!(msg.contains(POWER_ROUTED_FAILED_HINT));
         assert!(msg.contains("Keep using local until I quit PM"));
     }
+
+    /// A list's own walk and skip are failure-family notices of their own: kept apart from a local
+    /// failure and from the power policy (which is never a failure), with their own log tokens.
+    #[test]
+    fn a_lists_walk_and_skip_are_kept_apart_from_the_power_policy() {
+        use crate::error::{FailureClass, SkipReason};
+        assert_eq!(
+            FallbackReason::ListWalk(FailureClass::NoCredit).as_log_str(),
+            "list_no_credit"
+        );
+        assert_eq!(
+            FallbackReason::ListWalk(FailureClass::Busy).as_log_str(),
+            "list_busy"
+        );
+        assert_eq!(
+            FallbackReason::ListSkip(SkipReason::Paused).as_log_str(),
+            "list_skip_paused"
+        );
+        assert_eq!(
+            FallbackReason::ListSkip(SkipReason::NoKey).as_log_str(),
+            "list_skip_no_key"
+        );
+        assert_eq!(
+            FallbackReason::ListSkip(SkipReason::Down(FailureClass::KeyBad)).as_log_str(),
+            "list_skip_down"
+        );
+        let meta = |reason| CallMeta {
+            fallback: Some(reason),
+            ..CallMeta::cloud(std::time::Duration::ZERO, CloudProvider::Gemini)
+        };
+        // Both are shown in the strip (failure family) and neither is a power route.
+        for reason in [
+            FallbackReason::ListWalk(FailureClass::Busy),
+            FallbackReason::ListSkip(SkipReason::NoKey),
+        ] {
+            let m = meta(reason);
+            assert!(m.failure_fallback().is_some());
+            assert!(!m.power_routed());
+        }
+        let power = meta(FallbackReason::PowerPolicy);
+        assert!(power.failure_fallback().is_none());
+        assert!(power.power_routed());
+    }
+
+    /// EVERY caller that is not a mod asks for the person's own plan ([`resolve_plan`]); [`resolve`]
+    /// is the mod-facing one and its return type cannot hold a ladder. A second user of `resolve`
+    /// would hand a person a mod's cut of their list.
+    #[test]
+    fn only_a_mod_asks_for_the_mod_facing_plan() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let needle = concat!("llm_gateway", "::resolve(");
+        let import_one = concat!("llm_gateway", "::resolve;");
+        let import_as = concat!("llm_gateway", "::resolve as");
+        let import_group = concat!("llm_gateway", "::{");
+        let mut users = Vec::new();
+        for file in files {
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Files that are only tests may name it in their own scans.
+            if rel.ends_with("_tests.rs") || rel.ends_with("test_support.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            // Only live code counts: cut at the test MODULE (not at the first `#[cfg(test)]`, which
+            // can sit on an early test-only item and hide everything after it).
+            let live = text.split("#[cfg(test)]\nmod ").next().unwrap();
+            // Called by its path, or imported (alone, renamed, or inside a braced group), which would
+            // dodge the path needle: `use crate::llm_gateway::{resolve, ..}; resolve(&app, role)`.
+            let groups = live.match_indices(import_group).any(|(at, _)| {
+                live[at..]
+                    .split('}')
+                    .next()
+                    .unwrap_or_default()
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|tok| tok == "resolve")
+            });
+            if live.contains(needle)
+                || live.contains(import_one)
+                || live.contains(import_as)
+                || groups
+            {
+                users.push(rel);
+            }
+        }
+        assert_eq!(
+            users,
+            ["mods/api/ai.rs"],
+            "who asks for the mod-facing plan"
+        );
+        // And it cannot return a ladder: the type says so.
+        let live = include_str!("llm_gateway.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
+        assert!(live
+            .contains("pub fn resolve(app: &AppHandle, role: Role) -> Result<Option<RoutePlan>>"));
+        assert!(live
+            .contains("pub fn resolve_plan(app: &AppHandle, role: Role) -> Result<Option<Plan>>"));
+    }
+
+    fn temp_conn() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let pass = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let conn = db::open(&dir.path().join("t.sqlite"), pass).unwrap();
+        (dir, conn)
+    }
+
+    fn write_list(conn: &Connection, role: Role, entries: &[crate::route::Entry]) {
+        db::set_setting(
+            conn,
+            crate::route::route_key(role),
+            &crate::route::to_json(entries).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn claude_entry() -> crate::route::Entry {
+        let m = crate::direct_models::default_for(CloudProvider::Anthropic, Role::Chat).unwrap();
+        crate::route::Entry::Cloud {
+            provider: CloudProvider::Anthropic,
+            model: m.id.clone(),
+            effort: None,
+        }
+    }
+
+    fn or_entry(m: &str) -> crate::route::Entry {
+        crate::route::Entry::Cloud {
+            provider: CloudProvider::OpenRouter,
+            model: m.into(),
+            effort: None,
+        }
+    }
+
+    /// Ready means ANY cloud row of the list can be reached: every provider the list names that is
+    /// turned on, in its order, each once. A provider that is off does not count (its key is never
+    /// asked about), a list with no cloud row reaches none, and a list nobody has edited reads as the
+    /// role's own provider whatever its routing, exactly as before lists.
+    #[test]
+    fn readiness_reads_every_cloud_row_of_the_list() {
+        let (_d, conn) = temp_conn();
+        // Nothing stored: the role's provider (OpenRouter), and the first row's provider is the same.
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::OpenRouter]
+        );
+        assert_eq!(
+            first_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::OpenRouter
+        );
+        // A list nobody edited whose routing is local only still reads as the provider setting.
+        db::set_setting(&conn, CHAT_ROUTING_KEY, "local").unwrap();
+        db::set_setting(&conn, CHAT_CLOUD_PROVIDER_KEY, "anthropic").unwrap();
+        crate::direct_providers::set_opt_in(&conn, CloudProvider::Anthropic, true).unwrap();
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::Anthropic]
+        );
+        assert_eq!(
+            first_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::Anthropic
+        );
+        // A stored list is its own truth: Claude then OpenRouter, in that order, each once.
+        write_list(
+            &conn,
+            Role::Chat,
+            &[claude_entry(), or_entry("v/a"), or_entry("v/b")],
+        );
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::Anthropic, CloudProvider::OpenRouter]
+        );
+        assert_eq!(
+            first_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::Anthropic
+        );
+        // Turn the provider off: the list still names it, but it does not count as ready.
+        crate::direct_providers::set_opt_in(&conn, CloudProvider::Anthropic, false).unwrap();
+        // (turning it off retires its rows from nothing here: the stored list is read as written)
+        write_list(&conn, Role::Chat, &[claude_entry(), or_entry("v/a")]);
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::OpenRouter]
+        );
+        // A list with no cloud row at all reaches none, and its first-row provider is the inert one.
+        write_list(&conn, Role::Chat, &[crate::route::Entry::Local]);
+        assert!(providers_in(&conn, Role::Chat).unwrap().is_empty());
+        assert_eq!(
+            first_cloud_provider(&conn, Role::Chat).unwrap(),
+            CloudProvider::OpenRouter
+        );
+        // The other role is untouched.
+        assert_eq!(
+            providers_in(&conn, Role::Background).unwrap(),
+            [CloudProvider::OpenRouter]
+        );
+    }
+
+    /// A role is usable while Local AI is off when a row ABOVE the first this-computer row is: the
+    /// walk stops at that row, so the cloud rows after it are no way for the role to answer, and a
+    /// Local head leaves it nothing. On, every cloud row counts as before. A list nobody edited keeps
+    /// reading every cloud row.
+    #[test]
+    fn readiness_counts_only_the_rows_above_a_local_row_while_local_ai_is_off() {
+        use crate::route::Entry;
+        let (_d, conn) = temp_conn();
+        let set_on = |on: bool| {
+            db::set_bool(&conn, crate::local_ai_switch::LOCAL_AI_ENABLED_KEY, on).unwrap()
+        };
+        crate::direct_providers::set_opt_in(&conn, CloudProvider::Anthropic, true).unwrap();
+        write_list(
+            &conn,
+            Role::Chat,
+            &[claude_entry(), Entry::Local, or_entry("v/a")],
+        );
+        set_on(false);
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::Anthropic],
+            "the row after the Local row is never tried, so it is not readiness"
+        );
+        write_list(
+            &conn,
+            Role::Chat,
+            &[Entry::Local, claude_entry(), or_entry("v/a")],
+        );
+        assert!(
+            providers_in(&conn, Role::Chat).unwrap().is_empty(),
+            "a Local head stops the role: nothing behind it is ready"
+        );
+        set_on(true);
+        assert_eq!(
+            providers_in(&conn, Role::Chat).unwrap(),
+            [CloudProvider::Anthropic, CloudProvider::OpenRouter],
+            "with Local AI on every cloud row of the list counts"
+        );
+        // Waiting for a model (emptied) is the same stop as off.
+        db::set_bool(&conn, CHAT_MODEL_EMPTIED_KEY, true).unwrap();
+        assert!(providers_in(&conn, Role::Chat).unwrap().is_empty());
+        // A list nobody edited: readiness reads the provider setting, whatever Local AI says.
+        let (_d2, fresh) = temp_conn();
+        db::set_bool(&fresh, crate::local_ai_switch::LOCAL_AI_ENABLED_KEY, false).unwrap();
+        db::set_setting(&fresh, CHAT_ROUTING_KEY, "local-then-cloud").unwrap();
+        assert_eq!(
+            providers_in(&fresh, Role::Chat).unwrap(),
+            [CloudProvider::OpenRouter]
+        );
+    }
+
+    /// The battery policy's consent follows the FIRST cloud row of a list, per role.
+    #[test]
+    fn the_roles_provider_for_consent_is_its_first_cloud_row() {
+        let (_d, conn) = temp_conn();
+        crate::direct_providers::set_opt_in(&conn, CloudProvider::Anthropic, true).unwrap();
+        write_list(
+            &conn,
+            Role::Chat,
+            &[crate::route::Entry::Local, claude_entry(), or_entry("v/a")],
+        );
+        let p = RoleProviders::read(&conn).unwrap();
+        assert_eq!(p.chat, CloudProvider::Anthropic);
+        assert_eq!(p.background, CloudProvider::OpenRouter);
+        assert_eq!(
+            p.for_role(Role::Chat),
+            first_cloud_provider(&conn, Role::Chat).unwrap()
+        );
+    }
 }
+
+#[cfg(test)]
+mod ladder_tests;

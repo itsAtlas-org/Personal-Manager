@@ -245,10 +245,18 @@ merely discouraged — it cannot be called at all through OpenRouter.
 
 A provider key the person adds themselves (today: their own OpenAI, Google Gemini or Anthropic key) follows THAT provider's
 terms, which are not zero data retention. That carve-out is explicit and bounded: it is opt-in per
-provider and off by default; the warning is shown wherever the provider is chosen; the setting that
-points a role at it is read through an allow-list and demoted to OpenRouter while the provider isn't
-opted in; the On battery consent is kept per provider, so a yes about a zero-retention route never
-covers one that isn't; and a mod can never use it (`serves_a_mod` refuses every non-OpenRouter arm).
+provider and off by default; the warning is shown wherever the provider is chosen; a role's list of
+models (which can mix OpenRouter, a provider's own key and this computer, in the person's order) takes
+a row of such a provider only through the same entry gate (opted in, a readable key, not paused where
+the person is) at the moment it is written AND again when it is read, a row that fails the gate at
+read time is passed over and said so, and turning the provider off or removing its key takes its rows
+out of the lists; the On battery consent is kept per provider, so a yes about a zero-retention route
+never covers one that isn't; and a mod can never use it. A mod's plan is the type `RoutePlan`, which a
+list's walk is not (the walk is `Plan::Ladder`, which only the person's own chat and background paths
+build); a mod gets a plan from a list only when the list's first cloud row is OpenRouter or the list
+has no cloud row, and then from its OpenRouter and local rows alone; if the first cloud row is a
+direct provider the mod gets no AI (`MOD-5004`), as before (`serves_a_mod` refuses every
+non-OpenRouter arm, and `llm_gateway::resolve` is the only planner a mod calls).
 
 A Gemini key follows Google's terms, which differ by tier: Google may train on what a FREE key sends,
 and does not on a paid one. A free Gemini key is refused in the UK, the EEA and Switzerland (PM's own
@@ -1084,7 +1092,7 @@ Another table that holds anything a client may read is added to the strip and th
 build offers the section only on an operating system whose live test passed
 (`mcp::commands::OFFERED_OSES`; a debug build always offers it).
 
-### I-41 · A request bills at most one attempt, and a reply only moves to another company on the person's own click — **Held**
+### I-41 · A request bills at most one attempt, and a reply goes only to a model in the person's list or one they click — **Held**
 
 A cloud call that fails comes back as a typed failure (`error::ProviderFailure`: a class, which is
 wording, and a `Billing`, which is the gate). `NeverLeft` (PM refused before anything was sent, or a
@@ -1099,23 +1107,49 @@ body is read (`cloud_openai::{stream, complete}`, `anthropic_direct::send_with_o
 `NeverLeft` is read from a wire mark that is fresh for the attempt (`llm_gateway::attempt`) and still
 counts on a mod's outer mark, so a nested attempt never hides a send from a mod's booking refund.
 
-Nothing moves a chat reply to a different company by itself (a route the person configured, such as
-Local then cloud, is their own choice and not what this says). The "not working" card (`offers.rs`)
-offers other models, each only after it passes the same entry gate the role setters use
-(`gate_entry`: opted in, a readable key, not paused where the person is, which refuses a free Gemini
-key in the UK, the EEA and Switzerland), and never one the person's daily limit has paused; the
-re-send a click makes (`llm_gateway::plan_for_entry`) passes that gate again, takes only a catalogue
-row of that provider (Mythos is not one), builds a one-entry plan with no walk and no fallback, and
-cannot be named from `mods/`. A card never offers an entry already tried for the same turn
-(`NotWorking.tried`, handed back with each click).
+A row that is not in the person's list for the role is never used. The list is theirs: nothing adds a
+row to it but their own edit (the editor, "Use … from now on", or the wizard's unticked-by-default
+backup box), a person who never edits a list gets the plan their old settings always gave, and a
+request is sent only to a row of the list or to the one model a click on the "not working" card names.
+The walk down a list (`ladder::walk`, run by `llm_gateway`) moves to the next row only after a failure
+whose `Billing` is `NeverLeft` or `Rejected` (a class that walks still stops on `MaybeBilled`, and a
+refusal by the model or a reply that stopped partway never walks), never after an answer token has
+reached the screen, and never from a row PM could not build (no key, not turned on, paused where the
+person is, too long for the model's window, remembered as down), which is passed over and said, not
+sent to. So a list of any length bills at most the one attempt that was sent.
+
+A daily limit is a brake, not a switch of meter (the limits are per provider, with no total across
+them): a request whose row is paused by its limit never moves to another company's paid row by
+itself. It stops with the "not working" card, whose offers include the next row of the list, and the
+only row it continues to on its own is this computer, which costs nothing. Once a limit has paused a
+row in a request, no paid row after it is tried either. A Local row never turns Local AI being off
+into a cloud bill: with the switch off the rows above it are tried as usual, the walk stops AT it
+(a list that starts with it stops the role at once), and the rows after it are never tried. The
+switch never edits a list either (the row stays where the person put it, so a list that has this
+computer in it behaves the same whether or not it was ever edited), and "Use … from now on" on the
+card re-sends to that one row like every other offer, never as an ordinary walk that could ask the
+row that just refused or failed a second time.
+
+The "not working" card (`offers.rs`) offers other models, the person's own list rows after the failed
+one first and then each other company's default, each only after it passes the same entry gate the
+list writer uses (`gate_entry`: opted in, a readable key, not paused where the person is, which
+refuses a free Gemini key in the UK, the EEA and Switzerland), and never one the person's daily limit
+has paused or PM remembers as not working; the re-send a click makes
+(`llm_gateway::plan_for_entry`) passes that gate again, takes only a catalogue row of that provider
+(Mythos is not one), builds a one-entry plan with no walk and no fallback, and cannot be named from
+`mods/`. A card never offers an entry already tried for the same turn (`NotWorking.tried`, handed back
+with each click). "Use … from now on" is one list edit (`promote_entry`) after the same gate.
 
 **Why.** Walking down a list of providers is only safe if the cost of the whole walk is the cost of
-one attempt, and sending a person's words to another company is only theirs to decide. A failure PM
+one attempt, and sending a person's words to another company is only theirs to decide: the list is
+how they decide it ahead of time, and the card is how they decide it in the moment. A failure PM
 cannot prove unbilled must therefore stop, not try the next thing.
 
 **Co-signers.** A new adapter maps its failures to a class AND leaves billing at the default
 (`Error::provider`), lowering it only at a site that has just seen a response status. A new walk
-asks `Billing`, never the class, and a daily limit never walks to another company's paid row.
+asks `Billing`, never the class, and a daily limit never walks to another company's paid row. A new
+way to add a row to a list goes through `route::edit` (one writer, which refuses a row the entry
+gate refuses and clears what PM remembers as not working), never around it.
 
 ---
 

@@ -2,21 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // What a click on the "not working" card does, once: the three buttons' wiring in one testable place.
-// A click on an offer re-sends this reply to exactly that model; "Use X from now on" first changes
-// Chat's setting with the setters that already exist, then re-sends as an ordinary send. Only a
-// click gets here: PM never calls this by itself.
+// A click on an offer re-sends this reply to exactly that model; "Use X from now on" first puts that
+// row at the head of Chat's list (one list edit, `promoteEntry`), then re-sends to that one row too
+// (never an ordinary walk, which could ask the row that just refused or failed a second time).
+// Only a click gets here: PM never calls this by itself.
 
 import { useCallback, useRef, useState } from "react";
-import { entryOf, fromNowOnSteps, runFromNowOn, type FromNowOnSetters } from "./notWorking";
+import { entryOf } from "./notWorking";
 import type { EntryRef, NotWorkingOffer } from "./types";
 import type { NotWorkingState } from "./useChatStream";
 
 export interface NotWorkingActionDeps {
   /** The card on screen (null when there is none). */
   card: NotWorkingState | null;
-  /** The OpenRouter list as it stands, so "from now on" keeps the others behind the new first. */
-  chatModels: string[];
-  setters: FromNowOnSetters;
+  /** "From now on": put this row first in Chat's list (the backend inserts it, or moves it there,
+   *  after the same checks any list write gets). Rejects with the refusal's own sentence. */
+  promote: (entry: EntryRef) => Promise<unknown>;
   resend: (card: NotWorkingState, override: EntryRef | null) => Promise<boolean>;
   setError: (message: string) => void;
   /** Re-read what the send persisted (messages, the conversation list). */
@@ -30,7 +31,7 @@ export interface NotWorkingActionDeps {
   dropFailedSend: () => void;
 }
 
-/** One click at a time. A "from now on" click awaits up to three settings writes before the re-send
+/** One click at a time. A "from now on" click awaits the list edit before the re-send
  *  starts, and during that window the card is still on screen with its buttons enabled; without the
  *  guard a second click would send the same reply twice (and pay for both). */
 export function useNotWorkingActions(deps: NotWorkingActionDeps) {
@@ -51,7 +52,7 @@ export function useNotWorkingActions(deps: NotWorkingActionDeps) {
     try {
       if (fromNowOn) {
         try {
-          await runFromNowOn(fromNowOnSteps(offer, d.chatModels), d.setters);
+          await d.promote(entryOf(offer));
           d.refreshSettings();
         } catch (e) {
           d.setError(String(e));
@@ -63,10 +64,13 @@ export function useNotWorkingActions(deps: NotWorkingActionDeps) {
       // failure takes focus on its heading.
       setAfterClick(true);
       d.focusComposer();
-      // Just before the re-send, after the settings writes: a refused "from now on" sends nothing, so
+      // Just before the re-send, after the list edit: a refused "from now on" sends nothing, so
       // the person's "Try again" must still be there for it.
       d.dropFailedSend();
-      await latest.current.resend(card, fromNowOn ? null : entryOf(offer));
+      // "From now on" re-sends to that one row like every other offer: the list edit above already
+      // covers the NEXT turns, and an ordinary walk here could ask the row that just refused (billed)
+      // or failed again, a second charge for the same words.
+      await latest.current.resend(card, entryOf(offer));
       // Reload persisted state, as an ordinary send does.
       try {
         await latest.current.settled(card.convId);

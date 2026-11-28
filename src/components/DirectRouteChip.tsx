@@ -14,8 +14,10 @@ import {
   routeTitle,
   viewTerms,
 } from "../lib/directProviders";
+import { headDownNote } from "../lib/roleRoute";
 import type { LocalLlmStatus, Settings } from "../lib/types";
 import { useDirectProviders } from "../lib/useDirectProviders";
+import { useRoutes } from "../lib/useRoutes";
 
 /**
  * "OpenAI direct" in the chat composer, beside the local-endpoint chip: the one place chat says,
@@ -39,9 +41,32 @@ export function DirectRouteChip({
    *  reply that crossed the daily limit paused the provider without any Settings change. */
   busy?: boolean;
 }) {
+  // The list's own health, read live: when the first row is down and a later one can answer, the chip
+  // says so in place of a stale healthy label. Nothing for a list with no one behind its head, so a
+  // person with one model sees exactly what they saw.
+  const routes = useRoutes();
+  const down = headDownNote(routes.chat);
   const provider = settings?.chat_provider ?? "openrouter";
-  if (!isDirect(provider) || localAi?.chat_local_model) return null;
+  if (localAi?.chat_local_model) return null;
+  if (down) return <DownChip text={down} />;
+  if (!isDirect(provider)) return null;
   return <Chip provider={provider} settings={settings} busy={busy} />;
+}
+
+/** "Claude isn't working, Gemini is next". The due tint is for a route to look at. */
+function DownChip({ text }: { text: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[0.625rem] font-medium"
+      style={{
+        color: "var(--st-due)",
+        background: "color-mix(in oklab, var(--st-due) 15%, transparent)",
+      }}
+      title={`${text}. PM tries the next row when the first one can't answer. Change the order in Settings > AI & Models.`}
+    >
+      {text}
+    </span>
+  );
 }
 
 // Split out so the read below only happens while the chip is on screen.

@@ -78,6 +78,88 @@ pub struct GroundingConfidence {
     pub gated: bool,
 }
 
+/// One row of the person's list that did not answer a turn, for the strip: the model as a person
+/// reads it, who would have got the reply, and why not. `how` is `"failed"` (a request was sent and
+/// came back unanswered), `"paused"` (PM held the row back: paused where the person is, or by their
+/// daily limit) or `"skipped"` (passed over for any other reason, with nothing sent). The `why` is
+/// the one short form of the class table, shared with `Error::Exhausted`.
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+pub struct FallbackStep {
+    pub label: String,
+    pub company: String,
+    pub why: String,
+    pub how: &'static str,
+}
+
+/// The row of the person's list that replied.
+#[derive(Clone, Serialize, Debug, PartialEq, Eq)]
+pub struct FallbackAnswered {
+    pub label: String,
+    /// The company that got the reply ("Google", "OpenRouter", "this computer").
+    pub via: String,
+}
+
+/// What became of each row of a list that a LATER row answered, for the strip. `None` when no row
+/// above the answering one failed or was passed over (the person's first row answered), or when no
+/// row answered. PURE.
+fn list_notes(notes: &[crate::error::Attempt]) -> Option<(Vec<FallbackStep>, FallbackAnswered)> {
+    use crate::error::{AttemptOutcome, SkipReason};
+    let answered = notes
+        .iter()
+        .find(|a| a.outcome == AttemptOutcome::Answered)?;
+    let steps: Vec<FallbackStep> = notes
+        .iter()
+        .filter_map(|a| {
+            let (why, how) = match a.outcome {
+                AttemptOutcome::Answered => return None,
+                AttemptOutcome::Failed(c) => (c.why(), "failed"),
+                AttemptOutcome::LocalFailed(why) => (why, "failed"),
+                AttemptOutcome::Skipped(r @ (SkipReason::Paused | SkipReason::LimitReached)) => {
+                    (r.why(), "paused")
+                }
+                AttemptOutcome::Skipped(r) => (r.why(), "skipped"),
+            };
+            Some(FallbackStep {
+                label: a.entry.label(),
+                company: a.entry.company().to_string(),
+                why: why.to_string(),
+                how,
+            })
+        })
+        .collect();
+    if steps.is_empty() {
+        return None;
+    }
+    Some((
+        steps,
+        FallbackAnswered {
+            label: answered.entry.label(),
+            via: answered.entry.company().to_string(),
+        },
+    ))
+}
+
+/// The strip for a reply a later row of the person's list answered, or `None` when there is nothing
+/// to say. `reason` is the answer's first note (`list_<class>` / `list_skip_<reason>`).
+fn list_fallback_event(notes: &[crate::error::Attempt], reason: &str) -> Option<ChatEvent> {
+    let (steps, answered) = list_notes(notes)?;
+    let model_of = |o: Option<&crate::error::Attempt>| {
+        o.and_then(|a| a.entry.model.clone()).unwrap_or_default()
+    };
+    Some(ChatEvent::Fallback {
+        kind: "list",
+        from_model: model_of(notes.first()),
+        to_model: model_of(
+            notes
+                .iter()
+                .find(|a| a.outcome == crate::error::AttemptOutcome::Answered),
+        ),
+        reason: reason.to_string(),
+        steps,
+        answered: Some(answered),
+    })
+}
+
 /// Streamed back to the UI over a Tauri channel as the assistant replies.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -120,10 +202,19 @@ pub enum ChatEvent {
     /// `CallMeta::failure_fallback` and reported on `Done.on_battery` instead, so it can never
     /// share the failure strip. `reason` is the normalized slug (`hard_failure:<kind>` /
     /// `cooldown` / `endpoint_refused`); the honesty strip (#297 PR6) maps it to friendly text.
+    ///
+    /// `kind` says which strip this is: `"local"` (the local-to-cloud path above, which reads
+    /// `from_model`, `to_model` and `reason` and carries no steps) or `"list"` (a later row of the
+    /// person's own list answered because the ones above it could not: `steps` says what became of
+    /// each of those rows and `answered` who replied). A list's `reason` is its first note's log
+    /// token (`list_<class>` / `list_skip_<reason>`), the same one `usage_log.fallback_reason` keeps.
     Fallback {
+        kind: &'static str,
         from_model: String,
         to_model: String,
         reason: String,
+        steps: Vec<FallbackStep>,
+        answered: Option<FallbackAnswered>,
     },
     /// The model's thinking, live, only when the send opted in (`show_thinking`). **Never
     /// persisted**: not in `messages`, the vault, the index, summaries or `Done.content`, and never
@@ -168,10 +259,18 @@ fn direct_input_window(model: &str) -> Option<i64> {
 /// the failure is not one the card speaks to: a power-routed turn keeps its own hint ("Keep using
 /// local"), and a cloud plan's error that is not a provider's (a locked vault, a database error) is
 /// just an error. A plan with a local arm whose error is not a provider's is the local model failing.
-fn failed_attempt(e: &Error, plan: &llm_gateway::RoutePlan) -> Option<crate::offers::Failed> {
-    use llm_gateway::RoutePlan;
+fn failed_attempt(
+    e: &Error,
+    plan: &llm_gateway::Plan,
+    walked: &[crate::error::Attempt],
+) -> Option<crate::offers::Failed> {
+    use llm_gateway::{Plan, RoutePlan};
     if plan.is_power_routed() {
         return None;
+    }
+    // A list that ran out: the card speaks to the last row that answered with a failure.
+    if let Error::Exhausted { last, .. } = e {
+        return failed_attempt(last, plan, attempts_of(e, walked));
     }
     if let Some(f) = e.provider_failure() {
         return Some(crate::offers::Failed {
@@ -180,20 +279,76 @@ fn failed_attempt(e: &Error, plan: &llm_gateway::RoutePlan) -> Option<crate::off
             class: f.class,
             billing: Some(f.billing),
             message: f.message.clone(),
+            earlier_asked: earlier_asked(walked, f.class),
+            stopped_at_local: crate::error::stop_note(walked),
         });
     }
     match plan {
-        RoutePlan::LocalOnly(local) | RoutePlan::LocalThenCloud { local, .. } => {
+        Plan::Route(RoutePlan::LocalOnly(local) | RoutePlan::LocalThenCloud { local, .. }) => {
             Some(crate::offers::Failed {
                 provider: None,
                 model: Some(local.model.clone()),
                 class: crate::error::FailureClass::Other,
                 billing: None,
                 message: e.to_string(),
+                earlier_asked: 0,
+                stopped_at_local: None,
             })
         }
-        RoutePlan::Cloud(_) | RoutePlan::CloudForPower { .. } => None,
+        Plan::Route(RoutePlan::Cloud(_) | RoutePlan::CloudForPower { .. }) => None,
+        // A list's own failure that is not a provider's (a local row failing plainly, or every row
+        // passed over) is just an error.
+        Plan::Ladder(_) => None,
     }
+}
+
+/// What became of each row of the person's list in this request: an exhausted list carries its own
+/// attempts; a walk that STOPPED hands them to the chat as `walked` before it fails.
+fn attempts_of<'a>(
+    e: &'a Error,
+    walked: &'a [crate::error::Attempt],
+) -> &'a [crate::error::Attempt] {
+    match e {
+        Error::Exhausted { attempts, .. } => attempts,
+        _ => walked,
+    }
+}
+
+/// How many OTHER rows PM asked before the failing one, for the card's reassurance: the rows of this
+/// request's walk that FAILED (a request was tried), less the failing row itself, which is the last
+/// failed row when it carries the error's own class.
+fn earlier_asked(attempts: &[crate::error::Attempt], class: crate::error::FailureClass) -> usize {
+    use crate::error::AttemptOutcome;
+    let failed: Vec<_> = attempts
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.outcome,
+                AttemptOutcome::Failed(_) | AttemptOutcome::LocalFailed(_)
+            )
+        })
+        .collect();
+    match failed.last() {
+        Some(a) if a.outcome == AttemptOutcome::Failed(class) => failed.len() - 1,
+        _ => failed.len(),
+    }
+}
+
+/// The rows of the person's list this turn already asked and did not get an answer from, which the
+/// card never offers again: every row an exhausted list names, or every row a stopped walk noted.
+/// The failing row itself is excluded by the card already.
+fn tried_in_list(e: &Error, walked: &[crate::error::Attempt]) -> Vec<crate::offers::EntryRef> {
+    let attempts = attempts_of(e, walked);
+    attempts
+        .iter()
+        .filter_map(|a| {
+            let model = a.entry.model.clone()?;
+            Some(crate::offers::EntryRef {
+                provider: a.entry.provider.map_or("local", |p| p.as_str()).to_string(),
+                model,
+            })
+        })
+        .collect()
 }
 
 /// The card for a failed turn, or `None` for the plain error. Reads the keychain and the store (no
@@ -232,10 +387,10 @@ fn not_working_card(
 /// then failed. The card never offers any of them again.
 fn earlier_entries(
     handed_back: Option<Vec<crate::offers::EntryRef>>,
-    plan: &llm_gateway::RoutePlan,
+    plan: &llm_gateway::Plan,
 ) -> Vec<crate::offers::EntryRef> {
     let mut out = handed_back.unwrap_or_default();
-    if let llm_gateway::RoutePlan::LocalThenCloud { local, .. } = plan {
+    if let llm_gateway::Plan::Route(llm_gateway::RoutePlan::LocalThenCloud { local, .. }) = plan {
         out.push(crate::offers::EntryRef {
             provider: "local".into(),
             model: local.model.clone(),
@@ -727,9 +882,9 @@ pub async fn send_message(
     let plan = match &route_override {
         // Refused (gate, key, catalogue) BEFORE the user turn is saved, so a refused click leaves
         // nothing behind.
-        Some(entry) => llm_gateway::plan_for_entry(&app, Role::Chat, entry)?,
+        Some(entry) => llm_gateway::plan_for_entry(&app, Role::Chat, entry)?.into(),
         None => {
-            let Some(plan) = llm_gateway::resolve(&app, Role::Chat)? else {
+            let Some(plan) = llm_gateway::resolve_plan(&app, Role::Chat)? else {
                 return Err(Error::Other(llm_gateway::no_provider_message_for(
                     &app,
                     Role::Chat,
@@ -943,6 +1098,9 @@ pub async fn send_message(
 
     // Stream the reply, forwarding each token to the UI — and, only when this send asked for it, the
     // model's thinking, which is never kept: nothing below this call can see it.
+    // What became of each row of the person's list, when a later row answered: told after the
+    // answer, with the other fallback notices below.
+    let mut walked: Vec<crate::error::Attempt> = Vec::new();
     let result = llm_gateway::stream_chat(
         &app,
         &plan,
@@ -950,6 +1108,9 @@ pub async fn send_message(
         cache_through,
         show_thinking,
         |delta| {
+            if let llm_gateway::ChatDelta::Walked(notes) = &delta {
+                walked = notes.to_vec();
+            }
             if let Some(ev) = chat_event_for(delta, show_thinking) {
                 let _ = on_event.send(ev);
             }
@@ -970,13 +1131,10 @@ pub async fn send_message(
             };
             // A failure the person can act on gets the card (reason plus one-click offers) in
             // place of the plain error. The rejection below still carries the sentence.
-            let card = failed_attempt(&e, &plan).and_then(|failed| {
-                not_working_card(
-                    &app,
-                    conversation_id,
-                    &failed,
-                    &earlier_entries(tried.clone(), &plan),
-                )
+            let card = failed_attempt(&e, &plan, &walked).and_then(|failed| {
+                let mut earlier = earlier_entries(tried.clone(), &plan);
+                earlier.extend(tried_in_list(&e, &walked));
+                not_working_card(&app, conversation_id, &failed, &earlier)
             });
             let _ = match card {
                 Some(card) => on_event.send(ChatEvent::NotWorking(card)),
@@ -1009,16 +1167,17 @@ pub async fn send_message(
                     class: crate::error::FailureClass::Refused,
                     billing: Some(crate::error::Billing::MaybeBilled),
                     message: e.to_string(),
+                    // A refusal's card says nothing of "what else was sent" (it was billed).
+                    earlier_asked: 0,
+                    stopped_at_local: None,
                 })
             })
             .flatten()
             .and_then(|failed| {
-                not_working_card(
-                    &app,
-                    conversation_id,
-                    &failed,
-                    &earlier_entries(tried.clone(), &plan),
-                )
+                // Rows this request's walk already asked (and walked past) are not offered again.
+                let mut earlier = earlier_entries(tried.clone(), &plan);
+                earlier.extend(tried_in_list(&e, &walked));
+                not_working_card(&app, conversation_id, &failed, &earlier)
             });
         let _ = match card {
             Some(card) => on_event.send(ChatEvent::NotWorking(card)),
@@ -1032,14 +1191,30 @@ pub async fn send_message(
     // the UI so it can render the honesty strip (#297 PR6) — a fell-back reply is real, so this is
     // NOT an Error. A power-policy route is not a failure and never reaches this strip.
     if let Some(reason) = meta.failure_fallback() {
-        let _ = on_event.send(ChatEvent::Fallback {
-            from_model: meta.displaced_local_model.clone().unwrap_or_default(),
-            to_model: completion
-                .model
-                .clone()
-                .unwrap_or_else(|| plan.primary_model_id().to_string()),
-            reason: reason.as_log_str(),
-        });
+        // A later row of the person's own list answering is told row by row; every other reason is
+        // the local-to-cloud strip, unchanged.
+        let event = if matches!(
+            reason,
+            llm_gateway::FallbackReason::ListWalk(_) | llm_gateway::FallbackReason::ListSkip(_)
+        ) {
+            // No notes means nothing to say: never a local strip with a list's reason in it.
+            list_fallback_event(&walked, &reason.as_log_str())
+        } else {
+            Some(ChatEvent::Fallback {
+                kind: "local",
+                from_model: meta.displaced_local_model.clone().unwrap_or_default(),
+                to_model: completion
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| plan.primary_model_id().to_string()),
+                reason: reason.as_log_str(),
+                steps: Vec::new(),
+                answered: None,
+            })
+        };
+        if let Some(event) = event {
+            let _ = on_event.send(event);
+        }
     }
     // A reply that hit the model's token ceiling is real text, but it is not a finished answer — it
     // stops mid-thought. It is persisted to `messages`, to the vault file and to the index, so
@@ -1240,7 +1415,16 @@ pub async fn chat_context_status(app: AppHandle, conversation_id: i64) -> Result
     // on OpenRouter may carry a smaller provider window).
     let provider = llm_gateway::role_cloud_provider(&conn, llm_gateway::Role::Chat)?;
     let direct = provider.is_direct();
-    let primary = if direct {
+    // A role with a list of its own: the model of its first cloud row, whoever the provider is.
+    let list_head = crate::route::stored_entries(&conn, llm_gateway::Role::Chat)?.and_then(|l| {
+        l.into_iter().find_map(|e| match e {
+            crate::route::Entry::Cloud { model, .. } => Some(model),
+            crate::route::Entry::Local => None,
+        })
+    });
+    let primary = if let Some(model) = list_head {
+        model
+    } else if direct {
         crate::direct_providers::models_for(&conn, provider, llm_gateway::Role::Chat)?
             .into_iter()
             .next()
@@ -1581,12 +1765,13 @@ mod tests {
     use super::*;
     use crate::commands::shared::temp_db;
 
-    fn cloud_plan(p: llm_gateway::CloudProvider) -> llm_gateway::RoutePlan {
+    fn cloud_plan(p: llm_gateway::CloudProvider) -> llm_gateway::Plan {
         llm_gateway::RoutePlan::Cloud(llm_gateway::CloudArm::new(
             p,
             crate::secret::Secret::from("k".to_string()),
             vec!["m".into()],
         ))
+        .into()
     }
 
     fn local_arm() -> llm_gateway::LocalArm {
@@ -1612,28 +1797,30 @@ mod tests {
             model: Some("anthropic/claude-sonnet-5-5".into()),
             message: "out of credit".into(),
         }));
-        let f = failed_attempt(&typed, &cloud_plan(CloudProvider::Anthropic)).unwrap();
+        let f = failed_attempt(&typed, &cloud_plan(CloudProvider::Anthropic), &[]).unwrap();
         assert_eq!(f.provider, Some(CloudProvider::Anthropic));
         assert_eq!(f.class, FailureClass::NoCredit);
         assert_eq!(f.billing, Some(Billing::Rejected));
         assert_eq!(f.model.as_deref(), Some("anthropic/claude-sonnet-5-5"));
 
         let plain = Error::Other("local server not reachable".into());
-        let f = failed_attempt(&plain, &llm_gateway::RoutePlan::LocalOnly(local_arm())).unwrap();
+        let local_only: llm_gateway::Plan = llm_gateway::RoutePlan::LocalOnly(local_arm()).into();
+        let f = failed_attempt(&plain, &local_only, &[]).unwrap();
         assert_eq!(f.provider, None);
         assert_eq!(f.model.as_deref(), Some("llama3"));
         assert_eq!(f.billing, None);
-        assert!(failed_attempt(&plain, &cloud_plan(CloudProvider::Gemini)).is_none());
+        assert!(failed_attempt(&plain, &cloud_plan(CloudProvider::Gemini), &[]).is_none());
 
-        let power = llm_gateway::RoutePlan::CloudForPower {
+        let power: llm_gateway::Plan = llm_gateway::RoutePlan::CloudForPower {
             cloud: llm_gateway::CloudArm::new(
                 CloudProvider::OpenRouter,
                 crate::secret::Secret::from("k".to_string()),
                 vec!["m".into()],
             ),
             displaced_local_model: "llama3".into(),
-        };
-        assert!(failed_attempt(&typed, &power).is_none());
+        }
+        .into();
+        assert!(failed_attempt(&typed, &power, &[]).is_none());
     }
 
     /// What a turn tried before the failing attempt: the earlier clicks the page handed back, plus this
@@ -1645,14 +1832,15 @@ mod tests {
             provider: "gemini".into(),
             model: "g".into(),
         }];
-        let plan = llm_gateway::RoutePlan::LocalThenCloud {
+        let plan: llm_gateway::Plan = llm_gateway::RoutePlan::LocalThenCloud {
             local: local_arm(),
             cloud: llm_gateway::CloudArm::new(
                 llm_gateway::CloudProvider::Anthropic,
                 crate::secret::Secret::from("k".to_string()),
                 vec!["m".into()],
             ),
-        };
+        }
+        .into();
         let got = earlier_entries(Some(handed.clone()), &plan);
         assert_eq!(got.len(), 2);
         assert_eq!(
@@ -1668,6 +1856,62 @@ mod tests {
             ),
             handed
         );
+    }
+
+    /// A list that ran out gets the card of its last failure, and the card never offers a row the
+    /// walk already asked.
+    #[test]
+    fn an_exhausted_list_gets_the_card_of_its_last_failure_and_remembers_what_it_tried() {
+        use crate::error::{Attempt, AttemptEntry, AttemptOutcome, FailureClass, ProviderFailure};
+        let last = Error::Provider(Box::new(ProviderFailure {
+            class: FailureClass::Busy,
+            billing: crate::error::Billing::Rejected,
+            provider: llm_gateway::CloudProvider::Gemini,
+            model: Some("g".into()),
+            message: "Gemini is busy.".into(),
+        }));
+        let at = |p: Option<llm_gateway::CloudProvider>, m: &str, o| Attempt {
+            entry: AttemptEntry {
+                provider: p,
+                model: Some(m.into()),
+                local_elsewhere: false,
+            },
+            outcome: o,
+        };
+        let e = Error::Exhausted {
+            attempts: vec![
+                at(
+                    Some(llm_gateway::CloudProvider::Anthropic),
+                    "a",
+                    AttemptOutcome::Failed(FailureClass::NoCredit),
+                ),
+                at(None, "llama3", AttemptOutcome::Failed(FailureClass::Other)),
+                at(
+                    Some(llm_gateway::CloudProvider::Gemini),
+                    "g",
+                    AttemptOutcome::Failed(FailureClass::Busy),
+                ),
+            ],
+            last: Box::new(last),
+        };
+        let ladder: llm_gateway::Plan =
+            llm_gateway::Plan::Ladder(llm_gateway::Ladder::new(vec![llm_gateway::Rung::Local(
+                local_arm(),
+            )]));
+        let f = failed_attempt(&e, &ladder, &[]).expect("the card speaks to the last failure");
+        assert_eq!(f.provider, Some(llm_gateway::CloudProvider::Gemini));
+        assert_eq!(f.class, FailureClass::Busy);
+        let tried = tried_in_list(&e, &[]);
+        assert_eq!(
+            tried
+                .iter()
+                .map(|t| (t.provider.as_str(), t.model.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("anthropic", "a"), ("local", "llama3"), ("gemini", "g")]
+        );
+        // A plain error with no walk behind it has no record and no card.
+        assert!(tried_in_list(&Error::Other("x".into()), &[]).is_empty());
+        assert!(failed_attempt(&Error::Other("x".into()), &ladder, &[]).is_none());
     }
 
     /// The event's shape the webview reads: flat, tagged `not_working`.
@@ -1717,7 +1961,9 @@ mod tests {
             .expect("send_message");
         assert_eq!(send.matches("llm_gateway::stream_chat(").count(), 1);
         assert_eq!(send.matches("plan_for_entry(").count(), 1);
-        assert_eq!(send.matches("llm_gateway::resolve(").count(), 1);
+        assert_eq!(send.matches("llm_gateway::resolve_plan(").count(), 1);
+        // The chat asks for the person's own plan, never a mod's (`resolve` is the mod-facing one).
+        assert_eq!(send.matches("llm_gateway::resolve(").count(), 0);
         let (before, _) = send.split_once("plan_for_entry(").unwrap();
         assert!(
             before.trim_end().ends_with("Some(entry) =>")
@@ -1971,14 +2217,20 @@ mod tests {
         assert_eq!(done["on_battery"], false);
 
         let fb = serde_json::to_value(ChatEvent::Fallback {
+            kind: "local",
             from_model: "llama3".into(),
             to_model: "gpt-cloud".into(),
             reason: "hard_failure:timeout".into(),
+            steps: Vec::new(),
+            answered: None,
         })
         .unwrap();
         assert_eq!(fb["type"], "fallback");
+        assert_eq!(fb["kind"], "local");
         assert_eq!(fb["from_model"], "llama3");
         assert_eq!(fb["reason"], "hard_failure:timeout");
+        assert_eq!(fb["steps"], serde_json::json!([]));
+        assert!(fb["answered"].is_null());
 
         // The two thinking arms the TS union mirrors as `thinking` / `thinking_note`.
         let thinking = serde_json::to_value(ChatEvent::Thinking {
@@ -2003,6 +2255,233 @@ mod tests {
         .unwrap();
         assert_eq!(no_room["type"], "thinking_note");
         assert_eq!(no_room["note"], "no_room");
+    }
+
+    fn note(
+        provider: Option<llm_gateway::CloudProvider>,
+        model: &str,
+        outcome: crate::error::AttemptOutcome,
+    ) -> crate::error::Attempt {
+        crate::error::Attempt {
+            entry: crate::error::AttemptEntry {
+                provider,
+                model: Some(model.to_string()),
+                local_elsewhere: false,
+            },
+            outcome,
+        }
+    }
+
+    /// The strip for a walk names every row that did not answer, in order, with the class table's
+    /// own words and the company that would have got the reply, and says who answered.
+    #[test]
+    fn a_list_walk_is_told_row_by_row_with_the_class_words_and_companies() {
+        use crate::error::{AttemptOutcome as O, FailureClass as C, SkipReason as S};
+        use llm_gateway::CloudProvider as P;
+        let notes = [
+            note(
+                Some(P::Anthropic),
+                "anthropic/claude-opus-5-5",
+                O::Failed(C::NoCredit),
+            ),
+            note(
+                Some(P::Gemini),
+                "gemini/gemini-4-carbon",
+                O::Skipped(S::Paused),
+            ),
+            note(Some(P::OpenRouter), "vendor/some-model", O::Answered),
+        ];
+        let ev =
+            serde_json::to_value(list_fallback_event(&notes, "list_no_credit").unwrap()).unwrap();
+        assert_eq!(ev["type"], "fallback");
+        assert_eq!(ev["kind"], "list");
+        assert_eq!(ev["reason"], "list_no_credit");
+        assert_eq!(ev["from_model"], "anthropic/claude-opus-5-5");
+        assert_eq!(ev["to_model"], "vendor/some-model");
+        assert_eq!(
+            ev["steps"],
+            serde_json::json!([
+                {"label": "Claude Opus 5.5", "company": "Anthropic",
+                 "why": C::NoCredit.why(), "how": "failed"},
+                {"label": "Gemini 4 Carbon", "company": "Google",
+                 "why": S::Paused.why(), "how": "paused"},
+            ])
+        );
+        assert_eq!(
+            ev["answered"],
+            serde_json::json!({"label": "vendor/some-model", "via": "OpenRouter"})
+        );
+    }
+
+    /// A first-row answer, a walk with no answer, and a skip for a plain reason say what they are.
+    #[test]
+    fn a_list_notice_needs_a_row_above_the_answer_and_an_answer() {
+        use crate::error::{AttemptOutcome as O, FailureClass as C, SkipReason as S};
+        use llm_gateway::CloudProvider as P;
+        let first = [note(
+            Some(P::Anthropic),
+            "anthropic/claude-opus-5-5",
+            O::Answered,
+        )];
+        assert!(list_fallback_event(&first, "").is_none());
+        let none = [note(
+            Some(P::Anthropic),
+            "anthropic/claude-opus-5-5",
+            O::Failed(C::Busy),
+        )];
+        assert!(list_fallback_event(&none, "list_busy").is_none());
+        let local = [
+            note(
+                Some(P::Gemini),
+                "gemini/gemini-4-carbon",
+                O::Skipped(S::NoKey),
+            ),
+            note(None, "llama3", O::Answered),
+        ];
+        let ev =
+            serde_json::to_value(list_fallback_event(&local, "list_skip_no_key").unwrap()).unwrap();
+        assert_eq!(ev["steps"][0]["how"], "skipped");
+        assert_eq!(ev["steps"][0]["why"], S::NoKey.why());
+        assert_eq!(ev["answered"]["via"], "this computer");
+    }
+
+    /// A Local row on ANOTHER machine is never called "this computer" in the strip (the text left
+    /// the machine), as a failed step or as the answer. The words are the card's, from one function.
+    #[test]
+    fn the_strip_calls_a_local_server_on_another_machine_by_what_it_is() {
+        use crate::error::{AttemptOutcome as O, FailureClass as C};
+        use llm_gateway::CloudProvider as P;
+        let mut local = note(None, "llama3", O::Answered);
+        local.entry.local_elsewhere = true;
+        let notes = [
+            note(
+                Some(P::Anthropic),
+                "anthropic/claude-opus-5-5",
+                O::Failed(C::NoCredit),
+            ),
+            local.clone(),
+        ];
+        let ev =
+            serde_json::to_value(list_fallback_event(&notes, "list_no_credit").unwrap()).unwrap();
+        assert_eq!(ev["answered"]["via"], "your Local AI server");
+        // And a Local row that failed above a cloud answer names its place the same way.
+        let mut failed = note(None, "llama3", O::Failed(C::Other));
+        failed.entry.local_elsewhere = true;
+        let notes = [
+            failed,
+            note(Some(P::Gemini), "gemini/gemini-4-carbon", O::Answered),
+        ];
+        let ev = serde_json::to_value(list_fallback_event(&notes, "list_other").unwrap()).unwrap();
+        assert_eq!(ev["steps"][0]["company"], "your Local AI server");
+        assert_eq!(
+            crate::offers::local_company(true),
+            "this computer",
+            "a loopback server keeps the old words"
+        );
+    }
+
+    /// After a walk the card must not say "Nothing was sent anywhere else", and a stopped walk's
+    /// rows are not offered again. `earlier_asked` counts the rows that FAILED before the failing one.
+    #[test]
+    fn a_stopped_walk_counts_the_rows_it_asked_before_the_failing_one() {
+        use crate::error::{AttemptOutcome as O, FailureClass as C, SkipReason as S};
+        use llm_gateway::CloudProvider as P;
+        let walked = [
+            note(Some(P::Anthropic), "a", O::Failed(C::KeyBad)),
+            note(Some(P::OpenAi), "o", O::Skipped(S::NoKey)),
+            note(Some(P::Gemini), "g", O::Failed(C::Other)),
+        ];
+        // The stopping row is the last failed one (class Other): one earlier row was asked.
+        assert_eq!(earlier_asked(&walked, C::Other), 1);
+        // A first-row stop has nobody before it.
+        assert_eq!(earlier_asked(&walked[2..], C::Other), 0);
+        assert_eq!(earlier_asked(&[], C::Busy), 0);
+        // A brake's own refusal is not a failed row: every failed row counts.
+        assert_eq!(earlier_asked(&walked[..1], C::LimitReached), 1);
+        // The offers' own record of what was tried comes from the same notes.
+        let e = Error::Other("x".into());
+        let tried = tried_in_list(&e, &walked);
+        assert_eq!(tried.len(), 3);
+        // The line itself.
+        let mut f = crate::offers::Failed {
+            provider: Some(P::Gemini),
+            model: Some("g".into()),
+            class: C::Other,
+            billing: Some(crate::error::Billing::Rejected),
+            message: "x".into(),
+            earlier_asked: 1,
+            stopped_at_local: None,
+        };
+        let one = crate::offers::reassurance(&f).unwrap();
+        assert!(
+            one.contains("another model") && !one.contains("Nothing was sent"),
+            "{one}"
+        );
+        f.earlier_asked = 2;
+        assert!(crate::offers::reassurance(&f)
+            .unwrap()
+            .contains("2 other models"));
+        f.earlier_asked = 0;
+        assert_eq!(
+            crate::offers::reassurance(&f).as_deref(),
+            Some("Nothing was sent anywhere else.")
+        );
+    }
+
+    /// A walk that stopped at a this-computer row it would not run says WHY nothing after that row was
+    /// tried, on the failed row's card: failed_attempt reads it from the walk's last note, for an
+    /// exhausted list and for a stopped one, and a walk that did not stop there says nothing of it.
+    #[test]
+    fn the_card_says_why_a_walk_stopped_at_the_local_row() {
+        use crate::error::{Attempt, AttemptEntry, AttemptOutcome as O, FailureClass as C};
+        use crate::error::{Billing, Error, ProviderFailure, SkipReason as S};
+        use crate::llm_gateway::CloudProvider as P;
+        let claude = AttemptEntry {
+            provider: Some(P::Anthropic),
+            model: Some("m".into()),
+            local_elsewhere: false,
+        };
+        let local = AttemptEntry {
+            provider: None,
+            model: None,
+            local_elsewhere: false,
+        };
+        let walked = vec![
+            Attempt {
+                entry: claude.clone(),
+                outcome: O::Failed(C::Busy),
+            },
+            Attempt {
+                entry: local.clone(),
+                outcome: O::Skipped(S::LocalAiOff),
+            },
+        ];
+        let failure = Error::Provider(Box::new(ProviderFailure {
+            class: C::Busy,
+            billing: Billing::Rejected,
+            provider: P::Anthropic,
+            model: Some("m".into()),
+            message: "busy".into(),
+        }));
+        let plan = llm_gateway::Plan::Ladder(llm_gateway::Ladder::new(Vec::new()));
+        let exhausted = Error::Exhausted {
+            attempts: walked.clone(),
+            last: Box::new(failure),
+        };
+        let f = failed_attempt(&exhausted, &plan, &[]).expect("a card");
+        let said = crate::offers::reassurance(&f).unwrap();
+        assert!(
+            said.ends_with(S::LocalAiOff.stop_sentence().unwrap()),
+            "{said}"
+        );
+        // A list that was walked without stopping at a Local row says nothing of one.
+        let plain = vec![walked[0].clone()];
+        let mut g = f.clone();
+        g.stopped_at_local = crate::error::stop_note(&plain);
+        assert_eq!(g.stopped_at_local, None);
+        assert!(!crate::offers::reassurance(&g)
+            .unwrap()
+            .contains("Local AI is off"));
     }
 
     /// The second gate on "never shown unless asked": whatever the stream client hands up, thinking

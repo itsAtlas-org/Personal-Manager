@@ -469,6 +469,13 @@ where
                 continue;
             }
         }
+        // The wait it asked for (after the one retry this function made), for the entry-health memory.
+        if let Some(wait) = retry_after
+            .as_deref()
+            .and_then(crate::wire_mark::parse_retry_after)
+        {
+            crate::wire_mark::note_retry_after_for(wait);
+        }
         // A failed STATUS with no body streamed: the one site that may call it unbilled.
         return Err(failure_error(
             &failure,

@@ -11,7 +11,8 @@ import { CalendarView } from "./components/calendar/CalendarView";
 import { watchHeldDeletes } from "./components/calendar/edit/useEventWrites";
 import { ChatView } from "./components/ChatView";
 import { DirectRouteChip } from "./components/DirectRouteChip";
-import { chatUpgradeApplies, footerRow } from "./lib/directProviders";
+import { footerRow } from "./lib/directProviders";
+import { firstEditLine, upgradeChatModel } from "./lib/roleRoute";
 import { ProviderChip } from "./components/ProviderChip";
 import { ThinkingToggle } from "./components/ThinkingToggle";
 import { FallbackStrip } from "./components/FallbackStrip";
@@ -55,6 +56,7 @@ import { DeletedVaultNotice } from "./components/VaultRecovery";
 import { VaultUnlock } from "./components/VaultUnlock";
 import { WhatsNew } from "./components/WhatsNew";
 import { Callout, ErrorBoundary, Skeleton } from "./components/ui";
+import { ListNotice } from "./components/ListNotice";
 import { HelpContext } from "./lib/help";
 import { ReaderProvider } from "./lib/reader";
 import { ModPageHooksHost } from "./components/mods/ModPageHooksHost";
@@ -94,7 +96,6 @@ import {
   appLockStatus,
   createConversation,
   deleteConversation,
-  directProvidersState,
   getMessages,
   getSettings,
   aiProviderStatus,
@@ -122,12 +123,10 @@ import {
   resumeLocalFolderSync,
   resumeOneDriveSync,
   reviewQueueCount,
-  setChatModels,
+  promoteEntry,
+  switchToLargerChatModel,
   setConversationProject,
-  setDirectRole,
   setHelpMode,
-  setLocalLlmRouting,
-  setRoleCloudProvider,
   syncCalendar,
   vaultLockStatus,
   vaultStatus,
@@ -203,6 +202,9 @@ export default function App() {
   // A non-blocking notice when a vault's metadata was repaired on open (M-3): a downgraded
   // encryption policy PM forced back on, or a failed integrity check. Dismissible.
   const [metaWarning, setMetaWarning] = useState<string | null>(null);
+  // The one line a list's first edit says when it left saved models out (Q7): a neutral, dismissible
+  // notice, never the error banner.
+  const [listNotice, setListNotice] = useState<string | null>(null);
   // PM lost access to the shared vault folder MID-SESSION (`vault://fault` — the store
   // closed, or the writer-lock heartbeat started failing while open handles still work).
   // A dismissible banner naming the real problem, so it never masquerades as "locked"
@@ -212,8 +214,12 @@ export default function App() {
   // The Settings page the next open lands on. Every way in names one (`openSettings`), so a deep link
   // (a mod paused for developer mode points at "developer") never leaves the NEXT plain open there.
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
-  const openSettings = (tab: SettingsTab = "general") => {
+  // An element on that page to scroll to ("Edit my list" lands on the role's own list); cleared by
+  // every other way in, for the same reason as the tab.
+  const [settingsSection, setSettingsSection] = useState<string | null>(null);
+  const openSettings = (tab: SettingsTab = "general", section: string | null = null) => {
     setSettingsTab(tab);
+    setSettingsSection(section);
     setShowSettings(true);
   };
   const [view, setView] = useState<View>("focus");
@@ -1055,34 +1061,33 @@ export default function App() {
   function handleUpgrade(modelId: string) {
     // The meter's larger-model list is OpenRouter's. A chat on a provider of the person's own has no
     // such list (the backend sends none), and writing one here would change the OpenRouter list for
-    // a role that never reads it.
-    if (!chatUpgradeApplies(settings)) return Promise.resolve();
-    const rest = (settings?.chat_models ?? []).filter((m) => m !== modelId);
-    // Return the promise so the context meter can re-read AFTER the switch has landed.
-    return setChatModels([modelId, ...rest])
-      .then(refreshSettings)
+    // a role that never reads it (`upgradeChatModel` does nothing for it). The first edit of a list
+    // leaves out saved models that were not in use; that is said here in the list editor's own line
+    // rather than dropped without a word. Return the promise so the context meter can re-read AFTER
+    // the switch has landed. The line is information, not a failure, so it is a neutral notice and
+    // not the error banner.
+    return upgradeChatModel(settings, modelId, switchToLargerChatModel)
+      .then((note) => {
+        if (note) setListNotice(note);
+        return refreshSettings();
+      })
       .catch(() => {});
   }
 
-  // A click on the "not working" card. `fromNowOn` first changes the role's setting with the setters
-  // that already exist (the backend refuses a provider that isn't allowed, and the error shows), then
-  // the same turn is sent once more as an ordinary send; otherwise the turn goes once to exactly the
-  // model the offer named, through the backend's own checks. Never automatic: only a click gets here.
-  // The wiring itself lives in `useNotWorkingActions` (one click at a time, tested there).
+  // A click on the "not working" card. `fromNowOn` first puts the offered row at the head of Chat's
+  // list (one list edit: the backend refuses a provider that isn't allowed, and the error shows),
+  // and either way the turn goes once to exactly the model the offer named, through the backend's
+  // own checks. Never automatic: only a click gets
+  // here. The wiring itself lives in `useNotWorkingActions` (one click at a time, tested there).
   const notWorkingActions = useNotWorkingActions({
     card: chat.notWorking,
-    chatModels: settings?.chat_models ?? [],
-    setters: {
-      setDirectRole,
-      setRoleCloudProvider,
-      setChatModels,
-      setLocalLlmRouting,
-      // Keep an effort the person already set on this very model; a different model starts at the
-      // role's default (the setter checks an effort against the model it is written with).
-      chatEffortFor: async (provider, model) => {
-        const view = (await directProvidersState()).providers.find((p) => p.provider === provider);
-        return view && view.roles.chat.model === model ? view.roles.chat.effort : null;
-      },
+    // The list keeps an effort it already had for this row; a new row starts at the role's default.
+    // The first edit of a list nobody had edited leaves saved models out: said once, as a notice
+    // (Q7), the way the list editor and the larger-model switch say it.
+    promote: async (entry) => {
+      const edited = await promoteEntry("chat", entry.provider, entry.model);
+      const line = edited.materialised ? firstEditLine(edited.unused_saved) : null;
+      if (line) setListNotice(line);
     },
     resend: chat.resend,
     setError: chat.setError,
@@ -1422,6 +1427,9 @@ export default function App() {
                         {chat.error}
                       </Callout>
                     )}
+                    {listNotice && (
+                      <ListNotice text={listNotice} onDismiss={() => setListNotice(null)} />
+                    )}
                     {chat.fallback && (
                       <FallbackStrip fallback={chat.fallback} onDismiss={chat.dismissFallback} />
                     )}
@@ -1462,7 +1470,7 @@ export default function App() {
                         focusOnMount={notWorkingActions.afterClick}
                         onUse={(offer) => void notWorkingActions.use(offer, false)}
                         onUseFromNowOn={(offer) => void notWorkingActions.use(offer, true)}
-                        onEditList={() => openSettings("ai")}
+                        onEditList={() => openSettings("ai", "sec-ai-route-chat")}
                         onRaiseLimit={() => openSettings("ai")}
                       />
                     )}
@@ -1535,6 +1543,7 @@ export default function App() {
                   <SettingsView
                     onboarding={false}
                     initialTab={settingsTab}
+                    initialSection={settingsSection}
                     onClose={() => {
                       setShowSettings(false);
                       refreshSettings();

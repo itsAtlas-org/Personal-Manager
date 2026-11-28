@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { setLocalLlmRoleModel, setLocalLlmRouting } from "../../lib/ipc";
+import { setLocalLlmRoleModel } from "../../lib/ipc";
 import type { LocalRole } from "../../lib/localModelState";
+import { LOCAL_LINK_TEXT, localPlaceLine } from "../../lib/roleRoute";
+import { useRoutes } from "../../lib/useRoutes";
 import type {
   EffectiveRoute,
   LocalCoResidency,
@@ -42,6 +44,7 @@ export function LocalAiRoles({
   onConfigPatch,
   onError,
   error,
+  onOpenAiModels,
 }: {
   config: LocalLlmConfig | null;
   status: LocalLlmStatus | null;
@@ -59,8 +62,13 @@ export function LocalAiRoles({
   onError: (message: string | null) => void;
   /** Something in this section went wrong, said here rather than at the top of the tab. */
   error?: string | null;
+  /** Open AI & Models, where each role's list says where this computer sits. */
+  onOpenAiModels?: () => void;
 }) {
   const { testing, tests, runTest, clearTest } = roleTests;
+  // Where this computer sits in each role's list is that list's to say (one control, one home): this
+  // section only reads it, for the one line under each job.
+  const routes = useRoutes();
   // "on this computer" only for a loopback address: a LAN or remote server receives what PM sends.
   const where = whereOf(config?.base_url);
   /** A role's bound model, when its routing reaches the server and the listing has answered that
@@ -74,15 +82,6 @@ export function LocalAiRoles({
     onConfigPatch({ [`${role}_model`]: model || null });
     clearTest(role);
     void setLocalLlmRoleModel(role, model).catch((e) => onError(String(e)));
-  }
-
-  function changeRouting(role: "chat" | "background", pref: string) {
-    onError(null);
-    onConfigPatch({ [`${role}_routing`]: pref });
-    clearTest(role);
-    void setLocalLlmRouting(role, pref as "cloud" | "local" | "local-then-cloud").catch((e) =>
-      onError(String(e)),
-    );
   }
 
   return (
@@ -112,7 +111,8 @@ export function LocalAiRoles({
             notServed={notServed(config?.chat_model ?? "", config?.chat_routing ?? "cloud")}
             served={served}
             onModel={(m) => changeRoleModel("chat", m)}
-            onRouting={(p) => changeRouting("chat", p)}
+            placeLine={localPlaceLine("chat", routes.chat)}
+            onOpenAiModels={onOpenAiModels}
             onTest={() => void runTest("chat")}
             testing={testing === "chat"}
             testsBlocked={testing !== null}
@@ -133,7 +133,8 @@ export function LocalAiRoles({
             )}
             served={served}
             onModel={(m) => changeRoleModel("background", m)}
-            onRouting={(p) => changeRouting("background", p)}
+            placeLine={localPlaceLine("background", routes.background)}
+            onOpenAiModels={onOpenAiModels}
             onTest={() => void runTest("background")}
             testing={testing === "background"}
             testsBlocked={testing !== null}
@@ -150,8 +151,8 @@ export function LocalAiRoles({
             // it — the cloud for a keyed Cloud or fall-back job, nowhere for a Local only one or a
             // keyless one — and the line under each job already says which.
             <p className="text-xs text-ink4">
-              This server isn't serving any models yet, so there is nothing to assign yet — the line
-              under each job says where it goes meanwhile. Download a model into it and it will
+              This server isn't serving any models yet, so there is nothing to assign yet — the
+              lines under each job say where it goes meanwhile. Download a model into it and it will
               appear here within about half a minute.
             </p>
           )}
@@ -252,27 +253,20 @@ export function LocalAiRoles({
           )}
         </div>
       )}
-      <SectionInfo title="How routing & fallback work">
+      <SectionInfo title="How this computer is used">
         <p>
-          <span className="text-ink2">Cloud</span> keeps using your cloud model (OpenRouter, or the
-          provider you chose for that role in AI &amp; Models).{" "}
-          <span className="text-ink2">Local only</span> uses the model you picked and fails if it's
-          unreachable. <span className="text-ink2">Local, fall back to cloud</span> tries local
-          first and quietly hands off to your cloud model {WHEN_SERVER_CANT}. It never switches to
-          chase quality. The On battery section is separate from fallback: it can move a role set to
-          Local, fall back to cloud onto your cloud model while your battery is low, and it asks you
-          before it first does. Local only is never moved.
+          This computer answers a job only where it is a row in that job&apos;s list in AI &amp;
+          Models, and sits wherever you put it. When it is the first row it tries local first and
+          hands off to the next row {WHEN_SERVER_CANT}. It never switches to chase quality. As the
+          only row it fails if it&apos;s unreachable. The On battery section is separate: it can
+          move a job whose first row is this computer onto the cloud row after it while your battery
+          is low, and it asks you before it first does. A job that is only this computer is never
+          moved.
         </p>
       </SectionInfo>
     </div>
   );
 }
-
-const ROUTING_OPTIONS = [
-  { value: "cloud", label: "Cloud" },
-  { value: "local", label: "Local only" },
-  { value: "local-then-cloud", label: "Local, fall back to cloud" },
-];
 
 /** When a job set to Local, fall back to cloud goes to the cloud, from what the gateway actually
  *  falls back on — not only a server that is down: a reply that fails or times out on a running one
@@ -284,19 +278,14 @@ const ROUTING_OPTIONS = [
 const WHEN_SERVER_CANT =
   "when your server can't — it isn't reachable, a reply fails or times out before anything is shown, or a request is too long for the window it gives the model";
 
-/** Who each routing suits — said for the one chosen, so the choice is made against a reason. The
- *  section it names is read from the list, so a rename can't leave it naming a heading that's gone. */
-const GOOD_IF: Record<string, string> = {
-  cloud:
-    "Good if this computer is slow, or you'd rather not keep a model loaded. What you send goes to your cloud provider.",
-  local: `Good if nothing should ever go to the cloud. If your server is down, this job doesn't answer, and ${sectionLabel("sec-localai-power")} never moves it.`,
-  "local-then-cloud": `Good for most setups with a cloud key: your own model when it can, your cloud model ${WHEN_SERVER_CANT}. It's the only setting ${sectionLabel("sec-localai-power")} can move.`,
-};
+/** When a list that asks the cloud first reaches this computer: after a failure that was not
+ *  charged, or a daily limit (this computer is free, so it may answer after one by itself). */
+const WHEN_CLOUD_CANT = "when the model above it can't answer";
 
-/** The routing Select's and the model Select's names, per role. */
-const ROLE_NAMES: Record<LocalRole, { routing: string; model: string }> = {
-  chat: { routing: "Where chat runs", model: "Chat model" },
-  background: { routing: "Where background work runs", model: "Background work model" },
+/** The model Select's name, per role. */
+const ROLE_NAMES: Record<LocalRole, { model: string }> = {
+  chat: { model: "Chat model" },
+  background: { model: "Background work model" },
 };
 
 /**
@@ -313,7 +302,13 @@ function effectiveLine(
   // The three that name the model read the row's own (optimistic) choice. Just after it is cleared
   // the status can still say the old route for a moment; a sentence naming no model would be worse
   // than none until the next snapshot.
-  if (!model && (effective === "local_only" || effective === "local_then_cloud")) return null;
+  if (
+    !model &&
+    (effective === "local_only" ||
+      effective === "local_then_cloud" ||
+      effective === "cloud_then_local")
+  )
+    return null;
   if (!model && effective === "cloud_for_power") return null;
   switch (effective) {
     case "cloud":
@@ -322,6 +317,9 @@ function effectiveLine(
       return `Runs on ${model} ${where}, and never uses the cloud.`;
     case "local_then_cloud":
       return `Runs on ${model} ${where}; your cloud model answers ${WHEN_SERVER_CANT}.`;
+    case "cloud_then_local":
+      // The list asks the cloud first: this computer is behind it, never "local first".
+      return `Asks your cloud model first; ${model} ${where} answers ${WHEN_CLOUD_CANT}.`;
     case "cloud_for_power":
       return `On battery, so this is on your cloud model for now; ${model} is waiting.`;
     case "nothing":
@@ -344,7 +342,8 @@ function RoleRow({
   notServed,
   served,
   onModel,
-  onRouting,
+  placeLine,
+  onOpenAiModels,
   onTest,
   testing,
   testsBlocked,
@@ -364,7 +363,10 @@ function RoleRow({
   notServed: boolean;
   served: LocalServedModel[];
   onModel: (m: string) => void;
-  onRouting: (p: string) => void;
+  /** Where this computer sits in this role's list ("number 2 of 3 in Chat's list"), or null before
+   *  the list has been read. The list itself is edited in AI & Models. */
+  placeLine: string | null;
+  onOpenAiModels?: () => void;
   onTest: () => void;
   /** This row's test is the one running. */
   testing: boolean;
@@ -392,19 +394,6 @@ function RoleRow({
         <span className="text-[0.6875rem] text-ink4">{hint}</span>
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        {/* Routing first: WHERE the job runs is the decision, and which local model is a detail of
-            one answer to it. */}
-        <Select
-          aria-label={ROLE_NAMES[role].routing}
-          value={routing}
-          onChange={(e) => onRouting(e.target.value)}
-        >
-          {ROUTING_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </Select>
         <Select
           aria-label={ROLE_NAMES[role].model}
           value={model}
@@ -447,7 +436,21 @@ function RoleRow({
           {notServed && `Your server isn't serving ${model} right now.`}
         </p>
       )}
-      {GOOD_IF[routing] && <p className="mt-1 text-[0.6875rem] text-ink4">{GOOD_IF[routing]}</p>}
+      {/* Unfolded: where this computer sits is a status, and its one home is the list. */}
+      {placeLine && (
+        <p className="mt-1 text-xs text-ink3">
+          {placeLine}{" "}
+          {onOpenAiModels && (
+            <button
+              type="button"
+              onClick={onOpenAiModels}
+              className="text-accent-text hover:brightness-110"
+            >
+              {LOCAL_LINK_TEXT} <span aria-hidden="true">→</span>
+            </button>
+          )}
+        </p>
+      )}
       {/* Said before the click, not after it: a test arriving while the model is mid-answer waits
           for the lane, which can be the length of a whole reply. The button still works — this is
           an explanation of the wait, not a refusal. */}

@@ -202,10 +202,10 @@ describe("scopeNote", () => {
 
     const partial = power({ background: movable({ blocked: "local_only" }) });
     expect(scopeNote("both", partial)).toBe(
-      "With your setup only chat would move: Background work is set to Local only, which never uses the cloud.",
+      "With your setup only chat would move: Background work's list is only This computer, which never uses the cloud.",
     );
     expect(scopeNote("background", partial)).toBe(
-      "With your setup this moves nothing: Background work is set to Local only, which never uses the cloud.",
+      "With your setup this moves nothing: Background work's list is only This computer, which never uses the cloud.",
     );
 
     const none = power({
@@ -416,7 +416,7 @@ describe("powerSummary — one case per branch, first match wins", () => {
       "On battery, PM stays on your local model while it can't read your saved keys.",
     );
     expect(powerSummary("not_with_roles", power())).toBe(
-      "On battery, PM stays on your local model — your roles aren't set to Local, fall back to cloud.",
+      "On battery, PM stays on your local model — no role's list starts with This computer and has a cloud model after it.",
     );
   });
 

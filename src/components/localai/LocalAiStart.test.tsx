@@ -1034,9 +1034,9 @@ describe("every start-card action makes the write its section control makes", ()
           fireEvent.change(within(roles).getByRole("combobox", { name }), { target: { value } });
         set("Chat model", "qwen2.5:latest");
         set("Background work model", "qwen2.5:latest");
-        set("Where chat runs", "local-then-cloud");
-        set("Where background work runs", "local-then-cloud");
-        await waitFor(() => expect(setLocalLlmRouting).toHaveBeenCalledTimes(2));
+        // The routing half has no control in this tab any more: the lists in AI & Models make it
+        // (ACTION_MIRRORS `elsewhere`), so only the model writes are pressed here.
+        await waitFor(() => expect(setLocalLlmRoleModel).toHaveBeenCalledTimes(2));
       },
     },
     test: {
@@ -1145,7 +1145,13 @@ describe("every start-card action makes the write its section control makes", ()
         if (!mirror.ipc.includes(n)) expect(fromStart[n], `${n} from the start card`).toEqual([]);
       if (mirror.control === null) return;
       const fromControl = await pressed(c, c.control);
-      expect(fromControl).toEqual(fromStart);
+      // A write whose control is in another tab (`elsewhere`) is compared there, not here.
+      const here = (calls: typeof fromStart) =>
+        Object.fromEntries(
+          Object.entries(calls).filter(([n]) => !(mirror.elsewhere ?? []).includes(n)),
+        );
+      expect(here(fromControl)).toEqual(here(fromStart));
+      for (const n of mirror.elsewhere ?? []) expect(fromControl[n], n).toEqual([]);
     });
   }
 });

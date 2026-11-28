@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bobby Yu
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import {
   adoptRoles,
@@ -15,9 +15,11 @@ import {
   roleName,
   wizardModelsLine,
 } from "../../lib/directProviders";
-import { setRoleCloudProvider } from "../../lib/ipc";
+import { routeAdd, routeRemove, routeStatus, setRoleCloudProvider } from "../../lib/ipc";
+import { type BackupOffer, backupOffer } from "../../lib/roleRoute";
 import type { CloudProviderId, DirectProvidersState, RoleName } from "../../lib/types";
 import type { UseDirectProviders } from "../../lib/useDirectProviders";
+import { useRoutes } from "../../lib/useRoutes";
 import { SectionLabel, Select, SettingRow } from "../ui";
 import { DirectProviderCard } from "./DirectProviderCard";
 
@@ -36,17 +38,73 @@ const ROLES: RoleName[] = ["chat", "background"];
 export function OnboardingDirectKey({
   dp,
   hasOpenRouterKey,
+  openRouterModels = {},
   onError,
 }: {
   dp: UseDirectProviders;
   /** An OpenRouter key is saved or typed in the wizard. */
   hasOpenRouterKey: boolean;
+  /** The model each role would use on OpenRouter (the first of the wizard's own lists), which the
+   *  backup offer adds behind a provider of the person's own. */
+  openRouterModels?: { chat?: string; background?: string };
   onError: (message: string | null) => void;
 }) {
   const [saved, setSaved] = useState(false);
+  const routes = useRoutes();
+  // The checkbox the person ticked: the offer as it was when they ticked it (the live offer goes
+  // away the moment its rows exist), and the rows it added, so unticking can take them out again.
+  const [ticked, setTicked] = useState<BackupOffer | null>(null);
+  const busy = useRef(false);
   const state = dp.state;
   if (!state) return null;
   const eligible = eligibleProviders(state);
+  const live = backupOffer(state, hasOpenRouterKey, routes, openRouterModels);
+  const offer = ticked ?? live;
+
+  /** Ticking adds the other provider's default row behind the role's own, through the same list
+   *  edit as the editor (which checks it again). Unticking takes those rows out. Nothing is added
+   *  unless this is ticked. */
+  async function toggleBackup(on: boolean) {
+    if (!offer || busy.current) return;
+    busy.current = true;
+    onError(null);
+    /** Take the rows this offer adds out of the lists as they are NOW (an index read earlier may have
+     *  moved). A row that is the list's only one stays: a list is never emptied. */
+    async function takeOut(rows: BackupOffer["rows"]) {
+      const now = await routeStatus();
+      for (const r of rows) {
+        const list = r.role === "chat" ? now.chat : now.background;
+        const key = `${offer!.to}:${r.model}`;
+        const at = list.entries.findIndex((e) => e.key === key);
+        if (at >= 0 && list.entries.length > 1) await routeRemove(r.role, at, key);
+      }
+    }
+    const added: BackupOffer["rows"] = [];
+    try {
+      if (on) {
+        for (const r of offer.rows) {
+          await routeAdd(r.role, offer.to, r.model);
+          added.push(r);
+        }
+        setTicked(offer);
+      } else {
+        await takeOut(offer.rows);
+        setTicked(null);
+      }
+    } catch (e) {
+      onError(String(e));
+      // A half-done tick is put back, so the box and the lists agree.
+      try {
+        await takeOut(added);
+      } catch {
+        /* the next read shows what is there */
+      }
+    } finally {
+      busy.current = false;
+      await routes.reload();
+      await dp.reload();
+    }
+  }
 
   async function adopt(provider: CloudProviderId, next: DirectProvidersState | null) {
     setSaved(true);
@@ -62,6 +120,10 @@ export function OnboardingDirectKey({
         }
       }
       await dp.reload();
+      // The roles moved: the lists are read again, and a tick made before it no longer stands (the
+      // move replaced the cloud rows).
+      setTicked(null);
+      await routes.reload();
     } catch (e) {
       onError(String(e));
     }
@@ -74,7 +136,9 @@ export function OnboardingDirectKey({
     } catch (e) {
       onError(String(e));
     }
+    setTicked(null);
     await dp.reload();
+    await routes.reload();
   }
 
   return (
@@ -139,6 +203,19 @@ export function OnboardingDirectKey({
             {/* A free key took chat only, and nothing else answers background work yet. */}
             {!hasOpenRouterKey && state.roles.background.effective === "openrouter" && (
               <p className="text-xs text-st-due">{BACKGROUND_NOT_SET_UP}</p>
+            )}
+            {/* Unticked, and shown only where the other provider could answer at once: nothing is
+                added unless the person ticks it. */}
+            {offer && (
+              <label className="flex cursor-pointer items-start gap-2 text-sm text-ink2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+                  checked={ticked !== null}
+                  onChange={(e) => void toggleBackup(e.target.checked)}
+                />
+                <span>{offer.text}</span>
+              </label>
             )}
           </div>
         )}

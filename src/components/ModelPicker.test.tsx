@@ -119,6 +119,44 @@ describe("ModelPicker inside a dialog", () => {
   });
 });
 
+// A model already in the person's list stays in the menu, reachable by keyboard and screen reader
+// (`aria-disabled`, not `disabled`), and does nothing when pressed.
+describe("ModelPicker rows already in the list", () => {
+  it("keeps a taken row focusable, says why, and never picks it", async () => {
+    listModels.mockResolvedValue([
+      {
+        id: "a/one",
+        name: "One",
+        description: "",
+        context_length: 1000,
+        prompt_price: 1,
+        completion_price: 1,
+        input_modalities: ["text"],
+      },
+      {
+        id: "a/two",
+        name: "Two",
+        description: "",
+        context_length: 1000,
+        prompt_price: 1,
+        completion_price: 1,
+        input_modalities: ["text"],
+      },
+    ]);
+    const onChange = vi.fn();
+    render(<ModelPicker value="" onChange={onChange} disabledIds={["a/one"]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a model…" }));
+    const taken = (await screen.findByText("One")).closest("button")!;
+    expect(taken.getAttribute("aria-disabled")).toBe("true");
+    expect(taken.hasAttribute("disabled")).toBe(false);
+    expect(taken.textContent).toContain("Already in your list");
+    fireEvent.click(taken);
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Two").closest("button")!);
+    expect(onChange).toHaveBeenCalledWith("a/two");
+  });
+});
+
 // A person who only uses their own key hasn't opted into OpenRouter, so a direct list is handed in
 // and the picker never asks OpenRouter for anything.
 describe("ModelPicker with a provider's own list", () => {

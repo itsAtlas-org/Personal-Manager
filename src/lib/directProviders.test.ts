@@ -67,6 +67,7 @@ import {
   stateWith,
   TERRA,
 } from "./directProvidersFixture";
+import { claudeRow, geminiRow, localRow, orRow, routeView } from "./routeFixture";
 import type { RegionRefusal } from "./types";
 
 describe("effort levels", () => {
@@ -404,6 +405,27 @@ describe("what moved, and where a role's route goes", () => {
     );
   });
 
+  it("says 'removed', not 'back on OpenRouter', for a role whose list kept other rows", () => {
+    const withKey = { chat: true, background: true };
+    const kept = (role: "chat" | "background") => ({ ...move(role), restored_default: false });
+    expect(movedLine([kept("chat")], withKey, "Claude")).toBe("Removed Claude from Chat.");
+    // Never the OpenRouter key warning for a list that did not go back to OpenRouter.
+    expect(movedLine([kept("chat")], { chat: false, background: false }, "Claude")).toBe(
+      "Removed Claude from Chat.",
+    );
+    expect(movedLine([kept("chat"), kept("background")], withKey, "Claude")).toBe(
+      "Removed Claude from Chat and Background.",
+    );
+    // Mixed: one went back to OpenRouter, the other only lost the provider.
+    expect(
+      movedLine(
+        [{ ...move("chat"), restored_default: true }, kept("background")],
+        withKey,
+        "Claude",
+      ),
+    ).toBe("Chat is back on OpenRouter. Removed Claude from Background.");
+  });
+
   it("words the note under a direct role by its routing", () => {
     expect(routeNote("chat", "OpenAI", "cloud")).toBe(
       "Chat goes straight to OpenAI with your key. It isn't zero data retention.",
@@ -512,6 +534,56 @@ describe("the sidebar footer", () => {
     expect(footerRow(null, "chat")).toEqual({ id: null, fallbacks: 0, via: null, ...none });
   });
 
+  it("counts the rows behind the head for every provider once the list is the person's own", () => {
+    const down = { kind: "not_working" as const };
+    const edited = (rows: ReturnType<typeof claudeRow>[]) =>
+      settingsFor({
+        chat_provider: "anthropic",
+        chat_cloud_model: "anthropic/claude-sonnet-5-5",
+        chat_route: routeView(rows, false),
+      });
+    expect(footerRow(edited([claudeRow(), geminiRow(), localRow()]), "chat").fallbacks).toBe(2);
+    // A row that can't answer isn't a fallback, and a head that can't answer is stepped over.
+    expect(footerRow(edited([claudeRow(), geminiRow({ status: down })]), "chat").fallbacks).toBe(0);
+    expect(
+      footerRow(edited([claudeRow({ status: down }), geminiRow(), orRow("a/one")]), "chat")
+        .fallbacks,
+    ).toBe(1);
+    // A role nobody edited keeps the words it always had (auto-switch's models).
+    // (the stepped-over head is covered by its own test below)
+    const derived = settingsFor({ chat_route: routeView([claudeRow(), geminiRow()], true) });
+    expect(footerRow(derived, "chat").fallbacks).toBe(1);
+    expect(
+      footerRow(
+        settingsFor({ chat_auto_switch: false, chat_route: routeView([orRow("a/1")], true) }),
+        "chat",
+      ).fallbacks,
+    ).toBe(0);
+  });
+
+  it("names the first row that can answer when the head is down, never a model that is down", () => {
+    const down = { kind: "not_working" as const };
+    const s = settingsFor({
+      chat_provider: "anthropic",
+      chat_cloud_model: "anthropic/claude-sonnet-5-5",
+      chat_route: routeView([claudeRow({ status: down }), geminiRow(), orRow("a/one")], false),
+    });
+    const row = footerRow(s, "chat");
+    expect(row.id).toBe("gemini/gemini-3.8-flash");
+    // "+1" is the rows behind THAT row, so it belongs to the model beside it.
+    expect(row.fallbacks).toBe(1);
+    expect(row.via).not.toMatch(/Claude|Anthropic/);
+    // Another company's terms are not the head's: never read as free or paid from the head's field.
+    expect(row.viaDue).toBe(false);
+    // A head that can answer is the one named, as before.
+    const ok = settingsFor({
+      chat_provider: "anthropic",
+      chat_cloud_model: "anthropic/claude-sonnet-5-5",
+      chat_route: routeView([claudeRow(), geminiRow()], false),
+    });
+    expect(footerRow(ok, "chat").id).toBe("anthropic/claude-sonnet-5-5");
+  });
+
   it("says a Gemini route's terms from Settings, due-tinted when it is free or paused", () => {
     const on = (terms: "paid" | "free" | "blocked" | null | undefined) =>
       footerRow(
@@ -555,13 +627,19 @@ describe("the context meter's larger-model switch", () => {
     expect(chatUpgradeApplies(settingsFor({ chat_provider: "gemini" }))).toBe(false);
   });
 
-  it("is what App's handleUpgrade asks before it writes anything", () => {
-    // App is too large to mount here, so pin the wiring in its text: the guard comes first, ahead of
-    // the first write of the OpenRouter list.
+  // R11: the guard moved out of App into `upgradeChatModel` (lib/roleRoute.ts), so the unused saved
+  // models a first edit leaves out can be said; its behaviour is pinned in roleRoute.test.ts ("never
+  // writes the OpenRouter list for a chat on a provider of the person's own"). What is left to pin
+  // here is the wiring: App's handleUpgrade writes only through it, never with setChatModels itself.
+  // R11 (audit S1): the write is now the ONE-model switch (`switchToLargerChatModel`), which moves a
+  // single row and leaves the rest of the list where it is, not the whole OpenRouter set.
+  it("is what App's handleUpgrade goes through before it writes anything", () => {
     const body = appSource.slice(appSource.indexOf("function handleUpgrade("));
-    const guard = body.indexOf("if (!chatUpgradeApplies(settings)) return Promise.resolve();");
-    expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(body.indexOf("setChatModels("));
+    const handler = body.slice(0, body.indexOf("\n  }\n"));
+    const call = "upgradeChatModel(settings, modelId, switchToLargerChatModel)";
+    expect(handler).toContain(call);
+    expect(handler.replace(call, "")).not.toContain("setChatModels(");
+    expect(handler.replace(call, "")).not.toContain("switchToLargerChatModel(");
   });
 });
 

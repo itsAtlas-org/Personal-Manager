@@ -24,6 +24,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "3.209.0-alpha",
+    date: "2026-11-28",
+    highlights: [
+      "Chat and Background each have one ordered list of models now, in AI & Models. Put any mix in it: a model on OpenRouter, one on your own Claude, Gemini or OpenAI key, or the model on this computer (once, anywhere in the list). PM tries them top to bottom. A model that isn't in the list is never used, and you move, add and remove rows with plain buttons, so it works from the keyboard. The provider picker and the auto-switch switch are gone from AI & Models (the first-run setup keeps its own for now): models you list one after another on OpenRouter are still sent together, as before.",
+      "If you never edit a list, nothing changes: Chat and Background work as they did, the lists just show it. Your first edit turns what you have into the list and tells you how many other saved models weren't in use. A row says in words whether it's ready, has no key, is paused where you are or by your daily limit, or isn't working (since when, and why), with a button to try it again now.",
+      "A row after the first is tried only when the one above it failed without being charged: no credit, a key the company won't accept, busy, a model that's gone, too much text for it, or PM holding it back. It is never tried after the reply has started, after the model refused, or when PM can't tell whether the request was charged. The chat then says which model couldn't answer and why, which one did, and which company got the reply. The Usage tab keeps a line saying how many replies in the last 30 days went to a later row, why the first one did, and when, for the jobs that have no chat to tell you.",
+      "Your daily limit stops the reply instead of moving it to another company: you get the 'not working' card with the next row of your list as the first button. The only row PM goes on to by itself after a limit is this computer, because it costs nothing. With Local AI off, PM still tries the models above this computer in your list as usual, and stops when it reaches this computer: nothing after it is tried, so it never moves to the cloud. A list that starts with this computer stops at once. Turning Local AI off leaves your list exactly as it is.",
+      "On the 'not working' card, the rows of your own list after the one that failed come first, then the other models PM offered before. 'Use … from now on' puts that model first in your list, and 'Edit my list' opens Chat's list. The setup wizard offers, unticked, to add a second company as a backup when you save a key and another company could answer right now.",
+      "Mods get AI from a list only when its first model that isn't on this computer is on OpenRouter (or the list is only this computer), and then only from its OpenRouter rows, and this computer when it sits above them. If your first cloud row is your own Claude, Gemini or OpenAI key, a mod that asks for AI gets no answer, exactly as before, and a mod never gets your own keys or a walk down your list. In Local AI, where this computer sits in each list is now set in AI & Models.",
+    ],
+  },
+  {
     version: "3.208.0-alpha",
     date: "2026-11-27",
     highlights: [

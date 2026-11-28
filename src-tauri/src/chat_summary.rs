@@ -363,7 +363,8 @@ pub(crate) async fn extend_summary(app: &AppHandle, conversation_id: i64) -> Res
 
         // 2. Resolve the background model + key (off the model call's lock). No key set ⇒ we cannot
         //    summarise; leave the cursor where it is so the next launch retries once a key exists.
-        let Some(route) = crate::llm_gateway::resolve(app, crate::llm_gateway::Role::Background)?
+        let Some(route) =
+            crate::llm_gateway::resolve_plan(app, crate::llm_gateway::Role::Background)?
         else {
             break;
         };
@@ -532,7 +533,7 @@ pub(crate) async fn compress_now(
     };
 
     // 2. Resolve the background model + key off the lock; no key ⇒ we cannot compress.
-    let Some(route) = crate::llm_gateway::resolve(app, crate::llm_gateway::Role::Background)?
+    let Some(route) = crate::llm_gateway::resolve_plan(app, crate::llm_gateway::Role::Background)?
     else {
         return Ok(None);
     };

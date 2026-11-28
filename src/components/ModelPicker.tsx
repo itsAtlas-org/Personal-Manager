@@ -31,6 +31,9 @@ interface Props {
   ariaLabel?: string;
   /** The id of a line that describes what is chosen, read after the name when the trigger is focused. */
   describedBy?: string;
+  /** Models that can't be picked because they are already taken (a role's list can't hold one twice).
+   *  They stay in the list, disabled and saying so, so nothing a person looks for goes missing. */
+  disabledIds?: string[];
 }
 
 type Sort = "default" | "asc" | "desc";
@@ -50,6 +53,7 @@ export function ModelPicker({
   allowCustom = true,
   ariaLabel,
   describedBy,
+  disabledIds,
 }: Props) {
   const direct = source.kind === "direct";
   const [open, setOpen] = useState(false);
@@ -132,7 +136,10 @@ export function ModelPicker({
   // Let the user pick a model id that isn't in the catalogue (or hasn't loaded).
   const trimmed = query.trim();
   const customAvailable =
-    allowCustom && trimmed.length > 0 && !filtered.some((m) => m.id === trimmed);
+    allowCustom &&
+    trimmed.length > 0 &&
+    !filtered.some((m) => m.id === trimmed) &&
+    !disabledIds?.includes(trimmed);
 
   function pick(modelId: string) {
     onChange(modelId);
@@ -221,15 +228,22 @@ export function ModelPicker({
             {!loading &&
               shown.map((m) => {
                 const extra = rowsById?.get(m.id);
+                const taken = disabledIds?.includes(m.id) ?? false;
                 return (
                   <button
                     key={m.id}
                     type="button"
-                    onClick={() => pick(m.id)}
+                    // `aria-disabled`, not `disabled`: a row already in the list stays in the tab
+                    // order, so a keyboard or screen-reader person reaches it and hears "Already in
+                    // your list" instead of the row being skipped. Inert on click.
+                    aria-disabled={taken || undefined}
+                    onClick={() => {
+                      if (!taken) pick(m.id);
+                    }}
                     title={extra?.tip}
-                    className={`flex w-full items-start gap-3 px-3 py-2 text-left transition hover:bg-surface ${
-                      m.id === value ? "bg-surface" : ""
-                    }`}
+                    className={`flex w-full items-start gap-3 px-3 py-2 text-left transition ${
+                      taken ? "cursor-not-allowed" : "hover:bg-surface"
+                    } ${m.id === value ? "bg-surface" : ""}`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
@@ -249,6 +263,11 @@ export function ModelPicker({
                             {t.label}
                           </span>
                         ))}
+                        {taken && (
+                          <span className="rounded-[var(--radius-sm)] border border-ink4 px-1.5 py-0.5 text-[0.625rem] text-ink3">
+                            Already in your list
+                          </span>
+                        )}
                         {extra?.unlisted && (
                           <span className="rounded-[var(--radius-sm)] border border-ink4 px-1.5 py-0.5 text-[0.625rem] text-ink3">
                             Not in your key's list

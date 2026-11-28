@@ -1403,7 +1403,7 @@ fn opting_out_of_anthropic_moves_only_its_roles() {
     direct_providers::set_role_provider(&conn, Role::Chat, CloudProvider::Anthropic).unwrap();
     direct_providers::set_role_provider(&conn, Role::Background, CloudProvider::OpenAi).unwrap();
     let moved = direct_providers::set_opt_in(&conn, CloudProvider::Anthropic, false).unwrap();
-    assert_eq!(moved, vec![Role::Chat]);
+    assert_eq!(crate::route::edit::roles_of(&moved), vec![Role::Chat]);
     assert_eq!(
         crate::llm_gateway::role_cloud_provider(&conn, Role::Chat).unwrap(),
         CloudProvider::OpenRouter

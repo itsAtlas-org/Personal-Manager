@@ -129,6 +129,14 @@ pub struct Failed {
     pub billing: Option<Billing>,
     /// The sentence the error carried: used as the reason for a class with no wording of its own.
     pub message: String,
+    /// How many OTHER rows of the person's list PM asked, in this same request, before this one
+    /// failed (each walked past because it failed without charging). Zero for a plain single
+    /// attempt. It makes the reassurance true: after a walk, "nothing was sent anywhere else" is not.
+    pub earlier_asked: usize,
+    /// Set when the walk STOPPED at a this-computer row it would not run (Local AI off, or no model
+    /// picked yet) after this row failed: why nothing after that row was tried
+    /// ([`crate::error::SkipReason::stop_sentence`]). `None` for every other failure.
+    pub stopped_at_local: Option<&'static str>,
 }
 
 /// The short name of a provider in a sentence.
@@ -205,8 +213,28 @@ pub(crate) fn detail_line(f: &Failed, reason: &str, limit_known: bool) -> Option
 /// for a reply that really did; a 500 or a timeout that may have billed says what PM knows (it
 /// cannot tell) instead.
 pub(crate) fn reassurance(f: &Failed) -> Option<String> {
+    let base = checked_reassurance(f);
+    match (base, f.stopped_at_local) {
+        (Some(b), Some(stop)) => Some(format!("{b} {stop}")),
+        (None, Some(stop)) => Some(stop.to_string()),
+        (b, None) => b,
+    }
+}
+
+/// [`reassurance`] without the sentence about a walk that stopped at a this-computer row.
+fn checked_reassurance(f: &Failed) -> Option<String> {
     if f.class == FailureClass::Refused {
         return None;
+    }
+    // After a walk: PM did ask other rows of the list first. Say so, and that none of them charged
+    // (a walk only ever follows a failure that did not).
+    if f.earlier_asked > 0 && matches!(f.billing?, Billing::NeverLeft | Billing::Rejected) {
+        return Some(match f.earlier_asked {
+            1 => "PM also tried another model in your list first, and it didn't charge you.".into(),
+            n => format!(
+                "PM also tried {n} other models in your list first, and none of them charged you."
+            ),
+        });
     }
     match f.billing? {
         Billing::NeverLeft | Billing::Rejected => Some("Nothing was sent anywhere else.".into()),
@@ -285,6 +313,21 @@ pub struct Facts {
     pub openrouter: Option<OpenRouterFacts>,
     /// This computer's model for the role, only when Local AI is on and a model is chosen.
     pub local: Option<LocalFacts>,
+    /// The rows of the person's OWN list for the role, in order (empty for a list nobody has
+    /// edited). Each carries the offer it would make, when it can answer right now.
+    pub list: Vec<ListRow>,
+}
+
+/// One row of the person's own list, as the card sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRow {
+    /// The provider token (`openrouter`, `openai`, `gemini`, `anthropic`, `local`).
+    pub provider: String,
+    pub model: String,
+    /// What clicking this row would send; `None` when the row cannot answer now (not turned on,
+    /// no key, paused where the person is, at its daily limit, or remembered as not working).
+    /// Built where the facts are read, so the entry gate has already been asked.
+    pub offer: Option<Offer>,
 }
 
 /// One direct provider's facts from raw world readings. PURE. The entry gate is asked HERE, before an
@@ -378,11 +421,98 @@ fn direct_offer(f: &DirectFacts, m: &ModelFacts, kind: &'static str) -> Offer {
     }
 }
 
+fn openrouter_offer(model_id: &str) -> Offer {
+    Offer {
+        key: format!("openrouter:{model_id}"),
+        provider: "openrouter".into(),
+        model: model_id.to_string(),
+        label: model_id.to_string(),
+        company: company(CloudProvider::OpenRouter).into(),
+        data_note: data_note(CloudProvider::OpenRouter, false, None),
+        kind: "openrouter",
+    }
+}
+
+/// How a person calls the place a Local AI row sends the text: "this computer" for a loopback
+/// server, "your Local AI server" for one on another machine (a LAN or public address), which is
+/// true to where the reply really goes. The ONE copy of both phrases: the card, the strip, the log
+/// sentences and the list chip all read it.
+pub(crate) fn local_company(on_this_computer: bool) -> &'static str {
+    if on_this_computer {
+        "this computer"
+    } else {
+        "your Local AI server"
+    }
+}
+
+fn local_offer(l: &LocalFacts) -> Offer {
+    let company = local_company(l.on_this_computer);
+    let data_note = if l.on_this_computer {
+        "Stays on this computer."
+    } else {
+        "Goes to your Local AI server."
+    };
+    Offer {
+        key: format!("local:{}", l.model),
+        provider: "local".into(),
+        model: l.model.clone(),
+        label: l.model.clone(),
+        company: company.into(),
+        data_note: data_note.into(),
+        kind: "local",
+    }
+}
+
 // ---- the offers -------------------------------------------------------------------------------
+
+/// The person's own list rows AFTER the one that failed, in list order, that can answer now and were
+/// not already tried this turn. The failed row is found by provider and model (a failure that names
+/// no model matches the provider's first row); when it is not in the list at all (a one-click offer
+/// that failed, or a derived list) every row is a candidate. PURE.
+fn list_offers(failed: &Failed, facts: &Facts, tried: &[EntryRef]) -> Vec<Offer> {
+    let failed_token = failed.provider.map_or("local", CloudProvider::as_str);
+    let at = facts.list.iter().position(|r| {
+        r.provider == failed_token
+            && (r.provider == "local"
+                || failed
+                    .model
+                    .as_deref()
+                    .is_none_or(|m| m.is_empty() || m == r.model))
+    });
+    let start = at.map_or(0, |i| i + 1);
+    facts
+        .list
+        .iter()
+        .skip(start)
+        .filter_map(|row| {
+            let mut offer = row.offer.clone()?;
+            // A key-level failure is about the key, so another model on it is no way out.
+            if failed.provider.is_some_and(|p| p.as_str() == row.provider)
+                && failed.class.is_key_level()
+            {
+                return None;
+            }
+            if tried
+                .iter()
+                .any(|t| t.provider == row.provider && t.model == row.model)
+            {
+                return None;
+            }
+            if failed.provider.is_some_and(|p| p.as_str() == row.provider)
+                && offer.kind == "other_company"
+            {
+                offer.kind = "same_key";
+            }
+            Some(offer)
+        })
+        .collect()
+}
 
 /// The offers for a failed reply, in order, at most [`MAX_OFFERS`]. PURE.
 ///
-/// In order: another model on the SAME key (when the failure was about the model, not the key or the
+/// FIRST the person's own list: its rows after the one that failed, in the order they wrote them (a
+/// limit stop offers the next row this way, the only way a limit moves a reply to another company).
+/// Then, in order: another model on the SAME key (when the failure was about the model, not the key or the
 /// account); each OTHER provider the person has a key for, with its default model; OpenRouter's first
 /// row; this computer's model. Never a provider that fails the entry gate, is at its daily limit, or
 /// is the one that just failed for a key-level reason; never the exact model that just failed; never
@@ -398,6 +528,9 @@ pub(crate) fn offers_for(failed: &Failed, facts: &Facts, tried: &[EntryRef]) -> 
             .any(|t| t.provider == provider && t.model == model)
     };
     let tried_provider = |provider: &str| tried.iter().any(|t| t.provider == provider);
+
+    // 0. The person's own list, after the failed row.
+    out.extend(list_offers(failed, facts, tried));
 
     // 1. The same key, another model: only a failure about the model leaves the key worth trying.
     if let Some(p) = failed.provider {
@@ -432,39 +565,24 @@ pub(crate) fn offers_for(failed: &Failed, facts: &Facts, tried: &[EntryRef]) -> 
     // 3. OpenRouter's first row, unless OpenRouter is what failed (or was already tried).
     if failed.provider != Some(CloudProvider::OpenRouter) && !tried_provider("openrouter") {
         if let Some(or) = &facts.openrouter {
-            out.push(Offer {
-                key: format!("openrouter:{}", or.model_id),
-                provider: "openrouter".into(),
-                model: or.model_id.clone(),
-                label: or.model_id.clone(),
-                company: company(CloudProvider::OpenRouter).into(),
-                data_note: data_note(CloudProvider::OpenRouter, false, None),
-                kind: "openrouter",
-            });
+            out.push(openrouter_offer(&or.model_id));
         }
     }
 
     // 4. This computer's model, unless it is what failed or was tried first (a Local-then-cloud turn).
     if failed.provider.is_some() && !tried_provider("local") {
         if let Some(l) = &facts.local {
-            let (company, data_note) = if l.on_this_computer {
-                ("this computer", "Stays on this computer.")
-            } else {
-                // A LAN or public Local AI server: true to where the reply really goes.
-                ("your Local AI server", "Goes to your Local AI server.")
-            };
-            out.push(Offer {
-                key: format!("local:{}", l.model),
-                provider: "local".into(),
-                model: l.model.clone(),
-                label: l.model.clone(),
-                company: company.into(),
-                data_note: data_note.into(),
-                kind: "local",
-            });
+            out.push(local_offer(l));
         }
     }
 
+    // A row the list already offered is not offered a second time by the key and default rules.
+    let mut seen: Vec<String> = Vec::new();
+    out.retain(|o| {
+        let fresh = !seen.contains(&o.key);
+        seen.push(o.key.clone());
+        fresh
+    });
     out.truncate(MAX_OFFERS);
     out
 }
@@ -552,12 +670,22 @@ pub(crate) fn gather(app: &AppHandle, role: Role) -> Facts {
         let Ok(world) = direct_keys::read_entry_world(app, d) else {
             continue;
         };
-        let limit_reached = crate::llm_gateway::limit_paused(app, d.provider);
+        // "Unavailable now": at its daily limit, or remembered as not working for the whole key.
+        let limit_reached = crate::llm_gateway::limit_paused(app, d.provider)
+            || crate::entry_health::global()
+                .is_down(d.provider, "")
+                .is_some();
         directs.push(direct_facts(d, role, &world, limit_reached));
     }
 
+    let openrouter_limited = crate::llm_gateway::limit_paused(app, CloudProvider::OpenRouter);
     let openrouter = crate::llm_gateway::openrouter_offer_model(app, role)
-        .filter(|_| !crate::llm_gateway::limit_paused(app, CloudProvider::OpenRouter))
+        .filter(|_| !openrouter_limited)
+        .filter(|m| {
+            crate::entry_health::global()
+                .is_down(CloudProvider::OpenRouter, m)
+                .is_none()
+        })
         .map(|model_id| OpenRouterFacts { model_id });
 
     let local = crate::llm_gateway::local_offer_model(app, role).map(|l| LocalFacts {
@@ -565,10 +693,87 @@ pub(crate) fn gather(app: &AppHandle, role: Role) -> Facts {
         on_this_computer: l.on_this_computer,
     });
 
+    // The person's own list, when they have one: the rows the card offers FIRST once one fails.
+    let stored = {
+        let state = app.state::<AppState>();
+        state
+            .conn()
+            .ok()
+            .and_then(|conn| crate::route::stored_entries(&conn, role).ok().flatten())
+            .unwrap_or_default()
+    };
+    let openrouter_keyed = !stored.is_empty()
+        && crate::llm_gateway::provider_key_state(CloudProvider::OpenRouter, role)
+            == crate::llm_gateway::KeyPresence::Present;
+    let list = stored
+        .iter()
+        .map(|e| {
+            list_row(
+                e,
+                &directs,
+                local.as_ref(),
+                openrouter_keyed && !openrouter_limited,
+            )
+        })
+        .collect();
+
     Facts {
         directs,
         openrouter,
         local,
+        list,
+    }
+}
+
+/// One row of the person's list as the card sees it: the offer it would make, when it can answer now.
+/// PURE over the facts already read. A direct row needs its provider to have passed the entry gate and
+/// not be unavailable; an OpenRouter row needs its key and no limit; this computer's row needs Local
+/// AI on with a model chosen; and none of them may be remembered as not working.
+fn list_row(
+    entry: &crate::route::Entry,
+    directs: &[DirectFacts],
+    local: Option<&LocalFacts>,
+    openrouter_ok: bool,
+) -> ListRow {
+    use crate::route::Entry;
+    let down =
+        |p: CloudProvider, model: &str| crate::entry_health::global().is_down(p, model).is_some();
+    match entry {
+        Entry::Local => ListRow {
+            provider: "local".into(),
+            model: local.map(|l| l.model.clone()).unwrap_or_default(),
+            offer: local.map(local_offer),
+        },
+        Entry::Cloud {
+            provider, model, ..
+        } => {
+            let offer = if provider.is_direct() {
+                directs
+                    .iter()
+                    .find(|f| f.provider == *provider)
+                    .filter(|f| f.gate_ok && !f.limit_reached && !down(*provider, model))
+                    .and_then(|f| {
+                        direct_models::find(model).map(|m| {
+                            direct_offer(
+                                f,
+                                &ModelFacts {
+                                    id: m.id.clone(),
+                                    name: m.name.clone(),
+                                    note: m.note.clone(),
+                                },
+                                "other_company",
+                            )
+                        })
+                    })
+            } else {
+                (openrouter_ok && !down(*provider, model)).then(|| openrouter_offer(model))
+            };
+            ListRow {
+                provider: provider.as_str().to_string(),
+                model: model.clone(),
+                offer,
+            }
+        }
     }
 }
 
@@ -602,6 +807,8 @@ mod tests {
             class,
             billing: Some(Billing::Rejected),
             message: "The sentence the error carried.".into(),
+            earlier_asked: 0,
+            stopped_at_local: None,
         }
     }
 
@@ -643,7 +850,136 @@ mod tests {
                 model: "llama3".into(),
                 on_this_computer: true,
             }),
+            list: Vec::new(),
         }
+    }
+
+    fn row(provider: &str, model: &str, usable: bool) -> ListRow {
+        ListRow {
+            provider: provider.into(),
+            model: model.into(),
+            offer: usable.then(|| Offer {
+                key: format!("{provider}:{model}"),
+                provider: provider.into(),
+                model: model.into(),
+                label: model.into(),
+                company: "Someone".into(),
+                data_note: "Someone gets this reply.".into(),
+                kind: "other_company",
+            }),
+        }
+    }
+
+    fn with_list(rows: Vec<ListRow>) -> Facts {
+        Facts {
+            list: rows,
+            ..everything()
+        }
+    }
+
+    /// The person's own rows after the failed one come first, in the order they wrote them, ahead of
+    /// every default the keys would suggest.
+    #[test]
+    fn the_persons_own_rows_after_the_failed_one_are_offered_first() {
+        let facts = with_list(vec![
+            row("anthropic", "anthropic/claude-sonnet-5-5", true),
+            row("openrouter", "x/second", true),
+            row("gemini", "gemini/gemini-3.5-flash", true),
+        ]);
+        let f = failed(
+            Some(CloudProvider::Anthropic),
+            Some("anthropic/claude-sonnet-5-5"),
+            FailureClass::Busy,
+        );
+        let got = offers_for(&f, &facts);
+        assert_eq!(
+            keys(&got)[..2],
+            ["openrouter:x/second", "gemini:gemini/gemini-3.5-flash"]
+        );
+        assert_eq!(got.len(), MAX_OFFERS);
+    }
+
+    /// A row ABOVE the failed one already had its turn (it is why this one was reached), so it is
+    /// never offered back; a row that cannot answer now is skipped, not offered.
+    #[test]
+    fn rows_above_the_failed_one_and_rows_that_cannot_answer_are_never_offered() {
+        let facts = with_list(vec![
+            row("gemini", "gemini/gemini-3.5-flash", true),
+            row("anthropic", "anthropic/claude-sonnet-5-5", true),
+            row("openrouter", "x/down", false),
+            row("local", "llama3", true),
+        ]);
+        let f = failed(
+            Some(CloudProvider::Anthropic),
+            Some("anthropic/claude-sonnet-5-5"),
+            FailureClass::Busy,
+        );
+        let got = offers_for(&f, &facts);
+        assert_eq!(keys(&got)[0], "local:llama3", "{got:?}");
+        assert!(!keys(&got).contains(&"openrouter:x/down".to_string()));
+        // The first offer is the list's own, and the same row is not offered twice by the defaults.
+        assert_eq!(
+            keys(&got).iter().filter(|k| *k == "local:llama3").count(),
+            1
+        );
+    }
+
+    /// A limit stop offers the next row of the list: the only way a daily limit moves a reply to
+    /// another company, and only by the person's click.
+    #[test]
+    fn a_limit_stop_offers_the_next_row_of_the_list() {
+        let facts = with_list(vec![
+            row("anthropic", "anthropic/claude-sonnet-5-5", true),
+            row("gemini", "gemini/gemini-3.5-flash", true),
+        ]);
+        let f = failed(
+            Some(CloudProvider::Anthropic),
+            Some("anthropic/claude-sonnet-5-5"),
+            FailureClass::LimitReached,
+        );
+        assert_eq!(
+            keys(&offers_for(&f, &facts))[0],
+            "gemini:gemini/gemini-3.5-flash"
+        );
+    }
+
+    /// A key-level failure is about the key, so the list's later rows on that key are no way out;
+    /// and a row already tried this turn is never offered again.
+    #[test]
+    fn a_dead_key_and_an_already_tried_row_take_their_list_rows_out() {
+        let facts = with_list(vec![
+            row("anthropic", "anthropic/claude-sonnet-5-5", true),
+            row("anthropic", "anthropic/claude-haiku-5-5", true),
+            row("gemini", "gemini/gemini-3.5-flash", true),
+        ]);
+        let f = failed(
+            Some(CloudProvider::Anthropic),
+            Some("anthropic/claude-sonnet-5-5"),
+            FailureClass::NoCredit,
+        );
+        let got = offers_for(&f, &facts);
+        assert!(!keys(&got).contains(&"anthropic:anthropic/claude-haiku-5-5".to_string()));
+        assert_eq!(keys(&got)[0], "gemini:gemini/gemini-3.5-flash");
+        let tried = [EntryRef {
+            provider: "gemini".into(),
+            model: "gemini/gemini-3.5-flash".into(),
+        }];
+        let got = super::offers_for(&f, &facts, &tried_with(&f, &tried));
+        assert!(!keys(&got).contains(&"gemini:gemini/gemini-3.5-flash".to_string()));
+    }
+
+    /// A failure that is not a row of the list (a one-click offer that failed) leaves every row a
+    /// candidate; a model that failed on the same key but is a different row offers the next one as
+    /// "same key".
+    #[test]
+    fn a_failure_outside_the_list_leaves_every_row_a_candidate() {
+        let facts = with_list(vec![row("openrouter", "x/first", true)]);
+        let f = failed(
+            Some(CloudProvider::Gemini),
+            Some("gemini/not-in-the-list"),
+            FailureClass::Busy,
+        );
+        assert_eq!(keys(&offers_for(&f, &facts))[0], "openrouter:x/first");
     }
 
     fn keys(o: &[Offer]) -> Vec<String> {
@@ -1358,6 +1694,8 @@ mod tests {
                 class: f.class,
                 billing: Some(f.billing),
                 message: f.message.clone(),
+                earlier_asked: 0,
+                stopped_at_local: None,
             };
             let card = super::card_for(1, &failed, &Facts::default(), None, &[])
                 .expect("a walk class has a card");

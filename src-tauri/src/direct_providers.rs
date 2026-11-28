@@ -36,8 +36,10 @@ use rusqlite::Connection;
 
 use crate::direct_models::{self, DirectModel};
 use crate::error::{Error, Result};
+#[cfg(test)]
+use crate::llm_gateway::cloud_provider_key;
 use crate::llm_gateway::{
-    cloud_provider_key, role_cloud_provider, stored_role_provider, CloudProvider, KeyPresence, Role,
+    role_cloud_provider, stored_role_provider, CloudProvider, KeyPresence, Role,
 };
 use crate::power::{DirectConsent, DIRECT_CONSENT_KEY};
 use crate::region::{Basis, Region, RegionRefusal};
@@ -840,10 +842,17 @@ pub(crate) fn effort_for(
     if let Some(level) = stored.filter(|l| model.offers(l)) {
         return Ok(Some(level));
     }
-    Ok(match role {
+    Ok(default_effort(role, model))
+}
+
+/// The effort a role sends when nothing valid is stored: Chat omits the field (the model's own
+/// default), Background asks for "low" where the model has it. The ONE copy of that rule, shared by
+/// [`effort_for`] and by the list's own coercion (`route::normalise`), so the two can never differ.
+pub(crate) fn default_effort(role: Role, model: &DirectModel) -> Option<String> {
+    match role {
         Role::Chat => None,
         Role::Background => background_default_effort(model),
-    })
+    }
 }
 
 fn background_default_effort(model: &DirectModel) -> Option<String> {
@@ -856,6 +865,10 @@ fn background_default_effort(model: &DirectModel) -> Option<String> {
 
 /// What a direct arm needs from the store: the one model it calls and the effort to send.
 pub(crate) struct ArmInputs {
+    /// The model and effort the OLD provider rows say. A role's arm is built from its list now (the
+    /// row carries its own model and effort); these are what the derive golden tests hold the list
+    /// to, and the only reader of them besides those tests is the stored tier below.
+    #[allow(dead_code)]
     pub models: Vec<String>,
     pub effort: Option<String>,
     /// The STORED tier and the fingerprint it was stored with. Not judged here: `cloud_arm` compares
@@ -887,6 +900,10 @@ pub(crate) fn arm_inputs(conn: &Connection, p: CloudProvider, role: Role) -> Res
 /// NEW model. A direct list holds exactly one model in this version; the id must be one PM lists for
 /// the provider; the effort is `None` (clears the row, so the role default) or a level that model
 /// offers. The word "default" is not a level and is refused.
+///
+/// TEST ONLY, like [`set_role_provider`]: no command writes the older `direct_*` rows any more. The
+/// same checks run on a list row (`route::edit::set_effort`, and `add` for the model).
+#[cfg(test)]
 pub(crate) fn set_role_model(
     conn: &Connection,
     p: CloudProvider,
@@ -925,20 +942,15 @@ pub(crate) fn set_role_model(
     Ok(())
 }
 
-/// Every role whose STORED provider is `p` goes back to OpenRouter (its row is deleted), inside the
-/// given transaction, and the provider's yes to the on-battery question is forgotten with them: a
-/// stale yes would let a role moved to `p` later skip the question that names it. Returns the roles
-/// moved.
-fn retire_in(conn: &Connection, p: CloudProvider) -> Result<Vec<Role>> {
+/// Every role that uses `p` stops using it, inside the given transaction, and the provider's yes to
+/// the on-battery question is forgotten with them: a stale yes would let a role moved to `p` later
+/// skip the question that names it. A role with a list of its own loses `p`'s rows (and gets
+/// OpenRouter's default back if that would leave it empty); a role nobody has edited goes back to
+/// OpenRouter as it always did (`route::edit::retire_provider`, the one place that writes either).
+/// Returns what happened to each role it touched.
+fn retire_in(conn: &Connection, p: CloudProvider) -> Result<Vec<crate::route::edit::Retired>> {
     forget_battery_yes(conn, p)?;
-    let mut moved = Vec::new();
-    for role in [Role::Chat, Role::Background] {
-        if stored_role_provider(conn, role)? == p {
-            db::delete_setting(conn, cloud_provider_key(role))?;
-            moved.push(role);
-        }
-    }
-    Ok(moved)
+    crate::route::edit::retire_provider(conn, p)
 }
 
 /// Take `p`'s yes to the on-battery question out of the stored consent (the row is deleted when no
@@ -971,7 +983,10 @@ pub(crate) fn forget_yes_on_terms_drop(
 }
 
 /// [`retire_in`] in its own transaction, for a key removed while the provider stays on.
-pub(crate) fn retire_roles(conn: &Connection, p: CloudProvider) -> Result<Vec<Role>> {
+pub(crate) fn retire_roles(
+    conn: &Connection,
+    p: CloudProvider,
+) -> Result<Vec<crate::route::edit::Retired>> {
     let tx = conn.unchecked_transaction()?;
     let moved = retire_in(&tx, p)?;
     tx.commit()?;
@@ -980,8 +995,12 @@ pub(crate) fn retire_roles(conn: &Connection, p: CloudProvider) -> Result<Vec<Ro
 
 /// Turn a provider on or off. On is the flag alone. Off is ONE transaction: the flag and every role
 /// that was on the provider moving back to OpenRouter, so there is never a moment with a role on a
-/// provider that is off. Returns the roles moved, which the caller reports to the person.
-pub(crate) fn set_opt_in(conn: &Connection, p: CloudProvider, enabled: bool) -> Result<Vec<Role>> {
+/// provider that is off. Returns what happened to each role, which the caller reports to the person.
+pub(crate) fn set_opt_in(
+    conn: &Connection,
+    p: CloudProvider,
+    enabled: bool,
+) -> Result<Vec<crate::route::edit::Retired>> {
     let d = row(p)?;
     if enabled {
         db::set_setting(conn, d.opt_in, "true")?;
@@ -994,8 +1013,10 @@ pub(crate) fn set_opt_in(conn: &Connection, p: CloudProvider, enabled: bool) -> 
     Ok(moved)
 }
 
-/// Point a role at OpenRouter (deleting its row) or at a direct provider. The caller has already
-/// checked the provider is opted in and keyed.
+/// Point a role at OpenRouter (deleting its row) or at a direct provider, in the OLD rows. TEST
+/// ONLY: no command writes the older routing rows any more (the list is the one truth, and the
+/// older controls edit it), so this is what a test uses to set up a role nobody has edited.
+#[cfg(test)]
 pub(crate) fn set_role_provider(conn: &Connection, role: Role, p: CloudProvider) -> Result<()> {
     if p.is_direct() {
         db::set_setting(conn, cloud_provider_key(role), p.as_str())
@@ -1026,22 +1047,30 @@ pub(crate) fn set_shares_data(conn: &Connection, p: CloudProvider, shares: bool)
 
 // ---- the read model ------------------------------------------------------------------------------
 
-/// A role moved off a provider, for the card to say so.
+/// A role that lost a provider's rows, for the card to say so ("Removed Claude from Chat and
+/// Background"; the words are the page's, `lib/roleRoute.ts`). `restored_default` says the list
+/// would have been empty and OpenRouter's default came back, which is the only case where the role
+/// "went back to OpenRouter"; `to` stays OpenRouter for the older one-provider card.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub(crate) struct RoleMove {
     pub role: Role,
     pub from: CloudProvider,
     pub to: CloudProvider,
+    pub restored_default: bool,
 }
 
-/// Roles moved back to OpenRouter off `from`.
-pub(crate) fn moves_to_openrouter(from: CloudProvider, roles: &[Role]) -> Vec<RoleMove> {
-    roles
+/// What a provider leaving did to each role, as the card reports it.
+pub(crate) fn moves_to_openrouter(
+    from: CloudProvider,
+    retired: &[crate::route::edit::Retired],
+) -> Vec<RoleMove> {
+    retired
         .iter()
-        .map(|&role| RoleMove {
-            role,
+        .map(|r| RoleMove {
+            role: r.role,
             from,
             to: CloudProvider::OpenRouter,
+            restored_default: r.restored_default,
         })
         .collect()
 }
@@ -1172,10 +1201,30 @@ pub(crate) struct DirectProvidersState {
 }
 
 fn role_view(conn: &Connection, p: CloudProvider, role: Role) -> Result<DirectRoleView> {
+    // A role with a list of its own shows the model and effort of ITS row for this provider; a
+    // provider the list does not hold (or a role nobody has edited) shows what the older rows say,
+    // which for a role with a list is the catalogue's default for it.
+    let row = crate::route::stored_entries(conn, role)?.and_then(|list| {
+        list.into_iter().find_map(|e| match e {
+            crate::route::Entry::Cloud {
+                provider,
+                model,
+                effort,
+            } if provider == p => Some((model, effort)),
+            _ => None,
+        })
+    });
+    let (model, effort) = match row {
+        Some(row) => row,
+        None => (
+            models_for(conn, p, role)?.remove(0),
+            effort_for(conn, p, role)?,
+        ),
+    };
     Ok(DirectRoleView {
         uses_this_provider: role_cloud_provider(conn, role)? == p,
-        model: models_for(conn, p, role)?.remove(0),
-        effort: effort_for(conn, p, role)?,
+        model,
+        effort,
     })
 }
 
@@ -1560,7 +1609,10 @@ mod tests {
         let (_d, conn) = temp_db();
         opt_in(&conn);
         set_role_provider(&conn, Role::Chat, OA).unwrap();
-        assert_eq!(retire_roles(&conn, OA).unwrap(), vec![Role::Chat]);
+        assert_eq!(
+            crate::route::edit::roles_of(&retire_roles(&conn, OA).unwrap()),
+            vec![Role::Chat]
+        );
         assert!(db::get_setting(&conn, "chat_cloud_provider")
             .unwrap()
             .is_none());
@@ -1622,7 +1674,10 @@ mod tests {
         set_role_provider(&conn, Role::Chat, OA).unwrap();
         set_role_provider(&conn, Role::Background, OA).unwrap();
         let moved = set_opt_in(&conn, OA, false).unwrap();
-        assert_eq!(moved, vec![Role::Chat, Role::Background]);
+        assert_eq!(
+            crate::route::edit::roles_of(&moved),
+            vec![Role::Chat, Role::Background]
+        );
         assert!(!opted_in(&conn, OA).unwrap());
         for role in [Role::Chat, Role::Background] {
             assert_eq!(
@@ -1643,7 +1698,7 @@ mod tests {
         opt_in(&conn);
         set_role_provider(&conn, Role::Background, OA).unwrap();
         assert_eq!(
-            set_opt_in(&conn, OA, false).unwrap(),
+            crate::route::edit::roles_of(&set_opt_in(&conn, OA, false).unwrap()),
             vec![Role::Background]
         );
     }

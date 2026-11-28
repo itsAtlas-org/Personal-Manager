@@ -386,7 +386,7 @@ fn push_group(out: &mut String, label: &str, items: &[String]) {
 /// do on error (best-effort — a hiccup just leaves the prior briefing in place).
 pub async fn generate(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     snapshot: &str,
     profile: Option<&str>,
 ) -> Result<(

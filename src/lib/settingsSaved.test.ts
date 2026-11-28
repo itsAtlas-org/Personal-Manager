@@ -26,10 +26,9 @@ describe("isSettingWrite", () => {
       "set_local_llm_endpoint",
       "set_help_mode",
       "set_pref",
-      // Your own provider keys: the opt-in, the role's provider and model, the tick-box.
+      // Your own provider keys: the opt-in, the role's provider, the tick-box.
       "set_direct_opt_in",
       "set_role_cloud_provider",
-      "set_direct_role",
       "set_direct_data_sharing",
     ]) {
       expect(isSettingWrite(cmd)).toBe(true);
@@ -44,6 +43,16 @@ describe("isSettingWrite", () => {
       "recheck_direct_key",
       "clear_direct_key",
       "direct_providers_state",
+      // The list editor's commands: a refused edit (a provider that is off, a duplicate, the last
+      // row) must never claim "Saved", so none of them is named `set_*`.
+      "route_status",
+      "route_add",
+      "route_move",
+      "route_remove",
+      "route_set_effort",
+      "route_reset",
+      "route_try_again",
+      "promote_entry",
     ]) {
       expect(isSettingWrite(cmd)).toBe(false);
     }

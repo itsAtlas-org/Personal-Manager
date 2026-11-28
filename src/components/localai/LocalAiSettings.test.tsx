@@ -1365,10 +1365,10 @@ describe("errors are said where they happened", () => {
   });
 
   it("puts a failed role write under Assign roles", async () => {
-    setLocalLlmRouting.mockRejectedValue(new Error("vault locked"));
+    setLocalLlmRoleModel.mockRejectedValue(new Error("vault locked"));
     await loaded();
-    fireEvent.change(screen.getByRole("combobox", { name: "Where chat runs" }), {
-      target: { value: "cloud" },
+    fireEvent.change(screen.getByRole("combobox", { name: "Chat model" }), {
+      target: { value: "" },
     });
     const error = await screen.findByText(/vault locked/);
     expect(error.closest("[data-settings-section]")?.id).toBe("sec-localai-roles");

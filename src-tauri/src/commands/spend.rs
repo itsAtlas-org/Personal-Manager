@@ -79,7 +79,22 @@ pub struct CostSummary {
     pub unpriced_30d: i64,
     /// The named token types PM can't price, in the last 30 days, with how many replies each.
     pub partial_reasons: Vec<PartialReason>,
+    /// Replies in the last 30 days that a LATER row of the person's own list answered, so a bad
+    /// first row cannot quietly bill the second one night after night (Background and Review have
+    /// no strip). `None` when there were none.
+    pub list_walks: Option<ListWalks>,
     pub pricing_updated_at: Option<String>,
+}
+
+/// The persistent record of a list's walks, read from `usage_log.fallback_reason`.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct ListWalks {
+    pub replies: i64,
+    /// Why the earliest of them moved, in the class table's words ("busy", "no credit left or at a
+    /// spend limit"): one copy of each phrase, shared with the strip and `Error::Exhausted`.
+    pub first_reason: String,
+    /// When the earliest of them was logged (RFC 3339); the page words the date.
+    pub first_at: String,
 }
 
 /// Per-model spend (trailing 30 days + all time) joined against the cached OpenRouter
@@ -422,8 +437,39 @@ fn build_cost_summary(conn: &Connection) -> Result<CostSummary> {
         total_all_time_partial,
         unpriced_30d,
         partial_reasons: partial_reasons(conn)?,
+        list_walks: list_walks(conn)?,
         pricing_updated_at,
     })
+}
+
+/// The replies of the last 30 days that a later row of a person's list answered. The `_` in a LIKE
+/// pattern matches any character, so it is escaped: only `list_...` counts, never a look-alike.
+fn list_walks(conn: &Connection) -> Result<Option<ListWalks>> {
+    const WHERE: &str = "fallback_reason LIKE 'list\\_%' ESCAPE '\\' \
+         AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days')";
+    let replies: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM usage_log WHERE {WHERE}"),
+        [],
+        |r| r.get(0),
+    )?;
+    if replies == 0 {
+        return Ok(None);
+    }
+    let (reason, at): (String, String) = conn.query_row(
+        &format!(
+            "SELECT fallback_reason, created_at FROM usage_log WHERE {WHERE} \
+             ORDER BY created_at, id LIMIT 1"
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(Some(ListWalks {
+        replies,
+        first_reason: crate::error::list_reason_words(&reason)
+            .unwrap_or("it couldn't answer")
+            .to_string(),
+        first_at: at,
+    }))
 }
 
 /// The cost notes that name a token type PM can't price, as a SQL list of their fixed slugs. Built
@@ -1701,6 +1747,52 @@ mod tests {
         assert!(summary.total_all_time_partial);
         assert!(summary.total_30d_partial);
         assert_eq!(summary.unpriced_30d, 1);
+    }
+
+    /// The Usage line for a list's walks counts only `list_...` replies from the last 30 days, names
+    /// the EARLIEST one's reason and date in the class table's words, and never counts a local
+    /// failure, a power route, or an `_`-wildcard look-alike.
+    #[test]
+    fn the_usage_line_counts_a_lists_walks_and_nothing_that_only_looks_like_one() {
+        let (_dir, conn) = temp_db();
+        assert_eq!(list_walks(&conn).unwrap(), None);
+        let log = |reason: &str, at: &str| {
+            conn.execute(
+                "INSERT INTO usage_log(model, kind, fallback_reason, created_at) \
+                 VALUES ('m/x', 'chat', ?1, ?2)",
+                params![reason, at],
+            )
+            .unwrap();
+        };
+        let ago = |days: i64| -> String {
+            conn.query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now', ?1)",
+                [format!("-{days} days")],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        log("hard_failure:timeout", &ago(2));
+        log("power_policy", &ago(2));
+        log("cooldown", &ago(2));
+        log("listX_busy", &ago(2));
+        assert_eq!(
+            list_walks(&conn).unwrap(),
+            None,
+            "none of those is a list's walk"
+        );
+        log("list_busy", &ago(40));
+        assert_eq!(list_walks(&conn).unwrap(), None, "older than 30 days");
+        let three = ago(3);
+        log("list_no_credit", &three);
+        log("list_skip_down", &ago(1));
+        let walks = list_walks(&conn).unwrap().unwrap();
+        assert_eq!(walks.replies, 2);
+        assert_eq!(
+            walks.first_reason,
+            crate::error::FailureClass::NoCredit.why()
+        );
+        assert_eq!(walks.first_at, three);
     }
 
     /// `by_mod`: one line per mod across its models, priced row-additively like the per-model

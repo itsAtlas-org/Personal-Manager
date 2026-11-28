@@ -206,7 +206,7 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "sidebar-models": {
     title: "Models in use",
-    body: "The models PM is currently using — 'Chat' for your conversations and 'Tasks' for background work (sorting and learning). Each row names whatever will actually answer: if you have pointed that role at a model on your own machine, that is the name you see, and the cloud model behind it becomes the fallback. A row that says 'pick a model' is set to use a model on your own machine and has none right now (Local AI is off, or its model was cleared when you switched it off), so nothing answers it until you pick one. A '+N' badge means auto-switch is on with N fallback models behind it. 'Local' below them is your own model server's connection. Click to change any of it in Settings. On battery, a row can say 'on battery': PM has moved that role to your cloud model under your On battery setting, and the row names the cloud model answering. 'kept local' means you asked PM to stay on this machine anyway.",
+    body: "The models PM is currently using — 'Chat' for your conversations and 'Tasks' for background work (sorting and learning). Each row names whatever will actually answer: if you have pointed that role at a model on your own machine, that is the name you see, and the cloud model behind it becomes the fallback. A row that says 'pick a model' is set to use a model on your own machine and has none right now (Local AI is off, or its model was cleared when you switched it off), so nothing answers it until you pick one. A '+N' badge means N more models behind it in that role's list can answer if the first one can't. 'Local' below them is your own model server's connection. Click to change any of it in Settings. On battery, a row can say 'on battery': PM has moved that role to your cloud model under your On battery setting, and the row names the cloud model answering. 'kept local' means you asked PM to stay on this machine anyway.",
   },
   "sidebar-search": {
     title: "Search",
@@ -648,12 +648,16 @@ export const HELP: Record<string, HelpEntry> = {
     body: "A normal project key from platform.openai.com/api-keys. PM checks it when you press Save and check: it asks OpenAI which models the key can use, then sends one tiny test message (\"Reply with OK.\") to prove it can chat. That costs a tiny fraction of a cent and isn't listed in Usage. A key with no credit (or at a spend limit), or one that can't chat, is saved with a note, and Check again tries it once you've fixed that. A key that OpenAI refuses isn't saved.",
   },
   "settings-role-provider": {
-    title: "Provider",
-    body: "Which provider answers this job. Chat and Background each choose their own. OpenRouter asks for zero data retention. A provider you've added yourself doesn't give you zero data retention unless you arrange it with them. A Gemini key that reads as free where PM only uses paid ones shows as paused here. Turn a provider off above and its jobs go back to OpenRouter.",
+    title: "Who gets the reply",
+    body: 'Each row says who it sends to. OpenRouter asks for zero data retention. A row marked "your key" goes straight to that company with your own key, and doesn\'t give you zero data retention unless you arrange it with them. A Gemini key that reads as free where PM only uses paid ones shows as paused. Turn a provider off in Your own keys and its rows leave your lists.',
   },
   "settings-role-effort": {
     title: "Effort",
-    body: "How hard the model thinks before it answers, in that model's own levels. More effort is slower and costs more. Background work starts on Low. Chat uses the model's default until you choose.",
+    body: "How hard a model thinks before it answers, in that model's own levels, set on its own row. More effort is slower and costs more. Background work starts on Low. Chat uses the model's default until you choose.",
+  },
+  "settings-role-route": {
+    title: "The order of the list",
+    body: "PM tries a role's models top to bottom, and a model that isn't in the list is never used. It goes on to the next row only when it knows the one above didn't charge for this request: a key that is turned away, a service that is busy, a model that has gone. If a reply had already started, or PM can't tell, it stops and asks you. A daily limit stops a request and doesn't move it to another company's paid model on its own; this computer is the one row it moves on to. Rows from OpenRouter that sit together go out as one request. A mod only uses the OpenRouter rows, and only when your first cloud row is OpenRouter. Every move has a button and is announced; there is no dragging.",
   },
   "settings-background-key": {
     title: "Background API key",
@@ -666,11 +670,11 @@ export const HELP: Record<string, HelpEntry> = {
   // that provider's models, with the provider's own terms, and says so (settings-direct-keys).
   "settings-chat-models": {
     title: "Chat model",
-    body: "Which model answers your chats. On OpenRouter, add one from the picker: search the models PM can actually use, compare the input → output price per million tokens, sort by price, and use the tags (Free, Reasoning, Vision, Coding…). That list is OpenRouter's, filtered to models offering zero data retention, which PM asks for on every request. Add more than one and turn on auto-switch to fall through to the next when one hits its daily limit. With your own provider, the list is PM's own list of that provider's models, with prices, and holds one model. PM is never locked to one model.",
+    body: "The models that answer your chats, in the order PM tries them. Add one from the picker: for OpenRouter, search the models PM can actually use, compare the input → output price per million tokens, sort by price, and use the tags (Free, Reasoning, Vision, Coding…). That list is OpenRouter's, filtered to models offering zero data retention, which PM asks for on every request. For a provider you added with your own key, the picker is PM's own list of that provider's models, with prices. This computer can be a row too. Several models make a way out: when one isn't working, PM tries the next. PM is never locked to one model.",
   },
   "settings-background-models": {
     title: "Background model",
-    body: "Which model does PM's behind-the-scenes work — the sorting proposals in Review and the Learning You profile. It can differ from your chat model; free models work well here. On OpenRouter, chain several with auto-switch so background work keeps going when a free model's daily cap is reached. With your own provider, it's PM's own list of that provider's models, and holds one.",
+    body: "Which model does PM's behind-the-scenes work — the sorting proposals in Review and the Learning You profile. It can differ from your chat model; free models work well here. Chain several OpenRouter models so background work keeps going when a free model's daily cap is reached, or put another provider or this computer behind it. The list works the same way as Chat's.",
   },
   "settings-indexing-speed": {
     title: "Indexing speed",
@@ -705,11 +709,11 @@ export const HELP: Record<string, HelpEntry> = {
   },
   "settings-localai-roles": {
     title: "Assign roles",
-    body: "Choose where chat and background work run — Cloud, Local only, or Local with a fall-back to your cloud model when your server can't answer (it isn't reachable, a reply fails or times out before anything is shown, or a request is too long for the window the server gives the model) — and which local model each uses. Each line says what will really happen with your keys and server as they are. The On battery section is separate: it can move a job set to Local, fall back to cloud onto your cloud model while the battery is low, and asks before it first does.",
+    body: "Choose which local model each job uses. Where this computer sits in each job's list is set in AI & Models: as the first row it is tried first, and the next row answers when your server can't (it isn't reachable, a reply fails or times out before anything is shown, or a request is too long for the window the server gives the model). Each line says what will really happen with your keys and server as they are. The On battery section is separate: it can move a job whose first row is this computer onto the cloud row after it while the battery is low, and asks before it first does.",
   },
   "settings-localai-power": {
     title: "On battery",
-    body: 'When your laptop is on battery and the charge falls to the level you choose, PM can send new requests from your local model to your cloud model instead. That reduces power use by not running inference on your GPU. You choose what moves — chat, background work, or both — and only roles set to Local, fall back to cloud ever move. PM waits a minute before acting on any change, comes back to your local model about a minute after you plug in, and asks you before it first moves anything — once for what it asks about, and once more only if something else could move later. A reply that has started always finishes where it began. "Keep using local until I quit PM" keeps your own model for the rest of the session and is never saved. On battery PM can also hand your graphics card\'s memory back after a quiet spell — set in this section — which saves power even when nothing moves to the cloud.',
+    body: 'When your laptop is on battery and the charge falls to the level you choose, PM can send new requests from your local model to your cloud model instead. That reduces power use by not running inference on your GPU. You choose what moves — chat, background work, or both — and only a role whose list starts with This computer, with a cloud model after it, ever moves. PM waits a minute before acting on any change, comes back to your local model about a minute after you plug in, and asks you before it first moves anything — once for what it asks about, and once more only if something else could move later. A reply that has started always finishes where it began. "Keep using local until I quit PM" keeps your own model for the rest of the session and is never saved. On battery PM can also hand your graphics card\'s memory back after a quiet spell — set in this section — which saves power even when nothing moves to the cloud.',
   },
   "settings-localai-lifecycle": {
     title: "Model memory",

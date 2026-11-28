@@ -164,13 +164,6 @@ describe("argument marshalling", () => {
       role: "background",
       provider: "openrouter",
     });
-    await ipc.setDirectRole("openai", "chat", ["openai/gpt-6.2-sol"], null);
-    expect(invokeMock).toHaveBeenCalledWith("set_direct_role", {
-      provider: "openai",
-      role: "chat",
-      models: ["openai/gpt-6.2-sol"],
-      effort: null,
-    });
     await ipc.setDirectDataSharing("openai", true);
     expect(invokeMock).toHaveBeenCalledWith("set_direct_data_sharing", {
       provider: "openai",
@@ -178,11 +171,71 @@ describe("argument marshalling", () => {
     });
   });
 
+  it("wraps the list commands with the names and arguments Rust reads", async () => {
+    invokeMock.mockResolvedValue({ route: { entries: [], derived: false }, materialised: false });
+    await ipc.routeStatus();
+    expect(invokeMock).toHaveBeenCalledWith("route_status", undefined);
+    await ipc.routeAdd("chat", "anthropic", "anthropic/claude-sonnet-5-5", "high", 1);
+    expect(invokeMock).toHaveBeenCalledWith("route_add", {
+      role: "chat",
+      provider: "anthropic",
+      model: "anthropic/claude-sonnet-5-5",
+      effort: "high",
+      at: 1,
+    });
+    // This computer: no model, no place (the end).
+    await ipc.routeAdd("background", "local", "");
+    expect(invokeMock).toHaveBeenCalledWith("route_add", {
+      role: "background",
+      provider: "local",
+      model: "",
+      effort: null,
+      at: null,
+    });
+    // Every edit that names a position names the row too (the backend refuses a stale position).
+    await ipc.routeMove("chat", 2, 0, "openrouter:a/x");
+    expect(invokeMock).toHaveBeenCalledWith("route_move", {
+      role: "chat",
+      from: 2,
+      to: 0,
+      key: "openrouter:a/x",
+    });
+    await ipc.routeRemove("chat", 1, "local");
+    expect(invokeMock).toHaveBeenCalledWith("route_remove", {
+      role: "chat",
+      index: 1,
+      key: "local",
+    });
+    await ipc.routeSetEffort("chat", 0, "anthropic:m", null);
+    expect(invokeMock).toHaveBeenCalledWith("route_set_effort", {
+      role: "chat",
+      index: 0,
+      key: "anthropic:m",
+      effort: null,
+    });
+    await ipc.routeReset("background");
+    expect(invokeMock).toHaveBeenCalledWith("route_reset", { role: "background" });
+    await ipc.promoteEntry("chat", "gemini", "gemini/gemini-3.5-flash");
+    expect(invokeMock).toHaveBeenCalledWith("promote_entry", {
+      role: "chat",
+      provider: "gemini",
+      model: "gemini/gemini-3.5-flash",
+    });
+    await ipc.routeTryAgain("anthropic");
+    expect(invokeMock).toHaveBeenCalledWith("route_try_again", { provider: "anthropic" });
+  });
+
+  /** A refused list edit must never show the Settings "Saved" tick: none of these is a `set_*`. */
+  it("never ticks 'Saved' for a list edit, which can be refused", async () => {
+    invokeMock.mockResolvedValue({ route: { entries: [], derived: false } });
+    expect(await savedTicks(() => ipc.routeAdd("chat", "openrouter", "a/b"))).toBe(0);
+    expect(await savedTicks(() => ipc.routeMove("chat", 1, 0, "openrouter:a/x"))).toBe(0);
+    expect(await savedTicks(() => ipc.promoteEntry("chat", "openrouter", "a/b"))).toBe(0);
+  });
+
   it("ticks 'Saved' for a provider setting and not for a key check, which can be refused", async () => {
     invokeMock.mockResolvedValue(undefined);
-    expect(
-      await savedTicks(() => ipc.setDirectRole("openai", "chat", ["openai/gpt-6.2-sol"], "high")),
-    ).toBe(1);
+    expect(await savedTicks(() => ipc.setRoleCloudProvider("chat", "openrouter"))).toBe(1);
     expect(await savedTicks(() => ipc.saveDirectKey("openai", "typed-key"))).toBe(0);
     expect(await savedTicks(() => ipc.clearDirectKey("openai"))).toBe(0);
   });

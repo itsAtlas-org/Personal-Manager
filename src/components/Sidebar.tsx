@@ -850,7 +850,7 @@ function ModelRow({
       {!awaitingModel && fallbacks > 0 && (
         <span
           className="shrink-0 rounded-[var(--radius-sm)] bg-accent-soft px-1 font-mono text-[0.625rem] text-accent-text"
-          title={`${fallbacks} auto-switch fallback${fallbacks === 1 ? "" : "s"}`}
+          title={`${fallbacks} fallback${fallbacks === 1 ? "" : "s"}: PM tries the next row when this one can't answer`}
         >
           +{fallbacks}
         </span>

@@ -1483,6 +1483,38 @@ mod tests {
         )
     }
 
+    /// A rate limit's own `Retry-After` reaches the attempt's wire mark through the real request path
+    /// (the entry-health memory reads it from there), for the streamed and the plain completion; a
+    /// reply that names no wait, or an HTTP-date, names none.
+    #[tokio::test]
+    async fn a_rate_limits_retry_after_reaches_the_attempts_mark() {
+        use std::time::Duration;
+        for (extra, want) in [
+            ("retry-after: 30\r\n", Some(Duration::from_secs(30))),
+            ("", None),
+            ("retry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n", None),
+        ] {
+            let body = err_json("x", "x", "x");
+            let head = format!(
+                "HTTP/1.1 429 X\r\ncontent-type: application/json\r\n{extra}connection: close\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            let f = flavour_at(serve_raw(head, body));
+            let req = chat_body(sol(), None, &msgs(), true, None, 100);
+            let mark = crate::wire_mark::WireMark::new();
+            let e = mark
+                .scope(cloud_openai::stream(&f, "test-key-not-real", &req, |_| {}))
+                .await
+                .err()
+                .expect("an error");
+            assert_eq!(
+                e.provider_failure().unwrap().billing,
+                crate::error::Billing::Rejected
+            );
+            assert_eq!(mark.retry_after(), want, "{extra}");
+        }
+    }
+
     /// The status table, through the real request: only the documented unbilled statuses are
     /// `Rejected` (an error RESPONSE before any body streamed); a gateway timeout, a plain 500 and the
     /// rest stay `MaybeBilled`, because a router can answer after the upstream finished.

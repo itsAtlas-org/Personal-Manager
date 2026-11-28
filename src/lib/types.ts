@@ -61,6 +61,76 @@ export interface Settings {
    *  uses paid ones). null for OpenRouter and OpenAI. Optional so an older-shaped mock still types. */
   chat_route_terms?: RouteTerms | null;
   background_route_terms?: RouteTerms | null;
+  /** Each role's ordered list of models and every row's status (commands/routes.rs). The list is the
+   *  one truth for which models answer, in what order and with what effort; `chat_models`,
+   *  `chat_provider`, `chat_cloud_model` and `chat_route_terms` above are DERIVED from it. Optional so
+   *  an older-shaped mock still types; the backend always sends both. */
+  chat_route?: RouteView;
+  background_route?: RouteView;
+}
+
+// ---- A role's ordered list of models (commands/routes.rs, route.rs) -----------------------------
+// "PM tries these top to bottom." Serde names are frozen; the Rust types ARE the contract.
+
+/** Whether a row can answer right now, and why not, as a token the page words (`lib/roleRoute.ts`). */
+export type RouteStatusKind =
+  | "ready"
+  | "not_on"
+  | "no_key"
+  | "key_unreadable"
+  | "paused_region"
+  | "paused_limit"
+  | "not_working"
+  | "local_off"
+  | "no_local_model"
+  | "after_local_off"
+  | "after_local_pick";
+
+export interface RouteRowStatus {
+  kind: RouteStatusKind;
+  /** For `not_working`: why, as a short fragment ("busy", "no credit left or at a spend limit"). */
+  reason?: string;
+  /** For `not_working`: when it failed (RFC 3339), for "Not working since 14:05". */
+  since?: string;
+}
+
+/** One row of a list. `provider` is `local` for this computer; `model` is then the model chosen for
+ *  the role (empty when none is). `effort_options` is empty for every row but a direct model. */
+export interface RouteRow {
+  /** Stable within a list: `local`, or `provider:model`. */
+  key: string;
+  kind: "local" | "cloud";
+  provider: CloudProviderId | "local";
+  model: string;
+  name: string;
+  effort: string | null;
+  effort_options: string[];
+  /** The catalogue's note for the model (Fable carries one). */
+  warning?: string;
+  /** This computer's row, when Local AI points at a server on ANOTHER machine (a LAN or public
+   *  address): the text leaves this computer, so no label says "this computer". Absent otherwise. */
+  local_elsewhere?: boolean;
+  status: RouteRowStatus;
+}
+
+/** A role's list. `derived` is true until the person's first edit. */
+export interface RouteView {
+  entries: RouteRow[];
+  derived: boolean;
+}
+
+/** What a list edit answers: the list now, and the two things the first edit says aloud. */
+export interface RouteEdited {
+  route: RouteView;
+  /** This edit stored the list for the first time. */
+  materialised: boolean;
+  /** On that first edit: saved OpenRouter models the list leaves out because they were not in use. */
+  unused_saved: number;
+}
+
+export interface RouteStatusResult {
+  chat: RouteView;
+  background: RouteView;
 }
 
 // ---- Your own provider keys (opt-in; commands/direct_keys.rs, direct_providers.rs) --------------
@@ -114,6 +184,10 @@ export interface RoleMove {
   role: RoleName;
   from: CloudProviderId;
   to: CloudProviderId;
+  /** The role's list would have been empty, so OpenRouter's default came back. False means the
+   *  provider's rows left the list and the rest stayed ("Removed Claude from Chat"). Optional so an
+   *  older-shaped mock still types. */
+  restored_default?: boolean;
 }
 /** The answer to a key check. `listed` is the OpenRouter-style catalogue ids the key can see. */
 export interface KeyCheckResult {
@@ -560,7 +634,18 @@ export interface CostSummary {
   unpriced_30d: number;
   /** The named token types PM can't price in the last 30 days, with how many replies each. */
   partial_reasons: PartialReason[];
+  /** Replies in the last 30 days a LATER row of the person's own list answered. Absent or null
+   *  when there were none (older fixtures omit it; the backend always sends it). */
+  list_walks?: ListWalks | null;
   pricing_updated_at: string | null;
+}
+
+/** The persistent record of a list's walks: how many, why the earliest moved, and when. */
+export interface ListWalks {
+  replies: number;
+  first_reason: string;
+  /** RFC 3339; the page words the date as DD-MM-YYYY. */
+  first_at: string;
 }
 
 /** A document an answer cited — the provenance shown under it. */
@@ -670,8 +755,10 @@ export type ChatEvent =
   // The reply was served by cloud despite a local-endpoint preference (#297): local failed or was
   // resting, so cloud answered. NOT an error — the reply is real. `reason` is the backend slug
   // (`hard_failure:<kind>` / `cooldown`); `FallbackStrip` maps it to friendly copy. Arrives after
-  // the tokens, before `done`.
-  | { type: "fallback"; from_model: string; to_model: string; reason: string }
+  // the tokens, before `done`. `kind` is which strip: "local" is the local-to-cloud path above;
+  // "list" is a later row of the person's own list answering because the ones above it could not
+  // (`steps` says what became of each of those, `answered` who replied).
+  | ({ type: "fallback" } & ChatFallback)
   // The model's thinking, live, only when the send asked for it (showThinking). Never persisted,
   // never part of `done.content`. Arrives before the answer's tokens.
   | { type: "thinking"; text: string }
@@ -710,9 +797,32 @@ export type ServedBy = "local" | "cloud" | "cloud-on-battery";
 /** A cloud-served fallback the chat honesty strip renders (#297). Mirrors `ChatEvent`'s `fallback`
  *  arm minus the discriminant. Shared by `useChatStream`'s transient state and `FallbackStrip`. */
 export interface ChatFallback {
+  kind: "local" | "list";
   from_model: string;
   to_model: string;
+  /** "local": `hard_failure:<kind>` / `cooldown` / `endpoint_refused`. "list": the first note's
+   *  log token (`list_<class>` / `list_skip_<reason>`). */
   reason: string;
+  /** "list" only: each row above the answering one, in order. Empty for "local". */
+  steps: FallbackStep[];
+  /** "list" only: the row that replied. `null` for "local". */
+  answered: FallbackAnswered | null;
+}
+
+/** A row of the person's list that did not answer a turn. `how`: "failed" (a request came back
+ *  unanswered), "paused" (PM held it back: paused where the person is, or by their daily limit) or
+ *  "skipped" (passed over for another reason, nothing sent). `why` is Rust's short class wording. */
+export interface FallbackStep {
+  label: string;
+  company: string;
+  why: string;
+  how: "failed" | "paused" | "skipped";
+}
+
+/** The row that replied: its model, and the company that got the reply. */
+export interface FallbackAnswered {
+  label: string;
+  via: string;
 }
 
 /** A larger-context model the Upgrade option can switch to (board card 7D). */
@@ -3461,12 +3571,19 @@ export interface PowerRoleView {
   route_terms?: RouteTerms | null;
 }
 
-/** Where a role's requests really go (llm_gateway.rs EffectiveRoute). `cloud_for_power` is a
+/** Where a role's requests really go (llm_gateway.rs EffectiveRoute). `cloud_then_local` is a list
+ *  that asks the cloud first and has this computer behind it; `cloud_for_power` is a
  *  "Local, fall back to cloud" role the On battery policy has moved; `nothing` is a role with no key
  *  for its cloud route or no local model for its local one; `unknown` is a role PM can't place
  *  because it couldn't read the saved keys. */
 export type EffectiveRoute =
-  "cloud" | "local_only" | "local_then_cloud" | "cloud_for_power" | "nothing" | "unknown";
+  | "cloud"
+  | "local_only"
+  | "local_then_cloud"
+  | "cloud_then_local"
+  | "cloud_for_power"
+  | "nothing"
+  | "unknown";
 
 /** Whether a role's cloud key can be read (llm_gateway.rs KeyPresence). `unreadable` is never "no
  *  key": the store couldn't be read, so it may well be there. */

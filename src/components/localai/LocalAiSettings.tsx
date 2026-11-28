@@ -82,7 +82,11 @@ import { LocalAiSwitchBar } from "./LocalAiSwitchBar";
  *  accepting a licence) say so through `onSettingsWritten`. A reset then remounts the sections
  *  under a new key, so every section, hook and fold starts again from what is now stored — nothing
  *  can go on showing the server just forgotten — and the start card is back at step 1. */
-export function LocalAiSettings({ onBetterFitChange, onLocate }: LocalAiSettingsProps = {}) {
+export function LocalAiSettings({
+  onBetterFitChange,
+  onLocate,
+  onOpenAiModels,
+}: LocalAiSettingsProps = {}) {
   /** Bumped by a reset: the key the sections remount under. */
   const [epoch, setEpoch] = useState(0);
   // null until the backend has answered. Read as "at its defaults" meanwhile, the way the other tabs
@@ -148,6 +152,7 @@ export function LocalAiSettings({ onBetterFitChange, onLocate }: LocalAiSettings
         key={epoch}
         onBetterFitChange={onBetterFitChange}
         onLocate={onLocate}
+        onOpenAiModels={onOpenAiModels}
         onSettingsWritten={refreshDefaults}
       />
       <TabResetSection
@@ -172,12 +177,15 @@ interface LocalAiSettingsProps {
   /** Scroll the host to the element with this id (Settings' own section jump), or omitted to
    *  scroll it into view directly. */
   onLocate?: (id: string) => void;
+  /** Open AI & Models, where each role's list says where this computer sits. */
+  onOpenAiModels?: () => void;
 }
 
 /** The tab's sections and the state they share — everything a reset starts again. */
 function LocalAiTab({
   onBetterFitChange,
   onLocate,
+  onOpenAiModels,
   onSettingsWritten,
 }: LocalAiSettingsProps & {
   /** A write landed that isn't a `set_*` command, so the reset footer's answer has to be re-read
@@ -658,6 +666,7 @@ function LocalAiTab({
         }}
         onError={(m) => setError("roles", m)}
         error={errors.roles}
+        onOpenAiModels={onOpenAiModels}
       />
 
       {/* Between the two it depends on: it only ever moves a role Assign roles set to Local, fall

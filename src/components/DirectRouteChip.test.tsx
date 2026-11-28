@@ -10,13 +10,16 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const m = vi.hoisted(() => ({ directProvidersState: vi.fn() }));
+const m = vi.hoisted(() => ({ directProvidersState: vi.fn(), routeStatus: vi.fn() }));
 
 vi.mock("../lib/ipc", () => ({
   directProvidersState: () => m.directProvidersState(),
+  routeStatus: () => m.routeStatus(),
+  onRouteChanged: () => Promise.resolve(() => {}),
 }));
 
 import { directState, openaiView, settingsFor } from "../lib/directProvidersFixture";
+import { claudeRow, geminiRow, orRow, routeView } from "../lib/routeFixture";
 import type { LocalLlmStatus } from "../lib/types";
 import { DirectRouteChip } from "./DirectRouteChip";
 
@@ -26,6 +29,11 @@ const localIdle = { chat_local_model: null } as unknown as LocalLlmStatus;
 
 beforeEach(() => {
   m.directProvidersState.mockResolvedValue(directState({ chat: "openai" }));
+  // A role with one model: nobody behind the head, so the chip is what it always was.
+  m.routeStatus.mockResolvedValue({
+    chat: routeView([orRow("a/one")], true),
+    background: routeView([orRow("a/one")], true),
+  });
 });
 afterEach(() => {
   cleanup();
@@ -101,6 +109,41 @@ describe("the composer chip", () => {
     expect(chip.getAttribute("title")).toContain("can't read your key");
     expect(chip.getAttribute("title")).not.toContain("no key to use");
     expect(chip.getAttribute("style")).toContain("--st-due");
+  });
+
+  it("says the first row isn't working and which is next, instead of a stale healthy chip", async () => {
+    m.routeStatus.mockResolvedValue({
+      chat: routeView([
+        claudeRow({ status: { kind: "not_working", reason: "busy" } }),
+        geminiRow(),
+      ]),
+      background: routeView([orRow("a/one")], true),
+    });
+    render(<DirectRouteChip settings={direct} localAi={localIdle} />);
+    const chip = await screen.findByText("Claude isn't working, Gemini is next");
+    expect(chip.getAttribute("style")).toContain("--st-due");
+    // The healthy label is gone: the chip says one thing.
+    expect(screen.queryByText("OpenAI direct")).toBeNull();
+  });
+
+  it("says it on OpenRouter too, and says nothing when no later row can answer", async () => {
+    m.routeStatus.mockResolvedValue({
+      chat: routeView([
+        orRow("a/one", { status: { kind: "not_working" } }),
+        claudeRow({ status: { kind: "no_key" } }),
+      ]),
+      background: routeView([orRow("a/one")], true),
+    });
+    const { container } = render(<DirectRouteChip settings={settingsFor()} localAi={null} />);
+    await waitFor(() => expect(m.routeStatus).toHaveBeenCalled());
+    expect(container.textContent).toBe("");
+    cleanup();
+    m.routeStatus.mockResolvedValue({
+      chat: routeView([orRow("a/one", { status: { kind: "not_working" } }), geminiRow()]),
+      background: routeView([orRow("a/one")], true),
+    });
+    render(<DirectRouteChip settings={settingsFor()} localAi={null} />);
+    expect(await screen.findByText("OpenRouter isn't working, Gemini is next")).toBeTruthy();
   });
 
   it("says nothing at all until the read lands, not a flash of no key", async () => {

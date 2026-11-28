@@ -84,7 +84,6 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
     world.state = stateWith(cur.providers, { chat: keep("chat"), background: keep("background") });
     return Promise.resolve();
   },
-  setDirectRole: rec("setDirectRole"),
   setTimeZone: rec("setTimeZone"),
   setChatModels: rec("setChatModels"),
   setBackgroundModels: rec("setBackgroundModels"),
@@ -194,7 +193,12 @@ describe("Get started", () => {
     await waitFor(() => expect(calls).toContain("setOnboardingDone()"));
     // OpenRouter's lists are saved as before, and nothing here re-points a role or its direct model.
     expect(calls.some((c) => c.startsWith("setChatModels("))).toBe(true);
-    expect(calls.some((c) => c.startsWith("setDirectRole("))).toBe(false);
+    // The switch is saved BEFORE the models: a list nobody has edited reads it to decide how many
+    // saved models are in use (otherwise only the first survives the save).
+    const at = (prefix: string) => calls.findIndex((c) => c.startsWith(prefix));
+    expect(at("setChatAutoSwitch(")).toBeGreaterThanOrEqual(0);
+    expect(at("setChatAutoSwitch(")).toBeLessThan(at("setChatModels("));
+    expect(at("setBackgroundAutoSwitch(")).toBeLessThan(at("setBackgroundModels("));
     expect(calls.some((c) => c.startsWith("setRoleCloudProvider("))).toBe(false);
     expect(calls.some((c) => c.startsWith("setOpenRouterKey("))).toBe(false);
   });

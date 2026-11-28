@@ -306,7 +306,7 @@ async fn run_briefing_refresh(app: &AppHandle, force: bool) -> Result<briefing::
         }
     };
 
-    let Some(plan) = llm_gateway::resolve(app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(app, Role::Background)? else {
         if force {
             return Err(Error::Other(llm_gateway::no_provider_message_for(
                 app,
@@ -457,7 +457,7 @@ pub async fn route_focus_input(app: AppHandle, text: String) -> Result<flags::Fo
         let project_names = entities::canonical_project_names(&conn)?;
         (candidates, project_names)
     };
-    let Some(plan) = llm_gateway::resolve(&app, Role::Background)? else {
+    let Some(plan) = llm_gateway::resolve_plan(&app, Role::Background)? else {
         return Err(Error::Other(llm_gateway::no_provider_message_for(
             &app,
             Role::Background,

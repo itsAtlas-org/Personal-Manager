@@ -102,6 +102,13 @@ pub struct Settings {
     /// and the upgrade prompt read these, so none of them needs the provider hook.
     pub chat_route_terms: Option<crate::direct_providers::RouteTerms>,
     pub background_route_terms: Option<crate::direct_providers::RouteTerms>,
+    /// Each role's ordered list of models, with every row's status (`commands/routes.rs`). The list
+    /// is the one truth for which models answer, in what order and with what effort; `chat_models`,
+    /// `chat_provider`, `chat_cloud_model` and `chat_route_terms` above are DERIVED from it (the
+    /// head cloud row, the OpenRouter rows) so every reader that has not moved to the list keeps
+    /// working. `derived` is true until the person's first edit.
+    pub chat_route: crate::commands::RouteView,
+    pub background_route: crate::commands::RouteView,
 }
 
 impl Settings {
@@ -130,6 +137,9 @@ impl Settings {
             // OpenRouter has no tiers.
             chat_route_terms: None,
             background_route_terms: None,
+            // What a fresh install derives: one OpenRouter row, not yet edited.
+            chat_route: crate::commands::default_route_view(),
+            background_route: crate::commands::default_route_view(),
         }
     }
 }
@@ -142,6 +152,16 @@ fn role_cloud_primary(
     role: Role,
     openrouter_models: &[String],
 ) -> Result<(String, Option<String>)> {
+    // A role with a list of its own: its first cloud row, whatever the older rows say.
+    if let Some(list) = crate::route::stored_entries(conn, role)? {
+        let head = list.iter().find_map(|e| match e {
+            crate::route::Entry::Cloud {
+                provider, model, ..
+            } => Some((provider.as_str().to_string(), Some(model.clone()))),
+            crate::route::Entry::Local => None,
+        });
+        return Ok(head.unwrap_or_else(|| (CloudProvider::OpenRouter.as_str().to_string(), None)));
+    }
     let provider = crate::llm_gateway::role_cloud_provider(conn, role)?;
     let model = if provider.is_direct() {
         crate::direct_providers::models_for(conn, provider, role)?
@@ -153,8 +173,28 @@ fn role_cloud_primary(
     Ok((provider.as_str().to_string(), model))
 }
 
+/// The OpenRouter model ids a role's list holds, in order, when the role has a list of its own.
+/// What the older `chat_models` field says for such a role: the list is the truth, this is its
+/// OpenRouter part.
+fn list_openrouter_ids(conn: &Connection, role: Role) -> Result<Option<Vec<String>>> {
+    Ok(crate::route::stored_entries(conn, role)?.map(|list| {
+        list.into_iter()
+            .filter_map(|e| match e {
+                crate::route::Entry::Cloud {
+                    provider: CloudProvider::OpenRouter,
+                    model,
+                    ..
+                } => Some(model),
+                _ => None,
+            })
+            .collect()
+    }))
+}
+
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
+pub fn get_settings(app: tauri::AppHandle) -> Result<Settings> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
     // The two roles' providers are peeked under a short guard so the keys (keychain) and the region
     // (the OS zone) can be read BEFORE the main guard. `tier_context` reads neither unless a role is on
     // a provider with tiers, so a person on OpenRouter or OpenAI pays nothing for Gemini here.
@@ -163,9 +203,22 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
         crate::llm_gateway::RoleProviders::read(&conn)?
     };
     let (fps, region) = crate::direct_providers::tier_context(providers.chat, providers.background);
+    // An edited list's rows are judged from the keychain and the limit's own read, so they come
+    // BEFORE the main guard below (the mutex is not re-entrant). A list nobody edited is built with
+    // no such read (`route_view_for_settings`): this runs on every settings read.
+    let chat_route = crate::commands::route_view_for_settings(&app, Role::Chat)?;
+    let background_route = crate::commands::route_view_for_settings(&app, Role::Background)?;
     let conn = state.conn()?;
-    let chat_models = models_for(&conn, CHAT_MODELS_KEY)?;
-    let background_models = models_for(&conn, BACKGROUND_MODELS_KEY)?;
+    let chat_list = list_openrouter_ids(&conn, Role::Chat)?;
+    let background_list = list_openrouter_ids(&conn, Role::Background)?;
+    let chat_models = match &chat_list {
+        Some(ids) => ids.clone(),
+        None => models_for(&conn, CHAT_MODELS_KEY)?,
+    };
+    let background_models = match &background_list {
+        Some(ids) => ids.clone(),
+        None => models_for(&conn, BACKGROUND_MODELS_KEY)?,
+    };
     let (chat_provider, chat_cloud_model) = role_cloud_primary(&conn, Role::Chat, &chat_models)?;
     let (background_provider, background_cloud_model) =
         role_cloud_primary(&conn, Role::Background, &background_models)?;
@@ -190,8 +243,17 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
         background_cloud_model,
         chat_route_terms,
         background_route_terms,
-        chat_auto_switch: db::get_bool(&conn, CHAT_AUTO_SWITCH_KEY, false)?,
-        background_auto_switch: db::get_bool(&conn, BACKGROUND_AUTO_SWITCH_KEY, false)?,
+        // A role with a list tries every OpenRouter row it holds, which is what "on" meant.
+        chat_auto_switch: match &chat_list {
+            Some(ids) => ids.len() > 1,
+            None => db::get_bool(&conn, CHAT_AUTO_SWITCH_KEY, false)?,
+        },
+        background_auto_switch: match &background_list {
+            Some(ids) => ids.len() > 1,
+            None => db::get_bool(&conn, BACKGROUND_AUTO_SWITCH_KEY, false)?,
+        },
+        chat_route,
+        background_route,
         help_mode: db::get_bool(&conn, "help_mode", false)?,
         time_zone: db::get_setting(&conn, TIME_ZONE_KEY)?.unwrap_or_default(),
         reranking: db::reranking_enabled(&conn)?,
@@ -232,28 +294,44 @@ pub fn set_indexing_speed(state: State<'_, AppState>, speed: String) -> Result<(
     db::set_setting(&conn, db::INDEXING_SPEED_KEY, value)
 }
 
+// The four commands below are the OLDER OpenRouter controls (a model list per role and an
+// auto-switch toggle). The role's list is the one truth now, so they edit the list's OpenRouter rows
+// and write none of the older rows; they stay only until the list editor replaces the Settings
+// controls that call them, and go with it.
+
 #[tauri::command]
-pub fn set_chat_models(state: State<'_, AppState>, models: Vec<String>) -> Result<()> {
+pub fn set_chat_models(state: State<'_, AppState>, models: Vec<String>) -> Result<usize> {
     let conn = state.conn()?;
-    save_models(&conn, CHAT_MODELS_KEY, models)
+    // How many saved models the first edit of a list nobody had edited left out (they were not in
+    // use): the caller that is not the list editor says it, never drops them without a word.
+    crate::route::edit::set_openrouter_models(&conn, Role::Chat, &models).map(|e| e.unused_saved)
+}
+
+/// The context meter's "use a larger model": the one OpenRouter model goes where chat's first
+/// OpenRouter row stands, and no other row moves (`edit::promote_openrouter`). Answers the same
+/// "saved models the first edit left out" count as `set_chat_models`.
+#[tauri::command]
+pub fn use_larger_chat_model(state: State<'_, AppState>, model: String) -> Result<usize> {
+    let conn = state.conn()?;
+    crate::route::edit::promote_openrouter(&conn, Role::Chat, &model).map(|e| e.unused_saved)
 }
 
 #[tauri::command]
 pub fn set_background_models(state: State<'_, AppState>, models: Vec<String>) -> Result<()> {
     let conn = state.conn()?;
-    save_models(&conn, BACKGROUND_MODELS_KEY, models)
+    crate::route::edit::set_openrouter_models(&conn, Role::Background, &models).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_chat_auto_switch(state: State<'_, AppState>, enabled: bool) -> Result<()> {
     let conn = state.conn()?;
-    db::set_bool(&conn, CHAT_AUTO_SWITCH_KEY, enabled)
+    crate::route::edit::set_openrouter_auto(&conn, Role::Chat, enabled).map(|_| ())
 }
 
 #[tauri::command]
 pub fn set_background_auto_switch(state: State<'_, AppState>, enabled: bool) -> Result<()> {
     let conn = state.conn()?;
-    db::set_bool(&conn, BACKGROUND_AUTO_SWITCH_KEY, enabled)
+    crate::route::edit::set_openrouter_auto(&conn, Role::Background, enabled).map(|_| ())
 }
 
 /// Toggle the UI help/explain mode (Step 4b). Stored in `settings` so it persists.
@@ -610,25 +688,6 @@ pub(crate) fn effective_models(
     }
 }
 
-/// Clean (trim, drop empties + over-long ids, de-dup preserving order, cap count)
-/// and persist a role's model list as a JSON array. An empty result is stored as
-/// `[]`; `models_for` then falls back to the default, so the role always resolves
-/// to a usable model. The caps bound a frontend-supplied list that's persisted.
-fn save_models(conn: &Connection, key: &str, models: Vec<String>) -> Result<()> {
-    const MAX_MODELS: usize = 50;
-    const MAX_MODEL_ID_CHARS: usize = 200;
-    let mut seen = std::collections::HashSet::new();
-    let cleaned: Vec<String> = models
-        .into_iter()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty() && m.chars().count() <= MAX_MODEL_ID_CHARS)
-        .filter(|m| seen.insert(m.clone()))
-        .take(MAX_MODELS)
-        .collect();
-    let json = serde_json::to_string(&cleaned).map_err(|e| Error::Other(e.to_string()))?;
-    db::set_setting(conn, key, &json)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,17 +913,29 @@ mod tests {
             let key = crate::daily_limit::limit_key(p);
             assert!(!WEBVIEW_PREFS.contains(&key), "{key} is Rust's alone");
         }
+        // A role's ordered model list decides which company a reply goes to: a page that could write
+        // it would choose that without the gates every list command applies.
+        for role in [
+            crate::llm_gateway::Role::Chat,
+            crate::llm_gateway::Role::Background,
+        ] {
+            let key = crate::route::route_key(role);
+            assert!(!WEBVIEW_PREFS.contains(&key), "{key} is Rust's alone");
+        }
     }
 
     #[test]
-    fn save_models_caps_count_and_id_length_and_dedups() {
+    fn the_model_list_control_caps_count_and_id_length_and_dedups() {
         let (_dir, conn) = temp_db();
+        // The older control now edits the role's LIST (the first edit stores it); auto-switch on so
+        // the whole saved list is in use.
+        db::set_bool(&conn, CHAT_AUTO_SWITCH_KEY, true).unwrap();
         let mut models: Vec<String> = (0..100).map(|i| format!("vendor/model-{i}")).collect();
         models.push("vendor/model-0".into()); // duplicate of the first
         models.push("x".repeat(500)); // an absurdly long id
-        save_models(&conn, CHAT_MODELS_KEY, models).unwrap();
+        crate::route::edit::set_openrouter_models(&conn, Role::Chat, &models).unwrap();
 
-        let stored = models_for(&conn, CHAT_MODELS_KEY).unwrap();
+        let stored = list_openrouter_ids(&conn, Role::Chat).unwrap().unwrap();
         assert!(stored.len() <= 50, "model count is capped");
         assert!(
             stored.iter().all(|m| m.chars().count() <= 200),

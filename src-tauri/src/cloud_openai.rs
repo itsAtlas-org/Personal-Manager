@@ -339,6 +339,8 @@ where
 
     if !response.status().is_success() {
         let status = response.status();
+        // A rate limit's own wait, for the entry-health memory (read before the body consumes it).
+        crate::wire_mark::note_retry_after(response.headers());
         // The raw body, bounded: each flavour shortens it for display (see `Flavour::request_error`).
         let detail = bounded_error_body(&response.text().await.unwrap_or_default());
         // The one place that sees a failed STATUS before any body byte streamed, so the one place
@@ -466,6 +468,7 @@ pub(crate) async fn complete(
 
     if !response.status().is_success() {
         let status = response.status();
+        crate::wire_mark::note_retry_after(response.headers());
         let detail = bounded_error_body(&response.text().await.unwrap_or_default());
         // As in `stream`: a status with no body consumed, so this is a site that may mark it unbilled.
         return Err((flavour.request_error)(status, &detail).with_response_status(status.as_u16()));

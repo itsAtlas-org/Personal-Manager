@@ -22,6 +22,7 @@ import type {
   RoleMove,
   RoleName,
   RouteTerms,
+  RouteView,
   Settings,
   StoredKeyCheck,
 } from "./types";
@@ -1080,22 +1081,40 @@ export function adoptRoles(view: DirectProviderView | undefined): RoleName[] {
 export const BACKGROUND_NOT_SET_UP =
   "Background work isn't set up yet. Pick where it should go, or add an OpenRouter key.";
 
-/** The sentence under a card or a role when roles were moved back to OpenRouter. `orKey` says
- *  whether each role has an OpenRouter key to land on. */
+/** The sentence under a card or a role when a provider's rows left the lists. A role whose list
+ *  would have been empty is back on OpenRouter (`orKey` says whether each such role has an
+ *  OpenRouter key to land on); a role whose list kept other rows only lost this provider's, and the
+ *  line says exactly that, never "back on OpenRouter" (the command's `restored_default` decides,
+ *  and an older-shaped answer without it reads as restored). `name` is the provider's name. */
 export function movedLine(
   moves: RoleMove[],
   orKey: { chat: boolean; background: boolean },
+  name?: string,
 ): string | null {
   if (moves.length === 0) return null;
-  const roles = moves.map((m) => m.role);
-  const both = roles.includes("chat") && roles.includes("background");
-  const lead = both
-    ? "Chat and Background are back on OpenRouter"
-    : `${roleName(roles[0])} is back on OpenRouter`;
-  const lacking = roles.some((r) => !orKey[r]);
-  return lacking
-    ? `${lead}, but there's no OpenRouter key yet. Add one above, or choose another provider.`
-    : `${lead}.`;
+  const restored = moves.filter((m) => m.restored_default !== false).map((m) => m.role);
+  const removed = moves.filter((m) => m.restored_default === false).map((m) => m.role);
+  const names = (roles: RoleName[]) =>
+    roles.includes("chat") && roles.includes("background")
+      ? "Chat and Background"
+      : roleName(roles[0]);
+  const lines: string[] = [];
+  if (restored.length > 0) {
+    const lead =
+      restored.includes("chat") && restored.includes("background")
+        ? "Chat and Background are back on OpenRouter"
+        : `${roleName(restored[0])} is back on OpenRouter`;
+    const lacking = restored.some((r) => !orKey[r]);
+    lines.push(
+      lacking
+        ? `${lead}, but there's no OpenRouter key yet. Add one above, or choose another provider.`
+        : `${lead}.`,
+    );
+  }
+  if (removed.length > 0) {
+    lines.push(`Removed ${name ?? "it"} from ${names(removed)}.`);
+  }
+  return lines.join(" ");
 }
 
 /** What a role's direct provider means for the role's routing, said at the control. `routing` is the
@@ -1190,9 +1209,23 @@ export function chatUpgradeApplies(s: Settings | null): boolean {
   return (s?.chat_provider ?? "openrouter") === "openrouter";
 }
 
+/** The index of the row that answers first: the first row that can, else the first row. */
+export function headIndex(route: RouteView): number {
+  const i = route.entries.findIndex((e) => e.status.kind === "ready");
+  return i < 0 ? 0 : i;
+}
+
+/** How many rows sit behind the head and can answer too: the footer's "+N", for every provider. */
+export function fallbackCount(route: RouteView): number {
+  const h = headIndex(route);
+  return route.entries.slice(h + 1).filter((e) => e.status.kind === "ready").length;
+}
+
 /** What the sidebar footer says for a role. The model is the one that really answers (the backend's
- *  `*_cloud_model`), not the head of OpenRouter's list, which a direct role never reads; a direct
- *  role has no auto-switch fallbacks, and says which route it takes. */
+ *  `*_cloud_model`), not the head of OpenRouter's list, which a direct role never reads. A role whose
+ *  list the person has edited counts the rows behind the head for every provider ("+N fallbacks"); a
+ *  role nobody edited says what it always said (a direct role has none; OpenRouter's are its
+ *  auto-switch models), and says which route it takes. */
 export function footerRow(
   s: Settings | null,
   role: RoleName,
@@ -1209,18 +1242,38 @@ export function footerRow(
   if (!s) return { id: null, fallbacks: 0, via: null, viaTitle: null, viaDue: false };
   const list = role === "chat" ? s.chat_models : s.background_models;
   const auto = role === "chat" ? s.chat_auto_switch : s.background_auto_switch;
-  const provider = (role === "chat" ? s.chat_provider : s.background_provider) ?? "openrouter";
-  const cloud = role === "chat" ? s.chat_cloud_model : s.background_cloud_model;
+  const headProvider = (role === "chat" ? s.chat_provider : s.background_provider) ?? "openrouter";
+  const route = role === "chat" ? s.chat_route : s.background_route;
+  // An edited list whose first row can't answer: the footer names the first row that CAN (the count
+  // beside it is the rows behind that one), not a model that is down. This computer, when it is the
+  // one that answers, is shown by the local model's own line instead.
+  const live =
+    route && !route.derived && headIndex(route) > 0 ? route.entries[headIndex(route)] : null;
+  const stepped = live && live.kind === "cloud" ? live : null;
+  const provider = stepped ? stepped.provider : headProvider;
+  const cloud = stepped
+    ? stepped.model
+    : role === "chat"
+      ? s.chat_cloud_model
+      : s.background_cloud_model;
+  // The edited list's own count, or null for a role nobody edited (which keeps today's words).
+  const behind = route && !route.derived ? fallbackCount(route) : null;
   if (isDirect(provider)) {
     const info = directInfo(provider);
-    const terms = role === "chat" ? s.chat_route_terms : s.background_route_terms;
+    // The settings' terms are the head provider's: another company's terms are not known here.
+    const terms =
+      stepped && stepped.provider !== headProvider
+        ? null
+        : role === "chat"
+          ? s.chat_route_terms
+          : s.background_route_terms;
     // Rust answers `null` for a provider with tiers whose key isn't there: nothing is known about the
     // terms, so the footer says only where the route goes, never "free". (`undefined` is a Settings
     // that predates the field, which keeps reading free.)
     if (info && hasTiers(info) && terms === null) {
       return {
         id: cloud ?? null,
-        fallbacks: 0,
+        fallbacks: behind ?? 0,
         via: info.chipLabel,
         viaTitle: null,
         viaDue: false,
@@ -1228,7 +1281,7 @@ export function footerRow(
     }
     return {
       id: cloud ?? null,
-      fallbacks: 0,
+      fallbacks: behind ?? 0,
       via: info ? routeLabel(info, terms) : `${providerName(provider)} direct`,
       viaTitle: info && hasTiers(info) ? routeTitle(info, role, terms) : null,
       viaDue: !!info && hasTiers(info) && routeTermsOf(terms) !== "paid",
@@ -1236,7 +1289,7 @@ export function footerRow(
   }
   return {
     id: cloud ?? list[0] ?? null,
-    fallbacks: auto ? Math.max(0, list.length - 1) : 0,
+    fallbacks: behind ?? (auto ? Math.max(0, list.length - 1) : 0),
     via: null,
     viaTitle: null,
     viaDue: false,

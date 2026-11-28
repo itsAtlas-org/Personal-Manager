@@ -526,7 +526,7 @@ fn clean_opt(s: Option<&str>, max: usize) -> Option<String> {
 /// degree" vs "has just finished second year of Computer Science degree").
 pub async fn distill_blob(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     blob: &str,
     existing: &[String],
 ) -> Result<Vec<DraftPreference>> {
@@ -564,7 +564,7 @@ pub async fn distill_blob(
 /// new one would be rejected and only printed. Best-effort, like every usage row.
 fn log_billed(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     c: &crate::openrouter::Completion,
     meta: &crate::llm_gateway::CallMeta,
 ) {
@@ -647,7 +647,7 @@ pub fn inferred_seed_confidence() -> f64 {
 /// (`source='user'`, confidence 1.0, confirmed), so a mis-parse is corrected, never silently saved.
 pub async fn parse_statement(
     app: &tauri::AppHandle,
-    plan: &crate::llm_gateway::RoutePlan,
+    plan: &crate::llm_gateway::Plan,
     text: &str,
     project_names: &[String],
 ) -> Result<DraftPreference> {
